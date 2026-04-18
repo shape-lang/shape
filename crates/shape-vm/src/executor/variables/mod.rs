@@ -1470,6 +1470,137 @@ impl VirtualMachine {
             Err(VMError::InvalidOperand)
         }
     }
+
+    // ── V1.1B: ownership-aware local opcodes ─────────────────────────────
+    //
+    // Phase 1 of the ownership-aware runtime spec introduces three new
+    // opcodes — `MoveLocal`, `CloneLocal`, `DropLocal` — whose handlers
+    // read the local slot bits directly and delegate any refcount
+    // adjustment to `raw_helpers::clone_raw_bits` / `drop_raw_bits`. The
+    // compiler will begin emitting them in V1.1C behind a flag; this
+    // commit only wires up the executor side so hand-crafted bytecode
+    // can exercise the semantics in isolation.
+    //
+    // Note: These opcodes assume the compiler has proved that the slot
+    // contents obey normal ownership rules — no SharedCell wrapping, no
+    // second read after a move. That guarantee is V1.1C's job. The
+    // handlers here do not revalidate it at runtime; the poison state
+    // left behind by `MoveLocal` is conceptual.
+
+    /// `MoveLocal(idx)` — transfer ownership from the local slot onto the
+    /// VM stack.
+    ///
+    /// Reads the raw u64 bits of the local slot and pushes them onto the
+    /// stack with **no refcount adjustment**. This is the zero-cost
+    /// ownership transfer described in phase 1 of
+    /// `docs/ownership-aware-runtime-v2.md`: if the slot held a heap
+    /// reference, the reference count is unchanged — the stack slot now
+    /// owns that reference and the local slot is conceptually poisoned.
+    ///
+    /// The compiler (V1.1C) guarantees no subsequent read of a moved
+    /// slot, so we leave the raw bits in the local slot as-is. A
+    /// later `DropLocal` on the same slot would be a double-free; the
+    /// compiler's liveness analysis must never emit that pair.
+    ///
+    /// Stack effect: +1 push. No atomic operations.
+    pub(in crate::executor) fn op_move_local(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+            debug_assert!(
+                slot < self.stack.len(),
+                "MoveLocal slot {} out of bounds (stack len {})",
+                slot,
+                self.stack.len()
+            );
+            // SAFETY: compiler-allocated local slot inside the frame's
+            // pre-sized register window.
+            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+            self.push_raw_u64(bits)?;
+            Ok(())
+        } else {
+            Err(VMError::InvalidOperand)
+        }
+    }
+
+    /// `CloneLocal(idx)` — clone the value from the local slot onto the
+    /// stack, leaving the local live.
+    ///
+    /// Reads the slot bits and delegates to `raw_helpers::clone_raw_bits`
+    /// which handles the three cases:
+    ///   * inline scalar (int, f64, bool, unit, null) — copy bits, no-op;
+    ///   * shared heap reference (Arc-backed) — `Arc::increment_strong_count`;
+    ///   * owned heap reference (Box-backed) — deep clone into a new
+    ///     owned allocation via `vw_heap_box_owned`.
+    ///
+    /// After the call both the local slot and the pushed stack slot own
+    /// independent references (or identical inline bits) — no poisoning.
+    ///
+    /// Stack effect: +1 push.
+    pub(in crate::executor) fn op_clone_local(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+            debug_assert!(
+                slot < self.stack.len(),
+                "CloneLocal slot {} out of bounds (stack len {})",
+                slot,
+                self.stack.len()
+            );
+            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+            let cloned = raw_helpers::clone_raw_bits(bits);
+            self.push_raw_u64(cloned)?;
+            Ok(())
+        } else {
+            Err(VMError::InvalidOperand)
+        }
+    }
+
+    /// `DropLocal(idx)` — release the value in the local slot in place.
+    ///
+    /// Reads the slot bits and delegates to `raw_helpers::drop_raw_bits`
+    /// which handles:
+    ///   * inline scalar — no-op;
+    ///   * shared heap reference — `Arc::decrement_strong_count` (frees
+    ///     if refcount hits zero);
+    ///   * owned heap reference — immediate `Box::from_raw` drop.
+    ///
+    /// After the call the slot is overwritten with `0u64` to poison it.
+    /// The compiler (V1.1C) guarantees no subsequent read of a dropped
+    /// slot, so the poison value is never observed by well-formed
+    /// bytecode.
+    ///
+    /// Stack effect: 0.
+    pub(in crate::executor) fn op_drop_local(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+            debug_assert!(
+                slot < self.stack.len(),
+                "DropLocal slot {} out of bounds (stack len {})",
+                slot,
+                self.stack.len()
+            );
+            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+            // Release any refcount / owned-box the slot is holding.
+            raw_helpers::drop_raw_bits(bits);
+            // Poison the slot — the plan prescribes `0u64`. Well-formed
+            // bytecode will never read this back.
+            unsafe { *(self.stack.as_mut_ptr().add(slot) as *mut u64) = 0u64 };
+            Ok(())
+        } else {
+            Err(VMError::InvalidOperand)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1860,6 +1991,286 @@ mod tests {
         ];
         let result = run_program(program);
         assert!(result.is_none(), "null should survive PromoteToOwned");
+    }
+
+    // ===== V1.1B: MoveLocal / CloneLocal / DropLocal tests =====
+    //
+    // These hand-crafted programs exercise the new ownership-aware opcodes
+    // in isolation. V1.1C will wire compiler emission; until then no user
+    // program produces these opcodes, so these tests are the only
+    // coverage path.
+    //
+    // Key subtlety: the VM's `Drop` impl walks `stack[0..sp]` and drops
+    // every ValueWord. For top-level programs the local slots live
+    // inside that range. `MoveLocal` is defined to NOT adjust
+    // refcounts — the source slot retains the raw bits but is
+    // conceptually poisoned. A real compiler (V1.1C) guarantees no
+    // subsequent drop of the poisoned slot, but the VM's blanket Drop
+    // doesn't know about that — so tests that exercise MoveLocal with a
+    // heap value must explicitly poison the source slot afterwards via
+    // `stack_take_raw` + `mem::forget` to avoid a double-free at VM
+    // drop.
+
+    /// Inspect the Arc strong count for a heap-tagged raw u64 bit pattern
+    /// without modifying it. Returns 0 if the bits are not a shared
+    /// (Arc-backed) heap reference.
+    #[cfg(not(feature = "gc"))]
+    fn strong_count_of(bits: u64) -> usize {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::tags::{
+            get_payload, get_tag, is_tagged, HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP,
+        };
+        if !is_tagged(bits) || get_tag(bits) != TAG_HEAP {
+            return 0;
+        }
+        let payload = get_payload(bits);
+        if (payload & HEAP_OWNED_BIT) != 0 {
+            return 0;
+        }
+        let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
+        if ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: pointer came from a live Arc-backed heap tag.
+        let arc = std::mem::ManuallyDrop::new(unsafe { std::sync::Arc::from_raw(ptr) });
+        std::sync::Arc::strong_count(&arc)
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_move_local_transfers_ownership_no_refcount() {
+        // Put a heap string in slot 0 (rc=1). Execute MoveLocal 0: the
+        // raw bits transfer onto the stack with NO refcount bump.
+        // After Halt, the stack-top value is the sole live reference
+        // (rc=1), and slot 0 still holds the bits it had before the
+        // move — they are now "poisoned" per the V1.1C compiler
+        // contract. The test poisons slot 0 explicitly via
+        // `stack_take_raw` + `mem::forget` before VM drop so the
+        // blanket drop path does not double-decrement.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("move-test".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            // stack=[s]  rc=1
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            // slot0=s, stack=[], rc=1
+            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
+            // slot0=s (poisoned), stack=[s], rc=1 (UNCHANGED)
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        let bits = result.raw_bits();
+        assert_eq!(
+            result.as_str().map(|s| s.to_string()),
+            Some("move-test".to_string()),
+        );
+        // Only one live reference — the stack-top value that became
+        // the execute() result. Move did not bump the refcount.
+        let count = strong_count_of(bits);
+        assert_eq!(
+            count, 1,
+            "MoveLocal must not bump refcount (expected 1, got {})",
+            count
+        );
+        // Poison slot 0 before VM drop — MoveLocal leaves stale bits,
+        // and the VM's blanket Drop would otherwise double-decrement
+        // the Arc. In real bytecode the V1.1C compiler guarantees no
+        // subsequent read or drop of the moved slot; the test has to
+        // simulate that invariant manually.
+        std::mem::forget(vm.stack_take_raw(0));
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_clone_local_retains_heap_ref() {
+        // Store a heap string in slot 0, then CloneLocal it onto the
+        // stack. After the clone, both the local slot and the stack hold
+        // a reference, so the Arc strong count must be 2.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("clone-test".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            // rc=1
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            // slot0=s, stack=[], rc=1
+            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
+            // slot0=s, stack=[s], rc=2
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        let bits = result.raw_bits();
+        assert_eq!(
+            result.as_str().map(|s| s.to_string()),
+            Some("clone-test".to_string()),
+        );
+        let count = strong_count_of(bits);
+        assert_eq!(
+            count, 2,
+            "CloneLocal must bump refcount: local slot + stack = 2 (got {})",
+            count
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_drop_local_releases_heap_ref() {
+        // Observe refcount transitions across DropLocal. Use CloneLocal
+        // (not Dup) to create a second owning reference so the Arc
+        // refcount actually reaches 2 — Dup just copies raw bits
+        // without retaining, so a Dup'd pair shares one refcount slot
+        // and dropping one would free the string the other still
+        // "owns".
+        //
+        //   PushConst "s" → stack=[s]                 rc=1
+        //   StoreLocal 0  → slot0=s, stack=[]         rc=1
+        //   CloneLocal 0  → slot0=s, stack=[s]        rc=2 (retain)
+        //   StoreLocal 1  → slot0=s, slot1=s, stack=[] rc=2
+        //   CloneLocal 1  → slot1=s, stack=[s]        rc=3 (retain so the
+        //                                                   observation read
+        //                                                   at the end sees
+        //                                                   a fresh ref)
+        //   Halt
+        //
+        // After Halt the stack-top result is the cloned ref. Before the
+        // observation we run another program branch: actually this test
+        // has to fit in one program; we verify refcount after DropLocal
+        // by observing from a CloneLocal reading slot 1.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("drop-test".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            // stack=[s]                                 rc=1
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            // slot0=s, stack=[]                         rc=1
+            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
+            // slot0=s, stack=[s]                        rc=2
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+            // slot0=s, slot1=s, stack=[]                rc=2
+            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
+            // slot0=0, slot1=s, stack=[]                rc=1 (Arc dec)
+            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(1))),
+            // slot0=0, slot1=s, stack=[s]               rc=2
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 2;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        let bits = result.raw_bits();
+        assert_eq!(
+            result.as_str().map(|s| s.to_string()),
+            Some("drop-test".to_string()),
+        );
+        // Slot 0 was dropped, slot 1 and the stack-top result both hold
+        // live references — rc=2. If DropLocal had failed to decrement,
+        // we'd observe rc=3.
+        let count = strong_count_of(bits);
+        assert_eq!(
+            count, 2,
+            "DropLocal should have decremented slot 0's refcount; observed {}",
+            count
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_drop_local_poisons_slot_to_zero() {
+        // DropLocal must overwrite the slot with 0u64 after releasing it.
+        // We verify by dropping slot 0 and then loading slot 0 back via
+        // LoadLocalTrusted (which reads raw bits). The resulting value's
+        // raw_bits must equal 0.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("poison-test".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        assert_eq!(
+            result.raw_bits(),
+            0u64,
+            "DropLocal must poison the slot to 0u64"
+        );
+    }
+
+    #[test]
+    fn test_move_local_on_inline_value_is_zero_cost() {
+        // Inline int (i48 tagged). MoveLocal should push identical bits
+        // onto the stack — no heap, no refcount. We can't directly
+        // observe "no allocator activity", but the bit-for-bit match
+        // between the pushed value and the stored constant is sufficient
+        // evidence: `clone_raw_bits` would have returned the same bits,
+        // but Move must not even branch into the heap path.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(42));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(result.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_drop_local_on_inline_is_noop() {
+        // DropLocal on an int slot: the slot is poisoned to 0, no heap
+        // activity. We verify the load-back yields 0 bits.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(7));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(
+            result.raw_bits(),
+            0u64,
+            "DropLocal on inline slot must still zero the slot"
+        );
+    }
+
+    #[test]
+    fn test_move_local_sequence_end_to_end() {
+        // Move an inline int from slot 0 into slot 1 via the stack —
+        // this is the common compiler-emitted pattern for a last-use
+        // read + rebinding. For inline values it's safe to ignore the
+        // post-move state of slot 0 since no refcount is held.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(11));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(1))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 2;
+        let result = run_program(program);
+        assert_eq!(result.as_i64(), Some(11));
     }
 
     #[test]

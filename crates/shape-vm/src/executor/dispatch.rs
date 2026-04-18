@@ -747,19 +747,17 @@ impl VirtualMachine {
             // Stage 2.6.5.0: Debug opcode removed; slot 0xF2 reused for IsNull.
             // No compiler ever emitted Debug — it was a stale runtime hook.
 
-            // V1.1A: unwired — V1.1B adds handlers.
+            // V1.1B: ownership-aware local opcodes.
             //
-            // The MoveLocal/CloneLocal/DropLocal opcodes were added to the
-            // opcode table in V1.1A (see `bytecode/opcode_defs.rs`) but do
-            // not have executor handlers or compiler emission yet. Reaching
-            // any of them here indicates a bug — no compile path currently
-            // emits them.
-            MoveLocal | CloneLocal | DropLocal => {
-                panic!(
-                    "V1.1A unreachable: {:?} has no executor handler (adds in V1.1B)",
-                    instruction.opcode
-                );
-            }
+            // Phase 1 of `docs/ownership-aware-runtime-v2.md`: these
+            // handlers read the local slot bits directly and delegate
+            // refcount adjustment to `raw_helpers::{clone,drop}_raw_bits`.
+            // The compiler does not yet emit them — V1.1C adds emission
+            // behind the `SHAPE_V2_OWNERSHIP_MOVES` flag — so at this
+            // stage only hand-crafted bytecode exercises these arms.
+            MoveLocal => self.op_move_local(instruction)?,
+            CloneLocal => self.op_clone_local(instruction)?,
+            DropLocal => self.op_drop_local(instruction)?,
 
             _ => return Err(VMError::InvalidOperand),
         }
