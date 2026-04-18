@@ -425,7 +425,7 @@ pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::Val
     if nb.is_heap() {
         {
             // Handle unified heap values (bit-47): materialize to HeapValue.
-            if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+            if shape_value::ValueBits::from_raw(nb.raw_bits()).is_unified_heap() {
                 if let Some(view) = nb.as_any_array() {
                     let hv = shape_value::heap_value::HeapValue::Array(view.to_generic());
                     return (ValueSlot::from_heap(hv), true);

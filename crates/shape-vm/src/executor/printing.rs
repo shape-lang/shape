@@ -120,8 +120,9 @@ impl<'a> ValueFormatter<'a> {
         }
 
         // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
-        if shape_value::tags::is_unified_heap(value.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(value.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(value.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(value.raw_bits())

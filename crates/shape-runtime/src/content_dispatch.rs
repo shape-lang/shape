@@ -147,8 +147,9 @@ pub fn capabilities_for_adapter(adapter: &str) -> RendererCapabilities {
 /// Dispatch Content rendering for heap-allocated values.
 fn render_heap_as_content(value: &ValueWord) -> ContentNode {
     // Handle unified arrays (bit-47 tagged).
-    if shape_value::tags::is_unified_heap(value.raw_bits()) {
-        let kind = unsafe { shape_value::tags::unified_heap_kind(value.raw_bits()) };
+    let vb = shape_value::ValueBits::from_raw(value.raw_bits());
+    if vb.is_unified_heap() {
+        let kind = unsafe { vb.unified_heap_kind() };
         if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
             if let Some(view) = value.as_any_array() {
                 let elems = view.to_generic();
