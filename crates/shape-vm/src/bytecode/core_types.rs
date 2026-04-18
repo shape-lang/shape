@@ -413,7 +413,10 @@ pub struct Function {
     pub ref_mutates: Vec<bool>,
     /// Which upvalues (captures) are mutable.
     /// `mutable_captures[i] == true` means capture `i` is assigned inside the closure
-    /// and should use `Mutable(Arc<RwLock<>>)` upvalues for shared state.
+    /// and should be routed through the SharedCell-backed upvalue fallback
+    /// (post-H3: the single `Upvalue` payload auto-derefs the SharedCell)
+    /// or through the Phase D `LocalMutablePtr` typed-capture opcodes when
+    /// the storage plan qualifies.
     #[serde(default)]
     pub mutable_captures: Vec<bool>,
     /// Typed frame layout for this function's locals (params + locals).

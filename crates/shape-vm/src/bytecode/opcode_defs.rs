@@ -731,11 +731,12 @@ define_opcodes! {
     // no ValueWord round-trip on the hot path (Phase E will specialize the
     // executor to raw typed loads/stores against a Cranelift `StackSlot`).
     //
-    // In Phase D the interpreter backing storage is still a SharedCell
-    // (Upvalue::Mutable), so correctness relies on the SharedCell auto-deref
-    // already performed by the call-frame upvalue machinery. The typed
-    // variants skip the tag-dispatch step on read: the compiler has proven
-    // the ValueWord carries the declared encoding.
+    // In Phase D / H3 the interpreter backing storage is still a SharedCell
+    // sitting inside the single `Upvalue` payload, so correctness relies on
+    // the SharedCell auto-deref performed by `Upvalue::get` / `set` (itself
+    // a drop-in replacement for the retired mutable-upvalue enum variant).
+    // The typed variants skip the tag-dispatch step on read: the compiler
+    // has proven the ValueWord carries the declared encoding.
     /// Load f64 through a mutable capture pointer. Operand: Local(idx).
     LoadCaptureMutPtrF64 = 0x118, Variable, pops: 0, pushes: 1;
     /// Load i64 through a mutable capture pointer. Operand: Local(idx).

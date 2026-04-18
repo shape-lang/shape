@@ -4,9 +4,9 @@
 //! The canonical runtime value representation is `ValueWord` (8-byte NaN-boxed).
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 
 /// Inline capacity for small VMArrays (≤ 8 elements stored inline, no heap buffer).
 pub const VMARRAY_INLINE_CAP: usize = 8;
@@ -19,58 +19,76 @@ pub type VMArrayBuf = smallvec::SmallVec<[ValueWord; VMARRAY_INLINE_CAP]>;
 /// Small arrays (≤ 8 elements) are stored inline in the SmallVec; larger arrays spill to heap.
 pub type VMArray = Arc<VMArrayBuf>;
 
-/// Upvalue - a captured variable that can be shared between closures and their enclosing scope.
+/// Upvalue — a captured value held by a closure.
 ///
-/// Most captures are immutable (the compiler never emits `StoreClosure`), so the
-/// `Immutable` variant stores the ValueWord directly — no Arc, no RwLock, just an
-/// 8-byte clone.  The `Mutable` variant preserves the old `Arc<RwLock<ValueWord>>`
-/// path for the rare case where a capture is written to.
+/// Closure spec §13 H3: the legacy two-variant upvalue enum has been
+/// retired. The closure now holds a single `ValueWord` per capture. Shared
+/// mutability for captures whose source binding is boxed (legacy BoxLocal /
+/// BoxModuleBinding path, soon to be deleted by H4) is carried by a
+/// `HeapValue::SharedCell` encoded *inside* the `ValueWord`: reads and writes
+/// auto-deref through that cell when present, otherwise act on the slot
+/// directly.
+///
+/// Phase D's typed-pointer capture opcodes (`LoadCaptureMutPtr*` /
+/// `StoreCaptureMutPtr*`) now handle mutable captures of every binding class
+/// (local, module binding, async-scope-hosted), so the remaining fallback is
+/// strictly for untyped / unresolved capture paths while H4 retires the
+/// box-and-share opcodes. A future phase will also collapse the SharedCell
+/// fallback once all capture access is routed through the frame-pointer model.
 #[derive(Debug, Clone)]
-pub enum Upvalue {
-    /// Direct value — no lock, no Arc overhead.  Clone is 8 bytes (or Arc bump for heap values).
-    Immutable(ValueWord),
-    /// Shared mutable capture — used if `StoreClosure` is ever emitted.
-    Mutable(Arc<RwLock<ValueWord>>),
-}
+pub struct Upvalue(ValueWord);
 
 impl Upvalue {
-    /// Create a new **immutable** upvalue (fast path — default for all captures).
+    /// Create a new upvalue carrying `value`. The caller is responsible for
+    /// arranging shared mutation semantics via a `HeapValue::SharedCell`
+    /// wrapper inside the ValueWord when the capture is mutable and shared
+    /// with the enclosing scope.
     #[inline]
     pub fn new(value: ValueWord) -> Self {
-        Upvalue::Immutable(value)
+        Upvalue(value)
     }
 
-    /// Create a new **mutable** upvalue (slow path — only when writes are needed).
+    /// Back-compat shim for call sites that historically minted a fresh
+    /// mutable upvalue with no external sharing (non-escaping local closure
+    /// captures that bypassed the BoxLocal path). H3 collapses this to
+    /// `Upvalue::new`: the closure's internal writes land on its own slot,
+    /// matching pre-H3 behaviour for the fresh-Arc case where the enclosing
+    /// scope never observed the write anyway.
     #[inline]
     pub fn new_mutable(value: ValueWord) -> Self {
-        Upvalue::Mutable(Arc::new(RwLock::new(value)))
+        Upvalue(value)
     }
 
-    /// Get a clone of the contained ValueWord value.
+    /// Read the captured value. If the inner `ValueWord` is a
+    /// `HeapValue::SharedCell`, auto-deref through the cell's RwLock so
+    /// callers observe the latest shared write.
     #[inline]
     pub fn get(&self) -> ValueWord {
-        match self {
-            Upvalue::Immutable(nb) => nb.clone(),
-            Upvalue::Mutable(arc) => arc.read().unwrap().clone(),
+        use crate::heap_value::HeapValue;
+        // Best-effort auto-deref for the SharedCell-backed mutable capture
+        // fallback. The SharedCell itself is the value the stack hands the
+        // closure; reading *through* it preserves pre-H3 semantics where
+        // the legacy mutable variant dereferenced its inner cell.
+        if let Some(HeapValue::SharedCell(arc)) = self.0.as_heap_ref() {
+            return arc.read().unwrap().clone();
         }
+        self.0.clone()
     }
 
-    /// Set the contained value.
-    ///
-    /// If the upvalue is `Immutable`, it is upgraded to `Mutable` on the first write.
-    /// This requires `&mut self`.
+    /// Write through the captured value. If the inner `ValueWord` is a
+    /// `HeapValue::SharedCell`, the write targets the cell's slot so the
+    /// enclosing scope observes the update. Otherwise it replaces the local
+    /// upvalue's ValueWord.
     pub fn set(&mut self, value: ValueWord) {
-        match self {
-            Upvalue::Mutable(arc) => {
-                *arc.write().unwrap() = value;
-            }
-            Upvalue::Immutable(_) => {
-                // Upgrade to mutable on first write
-                *self = Upvalue::Mutable(Arc::new(RwLock::new(value)));
-            }
+        use crate::heap_value::HeapValue;
+        if let Some(HeapValue::SharedCell(arc)) = self.0.as_heap_ref() {
+            *arc.write().unwrap() = value;
+            return;
         }
+        self.0 = value;
     }
 }
+
 
 /// Print result with structured spans for reformattable output
 #[derive(Debug, Clone)]

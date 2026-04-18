@@ -641,26 +641,21 @@ impl VirtualMachine {
             }
             upvalues.reverse();
 
-            // Create upvalues: mutable captures reuse SharedCell Arcs for shared state,
-            // immutable captures get direct ValueWord values (no overhead).
+            // Closure spec §13 H3: the legacy mutable-upvalue enum variant
+            // has been retired. The shared-mutable-state carrier for
+            // mutable captures is now the
+            // `HeapValue::SharedCell` value sitting on the stack (emitted by
+            // the legacy `BoxLocal` / `BoxModuleBinding` path, which H4
+            // deletes). `Upvalue::new` stashes that SharedCell-bearing
+            // ValueWord directly; `Upvalue::get` / `set` auto-deref through
+            // the cell so every closure observing it sees the same slot.
+            // Non-shared mutable captures (no SharedCell on the stack — e.g.
+            // when BoxLocal was skipped) fall back to the closure-local
+            // write semantics that the fresh-Arc branch provided pre-H3.
+            let _ = &mutable_captures; // mutability flag remains for future frame-pointer work
             let upvalues: Vec<Upvalue> = upvalues
                 .into_iter()
-                .enumerate()
-                .map(|(i, nb)| {
-                    if mutable_captures.get(i).copied().unwrap_or(false) {
-                        // If the captured value is a SharedCell (boxed by BoxLocal),
-                        // extract and reuse its Arc so the closure and enclosing scope
-                        // share the same mutable cell.
-                        if let Some(arc) = raw_helpers::extract_shared_cell(nb.raw_bits())
-                        {
-                            Upvalue::Mutable(arc.clone())
-                        } else {
-                            Upvalue::new_mutable(nb)
-                        }
-                    } else {
-                        Upvalue::new(nb)
-                    }
-                })
+                .map(Upvalue::new)
                 .collect();
 
             self.push_raw_u64(ValueWord::from_heap_value(

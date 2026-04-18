@@ -433,21 +433,25 @@ impl VirtualMachine {
     /// Close upvalue - currently a no-op since we already capture by value
     /// In a full implementation, this would move the value from stack to heap
     fn op_close_upvalue(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
-        // With Arc<RwLock<ValueWord>> upvalues, closing is automatic
-        // The value is already on the heap and shared
+        // H3: closures capture ValueWords directly; shared mutability, when
+        // required, rides on a `HeapValue::SharedCell` inside the captured
+        // ValueWord, so "closing" is implicit on capture.
         Ok(())
     }
 
-    // ── Closure Spec Phase D: typed mutable-capture pointer access ───────
+    // ── Closure Spec Phase D / H3: typed mutable-capture pointer access ──
     //
     // The interpreter backing for `LoadCaptureMutPtrT` / `StoreCaptureMutPtrT`
-    // is the existing `Upvalue::Mutable(Arc<RwLock<ValueWord>>)` shared cell.
-    // Phase D's invariant is that the compiler has proven (a) the closure is
-    // non-escaping, (b) the outer slot has `BindingStorageClass::LocalMutablePtr`,
-    // (c) the MIR solver registered an exclusive loan on the outer slot for
-    // the closure's lifetime, and (d) the ValueWord stored in the shared cell
-    // carries the declared encoding (F64/I64/I32/Bool/Ptr). The typed opcodes
-    // skip the tag dispatch on read.
+    // is a `HeapValue::SharedCell`-backed `Upvalue` (H3 collapsed the
+    // former mutable-upvalue enum variant into a single-`ValueWord` upvalue
+    // whose `get`/`set` transparently deref through a SharedCell when one is
+    // present). Phase D's invariant is
+    // that the compiler has proven (a) the closure is non-escaping,
+    // (b) the outer slot has `BindingStorageClass::LocalMutablePtr`,
+    // (c) the MIR solver registered an exclusive loan on the outer slot
+    // for the closure's lifetime, and (d) the ValueWord stored in the
+    // shared cell carries the declared encoding (F64/I64/I32/Bool/Ptr).
+    // The typed opcodes skip the tag dispatch on read.
     //
     // Phase E replaces this path with a real raw `*mut T` into a Cranelift
     // `StackSlot`. The opcode-level ABI stays identical — only the executor
@@ -480,10 +484,13 @@ impl VirtualMachine {
                 upvalue_idx
             ))
         })?;
-        // `Upvalue::get()` returns the stored ValueWord. For Phase D the
-        // cell is always Mutable (BoxLocal wrapped the outer slot); the
-        // returned value IS the underlying scalar, not the SharedCell
-        // wrapper — `Upvalue::Mutable::get` reads through the Arc.
+        // `Upvalue::get()` auto-derefs through a SharedCell when the
+        // upvalue's ValueWord is the boxed outer slot; for Phase D bindings
+        // that's exactly what the upstream `BoxLocal`-emitting compiler
+        // arranges, so the returned value is the underlying scalar, not the
+        // SharedCell wrapper. H3 collapsed the former mutable-upvalue enum
+        // variant: the SharedCell ValueWord itself rides inside the single
+        // `Upvalue` payload now.
         Ok(upvalue.get())
     }
 

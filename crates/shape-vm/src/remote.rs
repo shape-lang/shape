@@ -19,9 +19,10 @@
 //!
 //! # Closure semantics
 //!
-//! `Arc<RwLock<ValueWord>>` upvalues become **value copies** on serialization.
-//! If the remote side mutates a captured variable, the sender doesn't see it.
-//! This is the correct semantic for distributed computing — a **send-copy** model.
+//! Upvalues (SharedCell-backed shared captures or Phase D typed-pointer
+//! captures alike) become **value copies** on serialization. If the remote
+//! side mutates a captured variable, the sender doesn't see it. This is the
+//! correct semantic for distributed computing — a **send-copy** model.
 
 use serde::{Deserialize, Serialize};
 use shape_runtime::snapshot::{
@@ -64,7 +65,8 @@ pub struct RemoteCallRequest {
     pub arguments: Vec<SerializableVMValue>,
 
     /// Closure upvalues, if calling a closure. These are value-copied from
-    /// the sender's `Arc<RwLock<ValueWord>>` upvalue slots.
+    /// the sender's upvalue slots (whether the local representation is a
+    /// SharedCell, a typed frame-pointer capture, or a plain ValueWord).
     pub upvalues: Option<Vec<SerializableVMValue>>,
 
     /// Type schema registry — sent separately because `BytecodeProgram`

@@ -186,8 +186,8 @@ impl BytecodeCompiler {
                 // The MIR storage planner assigns each binding a BindingStorageClass:
                 //   Direct    → LoadLocal / LoadLocalTrusted (no indirection)
                 //   Deferred  → same as Direct (plan not yet resolved)
-                //   UniqueHeap→ BoxLocal + Arc<RwLock<>> (SharedCell), read via LoadClosure
-                //   SharedCow → BoxLocal + Arc<RwLock<>> (SharedCell), read via LoadClosure
+                //   UniqueHeap→ BoxLocal + SharedCell, read via LoadClosure
+                //   SharedCow → BoxLocal + SharedCell, read via LoadClosure
                 //   Reference → DerefLoad / DerefStore (handled above)
                 //
                 // Consult the MIR storage plan first (authoritative when available),
