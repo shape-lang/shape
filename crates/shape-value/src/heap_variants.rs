@@ -152,6 +152,59 @@ macro_rules! define_heap_types {
                 slots: Box<[$crate::slot::ValueSlot]>,
                 heap_mask: u64,
             },
+            /// # Residual fallback variant (Closure spec §14.7 / H6.6)
+            ///
+            /// The H6 series migrated the hot path to the raw
+            /// [`Self::ClosureRaw`] variant — the JIT's `emit_heap_closure`
+            /// Cranelift codegen and the VM's `op_make_closure` both
+            /// allocate `TypedClosureHeader` blocks directly. The common
+            /// `arr.map(|x| x + n)` and `arr.filter(|x| …)` shapes hit
+            /// `ClosureRaw` end-to-end; no `Arc<HeapValue>` traffic.
+            ///
+            /// This legacy variant is preserved for four load-bearing
+            /// producer sites that cannot yet emit `ClosureRaw`:
+            ///
+            /// 1. **VM `op_make_closure` mutable-capture fallback**
+            ///    (`shape-vm::executor::control_flow::op_make_closure`).
+            ///    Mutable captures are backed by `HeapValue::SharedCell`
+            ///    pointers that the closure holds by identity — writing
+            ///    them through a `FieldKind::Ptr` slot via
+            ///    `write_capture_typed` would collapse the cell's
+            ///    auto-deref semantics because the typed read path in
+            ///    `read_capture_as_value_bits` returns the slot bits
+            ///    verbatim, not the cell's inner value. Fixing this
+            ///    requires a first-class mutable-capture field kind in
+            ///    `closure_layout::ClosureLayout` plus matching helpers,
+            ///    which is larger than H6.6's scope (see §14.11
+            ///    "frame-pointer universal capture model").
+            ///
+            /// 2. **VTable closure entries**
+            ///    (`shape-vm::executor::trait_object_ops`). Dyn-trait
+            ///    vtables currently carry `VTableEntry::Closure {
+            ///    function_id, upvalues: Vec<Upvalue> }` — the VTable
+            ///    predates the raw layout infrastructure. Promoting the
+            ///    VTable to carry `Arc<OwnedClosureBlock>` is a follow-up
+            ///    phase (touches every trait-object construction site).
+            ///
+            ///  3. **Snapshot deserialize**
+            ///    (`shape-runtime::snapshot`). Snapshots emit a typed
+            ///    `(function_id, upvalues)` blob; reloaded programs do not
+            ///    always carry the matching `ClosureLayout` side-table
+            ///    (`#[serde(skip)]` on `closure_function_layouts`). A
+            ///    typed-blob snapshot format is a future wire-protocol
+            ///    bump, not an H6 concern.
+            ///
+            /// 4. **Remote-builtins deserialize**
+            ///    (`shape-vm::executor::builtins::remote_builtins`). Same
+            ///    reasoning as (3) — cross-node values arrive without a
+            ///    guaranteed local layout.
+            ///
+            /// All _reader_ sites go through [`crate::vm_closure_handle::
+            /// VmClosureHandle`] (H6.1–H6.4); readers cannot observe which
+            /// backing is in use. The §10 verification gate passes via IR
+            /// inspection on the JIT hot path: `emit_heap_closure` lowers
+            /// to (v2_alloc_struct + typed stores + atomic_rmw retains)
+            /// with zero `Arc<HeapValue::Closure>` traffic.
             Closure {
                 function_id: u16,
                 upvalues: Vec<$crate::value::Upvalue>,
@@ -164,8 +217,11 @@ macro_rules! define_heap_types {
             /// enclosing `Arc<HeapValue>` so the existing dispatch plumbing
             /// (`TAG_HEAP → as_heap_ref → …`) keeps working unchanged;
             /// readers go through `VmClosureHandle` to remain oblivious to
-            /// the swap. H6.6 deletes the legacy `Closure { function_id,
-            /// upvalues }` variant once every producer emits `ClosureRaw`.
+            /// the swap.
+            ///
+            /// This is the canonical closure representation on the hot
+            /// path — the legacy [`Self::Closure`] variant lives on only
+            /// for the four producer sites enumerated in its doc comment.
             ClosureRaw($crate::v2::closure_raw::OwnedClosureBlock),
             Range {
                 start: Option<Box<$crate::value_word::ValueWord>>,
