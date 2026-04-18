@@ -101,42 +101,22 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
 }
 
 /// Emit the appropriate runtime-dispatched opcode for the given binary
-/// operation, routing through the centralized helpers in `helpers.rs`.
-/// Returns `true` if a helper was used, `false` if the caller should
+/// operation, routing through the `emit_binary_op` shim.
+/// Returns `true` if the shim handled the op, `false` if the caller should
 /// fall through to `compile_binary_op()` for remaining ops (And/Or/BitOps/
 /// NullCoalesce/ErrorContext).
 ///
-/// V3.2 (Tranche A — arithmetic): arithmetic arms (Add/Sub/Mul/Div/Mod/Pow)
-/// route through the `emit_binary_op` shim with `BinOperandKind::Unknown`
-/// operands — this is a fallback path reached only after typed emission has
-/// declined, so the shim's Dynamic-fallback branch emits byte-identical
-/// `AddDynamic`/etc. V3.3 (Tranche B) will migrate the comparison arms.
+/// V3.2 (Tranche A — arithmetic) + V3.3 (Tranche B — comparisons): all
+/// arithmetic and comparison arms now share a single shim call with
+/// `BinOperandKind::Unknown` operands. This path is only reached after typed
+/// emission has declined, so the shim's Dynamic-fallback branch emits
+/// byte-identical `*Dynamic` opcodes. The shim's return value (`Ok(true)`
+/// for handled ops, `Ok(false)` for non-arithmetic/non-comparison ops) is
+/// forwarded to the caller.
 fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bool {
-    use crate::compiler::helpers;
     use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-    match op {
-        BinaryOp::Add
-        | BinaryOp::Sub
-        | BinaryOp::Mul
-        | BinaryOp::Div
-        | BinaryOp::Mod
-        | BinaryOp::Pow => {
-            // V3.2: unified shim call. Operand kinds are Unknown because this
-            // path is only reached after typed emission declined — the shim
-            // emits the `*Dynamic` opcode, matching the pre-migration
-            // `emit_dynamic_*` helpers bit-for-bit.
-            let _ = emit_binary_op(compiler, *op, BinOperandKind::Unknown, BinOperandKind::Unknown)
-                .expect("emit_binary_op never returns Err for arithmetic ops");
-            true
-        }
-        BinaryOp::Greater => { helpers::emit_dynamic_gt(compiler); true }
-        BinaryOp::Less => { helpers::emit_dynamic_lt(compiler); true }
-        BinaryOp::GreaterEq => { helpers::emit_dynamic_gte(compiler); true }
-        BinaryOp::LessEq => { helpers::emit_dynamic_lte(compiler); true }
-        BinaryOp::Equal => { helpers::emit_dynamic_eq(compiler); true }
-        BinaryOp::NotEqual => { helpers::emit_dynamic_neq(compiler); true }
-        _ => false,
-    }
+    emit_binary_op(compiler, *op, BinOperandKind::Unknown, BinOperandKind::Unknown)
+        .expect("emit_binary_op never returns Err")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,13 +463,18 @@ impl BytecodeCompiler {
         // Fallback: both operand types are unresolved. Compile operands and
         // emit a runtime-dispatched equality (vw_equals in the executor).
         // This covers generic stdlib code, untyped function params, etc.
+        //
+        // V3.3 (Tranche B): route through the `emit_binary_op` shim with
+        // `BinOperandKind::Unknown` operands. The typed-equality dispatch
+        // above has already declined, so the shim emits the matching
+        // `EqDynamic` / `NeqDynamic` opcode, byte-identical to the previous
+        // `emit_dynamic_eq` / `emit_dynamic_neq` helpers.
         self.compile_expr(left)?;
         self.compile_expr(right)?;
-        if is_neq {
-            crate::compiler::helpers::emit_dynamic_neq(self);
-        } else {
-            crate::compiler::helpers::emit_dynamic_eq(self);
-        }
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        let op = if is_neq { BinaryOp::NotEqual } else { BinaryOp::Equal };
+        let _ = emit_binary_op(self, op, BinOperandKind::Unknown, BinOperandKind::Unknown)
+            .expect("emit_binary_op never returns Err for Equal/NotEqual");
         Ok(true)
     }
 
