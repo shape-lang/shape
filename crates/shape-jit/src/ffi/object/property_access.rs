@@ -368,7 +368,7 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
         Some(HK_COLUMN_REF) => 0,
         _ => {
             // VM-format heap values (HashMap, DataTable, etc.)
-            if is_heap(value_bits) && !shape_value::tags::is_unified_heap(value_bits) {
+            if is_heap(value_bits) && !shape_value::ValueBits::from_raw(value_bits).is_unified_heap() {
                 let vw = unsafe { shape_value::ValueWord::clone_from_bits(value_bits) };
                 if let Some(hm) = vw.as_hashmap_data() {
                     return box_number(hm.keys.len() as f64);

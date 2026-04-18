@@ -70,7 +70,7 @@ pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
         let inner = unsafe { unbox_result_inner(bits) };
         // Free the Ok wrapper. Zero the inner field first so the Drop impl
         // doesn't try to free the inner value (caller now owns it).
-        let ptr = shape_value::tags::unified_heap_ptr(bits)
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
             as *mut shape_value::unified_wrapper::UnifiedWrapper;
         if !ptr.is_null() {
             unsafe {
@@ -90,7 +90,7 @@ pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
 pub extern "C" fn jit_unwrap_err(bits: u64) -> u64 {
     if is_err_tag(bits) {
         let inner = unsafe { unbox_result_inner(bits) };
-        let ptr = shape_value::tags::unified_heap_ptr(bits)
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
             as *mut shape_value::unified_wrapper::UnifiedWrapper;
         if !ptr.is_null() {
             unsafe {
@@ -162,7 +162,7 @@ pub extern "C" fn jit_is_none(bits: u64) -> u64 {
 pub extern "C" fn jit_unwrap_some(bits: u64) -> u64 {
     if is_some_tag(bits) {
         let inner = unsafe { unbox_some_inner(bits) };
-        let ptr = shape_value::tags::unified_heap_ptr(bits)
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
             as *mut shape_value::unified_wrapper::UnifiedWrapper;
         if !ptr.is_null() {
             unsafe {

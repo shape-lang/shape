@@ -419,7 +419,7 @@ mod tests {
         unsafe { *(uv_ptr.add(8) as *mut *const u8) = to_ptr as *const u8 };
 
         // 3. Build NaN-boxed bits: TAG_HEAP with UNIFIED_HEAP_FLAG + pointer
-        let bits = shape_value::tags::make_unified_heap(uv_ptr as *const u8);
+        let bits = shape_value::ValueBits::make_unified_heap(uv_ptr as *const u8).raw();
 
         (bits, to_ptr, uv_ptr)
     }

@@ -189,7 +189,7 @@ fn dispatch_method_via_trampoline(
         // Guard: only dispatch VM-format heap values through the trampoline.
         // Unified heap values (bit-47 set) are JIT-native objects that should have
         // been handled by the built-in dispatch above.
-        if shape_value::tags::is_unified_heap(receiver_bits) {
+        if shape_value::ValueBits::from_raw(receiver_bits).is_unified_heap() {
             return TAG_NULL; // JIT object without a matching method
         }
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
@@ -492,7 +492,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // Check before built-in dispatch to avoid reading garbage from non-JitAlloc headers.
         if shape_value::tags::is_tagged(receiver_bits)
             && shape_value::tags::get_tag(receiver_bits) == shape_value::tags::TAG_HEAP
-            && !shape_value::tags::is_unified_heap(receiver_bits)
+            && !shape_value::ValueBits::from_raw(receiver_bits).is_unified_heap()
         {
             let vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
             if let Some(hm) = vw.as_hashmap_data() {

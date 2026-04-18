@@ -272,8 +272,9 @@ pub fn heap_kind(bits: u64) -> Option<u16> {
     if !is_heap(bits) {
         return None;
     }
-    if shape_value::tags::is_unified_heap(bits) {
-        Some(unsafe { shape_value::tags::unified_heap_kind(bits) })
+    let vb = shape_value::ValueBits::from_raw(bits);
+    if vb.is_unified_heap() {
+        Some(unsafe { vb.unified_heap_kind() })
     } else {
         Some(unsafe { read_heap_kind(bits) })
     }
@@ -331,7 +332,7 @@ pub unsafe fn unbox_result_inner(bits: u64) -> u64 {
 
 #[inline]
 pub fn unbox_result_pointer(bits: u64) -> *const u64 {
-    let ptr = shape_value::tags::unified_heap_ptr(bits) as *const UnifiedWrapper;
+    let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr() as *const UnifiedWrapper;
     if ptr.is_null() {
         std::ptr::null()
     } else {
@@ -488,7 +489,7 @@ pub fn box_str(s: &str) -> u64 {
 /// `bits` must be a TAG_HEAP value pointing to a live string allocation.
 #[inline]
 pub unsafe fn unbox_string(bits: u64) -> &'static str {
-    if shape_value::tags::is_unified_heap(bits) {
+    if shape_value::ValueBits::from_raw(bits).is_unified_heap() {
         unsafe { UnifiedString::from_heap_bits(bits) }.as_str()
     } else {
         unsafe { jit_unbox::<String>(bits) }.as_str()
@@ -576,7 +577,7 @@ mod tests {
         assert!(is_heap_kind(bits, HK_STRING));
         assert!(!is_number(bits));
         assert_eq!(heap_kind(bits), Some(HK_STRING));
-        assert!(shape_value::tags::is_unified_heap(bits));
+        assert!(shape_value::ValueBits::from_raw(bits).is_unified_heap());
         let s = unsafe { unbox_string(bits) };
         assert_eq!(s, "hello");
         unsafe { UnifiedString::heap_drop(bits) };
@@ -586,7 +587,7 @@ mod tests {
     fn test_box_str() {
         let bits = box_str("world");
         assert!(is_heap_kind(bits, HK_STRING));
-        assert!(shape_value::tags::is_unified_heap(bits));
+        assert!(shape_value::ValueBits::from_raw(bits).is_unified_heap());
         let s = unsafe { unbox_string(bits) };
         assert_eq!(s, "world");
         unsafe { UnifiedString::heap_drop(bits) };
@@ -598,7 +599,7 @@ mod tests {
         assert!(is_heap(bits));
         assert!(is_heap_kind(bits, HK_ARRAY));
         assert_eq!(heap_kind(bits), Some(HK_ARRAY));
-        assert!(shape_value::tags::is_unified_heap(bits));
+        assert!(shape_value::ValueBits::from_raw(bits).is_unified_heap());
         let arr = unsafe { unified_unbox::<Vec<u64>>(bits) };
         assert_eq!(arr.len(), 3);
         unsafe { UnifiedValue::<Vec<u64>>::heap_drop(bits) };
@@ -633,13 +634,13 @@ mod tests {
         assert!(is_result_tag(ok_val));
 
         // Verify unified heap encoding (bit 47 set)
-        assert!(shape_value::tags::is_unified_heap(ok_val));
+        assert!(shape_value::ValueBits::from_raw(ok_val).is_unified_heap());
 
         let err_val = box_err(box_number(42.0));
         assert!(is_err_tag(err_val));
         assert!(!is_ok_tag(err_val));
         assert!(is_result_tag(err_val));
-        assert!(shape_value::tags::is_unified_heap(err_val));
+        assert!(shape_value::ValueBits::from_raw(err_val).is_unified_heap());
 
         // TAG_BOOL values must not be detected as ERR
         assert!(!is_err_tag(TAG_BOOL_FALSE));
@@ -670,7 +671,7 @@ mod tests {
         assert!(is_some_tag(some_val));
         assert!(is_option_tag(some_val));
         assert!(!is_none_tag(some_val));
-        assert!(shape_value::tags::is_unified_heap(some_val));
+        assert!(shape_value::ValueBits::from_raw(some_val).is_unified_heap());
 
         // Round-trip
         let inner = unsafe { unbox_some_inner(some_val) };
@@ -705,7 +706,7 @@ mod tests {
         let bits = box_column_ref(data.as_ptr(), data.len());
         assert!(is_column_ref(bits));
         assert!(!is_number(bits));
-        assert!(shape_value::tags::is_unified_heap(bits));
+        assert!(shape_value::ValueBits::from_raw(bits).is_unified_heap());
 
         let (ptr, len) = unsafe { unbox_column_ref(bits) };
         assert_eq!(ptr, data.as_ptr());

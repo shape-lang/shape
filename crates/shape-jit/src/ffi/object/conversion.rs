@@ -34,7 +34,7 @@ pub fn drain_unified_heap_refs() {
     UNIFIED_HEAP_REFS.with(|cell| {
         let refs = cell.borrow_mut().split_off(0);
         for bits in refs {
-            let ptr = shape_value::tags::unified_heap_ptr(bits);
+            let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr();
             if ptr.is_null() {
                 continue;
             }
@@ -184,7 +184,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
     // These are passed through from nanboxed_to_jit_bits for types like HashMap,
     // DataTable, TypedObject that have no JIT-native representation.
     // Recover them via clone_from_bits (bumps Arc refcount).
-    if is_heap(bits) && !shape_value::tags::is_unified_heap(bits) {
+    if is_heap(bits) && !shape_value::ValueBits::from_raw(bits).is_unified_heap() {
         return unsafe { ValueWord::clone_from_bits(bits) };
     }
 
@@ -325,7 +325,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
 
     // VM-format heap values (TAG_HEAP, bit-47 clear) are Arc<HeapValue> pointers.
     // Recover them directly — no conversion needed.
-    if is_heap(bits) && !shape_value::tags::is_unified_heap(bits) {
+    if is_heap(bits) && !shape_value::ValueBits::from_raw(bits).is_unified_heap() {
         return unsafe { ValueWord::clone_from_bits(bits) };
     }
 
@@ -490,9 +490,10 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
     // be dropped by the caller (which decrements the refcount). Without this,
     // the JIT holds a dangling pointer to a freed allocation.
     // Track the ref so drain_unified_heap_refs() can balance the count at JIT exit.
-    if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+    let nb_vb = shape_value::ValueBits::from_raw(nb.raw_bits());
+    if nb_vb.is_unified_heap() {
         let bits = nb.raw_bits();
-        let ptr = shape_value::tags::unified_heap_ptr(bits);
+        let ptr = nb_vb.unified_heap_ptr();
         unsafe {
             let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
             (*rc).fetch_add(1, std::sync::atomic::Ordering::Relaxed);

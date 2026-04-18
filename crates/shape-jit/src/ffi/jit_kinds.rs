@@ -71,19 +71,19 @@ impl<T> UnifiedValue<T> {
     #[inline]
     pub fn heap_box(self) -> u64 {
         let ptr = Box::into_raw(Box::new(self));
-        shape_value::tags::make_unified_heap(ptr as *const u8)
+        shape_value::ValueBits::make_unified_heap(ptr as *const u8).raw()
     }
 
     #[inline]
     pub unsafe fn from_heap_bits(bits: u64) -> &'static Self {
-        let ptr = shape_value::tags::unified_heap_ptr(bits) as *const Self;
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr() as *const Self;
         debug_assert!(!ptr.is_null(), "UnifiedValue::from_heap_bits: null pointer");
         unsafe { &*ptr }
     }
 
     #[inline]
     pub unsafe fn from_heap_bits_mut(bits: u64) -> &'static mut Self {
-        let ptr = shape_value::tags::unified_heap_ptr(bits) as *mut Self;
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr() as *mut Self;
         debug_assert!(
             !ptr.is_null(),
             "UnifiedValue::from_heap_bits_mut: null pointer"
@@ -93,7 +93,7 @@ impl<T> UnifiedValue<T> {
 
     #[inline]
     pub unsafe fn heap_drop(bits: u64) {
-        let ptr = shape_value::tags::unified_heap_ptr(bits) as *mut Self;
+        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr() as *mut Self;
         unsafe { drop(Box::from_raw(ptr)) };
     }
 }
@@ -116,7 +116,7 @@ pub fn unified_box<T>(kind: u16, data: T) -> u64 {
 /// `bits` must be a TAG_HEAP value pointing to a live allocation of type T.
 #[inline]
 pub unsafe fn unified_unbox<T>(bits: u64) -> &'static T {
-    if shape_value::tags::is_unified_heap(bits) {
+    if shape_value::ValueBits::from_raw(bits).is_unified_heap() {
         &unsafe { UnifiedValue::<T>::from_heap_bits(bits) }.data
     } else {
         unsafe { jit_unbox::<T>(bits) }
@@ -129,7 +129,7 @@ pub unsafe fn unified_unbox<T>(bits: u64) -> &'static T {
 /// Same as `unified_unbox`, plus exclusive access must be guaranteed.
 #[inline]
 pub unsafe fn unified_unbox_mut<T>(bits: u64) -> &'static mut T {
-    if shape_value::tags::is_unified_heap(bits) {
+    if shape_value::ValueBits::from_raw(bits).is_unified_heap() {
         &mut unsafe { UnifiedValue::<T>::from_heap_bits_mut(bits) }.data
     } else {
         unsafe { jit_unbox_mut::<T>(bits) }
