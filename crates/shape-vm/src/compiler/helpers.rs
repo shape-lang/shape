@@ -105,6 +105,88 @@ pub(crate) fn with_ownership_moves_flag<R>(enabled: bool, f: impl FnOnce() -> R)
     f()
 }
 
+/// Phase V1.2C/D: default-on compiler emission of `PromoteToShared`.
+///
+/// When `true`, the compiler emits `PromoteToShared` (V1.2A/B) at escape
+/// points — sites where a uniquely-owned (Box-backed) value transitions to
+/// shared (Arc-backed) ownership:
+///
+///   * Site A: a `let` / `const` binding classified as `UniqueHeap` is
+///     captured by an *escaping* closure (`emit_make_closure_heap_next`
+///     was set by the caller, e.g. a return-of-closure or
+///     store-into-collection pattern). The value is pushed for the
+///     closure env; `PromoteToShared` converts it to Arc so the closure
+///     can outlive the owning scope safely.
+///
+///   * Site B: a `var`-like assignment target with `SharedCow` storage
+///     is written from an rhs that was just produced by `PromoteToOwned`
+///     (Box-backed). The target's Arc-shared representation needs the
+///     value in Arc form; `PromoteToShared` performs the Box→Arc
+///     transfer without a refcount bump.
+///
+/// Site C (passing owned to an Arc-expecting parameter) is deferred to
+/// V1.3: it requires `FunctionBorrowSummary.param_ownership_hints` which
+/// does not exist at V1.2 time.
+///
+/// V1.2C ships the emission gated on this flag; V1.2D flips the default
+/// to `true`. Polarity matches the V1.1D convention: the env var is an
+/// opt-OUT. Values `0` / `false` / `off` / `no` (case-insensitive,
+/// trimmed) disable the flag; unset, empty, or any other value keeps the
+/// V1.2D default of `true`. Mirrors the V0.a `SHAPE_V2_VAR_SHAREDCOW`
+/// pattern (`crates/shape-vm/src/mir/storage_planning.rs:50`) and the
+/// V1.1D `SHAPE_V2_OWNERSHIP_MOVES` pattern above.
+///
+/// Rollback: `SHAPE_V2_PROMOTE_TO_SHARED=0` restores the pre-V1.2C
+/// byte-identical emission at both sites.
+///
+/// For unit-test determinism, a `#[cfg(test)]` thread-local override
+/// (`with_promote_to_shared_flag`) lets a single test force the flag
+/// on/off without touching the env-var cache.
+pub(super) fn promote_to_shared_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_PROMOTE_TO_SHARED_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_PROMOTE_TO_SHARED") {
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False"
+                | "off" | "OFF" | "Off"
+                | "no" | "NO" | "No"
+        ),
+        Err(_) => true,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Phase V1.2C test hook: per-thread override for
+    /// `promote_to_shared_enabled()`. Thread-local so concurrent
+    /// `cargo test` workers remain independent.
+    pub(super) static TEST_PROMOTE_TO_SHARED_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Phase V1.2C test helper: run `f` with the PromoteToShared flag forced
+/// to `enabled`. Restores the previous override on return (even on
+/// panic). Production code reads the env var exclusively via
+/// `promote_to_shared_enabled()`.
+#[cfg(test)]
+pub(crate) fn with_promote_to_shared_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_PROMOTE_TO_SHARED_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_PROMOTE_TO_SHARED_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
 /// Emit a runtime-dispatched addition instruction.
 ///
 /// This is the fallback path for `+` when the compiler cannot prove both

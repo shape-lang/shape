@@ -431,6 +431,39 @@ impl BytecodeCompiler {
             } else {
                 let temp = Expr::Identifier(captured.clone(), Span::DUMMY);
                 self.compile_expr(&temp)?;
+                // Phase V1.2C/D — Site A: closure capture of a
+                // uniquely-owned value into an *escaping* closure.
+                // If the outer slot is classified as `UniqueHeap`
+                // (Box-backed, owned — see Phase 4 / `PromoteToOwned`)
+                // and the closure escapes the current scope, the
+                // captured value must transition to an Arc-shared
+                // encoding so the closure can outlive the owning
+                // binding. `PromoteToShared` converts the top-of-stack
+                // Box into an Arc in place without bumping a refcount.
+                // No-op on inline scalars and already-Arc values, so
+                // emitting it here is correctness-safe; gating on
+                // `UniqueHeap` simply avoids the unnecessary opcode.
+                //
+                // Non-escaping closures share the caller's scope by
+                // construction — the Box stays unique for the closure's
+                // lifetime and the promotion is unnecessary.
+                if closure_is_escaping
+                    && crate::compiler::helpers::promote_to_shared_enabled()
+                {
+                    if let Some(local_idx) = self.resolve_local(captured) {
+                        // Mirror V1.1C's `slot_is_heap_backed_owned`:
+                        // `UniqueHeap` is the canonical owned-heap class,
+                        // but `Direct` + non-scalar storage hint also
+                        // indicates a Box-backed slot (strings, arrays,
+                        // hashmaps, typed objects) handed to the slot
+                        // by the Phase 4 `PromoteToOwned` emission —
+                        // those need the same Box→Arc transition when
+                        // they escape into a closure.
+                        if self.slot_is_heap_backed_owned(local_idx) {
+                            self.emit(Instruction::simple(OpCode::PromoteToShared));
+                        }
+                    }
+                }
             }
         }
 

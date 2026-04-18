@@ -182,6 +182,73 @@ impl BytecodeCompiler {
                 let compile_result = self.compile_expr_for_reference_binding(&assign_expr.value);
                 self.pending_variable_name = saved_pending_variable_name;
                 let ref_borrow = compile_result?;
+                // Phase V1.2C/D — Site B: a `var`-like assignment whose
+                // target is `SharedCow` (Arc-shared) receives a freshly-
+                // owned (Box-backed) rhs. Insert `PromoteToShared` so
+                // the `StoreLocal` below lands an Arc in the slot
+                // rather than a mixed Box/Arc representation for the
+                // same binding.
+                //
+                // The handler is a no-op for inline scalars and
+                // already-Arc values, so emitting it is correctness-
+                // safe. We still gate conservatively — per V1.2C
+                // guidance ("owned AND UniqueHeap in storage plan AND
+                // target is SharedCow") — to keep bytecode lean:
+                //   (a) immediately-preceding `PromoteToOwned`: a Box
+                //       was produced on TOS by this very expression
+                //       (rare but possible for heap-allocating rhs);
+                //   (b) rhs identifier refers to a `UniqueHeap`
+                //       source: `LoadLocal` / `CloneLocal` will have
+                //       pushed a Box-backed value.
+                // Anything else (function call, method call, literal,
+                // computed expression) falls through — today those
+                // rarely produce Box-backed TOS values at assignment
+                // sites; V1.3's param-ownership hints will refine the
+                // heuristic.
+                if crate::compiler::helpers::promote_to_shared_enabled() {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        let target_is_shared_cow = matches!(
+                            self.mir_storage_class_for_slot(local_idx),
+                            Some(crate::type_tracking::BindingStorageClass::SharedCow)
+                        );
+                        if target_is_shared_cow {
+                            // (a) Collapse an adjacent PromoteToOwned into
+                            //     PromoteToShared — the rhs was just
+                            //     boxed, and the next op-chain would
+                            //     unbox it anyway.
+                            let collapsed = self
+                                .program
+                                .instructions
+                                .last()
+                                .map(|ins| ins.opcode == OpCode::PromoteToOwned)
+                                .unwrap_or(false);
+                            if collapsed {
+                                self.program.instructions.pop();
+                                self.emit(Instruction::simple(OpCode::PromoteToShared));
+                            } else {
+                                // (b) rhs is a bare identifier whose
+                                //     source slot is Box-backed
+                                //     (UniqueHeap canonically, or
+                                //     Direct + non-scalar storage
+                                //     hint per the Phase 4 Box
+                                //     promotion). `LoadLocal` /
+                                //     `CloneLocal` will have pushed
+                                //     a Box on TOS.
+                                if let Expr::Identifier(src_name, _) =
+                                    assign_expr.value.as_ref()
+                                {
+                                    if let Some(src_idx) = self.resolve_local(src_name) {
+                                        if self.slot_is_heap_backed_owned(src_idx) {
+                                            self.emit(Instruction::simple(
+                                                OpCode::PromoteToShared,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.emit(Instruction::simple(OpCode::Dup));
                 // Mutable closure captures: emit StoreClosure (or, Phase D, a
                 // typed StoreCaptureMutPtr<T> when the storage plan classified
