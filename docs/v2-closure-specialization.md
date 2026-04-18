@@ -1409,3 +1409,254 @@ Pre-H5 Phase F/G test assertions on opcode identity (`|op| op == OC::MakeClosure
 **Verification**: `cargo check --workspace` clean; `shape-vm` lib 2026 passed / 0 failed; `shape-jit` lib 371 passed / 0 failed; `just test-fast` all green.
 
 **Dependencies satisfied**: H1 landed (JIT uses `emit_heap_closure`, not the `jit_make_closure` FFI), so there was no backwards-compat need for the separate opcode.
+
+---
+
+## §14 — Phase H6: `HeapValue::Closure` Consumer Migration
+
+§13 H3.B's consumer-migration sub-task (retire `HeapValue::Closure` variant; migrate ~60 consumer references across 23 files; rewire snapshot + wire to raw `TypedClosureHeader` serialization) was deferred across two agent attempts — each concluded the scope was multi-session work unsafe to land in one commit. §14 is the detailed plan that breaks that work into one-session-sized phases. After H6 lands, the §10 benchmark gate ("≥ 30% improvement on closure-heavy benchmarks") becomes numerically measurable.
+
+### §14.0 — Current state (the ground truth H6 starts from)
+
+```
+$ grep -rn "HeapValue::Closure" crates/ | wc -l
+60
+$ grep -rln "HeapValue::Closure" crates/ | wc -l
+23
+```
+
+Distribution (readers vs producers vs defs):
+
+| Role | Files | Refs | Notes |
+|---|---|---|---|
+| Variant **definition** | `shape-value/src/heap_variants.rs`, `shape-value/src/heap_value.rs` | 6 | The enum variant + `impl` methods |
+| **Producer** (constructs `HeapValue::Closure { … }`) | `shape-jit/src/ffi/object/closure.rs` | 24 | The finalizer FFI + 14 H2 tests. Single source of truth for allocation today |
+| **JIT codegen** (lowers to producer) | `shape-jit/src/mir_compiler/statements.rs`, `shape-jit/src/ffi_refs.rs`, `shape-jit/src/ffi_symbols/object_symbols.rs` | 6 | Compile-time references to the FFI |
+| **VM dispatch** | `shape-vm/src/executor/call_convention.rs`, `shape-vm/src/executor/control_flow/mod.rs`, `shape-vm/src/executor/control_flow/native_abi.rs`, `shape-vm/src/executor/trait_object_ops.rs` | 5 | Read `function_id` + iterate captures for call |
+| **Serialization** | `shape-runtime/src/snapshot.rs`, `shape-runtime/src/wire_conversion.rs` | 3 | Byte-level formats; may need version bump |
+| **Introspection** | `shape-vm/src/executor/printing.rs`, `shape-vm/src/executor/objects/raw_helpers.rs`, `shape-vm/src/executor/builtins/remote_builtins.rs`, `shape-value/src/external_value.rs`, `shape-value/src/value_word.rs` | 7 | REPL display, accessors, type bridges |
+| **Compiler surface** | `shape-vm/src/compiler/comptime.rs`, `shape-vm/src/compiler/expressions/closures.rs`, `shape-vm/src/bytecode/opcode_defs.rs` | 4 | Ad-hoc reads for diagnostics/comptime |
+| **Runtime bridges** | `shape-runtime/src/module_bindings.rs`, `shape-runtime/src/type_system/typed_value.rs` | 2 | Module-binding + typed-value conversions |
+| H3.B.1 new code | `shape-value/src/v2/closure_raw.rs` | 3 | Interior refs to the raw allocator |
+
+The **producer** accounts for 40% of references in one file. Everything else is a handful of reads — migrate them to a shim, then swap the producer last.
+
+### §14.1 — Strategy: shim + ordered tranches + swap
+
+The rewiring is brittle when done variant-at-a-time because each consumer expects `HeapValue::Closure { function_id, upvalues }` destructuring. Instead:
+
+1. **H6.1 — Introduce `VmClosureHandle` shim** (additive; zero behavior change).
+2. **H6.2–H6.4 — Migrate consumer tranches** ordered by blast radius (low → high). Each tranche is a one-agent session that compiles and tests green.
+3. **H6.5 — Swap the producer**: `jit_finalize_heap_closure` returns raw `*const TypedClosureHeader`; `op_make_closure_heap` stops allocating the Arc enum; snapshot/wire switch to raw format.
+4. **H6.6 — Delete the variant + measure**: `HeapValue::Closure` variant deletion + benchmark validation of §10 target.
+
+Between H6.1 and H6.5, the variant is still emitted by the finalizer — the shim just wraps it. This keeps the branch bisect-able: if H6.3 (say) regresses, we know the shim itself is fine (H6.1), and the migration commit is localized.
+
+### §14.2 — H6.1: `VmClosureHandle` shim
+
+**Goal**: give consumers a stable, typed API to read closure state that works against BOTH `HeapValue::Closure { … }` (today) AND raw `*const TypedClosureHeader` (post-H6.5). The shim is the only touchpoint that needs updating when the producer swaps.
+
+**Files**:
+- NEW `crates/shape-value/src/vm_closure_handle.rs` (or co-locate in `closure_raw.rs`).
+- `crates/shape-value/src/heap_value.rs` — `HeapValue::Closure` gains an `as_handle(&self) -> VmClosureHandle` accessor.
+- `crates/shape-value/src/value_word.rs` — if `ValueWord` has a closure accessor (grep: the existing `as_closure` from the audit), extend or retain alongside.
+- `crates/shape-value/src/v2/mod.rs` — export the new handle.
+
+**API**:
+```rust
+pub struct VmClosureHandle<'a> { backing: ClosureBacking<'a> }
+
+enum ClosureBacking<'a> {
+    /// Pre-H6.5: closure is Arc<HeapValue::Closure { ... }>.
+    Legacy { function_id: u32, upvalues: &'a [Upvalue] },
+    /// Post-H6.5: closure is *const TypedClosureHeader.
+    Raw { ptr: *const TypedClosureHeader, layout: &'a ClosureLayout },
+}
+
+impl<'a> VmClosureHandle<'a> {
+    pub fn function_id(&self) -> u32;
+    pub fn type_id(&self) -> u32;                       // 0 in Legacy case; layout's id in Raw
+    pub fn capture_count(&self) -> usize;
+    pub fn capture_as_value(&self, i: usize) -> ValueWord;  // typed read, widened to ValueWord
+    pub fn captures_as_values(&self) -> Vec<ValueWord>; // iteration helper
+    pub fn refcount(&self) -> u32;                      // Legacy: delegates to Arc; Raw: reads HeapHeader
+}
+```
+
+**Sub-tasks**:
+1. Define the struct/enum pair.
+2. Implement accessors for the Legacy backing by reading `function_id` + iterating `upvalues.iter().map(|u| u.value()).collect()`.
+3. Implement accessors for the Raw backing — reuse `closure_raw::read_capture_as_value_bits` + layout offsets.
+4. Add `HeapValue::as_closure_handle(&self) -> Option<VmClosureHandle<'_>>` that returns `Some` when the variant matches, `None` otherwise.
+5. Unit tests on BOTH backings — 8 tests: function_id read, type_id read, capture count, capture_as_value for F64/I64/Bool/Ptr, captures_as_values round-trip, refcount path.
+
+**Tests**: 8 unit tests covering both backings, all green.
+**Verification**: `cargo check --workspace`; `just test-fast`.
+**Commit**: `Closure spec H6.1: introduce VmClosureHandle shim`.
+**Agent size**: 1 agent, 1 commit.
+
+### §14.3 — H6.2: low-blast-radius reader migration
+
+**Goal**: migrate the 7 **introspection** + 4 **compiler surface** sites (≈11 refs, mostly 1–2 per file) to `VmClosureHandle`. These are easy wins that de-risk the harder tranches.
+
+**Files**:
+- `crates/shape-vm/src/executor/printing.rs` — REPL `<closure #N [...]>` formatting
+- `crates/shape-vm/src/executor/objects/raw_helpers.rs`
+- `crates/shape-vm/src/executor/builtins/remote_builtins.rs`
+- `crates/shape-value/src/external_value.rs`
+- `crates/shape-value/src/value_word.rs` (existing `as_closure` accessor; augment with `as_closure_handle`)
+- `crates/shape-vm/src/compiler/comptime.rs`
+- `crates/shape-vm/src/compiler/expressions/closures.rs` (non-emission sites only — diagnostics/comptime)
+- `crates/shape-vm/src/bytecode/opcode_defs.rs` (doc-only ref; trivially retire)
+
+**Sub-tasks**:
+1. Replace `HeapValue::Closure { function_id, upvalues }` destructuring with `handle.function_id()` / `handle.captures_as_values()` at each site.
+2. Leave the shim's Legacy backing doing the Arc walk — performance of these sites is not hot-path.
+3. Preserve existing test coverage; add 2 new tests for REPL format and one for `value_word::as_closure_handle` covering the shim path.
+
+**Commit**: `Closure spec H6.2: migrate introspection + compiler-surface readers to VmClosureHandle`.
+**Agent size**: 1 agent, 1 commit.
+
+### §14.4 — H6.3: VM dispatch reader migration
+
+**Goal**: migrate the 5 **VM dispatch** sites. These are hot paths — the shim's Legacy backing still does the Arc walk, so expect zero perf change; the perf win arrives with H6.5.
+
+**Files**:
+- `crates/shape-vm/src/executor/call_convention.rs` (lines 163, 435 per the H3.B audit)
+- `crates/shape-vm/src/executor/control_flow/mod.rs` (line ~662, 682)
+- `crates/shape-vm/src/executor/control_flow/native_abi.rs` (line ~746)
+- `crates/shape-vm/src/executor/trait_object_ops.rs` (line ~154)
+
+**Sub-tasks**:
+1. Each callsite reads `function_id` + pushes captures as leading locals before `Call(fid)`. Swap to `handle.function_id()` + `handle.captures_as_values()`.
+2. Preserve the hot-path fast-path: if the current code reads `function_id` via a hand-unrolled match arm, replace with an inlined shim call; verify the compiler inlines `handle.function_id()` via `#[inline]`.
+3. Add 2 regression tests on dispatch correctness — one heap closure, one array-of-closures dispatching via `CallFunctionIndirect`.
+
+**Commit**: `Closure spec H6.3: migrate VM dispatch readers to VmClosureHandle`.
+**Agent size**: 1 agent, 1 commit.
+
+### §14.5 — H6.4: serialization + runtime-bridge migration
+
+**Goal**: migrate the 3 **serialization** sites + 2 **runtime-bridge** sites. These touch byte-level formats — handle with care; decide wire-compat policy.
+
+**Files**:
+- `crates/shape-runtime/src/snapshot.rs` (lines 697, 1346)
+- `crates/shape-runtime/src/wire_conversion.rs` (line 357)
+- `crates/shape-runtime/src/module_bindings.rs` (line 364)
+- `crates/shape-runtime/src/type_system/typed_value.rs` (line 281)
+
+**Sub-tasks**:
+1. Snapshot: replace `HeapValue::Closure { function_id, upvalues }` destructuring with `handle.function_id()` + iterate `handle.captures_as_values()`. Existing byte-format unchanged — the shim is transparent.
+2. Wire: same.
+3. `module_bindings.rs` + `typed_value.rs`: same.
+4. Tests: existing snapshot-roundtrip and wire-roundtrip tests should pass unchanged. Add 1 new test that exercises a closure value across a snapshot boundary to prove the shim preserves semantics.
+
+**Commit**: `Closure spec H6.4: migrate serialization + runtime-bridge readers to VmClosureHandle`.
+**Agent size**: 1 agent, 1 commit.
+
+### §14.6 — H6.5: swap the producer
+
+**Goal**: `jit_finalize_heap_closure` stops boxing into `Arc<HeapValue>`; `op_make_closure_heap` allocates raw `TypedClosureHeader` directly; `VmClosureHandle` starts returning the `Raw` backing. Serialization switches byte format — this is where we commit to the protocol version bump (if any).
+
+**Files**:
+- `crates/shape-jit/src/ffi/object/closure.rs` — the finalizer's signature changes to `-> *const TypedClosureHeader`. All 14 H2 tests update.
+- `crates/shape-jit/src/mir_compiler/statements.rs` — JIT `MakeClosure{escapes=true}` lowering uses the new signature.
+- `crates/shape-jit/src/ffi_refs.rs` + `crates/shape-jit/src/ffi_symbols/object_symbols.rs` — Cranelift signature updated.
+- `crates/shape-vm/src/executor/control_flow/mod.rs` — `op_make_closure_heap` allocates raw; stops wrapping in Arc<HeapValue>.
+- `crates/shape-runtime/src/snapshot.rs` + `crates/shape-runtime/src/wire_conversion.rs` — switch serialization to typed blob `(function_id: u32, type_id: u32, capture_count: u32, captures: Vec<ValueWord-bits>)`.
+- `VmClosureHandle::as_from_heap_value` returns `ClosureBacking::Raw { ptr, layout }` for `HeapValue::Closure` backings (transitional — the variant still exists in H6.5, just wraps a raw pointer; H6.6 deletes it).
+
+**Sub-tasks**:
+1. Update finalizer signature.
+2. Update JIT lowering + FFI signature.
+3. Update `op_make_closure_heap` to mirror the JIT's raw allocation path (reuse `closure_raw::alloc_typed_closure`).
+4. Redirect `VmClosureHandle`'s Legacy backing to `Raw` (or add a transitional backing that detects which shape the pointer is in).
+5. Bump wire protocol version if the byte layout differs — document in the commit.
+6. Snapshot format: the typed blob deserialize path allocates via `closure_raw::alloc_typed_closure`.
+7. Drop glue: `Arc<HeapValue>` drop no longer calls Closure destructor; `closure_raw::release_typed_closure` takes over.
+8. **Benchmark first pass**: after this commit, inspect `arr.map(|x| x + n)` IR for absence of `call jit_finalize_heap_closure_legacy` / `atomic_rmw` in the inner loop. Run `just test-fast` — should still be green since `HeapValue::Closure` variant still exists as a shell.
+
+**Tests**: update H2's 14 finalizer tests to reflect the new signature. Add 5 new tests covering: raw allocation + destructor correctness, cross-boundary refcount preservation, snapshot roundtrip with typed blob, wire roundtrip, and `arr.map(...)` IR no-Arc inspection.
+
+**Commit**: `Closure spec H6.5: swap producer to raw TypedClosureHeader + serialization typed blob`.
+**Agent size**: 1 agent, 1 commit. This is the highest-risk commit in the series — run `just test` (tier 2) before declaring done.
+
+### §14.7 — H6.6: delete `HeapValue::Closure` + measure
+
+**Goal**: `HeapValue::Closure` variant is now unreferenced (post-H6.5 all consumers go through `VmClosureHandle`, whose backing is `Raw`). Delete the variant. Measure the §10 benchmark.
+
+**Files**:
+- `crates/shape-value/src/heap_variants.rs` — remove the `Closure` variant. `HeapKind` ordinal for closure is preserved (marked `reserved`) for ABI stability or repurposed as `HeapKind::V2Closure` matching `HEAP_KIND_V2_CLOSURE = 84`.
+- `crates/shape-value/src/heap_value.rs` — remove accessor methods.
+- `crates/shape-value/src/value_word.rs` — existing `as_closure` removed; `as_closure_handle` (introduced in H6.1) stays.
+- Any stragglers found by `grep -rn "HeapValue::Closure"` — should be none.
+
+**Sub-tasks**:
+1. Delete variant + accessors.
+2. `grep -rn "HeapValue::Closure" crates/ | grep -v '//\|/\*\|//!'` must return 0.
+3. `VmClosureHandle::ClosureBacking::Legacy` variant removed from the shim (only `Raw` remains). Can then rename `VmClosureHandle` back to something simpler if desired.
+4. **Benchmark**: run the `shape/benchmarks/` closure-heavy benchmarks. Target: `arr.map(|x| x + n).reduce(|a, b| a + b, 0)` within 2× of equivalent imperative loop; ≥ 30% improvement vs pre-H6 baseline on the hot path.
+5. Update `§10` verification gates in the doc with the measured result.
+6. Update `§6 Phase H` status from "landed (minimal)" to include a pointer to §14 H6 series as the actual completion.
+
+**Commit**: `Closure spec H6.6: delete HeapValue::Closure variant + measure §10 benchmark gate`.
+**Agent size**: 1 agent, 1 commit.
+
+### §14.8 — Execution order and gate behaviors
+
+| Step | Commit | `HeapValue::Closure` refs | Producer | §10 gate measurable? |
+|---|---|---|---|---|
+| today | (current HEAD) | 60 | Arc enum | no |
+| H6.1 | shim | 60 (+2 shim refs) | Arc enum | no |
+| H6.2 | introspection migration | ~49 | Arc enum | no |
+| H6.3 | dispatch migration | ~44 | Arc enum | no |
+| H6.4 | serialization migration | ~39 | Arc enum | no |
+| H6.5 | producer swap | ~9 (defn + 3 JIT files + accessors) | raw `*const TypedClosureHeader` | **yes — partial** |
+| H6.6 | variant delete + measure | **0** | raw `*const TypedClosureHeader` | **yes — full** |
+
+After H6.5, the hot path is already Arc-free; the variant still exists as an inert enum member. H6.6 is the cleanup that makes the grep gate trivial.
+
+### §14.9 — Risk checklist (per tranche)
+
+- **H6.1**: risk = `VmClosureHandle` API surface not future-proof. Mitigation: design the API around what `closure_raw` already exposes; revisit at H6.5 if needed. Low.
+- **H6.2**: risk = one of the 11 callsites does something subtle with `upvalues` that `captures_as_values()` can't express. Mitigation: scan every site with `grep -B2 -A5 "HeapValue::Closure" file.rs` before editing. Low.
+- **H6.3**: risk = hot-path dispatch regresses due to shim's Legacy backing. Mitigation: inspect assembly for the relevant calls; shim is `#[inline(always)]`; expect zero perf change vs today. Medium.
+- **H6.4**: risk = wire format silently changes. Mitigation: shim is transparent; existing wire roundtrip tests catch any drift. Low.
+- **H6.5**: risk = snapshot deserialize allocates wrong layout; wire consumers receive unexpected byte format; refcount handoff from JIT FFI to VM drop glue leaks or double-frees. Mitigation: run `just test` (tier 2) before committing; instrument retain/release counters in test to assert exact counts. **High — this is the commit where real behavior changes.**
+- **H6.6**: risk = unused import / doc ref still mentions the variant, causing compile failure. Mitigation: the grep gate is the canary. Low.
+
+### §14.10 — Go/no-go decision points
+
+After H6.5 lands:
+- If `just test` (tier 2) green AND closure-heavy micro-benchmarks show ≥20% improvement: GO on H6.6.
+- If tier-2 has regressions tied to H6.5: HALT; investigate. Do NOT proceed to H6.6 before H6.5's regressions are tracked down.
+
+After H6.6 lands:
+- Run closure-heavy benchmarks. Expected: `arr.map(...)` hot path within 2× of imperative; `arr.map().filter().reduce()` within 3×. If within target, §10 "≥ 30% improvement" gate PASSES and the closure-specialization work is complete.
+
+### §14.11 — What this does NOT do
+
+Out of scope for H6 (these remain for future phases, separately from the closure-spec plan):
+- Frame-pointer universal capture model for non-`LocalMutablePtr` captures (H3.B's sub-task 7 that was deferred). H4 already extended to module bindings; async-scope still goes through heap per Phase G.
+- `BoxLocal` / `BoxModuleBinding` opcode deletion. 3 emission sites remain. These deletions become safe only after a V3-style frame representation lands separately (see §6 Phase H implementation notes).
+- `jit_make_closure` FFI symbol deletion. The `#[deprecated]` marker stays; the FFI is still referenced by legacy non-`MakeClosureHeap` code paths that H5's opcode merge didn't reach.
+- Performance tuning beyond the §10 gate. Once §10 passes, further JIT optimization is a Tier 2 / Tier 3 compiler concern, not closure-spec work.
+
+### §14.12 — Agent dispatch summary
+
+| Phase | Agent | Files changed (est.) | Test count added (est.) | Duration (est.) |
+|---|---|---|---|---|
+| H6.1 | 1 | 3 new + 2 modified | 8 | 30 min |
+| H6.2 | 1 | 8 modified | 3 | 30 min |
+| H6.3 | 1 | 4 modified | 2 | 30 min |
+| H6.4 | 1 | 4 modified | 1 | 30 min |
+| H6.5 | 1 | 6 modified | 5 (+14 H2 tests updated) | 60 min (high-risk) |
+| H6.6 | 1 | 3 modified | 0 (benchmark run only) | 20 min |
+
+Six commits. Three hours of agent work, probably two or three sessions total. Every commit compiles and passes `just test-fast` independently. Agents can run H6.1 through H6.4 unattended; H6.5 should be monitored; H6.6 is the victory lap.
+
+### §14.13 — Dependency on work outside §14
+
+- **H6 depends on H3.B.1 + H3.B.2** (commits `22bbfbe`, `38c79ff`) — these landed the raw allocator + dealloc that `VmClosureHandle::Raw` backing reads. Prereq satisfied.
+- **H6 does NOT depend on H4 or H5** — those are orthogonal opcode-surface cleanups. H6 can run on any branch that has H3.B.1+2.
+- **H6 unlocks nothing downstream** beyond the benchmark gate. It's the final step of closure specialization.
