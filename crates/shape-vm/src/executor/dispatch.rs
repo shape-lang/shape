@@ -420,7 +420,8 @@ impl VirtualMachine {
 
         match instruction.opcode {
             // Stack operations
-            PushConst | PushNull | Pop | Dup | Swap | PromoteToOwned | ReturnOwned => {
+            PushConst | PushNull | Pop | Dup | Swap | PromoteToOwned | ReturnOwned
+            | PromoteToShared => {
                 return self.exec_stack_ops(instruction);
             }
 
@@ -759,17 +760,9 @@ impl VirtualMachine {
             CloneLocal => self.op_clone_local(instruction)?,
             DropLocal => self.op_drop_local(instruction)?,
 
-            // V1.2A: `PromoteToShared` is the inverse of `PromoteToOwned` —
-            // converts a Box-owned heap value on top-of-stack into an
-            // Arc-shared one. V1.2A lands the enum variant only; V1.2B
-            // wires the executor handler and V1.2C adds compiler emission.
-            // Reaching this arm today means a bytecode producer leaked the
-            // opcode before its handler exists, so we panic loudly rather
-            // than silently returning `InvalidOperand`.
-            PromoteToShared => panic!(
-                "V1.2A unreachable: {:?} has no executor handler (adds in V1.2B)",
-                instruction.opcode
-            ),
+            // V1.2B: `PromoteToShared` is dispatched above through the
+            // Stack-category arm alongside `PromoteToOwned`; no separate
+            // arm is needed here. V1.2C will add compiler emission.
 
             _ => return Err(VMError::InvalidOperand),
         }
