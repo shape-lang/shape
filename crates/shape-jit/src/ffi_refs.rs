@@ -1,286 +1,96 @@
 //! FFI function references for Cranelift codegen.
-//! Extracted from translator/types.rs for standalone use.
+//!
+//! This struct bundles the native-typed FFI entry points that the JIT
+//! compiler actually references during codegen. Historically it carried ~240
+//! `FuncRef` fields covering every legacy NaN-boxed helper; the V6 cleanup
+//! (part of the v2 spec alignment) pruned the dead weight so only the
+//! v2-native entry points remain.
+//!
+//! New FFI helpers should be registered here AND in
+//! `crates/shape-jit/src/ffi_symbols/` (declare + register), and then the
+//! `FFIFuncRefs` builder in `crates/shape-jit/src/compiler/ffi_builder.rs`
+//! should populate the field.
 
-use cranelift::codegen;
 use cranelift::codegen::ir::FuncRef;
-use cranelift::prelude::*;
-use std::collections::HashMap;
 
+/// Bundle of Cranelift `FuncRef` handles for native-typed FFI calls used by
+/// the v2 JIT codegen pipeline.
 pub struct FFIFuncRefs {
-    pub(crate) new_array: FuncRef,
-    pub(crate) new_object: FuncRef,
+    // Object / property access
     pub(crate) get_prop: FuncRef,
     pub(crate) set_prop: FuncRef,
-    pub(crate) length: FuncRef,
-    pub(crate) array_get: FuncRef,
-    pub(crate) call_function: FuncRef,
+
+    // Call dispatch (value/method path — the other foreign-call variants were
+    // retired with the legacy NaN-boxed dispatch helpers).
     pub(crate) call_value: FuncRef,
-    pub(crate) call_foreign: FuncRef,
-    pub(crate) call_foreign_native: FuncRef,
-    pub(crate) call_foreign_dynamic: FuncRef,
-    pub(crate) call_foreign_native_0: FuncRef,
-    pub(crate) call_foreign_native_1: FuncRef,
-    pub(crate) call_foreign_native_2: FuncRef,
-    pub(crate) call_foreign_native_3: FuncRef,
-    pub(crate) call_foreign_native_4: FuncRef,
-    pub(crate) call_foreign_native_5: FuncRef,
-    pub(crate) call_foreign_native_6: FuncRef,
-    pub(crate) call_foreign_native_7: FuncRef,
-    pub(crate) call_foreign_native_8: FuncRef,
-    pub(crate) iter_next: FuncRef,
-    pub(crate) iter_done: FuncRef,
     pub(crate) call_method: FuncRef,
-    pub(crate) type_of: FuncRef,
-    pub(crate) type_check: FuncRef,
-    // Result type operations (Ok/Err)
-    pub(crate) make_ok: FuncRef,
-    pub(crate) make_err: FuncRef,
-    pub(crate) is_ok: FuncRef,
-    pub(crate) is_err: FuncRef,
-    pub(crate) is_result: FuncRef,
-    pub(crate) unwrap_ok: FuncRef,
-    pub(crate) unwrap_err: FuncRef,
-    pub(crate) unwrap_or: FuncRef,
-    pub(crate) result_inner: FuncRef,
-    // Option type operations (Some/None)
-    pub(crate) make_some: FuncRef,
-    pub(crate) is_some: FuncRef,
-    pub(crate) is_none: FuncRef,
-    pub(crate) unwrap_some: FuncRef,
-    pub(crate) array_first: FuncRef,
-    pub(crate) array_last: FuncRef,
-    pub(crate) array_min: FuncRef,
-    pub(crate) array_max: FuncRef,
-    pub(crate) slice: FuncRef,
-    pub(crate) range: FuncRef,
-    pub(crate) make_range: FuncRef,
-    pub(crate) to_string: FuncRef,
-    pub(crate) to_number: FuncRef,
-    pub(crate) print: FuncRef,
-    pub(crate) sin: FuncRef,
-    pub(crate) cos: FuncRef,
-    pub(crate) tan: FuncRef,
-    pub(crate) asin: FuncRef,
-    pub(crate) acos: FuncRef,
-    pub(crate) atan: FuncRef,
-    pub(crate) exp: FuncRef,
-    pub(crate) ln: FuncRef,
-    pub(crate) log: FuncRef,
-    pub(crate) pow: FuncRef,
-    pub(crate) control_fold: FuncRef,
-    pub(crate) control_reduce: FuncRef,
-    pub(crate) control_map: FuncRef,
-    pub(crate) control_filter: FuncRef,
-    pub(crate) control_foreach: FuncRef,
-    pub(crate) control_find: FuncRef,
-    pub(crate) control_find_index: FuncRef,
-    pub(crate) control_some: FuncRef,
-    pub(crate) control_every: FuncRef,
-    pub(crate) array_push: FuncRef,
-    pub(crate) array_pop: FuncRef,
+
+    // Array allocator + hot per-element push used by v2 lowerings.
+    pub(crate) new_array: FuncRef,
     pub(crate) array_push_elem: FuncRef,
-    pub(crate) array_push_local: FuncRef,
-    pub(crate) array_reserve_local: FuncRef,
-    pub(crate) array_zip: FuncRef,
-    pub(crate) array_filled: FuncRef,
-    pub(crate) array_reverse: FuncRef,
-    pub(crate) array_push_element: FuncRef,
+
+    // Builtin print fallback (used by emit_print).
+    pub(crate) print: FuncRef,
+
+    // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,
-    /// Closure-spec Phase H2: `TypedClosureHeader` finalizer (see
-    /// `jit_finalize_heap_closure`). Called at the tail of
-    /// `MirToIR::emit_heap_closure` to convert the raw typed block into a
-    /// NaN-boxed `Arc<HeapValue::Closure>` for downstream dispatch.
     pub(crate) finalize_heap_closure: FuncRef,
-    pub(crate) eval_datetime_expr: FuncRef,
-    pub(crate) eval_time_reference: FuncRef,
-    pub(crate) eval_data_datetime_ref: FuncRef,
-    pub(crate) eval_data_relative: FuncRef,
-    pub(crate) intrinsic_series: FuncRef,
-    pub(crate) series_method: FuncRef,
-    pub(crate) format_error: FuncRef,
-    pub(crate) object_rest: FuncRef,
-    pub(crate) format: FuncRef,
+
+    // Generic (fallback) arithmetic / comparison trampolines — kept for the
+    // minimal dynamic-dispatch surface that remains after the V3/V4 cleanup.
     pub(crate) generic_add: FuncRef,
     pub(crate) generic_sub: FuncRef,
     pub(crate) generic_mul: FuncRef,
     pub(crate) generic_div: FuncRef,
+    pub(crate) generic_mod: FuncRef,
     pub(crate) generic_eq: FuncRef,
     pub(crate) generic_neq: FuncRef,
     pub(crate) generic_lt: FuncRef,
     pub(crate) generic_le: FuncRef,
     pub(crate) generic_gt: FuncRef,
     pub(crate) generic_ge: FuncRef,
-    pub(crate) generic_mod: FuncRef,
-    pub(crate) series_shift: FuncRef,
-    pub(crate) series_fillna: FuncRef,
-    pub(crate) series_rolling_mean: FuncRef,
-    pub(crate) series_rolling_sum: FuncRef,
-    pub(crate) series_rolling_std: FuncRef,
-    pub(crate) intrinsic_rolling_std: FuncRef,
-    pub(crate) series_cumsum: FuncRef,
-    pub(crate) series_gt: FuncRef,
-    pub(crate) series_lt: FuncRef,
-    pub(crate) series_gte: FuncRef,
-    pub(crate) series_lte: FuncRef,
-    pub(crate) intrinsic_sum: FuncRef,
-    pub(crate) intrinsic_mean: FuncRef,
-    pub(crate) intrinsic_min: FuncRef,
-    pub(crate) intrinsic_max: FuncRef,
-    pub(crate) intrinsic_std: FuncRef,
-    pub(crate) intrinsic_variance: FuncRef,
-    pub(crate) intrinsic_median: FuncRef,
-    pub(crate) intrinsic_percentile: FuncRef,
-    pub(crate) intrinsic_correlation: FuncRef,
-    pub(crate) intrinsic_covariance: FuncRef,
-    // Vector intrinsics (boxed interface - legacy)
-    pub(crate) intrinsic_vec_abs: FuncRef,
-    pub(crate) intrinsic_vec_sqrt: FuncRef,
-    pub(crate) intrinsic_vec_ln: FuncRef,
-    pub(crate) intrinsic_vec_exp: FuncRef,
-    pub(crate) intrinsic_vec_add: FuncRef,
-    pub(crate) intrinsic_vec_sub: FuncRef,
-    pub(crate) intrinsic_vec_mul: FuncRef,
-    pub(crate) intrinsic_vec_div: FuncRef,
-    pub(crate) intrinsic_vec_max: FuncRef,
-    pub(crate) intrinsic_vec_min: FuncRef,
-    pub(crate) intrinsic_matmul_vec: FuncRef,
-    pub(crate) intrinsic_matmul_mat: FuncRef,
 
-    // Raw pointer SIMD operations (zero-copy, high performance)
-    // Binary: simd_op(ptr_a, ptr_b, len) -> result_ptr
-    pub(crate) simd_add: FuncRef,
-    pub(crate) simd_sub: FuncRef,
-    pub(crate) simd_mul: FuncRef,
-    pub(crate) simd_div: FuncRef,
-    pub(crate) simd_max: FuncRef,
-    pub(crate) simd_min: FuncRef,
-    // Scalar broadcast: simd_op_scalar(ptr, scalar, len) -> result_ptr
-    pub(crate) simd_add_scalar: FuncRef,
-    pub(crate) simd_sub_scalar: FuncRef,
-    pub(crate) simd_mul_scalar: FuncRef,
-    pub(crate) simd_div_scalar: FuncRef,
-    // Comparison: simd_cmp(ptr_a, ptr_b, len) -> mask_ptr (1.0/0.0)
-    pub(crate) simd_gt: FuncRef,
-    pub(crate) simd_lt: FuncRef,
-    pub(crate) simd_gte: FuncRef,
-    pub(crate) simd_lte: FuncRef,
-    pub(crate) simd_eq: FuncRef,
-    pub(crate) simd_neq: FuncRef,
-    // Memory management
-    pub(crate) simd_free: FuncRef,
-
-    pub(crate) series_rolling_min: FuncRef,
-    pub(crate) series_rolling_max: FuncRef,
-    pub(crate) series_ema: FuncRef,
-    pub(crate) series_diff: FuncRef,
-    pub(crate) series_pct_change: FuncRef,
-    pub(crate) series_cumprod: FuncRef,
-    pub(crate) series_clip: FuncRef,
-    pub(crate) series_broadcast: FuncRef,
-    pub(crate) series_highest_index: FuncRef,
-    pub(crate) series_lowest_index: FuncRef,
-    pub(crate) time_current_time: FuncRef,
-    pub(crate) time_symbol: FuncRef,
-    pub(crate) time_last_row: FuncRef,
-    pub(crate) time_range: FuncRef,
-    pub(crate) get_all_rows: FuncRef,
-    pub(crate) align_series: FuncRef,
-    pub(crate) run_simulation: FuncRef,
-    // Generic DataFrame access (industry-agnostic)
-    pub(crate) get_field: FuncRef,
-    pub(crate) get_row_ref: FuncRef,
-    pub(crate) row_get_field: FuncRef,
-    pub(crate) get_row_timestamp: FuncRef,
-    // Type-specialized field access (JIT optimization)
-    pub(crate) get_field_typed: FuncRef,
-    pub(crate) set_field_typed: FuncRef,
-    // TypedObject allocation
+    // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,
-    // TypedObject field get/set via FFI
-    pub(crate) typed_object_get_field: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
-    // TypedObject merge (O(1) memcpy-based)
-    pub(crate) typed_merge_object: FuncRef,
-    // Typed column access (Arrow-backed LoadCol* opcodes)
-    pub(crate) load_col_f64: FuncRef,
-    pub(crate) load_col_i64: FuncRef,
-    pub(crate) load_col_bool: FuncRef,
-    pub(crate) load_col_str: FuncRef,
-    // GC safepoint poll (called at loop headers)
-    pub(crate) gc_safepoint: FuncRef,
-    // Reference operations
-    pub(crate) set_index_ref: FuncRef,
-    // Array info (data_ptr, length) extraction via stable Rust API
-    pub(crate) array_info: FuncRef,
-    // HOF inlining array operations
-    pub(crate) hof_array_alloc: FuncRef,
-    pub(crate) hof_array_push: FuncRef,
-    // Async task operations
-    pub(crate) spawn_task: FuncRef,
-    pub(crate) join_init: FuncRef,
-    pub(crate) join_await: FuncRef,
-    pub(crate) cancel_task: FuncRef,
-    pub(crate) async_scope_enter: FuncRef,
-    pub(crate) async_scope_exit: FuncRef,
-    // Shape guard operations (HashMap hidden class)
-    pub(crate) hashmap_shape_id: FuncRef,
-    pub(crate) hashmap_value_at: FuncRef,
-    // Generic builtin trampoline (handles any builtin not lowered by dedicated JIT paths)
-    pub(crate) generic_builtin: FuncRef,
-    // Arc reference counting for ownership-aware JIT (MirToIR)
+
+    // Arc refcount primitives (used by ownership-aware JIT paths).
     pub(crate) arc_retain: FuncRef,
     pub(crate) arc_release: FuncRef,
 
-    // v2 typed array (native types, not NaN-boxed)
+    // v2 typed-array allocators (used by v2 lowerings).
     pub(crate) v2_array_new_f64: FuncRef,
-    pub(crate) v2_array_get_f64: FuncRef,
-    pub(crate) v2_array_set_f64: FuncRef,
-    pub(crate) v2_array_push_f64: FuncRef,
-    pub(crate) v2_array_len_f64: FuncRef,
     pub(crate) v2_array_new_i64: FuncRef,
-    pub(crate) v2_array_get_i64: FuncRef,
-    pub(crate) v2_array_set_i64: FuncRef,
-    pub(crate) v2_array_push_i64: FuncRef,
-    pub(crate) v2_array_len_i64: FuncRef,
     pub(crate) v2_array_new_i32: FuncRef,
-    pub(crate) v2_array_get_i32: FuncRef,
-    pub(crate) v2_array_set_i32: FuncRef,
-    pub(crate) v2_array_push_i32: FuncRef,
-    pub(crate) v2_array_len_i32: FuncRef,
     pub(crate) v2_array_new_bool: FuncRef,
-    pub(crate) v2_array_get_bool: FuncRef,
-    pub(crate) v2_array_set_bool: FuncRef,
+
+    // v2 typed-array element push (the rest — get/set/len — are inlined in
+    // Cranelift directly against the native buffer layout).
+    pub(crate) v2_array_push_f64: FuncRef,
+    pub(crate) v2_array_push_i64: FuncRef,
+    pub(crate) v2_array_push_i32: FuncRef,
     pub(crate) v2_array_push_bool: FuncRef,
-    pub(crate) v2_array_len_bool: FuncRef,
-    // v2 typed field access
-    pub(crate) v2_field_load_f64: FuncRef,
-    pub(crate) v2_field_load_i64: FuncRef,
-    pub(crate) v2_field_load_i32: FuncRef,
-    pub(crate) v2_field_load_ptr: FuncRef,
-    pub(crate) v2_field_store_f64: FuncRef,
-    pub(crate) v2_field_store_i64: FuncRef,
-    pub(crate) v2_field_store_i32: FuncRef,
-    pub(crate) v2_field_store_ptr: FuncRef,
-    // v2 refcount
-    pub(crate) v2_retain: FuncRef,
-    pub(crate) v2_release: FuncRef,
-    // v2 struct allocation
+
+    // v2 struct allocator.
     pub(crate) v2_alloc_struct: FuncRef,
-    // v2 SIMD reductions (Phase C.3)
+
+    // v2 SIMD reductions (f64/i64 sum/min/max/mean/sum-of-squares).
     pub(crate) v2_array_sum_f64: FuncRef,
     pub(crate) v2_array_sum_i64: FuncRef,
-    // v2 SIMD extended reductions (min/max/mean/sum-of-squares, f64)
     pub(crate) v2_array_min_f64: FuncRef,
     pub(crate) v2_array_max_f64: FuncRef,
     pub(crate) v2_array_mean_f64: FuncRef,
     pub(crate) v2_array_sum_squares_f64: FuncRef,
-    // v2 SIMD element-wise scalar ops (allocating, f64)
+
+    // v2 SIMD element-wise scalar ops (allocating, f64).
     pub(crate) v2_array_scale_f64: FuncRef,
     pub(crate) v2_array_add_scalar_f64: FuncRef,
-    // v2 SIMD element-wise binary ops (allocating, f64)
+
+    // v2 SIMD element-wise binary ops (allocating, f64).
     pub(crate) v2_array_add_f64: FuncRef,
     pub(crate) v2_array_mul_f64: FuncRef,
-    // v2 typed HashMap<string, ...> access
+
+    // v2 typed HashMap<string, ...> access.
     pub(crate) v2_map_get_str_i64: FuncRef,
     pub(crate) v2_map_get_str_f64: FuncRef,
     pub(crate) v2_map_has_str: FuncRef,
