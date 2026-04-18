@@ -1,4 +1,5 @@
 pub mod closure_layout;
+pub mod closure_raw;
 pub mod concrete_type;
 pub mod function_type_registry;
 pub mod heap_header;
