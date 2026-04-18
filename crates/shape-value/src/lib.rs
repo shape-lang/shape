@@ -110,7 +110,7 @@ pub use heap_value::{
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
-pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueWord, ValueWordDisplay, ValueWordExt, nan_tag_type_name, nan_tag_is_truthy};
+pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay, ValueWordExt, nan_tag_type_name, nan_tag_is_truthy};
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
