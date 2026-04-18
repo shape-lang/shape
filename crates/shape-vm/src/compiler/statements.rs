@@ -4383,6 +4383,17 @@ impl BytecodeCompiler {
                     //   - `const` with Direct storage
                     // Does NOT apply to `var` bindings, which stay Arc for shared mutability.
                     //
+                    // Phase V1.3 (flag `SHAPE_V2_BOX_BY_DEFAULT`, default on): the
+                    // predicate is extended to also cover `UniqueHeap` storage — the
+                    // class `storage_planning.rs` rule 2 assigns when a `let`/`const`
+                    // is mutably captured by a closure. Pre-V1.3 those bindings
+                    // allocated as `Arc<HeapValue>` despite being uniquely owned by
+                    // construction; the V1.2D `PromoteToShared` emission covers the
+                    // escape vectors (Site A = escape into closure, Site B = SharedCow
+                    // var write), so the non-escape case can safely switch to Box.
+                    // When the flag is off the predicate reverts to Direct-only and
+                    // emission is byte-identical to pre-V1.3.
+                    //
                     // Phase 5.C: When the initializer was a call to a function whose
                     // return-ownership mode is `NewlyOwned`, the callee already emitted
                     // `ReturnOwned` and handed us a Box-backed value on the stack. In
@@ -4395,13 +4406,19 @@ impl BytecodeCompiler {
                             || var_decl.kind == VarKind::Const;
                         if is_owned_binding {
                             if let Some(local_idx) = self.resolve_local(name) {
+                                let box_by_default =
+                                    super::helpers::box_by_default_enabled();
                                 let should_promote = self
                                     .mir_storage_class_for_slot(local_idx)
                                     .map_or(false, |sc| {
                                         matches!(
                                             sc,
                                             crate::type_tracking::BindingStorageClass::Direct
-                                        )
+                                        ) || (box_by_default
+                                            && matches!(
+                                                sc,
+                                                crate::type_tracking::BindingStorageClass::UniqueHeap
+                                            ))
                                     });
                                 // Compute the Phase 5.B hint directly from the
                                 // initializer AST — the binding semantics aren't

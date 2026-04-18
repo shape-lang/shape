@@ -187,6 +187,87 @@ pub(crate) fn with_promote_to_shared_flag<R>(enabled: bool, f: impl FnOnce() -> 
     f()
 }
 
+/// Phase V1.3: default-on Box-by-default allocation for `UniqueHeap` locals.
+///
+/// When `true`, the compiler extends the Phase 3/4 `PromoteToOwned` emission
+/// (which pre-V1.3 only fired for `BindingStorageClass::Direct` heap-typed
+/// `let`/`const`) to also fire for `BindingStorageClass::UniqueHeap` slots.
+/// Under the V1.2D baseline `UniqueHeap` bindings (a `let`/`const` value
+/// captured by a mutating closure; see `storage_planning.rs:935` rule 2)
+/// landed in their slot as freshly-allocated `Arc<HeapValue>` with refcount
+/// 1 — a wasted atomic per allocation since the binding is uniquely owned
+/// by construction. V1.3 converts these to `Box<HeapValue>` via
+/// `PromoteToOwned` so the non-escape case pays zero atomic ops.
+///
+/// Escape safety: V1.2's `PromoteToShared` emission (default on) already
+/// covers the two escape vectors — Site A (capture into an escaping
+/// closure) and Site B (assignment into a SharedCow-backed `var`). The
+/// V1.3 switch therefore operates behind the escape boundary: values start
+/// as Box and promote to Arc at the escape point if needed.
+///
+/// Mechanism: V1.3 does not add any new opcodes. It extends the existing
+/// `PromoteToOwned` (0x107) emission in statements.rs by broadening the
+/// storage-class predicate. When the flag is off, the predicate keeps its
+/// V1.2D shape (`Direct` only) and bytecode is byte-identical to pre-V1.3.
+///
+/// Polarity matches V1.1D / V1.2D: the env var is an opt-OUT. Values
+/// `0` / `false` / `off` / `no` (case-insensitive, trimmed) disable the
+/// flag; unset, empty, or any other value keeps the V1.3 default of
+/// `true`. Mirrors `SHAPE_V2_VAR_SHAREDCOW` (V0.a),
+/// `SHAPE_V2_OWNERSHIP_MOVES` (V1.1D), `SHAPE_V2_PROMOTE_TO_SHARED`
+/// (V1.2D).
+///
+/// Rollback: `SHAPE_V2_BOX_BY_DEFAULT=0` restores the pre-V1.3
+/// byte-identical emission. A single-commit revert also suffices.
+///
+/// For unit-test determinism, a `#[cfg(test)]` thread-local override
+/// (`with_box_by_default_flag`) lets a single test force the flag on/off
+/// without touching the env-var cache.
+pub(super) fn box_by_default_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_BOX_BY_DEFAULT_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_BOX_BY_DEFAULT") {
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False"
+                | "off" | "OFF" | "Off"
+                | "no" | "NO" | "No"
+        ),
+        Err(_) => true,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Phase V1.3 test hook: per-thread override for
+    /// `box_by_default_enabled()`. Thread-local so concurrent
+    /// `cargo test` workers remain independent.
+    pub(super) static TEST_BOX_BY_DEFAULT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Phase V1.3 test helper: run `f` with the Box-by-default flag forced to
+/// `enabled`. Restores the previous override on return (even on panic).
+/// Production code reads the env var exclusively via
+/// `box_by_default_enabled()`.
+#[cfg(test)]
+pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_BOX_BY_DEFAULT_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_BOX_BY_DEFAULT_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
 /// Emit a runtime-dispatched addition instruction.
 ///
 /// This is the fallback path for `+` when the compiler cannot prove both
