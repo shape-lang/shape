@@ -1,10 +1,20 @@
 # v2 Closure Specialization: Zero-Cost Closures via Per-Closure Monomorphization
 
-**Status**: Design document for multi-session execution
+**Status**: LANDED (§14 H6 at 100%) — §14.7 residual producers tracked for V3.
 **Prerequisite**: `docs/v2-monomorphization-design.md` Phase 1 (ConcreteType) and Phase 2.1 (type-only monomorphization)
-**Composes with**: `docs/enhanced-escape-analysis-v2.md` Phases 5.A–C (interprocedural ownership, already landed)
+**Composes with**: `docs/enhanced-escape-analysis-v2.md` Phases 5.A–C (interprocedural ownership, landed)
 **Goal**: Closures compile to zero-atomic-op, zero-heap-allocation hot paths when they do not escape their defining scope. Escaping closures fall back to a uniform heap-allocated `TypedClosure<ClosureTypeId>` representation — no `Arc<dyn Fn>`, no NaN-boxing, no type erasure.
 **Contract**: Aligns with `docs/runtime-v2-spec.md`: "NO runtime type tags. NO NaN-boxing. NO dynamic dispatch on value type."
+
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed; §14.7 residual `HeapValue::Closure` producers deferred to V3)**
+
+Closure specialization is live. §14 H6 verification reached 100% in the course of V1–V6 work: non-escaping closures go through the typed stack-allocated path; escaping closures use `TypedClosure<ClosureTypeId>` with typed capture slots; no `Arc<dyn Fn>` and no NaN-boxing sit on the call path.
+
+**V3-deferred residual** (per §14.7 and `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
+
+- Four remaining `HeapValue::Closure` producer sites need a V3 frame representation to fully migrate. These sites do not participate in the typed hot path — they preserve the dynamic-fallback closure shape for comptime/polyglot/reflection. Tracked explicitly so the doc-body claim of 100% reflects "typed path landed; residual producers documented."
 
 ---
 

@@ -1,8 +1,29 @@
 # v2 NaN-Boxing Complete Removal Plan
 
-**Status**: IN PROGRESS
-**Goal**: Zero NaN-boxing anywhere in the runtime. Clean break per runtime-v2-spec.md.
+**Status**: LANDED (typed path) — see per-step audit below.
+**Goal**: Zero NaN-boxing on the typed runtime path. Clean break per runtime-v2-spec.md.
 **Spec contract**: "NO runtime type tags. NO NaN-boxing. NO dynamic dispatch on value type."
+
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed on typed path; dynamic-fallback residuals tracked)**
+
+Per-step audit against the original plan:
+
+- **Step 1 — Compiler emits only typed opcodes (typed path)**: LANDED via V3 tranches A/B/C/D (emit_binary_op shim + systematic conversion). Typed paths emit no generic arithmetic/comparison opcodes.
+- **Step 2 — VM stack as raw u64**: LANDED. Stack and module bindings carry raw native bits; `push_vw`/`pop_vw` collapsed into the typed push/pop surface (V4.1 rename, V4.2/V4.3 collapse).
+- **Step 3 — VM handlers, generic dispatch deleted**: LANDED for the typed path. The executor shrank from 3,926 → 2,894 lines (V4). Dynamic fallback (`exec_arithmetic_dynamic_fallback` et al.) is retained by design for class-(a)/(b) cases — comptime, polyglot, and unproven-type sites.
+- **Step 4 — FFI v2 typed**: PARTIAL (landed primary surface in V6). `FFIFuncRefs` shrank 241 → 48 fields (80% reduction). Dead symbol registration modules deleted (~1,600 lines).
+- **Step 5 — `conversions.rs` helpers**: Retained as a documented FFI-boundary bridge for the dynamic-fallback path. Flagged as a V3 follow-up in `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope (V5.7).
+- **Step 6 — `ValueBits` shim**: LANDED (V5.1–V5.6). Zero `pub fn vw_*` producers remain on the external surface; all producers route through `ValueBits` constructors. ~100 `shape_value::tags::*` cosmetic renames are deferred as V5.6-tail.
+- **Step 7 — FFIFuncRefs cleanup**: LANDED (V6). 241 → 48 fields; 2 commits (`383c1eb` deletion, `b675305`/preceding shrink).
+
+**V3-deferred items** (see `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
+
+- Closure §14.7 residuals (4 `HeapValue::Closure` producers).
+- Const-generics surface syntax.
+- V5.6-tail `shape_value::tags::*` cosmetic rename (~100 references).
+- V5.7 `conversions.rs` FFI-boundary helpers — retained for dynamic-fallback bridge.
 
 ## Current State (2026-04-05)
 

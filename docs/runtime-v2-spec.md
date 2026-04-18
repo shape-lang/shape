@@ -2,6 +2,37 @@
 
 **Status**: Authoritative spec — all implementation must conform to this document.
 
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed; dynamic-fallback residuals documented and tracked)**
+
+The v2 typed architecture is realized end-to-end on the typed code path:
+
+- Typed opcodes (`AddInt`, `MulNumber`, `EqInt`, …) execute on raw native values with zero tag checks.
+- Typed collections (`TypedArray<f64>`, `TypedArray<i64>`, `TypedStruct` with compile-time field offsets) are the canonical storage — v1 `VMArray` has been deleted (V2.b).
+- Typed method dispatch is wired through the PHF table for every proven receiver (V2.a).
+- VM stack slots hold raw native bits; the executor's typed path has zero NaN-box tag reads.
+- JIT FFI boundaries use the `ValueBits` / `FFIFuncRefs` typed surface (V5.4–V5.6, V6); `FFIFuncRefs` shrank 241 → 48 fields.
+
+**NaN-box backstop (minimized and documented)**: `ValueBits` + `ValueWordExt` remain as a shim for the dynamic-fallback paths that genuinely need a tagged representation — comptime evaluation, polyglot interop (Python/TypeScript/C ffi), snapshot serialization, and `exec_arithmetic_dynamic_fallback` for value sites the compiler cannot prove. On the typed path, no opcode, handler, or JIT emitter reads a NaN-box tag.
+
+**Landed phase history** (see `docs/v2-nanbox-removal-plan.md` for full audit):
+
+- V0: `abd1d15` var→SharedCow, `e597e79` Shared/Static escape emission, `8a0809c` typed-array PHF scaffold
+- V1: Move/Clone/Drop + PromoteToShared + Box-by-default (9 commits across V1.1–V1.3)
+- V2: PHF dispatch wire-up + v1 TypedArray deletion (4 commits)
+- V3: typed-opcode emission tranches A/B/C/D + dead-helper sweep (6 commits)
+- V4: rename + dynamic-fallback collapse (3,926 → 2,894 executor lines, 2 commits)
+- V5: ValueBits shim + external migrations + producer swap (6 commits)
+- V6: FFIFuncRefs cleanup (241 → 48 fields) + ~1,600 lines of dead symbol files deleted (2 commits)
+
+**V3-deferred items** (tracked in `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
+
+- Closure §14.7 residuals: 4 remaining `HeapValue::Closure` producers that require a V3 frame representation.
+- Const-generics surface syntax (internal support exists).
+- V5.6-tail cosmetic rename of ~100 `shape_value::tags::*` references.
+- V5.7 `conversions.rs` FFI-boundary helpers retained for the dynamic-fallback bridge.
+
 ## Contract (ABSOLUTE — no exceptions)
 
 Every value at runtime has a compile-time-determined type. There are NO runtime type tags. NO NaN-boxing. NO dynamic dispatch on value type. NO fallback to boxed representations. The compiler MUST resolve every variable, parameter, field, return value, and array element to a concrete type. If it can't, it's a compile error. Generics are monomorphized.

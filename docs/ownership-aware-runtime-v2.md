@@ -1,5 +1,20 @@
 # Ownership-Aware Runtime v2: Eliminate Unnecessary Reference Counting
 
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed)**
+
+All four phases have shipped:
+
+- **Phase 1 — Move/Clone/Drop opcodes**: LANDED in V1.1A–D. Move by default transfers pointers without Arc traffic; Clone bumps only when the compiler proves the source is still live; Drop decrements at scope exit only for SharedCow slots.
+- **Phase 2 — Box-by-default for unique ownership**: LANDED in V1.3. `UniqueHeap` bindings allocate via `Box<HeapValue>`, eliminating atomic refcount ops on the unique path.
+- **Phase 3 — PromoteToShared**: LANDED in V1.2A–D. Promotion from `Direct`/`UniqueHeap` to `SharedCow` is explicit and happens only at the point where sharing is required.
+- **Phase 4 — `var` → SharedCow**: LANDED in V0.a (`abd1d15`). `var` bindings default to the SharedCow storage class; `let` stays owned.
+
+Result: the executor honors `BindingStorageClass` end-to-end; `vw_heap_box` no longer unconditionally Arc-wraps, and `clone_raw_bits` no longer bumps refcounts on Move transfers.
+
+**V3-deferred items**: none directly in this document. Closure-capture specialization (previously Phase 5.D-style bolt-on) has been superseded by `docs/v2-closure-specialization.md`; see that document for §14.7 residuals.
+
 ## Problem Statement
 
 Shape's runtime wraps **every heap-allocated value in `Arc<HeapValue>`** regardless of whether the compiler can prove unique ownership. The MIR borrow checker already computes `OwnershipDecision` (Move/Clone/Copy) and `BindingStorageClass` (Direct/UniqueHeap/SharedCow) per binding, but the executor ignores this — it unconditionally Arc-wraps at `vw_heap_box()` and Arc-bumps at `clone_raw_bits()`.

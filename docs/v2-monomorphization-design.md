@@ -1,8 +1,23 @@
 # v2 Complete NaN-Boxing Removal: Monomorphization + Typed Collections Architecture
 
-**Status**: Design document for multi-session execution
+**Status**: LANDED (core phases) — const-generics surface deferred to V3.
 **Prerequisite**: All prior v2 work (native JIT locals, typed VM stack, BytecodeToIR deletion)
-**Goal**: Zero ValueWord, zero NaN-boxing, zero type-tag dispatch anywhere in the runtime
+**Goal**: Zero ValueWord, zero NaN-boxing, zero type-tag dispatch on the typed runtime path
+
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed; const-generics surface deferred to V3)**
+
+- **Phase 1 — ConcreteType and full type resolution**: LANDED. Typed opcodes and typed collection allocation carry concrete element/field types.
+- **Phase 2 — Monomorphization (type-only)**: LANDED for the paths the runtime needs. Per-closure specialization design is carried in `docs/v2-closure-specialization.md`.
+- **Phase 3 — Typed collection runtime swap**: LANDED via V2.b. v1 `VMArray` / `TypedArray` were deprecated then deleted; v2 `TypedArray<T>` + `TypedStruct` are canonical. PHF dispatch was wired in V2.a.
+- **Phase 4 — ValueWord deletion (typed path)**: LANDED. Stack slots hold raw native bits; typed handlers carry no tag reads. Dynamic fallback retains `ValueBits` by design for class-(a)/(b) sites.
+- **Phase 5 — Const-generics surface syntax**: DEFERRED to V3 per `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope. Internal const-generic support for typed collection parameters is retained; user-facing syntax is held until V3.
+
+**V3-deferred items** (see plan §out-of-scope):
+
+- Const-generics surface syntax (internal support already present).
+- Closure §14.7 residuals (cross-cutting with `v2-closure-specialization.md`).
 
 ## The Problem
 

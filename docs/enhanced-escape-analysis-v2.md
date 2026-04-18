@@ -1,5 +1,22 @@
 # Enhanced Escape Analysis v2: Interprocedural Ownership Inference
 
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (landed; Phase 5.D superseded)**
+
+- **Phase 5.A — Per-function `ReturnOwnershipMode` inference**: LANDED in `184a48e`.
+- **Phase 5.B — Propagate return ownership hint to let-bindings**: LANDED in `15395d7`.
+- **Phase 5.C — `ReturnOwned` opcode + caller-skip activation**: LANDED in `99a36a6`.
+- **V0.b — Shared/Static escape emission**: LANDED in `e597e79`. Expanded the escape lattice so `var`-style and module-level slots are classified as Shared, and true constants are classified as Static — feeding the ownership solver's Mode selection.
+- **Phase 5.D — Closure-capture storage-class tweak**: SUPERSEDED by `docs/v2-closure-specialization.md`. The narrow `SharedCow`-to-`Direct` change proposed in 5.D is replaced by the v2-native per-closure monomorphization + stack-allocation design. No action remaining under this document.
+
+Interprocedural ownership information now flows through `CalleeSummaries` / `FunctionBorrowSummary` end-to-end: owned returns stay Box-backed across A→B→C pipelines, non-escaping closures keep captures owned, and escape-classified slots (Shared/Static) drive the correct allocation mode at emit time.
+
+**V3-deferred items**: none in this document. Cross-references:
+
+- Closure §14.7 residual producers → `docs/v2-closure-specialization.md`.
+- Full out-of-scope list → `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope.
+
 ## Executive Summary
 
 Shape's current escape analysis is **intraprocedural** — each function is analyzed in isolation. This means:

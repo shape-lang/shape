@@ -1,5 +1,17 @@
 # Native Typed Collections v2: Rust-Equivalent Data Structure Performance
 
+## Status (as of 2026-04-18)
+
+**Alignment: 100% (Phase B landed)**
+
+- **Phase B — Typed method dispatch wired**: LANDED. PHF scaffold landed in V0.c (`8a0809c`); dispatch wire-up landed in V2.a. v1 `TypedArray` / `VMArray` were deprecated and deleted in V2.b. v2 `TypedArray<T>` is the canonical storage with compile-time element type, and `arr[i]` lowers to `load f64 [data + i*8]` on proven-type paths (JIT Tier 2) and `GetElemI64`/`GetElemF64` typed opcodes on Tier 1.
+- **Collection coverage**: Typed `TypedArray<f64>`, `TypedArray<i64>`, `TypedStruct` (compile-time field offsets) operate through typed dispatch. Typed map / set coverage remains under `docs/v2-monomorphization-design.md` Phase 2.
+- **JIT path**: Cranelift codegen reads typed pointers and inlines length/data loads with zero HeapValue dispatch on proven-type paths.
+
+**V3-deferred items** (see `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
+
+- SIMD vectorization of higher-order methods (`map`/`filter`/`sum`) remains a Tier 2 optimization opportunity — not blocking.
+
 ## Problem Statement
 
 When the compiler proves the types of collection elements and keys, the runtime should compile data structure access to the same instructions as Rust or C:
