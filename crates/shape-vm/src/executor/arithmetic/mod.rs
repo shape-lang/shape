@@ -1495,58 +1495,36 @@ impl VirtualMachine {
     ///
     /// ### R5.4 audit (Matrix / typed-vector arithmetic)
     ///
+    /// All Matrix/Vec arithmetic shapes covered by R5.4A's baseline are
+    /// now retargeted; these arms are unreachable. See R5.4F annotations.
+    ///
     /// The temporal arms above (annotated with R5.3B cleanup markers) are
-    /// unreachable after the R5.3B retarget. The remaining non-temporal
-    /// arms in this function — Matrix+Matrix, Matrix-Matrix, Matrix*Matrix,
-    /// Matrix*Vec<number>, Vec<number>+/-/*//Vec<number> (SIMD), Vec<int>+
-    /// Vec<int>, Vec<int>+Vec<number> promotion, Vec<number>+Vec<int>
-    /// promotion, Matrix op scalar, scalar op Matrix, string+scalar — are
-    /// the live execution paths for every reachable `AddDynamic` /
-    /// `SubDynamic` / `MulDynamic` / `DivDynamic` with a Matrix or typed
-    /// array operand today. The compiler's `AddDynamic` / `SubDynamic` /
-    /// `MulDynamic` / `DivDynamic` shim in `emit_binary_op` is still
-    /// emitted whenever the binary-op arm's coercion / retarget path ends
-    /// in `NoPlan` or `CoercedNeedsGeneric` without a schema, which is
-    /// exactly the case for `Vec<T> + Vec<T>` and `Mat<T> + Mat<T>`
-    /// typed-parameter and let-local programs (the display name is "Vec"
-    /// or "Mat", not numeric, and no TypedObject schema attaches).
+    /// unreachable after the R5.3B retarget. After R5.4E the compiler
+    /// retargets the 7 Matrix/Vec arithmetic shapes identified by R5.4A
+    /// — `Mat + Mat`, `Mat - Mat`, `Mat * Mat`,
+    /// `Vec<number> +/-/*// Vec<number>`, and `Vec<int> + Vec<int>` — to
+    /// intrinsic `BuiltinCall`s at compile time via
+    /// `compiler/expressions/matrix_ops.rs::try_compile_typed_matrix_arithmetic`
+    /// and `try_compile_typed_vec_arithmetic`, bypassing
+    /// `exec_arithmetic_dynamic_fallback` entirely. The corresponding arms
+    /// in this function are therefore unreachable and are annotated with
+    /// R5.4F cleanup markers; deletion is owned by R5.6.
     ///
-    /// R5.4B will retarget these at compile time, mirroring the R5.3B
-    /// pattern. The pre-conditions for a clean retarget — which R5.4B
-    /// needs to resolve before flipping the baseline test below — are:
+    /// The remaining live arms — `Vec<int>+Vec<number>` promotion,
+    /// `Vec<number>+Vec<int>` promotion, `Matrix * Vec<number>`,
+    /// `Vec<number> op scalar`, `Matrix op scalar`, `scalar op Vec<number>`,
+    /// `scalar * Matrix`, and `string + scalar` — are NOT covered by the
+    /// R5.4A/R5.4E retarget set and continue to execute here when the
+    /// compiler falls through to `AddDynamic` / `SubDynamic` /
+    /// `MulDynamic` / `DivDynamic`. Retargeting those is outside R5.4's
+    /// scope.
     ///
-    ///   1. `Mat<number> * Mat<number>` already lowers to
-    ///      `BuiltinCall(IntrinsicMatMulMat)` via
-    ///      `compiler/expressions/matrix_ops.rs::try_compile_typed_matrix_mul`,
-    ///      but the existing compiler_tests `test_mat_mat_mul_lowers_to_matrix_intrinsic`
-    ///      currently fails end-to-end — the `shape_runtime::intrinsics::matrix::intrinsic_matmul_mat`
-    ///      kernel rejects `Mat<number>` literal inner rows emitted as
-    ///      `NewTypedArrayF64`. R5.4B must either fix that kernel or
-    ///      teach the retarget to only fire on the representation it
-    ///      supports.
-    ///   2. The vector SIMD intrinsics
-    ///      (`shape_runtime::intrinsics::vector::intrinsic_vec_add`
-    ///      and siblings) return a generic `Array<number>` via
-    ///      `f64_vec_to_nb_array`, whereas this fallback's
-    ///      `TypedArrayData::F64 + TypedArrayData::F64` arm returns a
-    ///      typed `FloatArray` via `ValueWord::from_float_array`.
-    ///      Retargeting without fixing that output shape would change
-    ///      downstream method dispatch (generic `Array` PHF vs. typed
-    ///      `FloatArray` PHF).
-    ///   3. There is no `IntrinsicVecAddI64` / `IntrinsicVecSubI64`
-    ///      / `IntrinsicMatAdd` / `IntrinsicMatSub` builtin today. The
-    ///      `Vec<int> + Vec<int>` and `Matrix + Matrix` /
-    ///      `Matrix - Matrix` arms need new intrinsics (or new matrix
-    ///      PHF methods) before compile-time retarget is feasible.
-    ///
-    /// Until those three are resolved, the arms below remain live and
-    /// this R5.4A commit only pins the current emission shape so R5.4B
-    /// can flip it atomically. The R5.4A regression test
-    /// `test_r5_4a_matrix_vec_arithmetic_fallback_baseline` in
-    /// `executor/tests/operator_overload.rs` guards that shape; when
-    /// R5.4B lands, the assertions flip to require intrinsic
-    /// `BuiltinCall` (or `CallMethod`) and reject `AddDynamic` /
-    /// `SubDynamic` / `MulDynamic` / `DivDynamic`.
+    /// The R5.4E regression test
+    /// `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic` in
+    /// `executor/tests/operator_overload.rs` pins the retarget emission
+    /// and rejects `AddDynamic` / `SubDynamic` / `MulDynamic` /
+    /// `DivDynamic` for the 7 retargeted shapes; if that test fails,
+    /// these arms may have become live again and R5.4E has regressed.
     ///
     /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.4.
     fn try_heap_arithmetic(
@@ -1642,7 +1620,22 @@ impl VirtualMachine {
                     })?;
                     return Ok(Some(ValueWord::from_timespan(out)));
                 }
-                // Vec<number> SIMD binary
+                // Vec<number> SIMD binary.
+                //
+                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
+                // `Vec<number> + Vec<number>`, `Vec<number> - Vec<number>`,
+                // `Vec<number> * Vec<number>`, and `Vec<number> / Vec<number>`
+                // are retargeted at compile time to
+                // `BuiltinCall(IntrinsicVecAdd / IntrinsicVecSub /
+                // IntrinsicVecMul / IntrinsicVecDiv)` via
+                // `try_compile_typed_vec_arithmetic` in
+                // `compiler/expressions/matrix_ops.rs`, so the
+                // `AddDynamic` / `SubDynamic` / `MulDynamic` / `DivDynamic`
+                // fallback no longer reaches this arm for reachable program
+                // forms. Pinned by
+                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
+                // in `executor/tests/operator_overload.rs`. Deletion owned
+                // by R5.6.
                 (
                     _,
                     HeapValue::TypedArray(TypedArrayData::F64(a_arr)),
@@ -1672,7 +1665,18 @@ impl VirtualMachine {
                     };
                     return Ok(Some(ValueWord::from_float_array(Arc::new(out.into()))));
                 }
-                // Vec<int> + Vec<int>
+                // Vec<int> + Vec<int>.
+                //
+                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
+                // `Vec<int> + Vec<int>` is retargeted at compile time to
+                // `BuiltinCall(IntrinsicVecAddI64)` via
+                // `try_compile_typed_vec_arithmetic` in
+                // `compiler/expressions/matrix_ops.rs`, so the `AddDynamic`
+                // fallback no longer reaches this arm for reachable program
+                // forms. Pinned by
+                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
+                // in `executor/tests/operator_overload.rs`. Deletion owned
+                // by R5.6.
                 (
                     Add,
                     HeapValue::TypedArray(TypedArrayData::I64(a_arr)),
@@ -1723,7 +1727,22 @@ impl VirtualMachine {
                     let r = shape_runtime::intrinsics::vector::simd_vec_add_f64(a_arr.as_slice(), &bf);
                     return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
                 }
-                // Matrix + Matrix / Matrix - Matrix / Matrix * Matrix
+                // Matrix + Matrix / Matrix - Matrix / Matrix * Matrix.
+                //
+                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
+                // `Mat + Mat` and `Mat - Mat` are retargeted at compile time
+                // to `BuiltinCall(IntrinsicMatAdd / IntrinsicMatSub)` via
+                // `try_compile_typed_matrix_arithmetic`; `Mat * Mat` is
+                // retargeted to `BuiltinCall(IntrinsicMatMulMat)` via
+                // `try_compile_typed_matrix_mul` (in place since pre-R5.4,
+                // newly exercised by the R5.4E hook ordering). All three
+                // live in `compiler/expressions/matrix_ops.rs`. The
+                // `AddDynamic` / `SubDynamic` / `MulDynamic` fallback no
+                // longer reaches these arms for reachable program forms.
+                // Pinned by
+                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
+                // in `executor/tests/operator_overload.rs`. Deletion owned
+                // by R5.6.
                 (
                     Add,
                     HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)),
