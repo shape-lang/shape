@@ -648,6 +648,23 @@ impl BytecodeCompiler {
                 }
             }
             BinaryOp::Add => {
+                // R5.4E: retarget typed element-wise Matrix/Vec arithmetic
+                // ahead of any operand compilation. These helpers compile
+                // both operands + an arg-count constant + emit `BuiltinCall`
+                // for the matching `IntrinsicMat*` / `IntrinsicVec*`; they
+                // never fall through to the dynamic-fallback `AddDynamic`.
+                // Vector first (covers `Vec<number>+Vec<number>` and
+                // `Vec<int>+Vec<int>`), then matrix (`Mat<number>+Mat<number>`).
+                // The operand shapes are disjoint so ordering is not
+                // observable, but we mirror the pattern used in the generic
+                // `_ => {}` arm below.
+                if self.try_compile_typed_vec_arithmetic(&BinaryOp::Add, left, right)? {
+                    return Ok(());
+                }
+                if self.try_compile_typed_matrix_arithmetic(&BinaryOp::Add, left, right)? {
+                    return Ok(());
+                }
+
                 // For Add, check if we can do typed merge optimization
                 self.compile_expr(left)?;
                 let left_schema = self.last_expr_schema.take();
@@ -1005,6 +1022,29 @@ impl BytecodeCompiler {
                 // Lower before generic strict-arithmetic checks so typed matrix
                 // paths never fall back to scalar arithmetic dispatch.
                 if matches!(op, BinaryOp::Mul) && self.try_compile_typed_matrix_mul(left, right)? {
+                    return Ok(());
+                }
+
+                // R5.4E: retarget typed element-wise vector arithmetic for
+                // Sub/Mul/Div on `Vec<number>`. The Add case is handled in
+                // the dedicated `BinaryOp::Add` arm above. Running before
+                // the strict-arithmetic gate below is intentional: the
+                // gate rejects non-numeric operand types, but a typed
+                // `Vec<number>` param is non-numeric at the type level and
+                // would otherwise produce a misleading "Cannot apply '-'
+                // to Vec<number> and Vec<number>" error.
+                //
+                // Vector before matrix to match the generic fallback ordering
+                // (the pre-R5.4E path routes vector ops through
+                // `TypedArrayData::F64` SIMD while matrix ops go through the
+                // heap-matrix arm). Ordering here is not semantically load-
+                // bearing — the two helpers classify disjoint operand shapes
+                // — but mirrors the shape of other compile-time retargets
+                // in this file.
+                if self.try_compile_typed_vec_arithmetic(op, left, right)? {
+                    return Ok(());
+                }
+                if self.try_compile_typed_matrix_arithmetic(op, left, right)? {
                     return Ok(());
                 }
 
