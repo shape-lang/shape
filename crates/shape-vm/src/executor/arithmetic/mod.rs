@@ -1812,7 +1812,21 @@ impl VirtualMachine {
                         return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
                     }
                 }
-                // string + scalar — number/int concat
+                // R5.5: string + scalar — number/int concat.
+                //
+                // Unreachable after R5.5 for proved `string` LHS + `int`
+                // / `number` / `bool` RHS: the compiler emits dedicated
+                // `StringConcatInt` / `StringConcatNumber` /
+                // `StringConcatBool` opcodes (see
+                // `compiler/expressions/binary_ops.rs` R5.5 block).
+                //
+                // Retained until R5.6 cleanup audit. Still reachable by:
+                //   - `SHAPE_V2_STRING_COERCE_CONCAT=0` (flag-off fallback).
+                //   - Commutative `scalar + string` (typed path only covers
+                //     string-LHS).
+                //   - Paths where the compiler fails to resolve the operand
+                //     type name (e.g. untyped function params, certain
+                //     generic contexts).
                 (Add, HeapValue::String(s)) => {
                     if let Some(i) = b.as_i64() {
                         return Ok(Some(ValueWord::from_string(Arc::new(format!("{}{}", s, i)))));

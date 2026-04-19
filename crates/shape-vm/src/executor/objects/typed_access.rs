@@ -247,7 +247,7 @@ impl VirtualMachine {
     // =====================================================================
 
     /// Dispatch for typed String access opcodes (StringLenTyped, StringCharAt,
-    /// StringConcatTyped).
+    /// StringConcatTyped, and R5.5's StringConcat{Int,Number,Bool}).
     pub(in crate::executor) fn exec_typed_string_access(
         &mut self,
         instruction: &Instruction,
@@ -256,6 +256,9 @@ impl VirtualMachine {
             OpCode::StringLenTyped => self.op_string_len_typed(instruction),
             OpCode::StringCharAt => self.op_string_char_at(instruction),
             OpCode::StringConcatTyped => self.op_string_concat_typed(),
+            OpCode::StringConcatInt => self.op_string_concat_int(),
+            OpCode::StringConcatNumber => self.op_string_concat_number(),
+            OpCode::StringConcatBool => self.op_string_concat_bool(),
             _ => unreachable!(
                 "exec_typed_string_access called with non-string opcode: {:?}",
                 instruction.opcode
@@ -325,6 +328,69 @@ impl VirtualMachine {
         })?;
 
         let result = format!("{}{}", a, b);
+        self.push_raw_u64(ValueWord::from_string(Arc::new(result)))?;
+        Ok(())
+    }
+
+    // ===== R5.5: String + scalar concat =====
+    //
+    // Typed siblings of the dynamic `AddDynamic` handler's "string + scalar"
+    // branch (see `try_heap_arithmetic` Case 2 at arithmetic/mod.rs:1815).
+    // Semantics are preserved byte-for-byte for `int` and `number`. The
+    // `bool` variant is new (the pre-R5.5 fallback coerced bool via `as_f64`
+    // and produced a garbage numeric tail; R5.5 emits the canonical
+    // `"true"`/`"false"` textual form — see R5.5 commit body).
+    //
+    // All three opcodes pop (string, scalar) with the string produced first
+    // by the compiler (LHS), scalar second (RHS), matching the
+    // `StringConcatTyped` convention: stack top = RHS.
+
+    /// StringConcatInt: pop (string, i64 int), push `format!("{}{}", s, i)`.
+    fn op_string_concat_int(&mut self) -> Result<(), VMError> {
+        let i = self.pop_raw_i64()?;
+        let s_bits = self.pop_raw_u64()?;
+        let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
+            expected: "string",
+            got: raw_helpers::type_name_from_bits(s_bits),
+        })?;
+        let result = format!("{}{}", s, i);
+        self.push_raw_u64(ValueWord::from_string(Arc::new(result)))?;
+        Ok(())
+    }
+
+    /// StringConcatNumber: pop (string, raw f64), push formatted concat.
+    /// Mirrors the legacy fallback's integer-fast-path: whole-valued floats
+    /// render without a decimal (e.g. `2.0` → `"2"`); other values use the
+    /// default `{}` format for f64.
+    fn op_string_concat_number(&mut self) -> Result<(), VMError> {
+        let n = self.pop_raw_f64()?;
+        let s_bits = self.pop_raw_u64()?;
+        let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
+            expected: "string",
+            got: raw_helpers::type_name_from_bits(s_bits),
+        })?;
+        let n_str = if n.fract() == 0.0 && n.is_finite() {
+            format!("{}", n as i64)
+        } else {
+            format!("{}", n)
+        };
+        let result = format!("{}{}", s, n_str);
+        self.push_raw_u64(ValueWord::from_string(Arc::new(result)))?;
+        Ok(())
+    }
+
+    /// StringConcatBool: pop (string, bool), push `format!("{}{}", s, b)`
+    /// where `b` renders as `"true"` / `"false"`. See R5.5 commit body
+    /// for the divergence from the pre-R5.5 fallback (which produced
+    /// garbage numeric tails for bool RHS).
+    fn op_string_concat_bool(&mut self) -> Result<(), VMError> {
+        let b = self.pop_raw_bool()?;
+        let s_bits = self.pop_raw_u64()?;
+        let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
+            expected: "string",
+            got: raw_helpers::type_name_from_bits(s_bits),
+        })?;
+        let result = format!("{}{}", s, b);
         self.push_raw_u64(ValueWord::from_string(Arc::new(result)))?;
         Ok(())
     }
@@ -643,5 +709,128 @@ mod tests {
         program.top_level_locals_count = 0;
         let result = run_program(program);
         assert_eq!(result.as_str(), Some("abc"));
+    }
+
+    // ===== R5.5: StringConcatInt / StringConcatNumber / StringConcatBool =====
+
+    /// R5.5 executor test: `"Cash: " + 42` via `StringConcatInt`.
+    #[test]
+    fn r55_string_concat_int_basic() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("Cash: ".to_string()));
+        let c_i = program.add_constant(Constant::Int(42));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_i))),
+            Instruction::simple(OpCode::StringConcatInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("Cash: 42"));
+    }
+
+    /// R5.5 executor test: negative int concat.
+    #[test]
+    fn r55_string_concat_int_negative() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("delta=".to_string()));
+        let c_i = program.add_constant(Constant::Int(-17));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_i))),
+            Instruction::simple(OpCode::StringConcatInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("delta=-17"));
+    }
+
+    /// R5.5 executor test: `"X: " + 3.14` via `StringConcatNumber`.
+    #[test]
+    fn r55_string_concat_number_basic() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("X: ".to_string()));
+        let c_n = program.add_constant(Constant::Number(3.14));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_n))),
+            Instruction::simple(OpCode::StringConcatNumber),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("X: 3.14"));
+    }
+
+    /// R5.5 executor test: whole-valued float renders without a decimal
+    /// (mirrors the pre-R5.5 fallback semantics).
+    #[test]
+    fn r55_string_concat_number_whole_formats_as_int() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("n=".to_string()));
+        let c_n = program.add_constant(Constant::Number(2.0));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_n))),
+            Instruction::simple(OpCode::StringConcatNumber),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("n=2"));
+    }
+
+    /// R5.5 executor test: `"flag: " + true` via `StringConcatBool`.
+    #[test]
+    fn r55_string_concat_bool_true() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("flag: ".to_string()));
+        let c_b = program.add_constant(Constant::Bool(true));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_b))),
+            Instruction::simple(OpCode::StringConcatBool),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("flag: true"));
+    }
+
+    /// R5.5 executor test: `"flag: " + false` → `"flag: false"`.
+    #[test]
+    fn r55_string_concat_bool_false() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("flag: ".to_string()));
+        let c_b = program.add_constant(Constant::Bool(false));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_b))),
+            Instruction::simple(OpCode::StringConcatBool),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("flag: false"));
+    }
+
+    /// R5.5 executor test: empty-string LHS still produces the stringified
+    /// scalar on its own (`"" + 42` → `"42"`).
+    #[test]
+    fn r55_string_concat_int_empty_lhs() {
+        let mut program = BytecodeProgram::default();
+        let c_s = program.add_constant(Constant::String("".to_string()));
+        let c_i = program.add_constant(Constant::Int(42));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_s))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_i))),
+            Instruction::simple(OpCode::StringConcatInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 0;
+        let result = run_program(program);
+        assert_eq!(result.as_str(), Some("42"));
     }
 }

@@ -925,6 +925,42 @@ define_opcodes! {
     /// Executor handler added in R5.1B; currently unreachable via dispatch.
     BitNotInt = 0x12E, Arithmetic, pops: 1, pushes: 1;
 
+    // ===== R5.5: Typed string+scalar concatenation =====
+    //
+    // Typed siblings of the dynamic `AddDynamic` handler's string-coercion
+    // branch (`exec_arithmetic_dynamic_fallback` → `try_heap_arithmetic`,
+    // Case 2 "string + scalar"). Pops a heap-tagged string LHS and a
+    // raw-scalar RHS, pushes a newly-allocated string. The compiler emits
+    // these (R5.5) when `BinaryOp::Add` is proved to have a `string` LHS
+    // and an `int` / `number` / `bool` RHS, bypassing the dynamic fallback.
+    //
+    // Semantics match the pre-R5.5 fallback for int/number:
+    //   * int → `format!("{}{}", lhs, rhs_i64)`
+    //   * number → integer-formatted if `rhs.fract() == 0.0`, else default
+    //     float formatting (mirrors the `n.fract() == 0.0` branch in the
+    //     legacy fallback at arithmetic/mod.rs:1821).
+    //   * bool → `"true"` / `"false"` (pre-R5.5 fell through the fallback
+    //     and returned a garbage numeric coercion; R5.5 produces the
+    //     canonical textual form). See R5.5 commit body.
+    //
+    // Category: Object (shared with `StringConcat` / `StringConcatTyped`,
+    // matches their single-allocation heap-producing shape). Operand: none
+    // (simple instruction). Stack effect: pop 2 / push 1.
+    /// R5.5: Concatenate a heap string with an `int` scalar. Pops (string,
+    /// i64 raw int), formats the int via `format!("{}{}", s, i)`, pushes a
+    /// newly-allocated string. Compile-time proof of operand types — no tag
+    /// checks beyond the string decode.
+    StringConcatInt = 0x12F, Object, pops: 2, pushes: 1;
+    /// R5.5: Concatenate a heap string with a `number` scalar. Pops (string,
+    /// raw f64), formats the number via the same integer-fast-path logic as
+    /// the legacy fallback (whole numbers render without a decimal), pushes a
+    /// newly-allocated string. Compile-time proof of operand types.
+    StringConcatNumber = 0x130, Object, pops: 2, pushes: 1;
+    /// R5.5: Concatenate a heap string with a `bool` scalar. Pops (string,
+    /// raw bool), formats the bool as `"true"` / `"false"`, pushes a
+    /// newly-allocated string. Compile-time proof of operand types.
+    StringConcatBool = 0x131, Object, pops: 2, pushes: 1;
+
 }
 
 impl OpCode {
@@ -2009,6 +2045,76 @@ mod tests {
             assert!(
                 instr.operand.is_none(),
                 "{:?} should have no operand (like AddInt/BitAnd)",
+                op
+            );
+        }
+    }
+
+    // ===== R5.5: Typed string+scalar concat discriminant & shape tests =====
+
+    /// R5.5: pin each new string+scalar concat opcode's u16 discriminant.
+    /// The bytecode ABI is stable, so these IDs must not drift across phases.
+    /// IDs were chosen sequentially above the last R5.1A discriminant (0x12E).
+    #[test]
+    fn r55_string_scalar_concat_discriminants() {
+        assert_eq!(OpCode::StringConcatInt as u16, 0x12F);
+        assert_eq!(OpCode::StringConcatNumber as u16, 0x130);
+        assert_eq!(OpCode::StringConcatBool as u16, 0x131);
+    }
+
+    /// R5.5: the three new string+scalar concat opcodes belong to the
+    /// `Object` category, matching their siblings `StringConcat` (0xFC)
+    /// and `StringConcatTyped` (0x116).
+    #[test]
+    fn r55_string_scalar_concat_opcodes_are_object_category() {
+        assert_eq!(OpCode::StringConcatInt.category(), OpcodeCategory::Object);
+        assert_eq!(OpCode::StringConcatNumber.category(), OpcodeCategory::Object);
+        assert_eq!(OpCode::StringConcatBool.category(), OpcodeCategory::Object);
+    }
+
+    /// R5.5: each typed string+scalar concat opcode pops two (string, scalar)
+    /// and pushes one new string. Same stack effect as `StringConcatTyped`.
+    #[test]
+    fn r55_string_scalar_concat_stack_effects() {
+        for op in [
+            OpCode::StringConcatInt,
+            OpCode::StringConcatNumber,
+            OpCode::StringConcatBool,
+        ] {
+            assert_eq!(op.stack_pops(), 2, "{:?} should pop 2", op);
+            assert_eq!(op.stack_pushes(), 1, "{:?} should push 1", op);
+        }
+    }
+
+    /// R5.5: neither trusted nor v2-typed (they still allocate a heap
+    /// `StringObj` through the regular ValueWord pipeline). Mirrors
+    /// `StringConcatTyped`'s classification.
+    #[test]
+    fn r55_string_scalar_concat_opcodes_not_classified_as_trusted_or_v2() {
+        for op in [
+            OpCode::StringConcatInt,
+            OpCode::StringConcatNumber,
+            OpCode::StringConcatBool,
+        ] {
+            assert!(!op.is_trusted(), "{:?} should not be trusted", op);
+            assert!(!op.is_v2_typed(), "{:?} should not be v2_typed", op);
+        }
+    }
+
+    /// R5.5: `Instruction::simple` constructs every string+scalar concat
+    /// opcode with no operand (same shape as `StringConcatTyped`).
+    #[test]
+    fn r55_string_scalar_concat_instructions_have_no_operand() {
+        for op in [
+            OpCode::StringConcatInt,
+            OpCode::StringConcatNumber,
+            OpCode::StringConcatBool,
+        ] {
+            let instr = Instruction::simple(op);
+            assert_eq!(instr.opcode, op);
+            assert!(
+                instr.operand.is_none(),
+                "{:?} should have no operand (like StringConcatTyped)",
                 op
             );
         }

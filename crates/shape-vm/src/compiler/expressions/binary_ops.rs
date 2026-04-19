@@ -744,6 +744,72 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
+                    // R5.5: typed string + scalar concat. When LHS is proved
+                    // `string` and RHS is a scalar primitive (`int`, `number`,
+                    // or `bool`), emit a dedicated typed opcode instead of
+                    // falling through to the dynamic `AddDynamic` handler's
+                    // string-coercion branch (`try_heap_arithmetic` Case 2 at
+                    // arithmetic/mod.rs:1815).
+                    //
+                    // Gate: `SHAPE_V2_STRING_COERCE_CONCAT` (default ON via
+                    // `typed_string_coerce_concat_enabled()`). With the flag
+                    // off, emission is byte-identical to pre-R5.5 (falls
+                    // through to the generic AddDynamic path below).
+                    //
+                    // Asymmetric: only string-LHS fires the typed path. The
+                    // commutative form `int + string` is rare in Shape code
+                    // and continues to work via the dynamic fallback. See
+                    // R5.5 commit body.
+                    //
+                    // Resolve operand types via multiple sources — the
+                    // order matches the surrounding arithmetic branch:
+                    //   1. `infer_expr_type` when it produces a display
+                    //      name (often `None` for locals whose tracker
+                    //      info came from an annotation rather than
+                    //      full inference).
+                    //   2. `storage_hint_for_expr` fallback, which reads
+                    //      the tracker's `SlotKind` hint (set by
+                    //      `let x: string = ...` annotations and by
+                    //      literals). This is the same helper the numeric
+                    //      path uses via `storage_hint_for_expr` below.
+                    let lhs_is_string = matches!(lhs_name.as_deref(), Some("string"))
+                        || matches!(
+                            self.storage_hint_for_expr(left),
+                            Some(crate::type_tracking::SlotKind::String)
+                        );
+                    if lhs_is_string
+                        && crate::compiler::helpers::typed_string_coerce_concat_enabled()
+                    {
+                        let rhs_hint = self.storage_hint_for_expr(right);
+                        let typed_opcode = match rhs_name.as_deref() {
+                            Some("int") => Some(OpCode::StringConcatInt),
+                            Some("number") => Some(OpCode::StringConcatNumber),
+                            Some("bool") => Some(OpCode::StringConcatBool),
+                            _ => match rhs_hint {
+                                Some(crate::type_tracking::SlotKind::Int64) => {
+                                    Some(OpCode::StringConcatInt)
+                                }
+                                Some(crate::type_tracking::SlotKind::Float64) => {
+                                    Some(OpCode::StringConcatNumber)
+                                }
+                                Some(crate::type_tracking::SlotKind::Bool) => {
+                                    Some(OpCode::StringConcatBool)
+                                }
+                                _ => None,
+                            },
+                        };
+                        if let Some(op) = typed_opcode {
+                            self.emit(Instruction::simple(op));
+                            self.last_expr_schema = None;
+                            self.last_expr_type_info = None;
+                            // Result is a freshly-allocated string; clear
+                            // the numeric hint so downstream Add chains
+                            // don't think the result is a scalar.
+                            self.last_expr_numeric_type = None;
+                            return Ok(());
+                        }
+                    }
+
                     // Array concat: both operands proven to be arrays. We
                     // intentionally only fire for the generic `Array<T>` shape,
                     // not for `Vec<number>`-style FloatArray/IntArray/BoolArray

@@ -336,6 +336,77 @@ pub(crate) fn with_typed_bitwise_flag<R>(enabled: bool, f: impl FnOnce() -> R) -
     f()
 }
 
+/// Phase R5.5: default-on compiler emission of typed string+scalar concat
+/// opcodes (`StringConcatInt`, `StringConcatNumber`, `StringConcatBool`)
+/// when `BinaryOp::Add` has a `string`-typed LHS and an `int`/`number`/
+/// `bool`-typed RHS proved at compile time.
+///
+/// When `true`, string+scalar Add expressions emit one of the three typed
+/// opcodes, bypassing the dynamic fallback's string-coercion branch in
+/// `exec_arithmetic_dynamic_fallback`. When `false`, emission falls back
+/// to the pre-R5.5 Dynamic path — the `AddDynamic` handler's
+/// `try_heap_arithmetic` Case 2 still handles int/number RHS.
+///
+/// Polarity mirrors `typed_bitwise_enabled()`: the env var is an opt-OUT.
+/// Values `0` / `false` / `off` / `no` (case-insensitive, trimmed)
+/// disable the flag; unset, empty, or any other value keeps the R5.5
+/// default of `true`.
+///
+/// Rollback: `SHAPE_V2_STRING_COERCE_CONCAT=0` restores pre-R5.5 emission
+/// (string+scalar Add always goes through the Dynamic variant).
+///
+/// For unit-test determinism, a `#[cfg(test)]` thread-local override
+/// (`with_typed_string_coerce_concat_flag`) lets a single test force the
+/// flag on/off without touching the env-var cache.
+pub(super) fn typed_string_coerce_concat_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_STRING_COERCE_CONCAT") {
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False"
+                | "off" | "OFF" | "Off"
+                | "no" | "NO" | "No"
+        ),
+        Err(_) => true,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Phase R5.5 test hook: per-thread override for
+    /// `typed_string_coerce_concat_enabled()`. Thread-local so concurrent
+    /// `cargo test` workers remain independent.
+    pub(super) static TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Phase R5.5 test helper: run `f` with the typed string+scalar concat
+/// flag forced to `enabled`. Restores the previous override on return
+/// (even on panic). Production code reads the env var exclusively via
+/// `typed_string_coerce_concat_enabled()`.
+#[cfg(test)]
+pub(crate) fn with_typed_string_coerce_concat_flag<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE
+        .with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
 // ── Phase V3.6: `emit_dynamic_*` helpers deleted ─────────────────────────
 //
 // V3.2-V3.5 migrated every arithmetic, comparison, and pattern-`Eq` emission
@@ -3803,5 +3874,268 @@ mod tests {
                 code, typed, dynamic
             );
         }
+    }
+
+    // ── Phase R5.5: typed string+scalar concat emission tests ────────
+    //
+    // These tests pin the compiler's contract for the R5.5 typed
+    // string+scalar concat opcodes (`StringConcatInt` / `StringConcatNumber`
+    // / `StringConcatBool`):
+    //   * Proved `string` LHS + `int`/`number`/`bool` RHS emits the typed
+    //     opcode.
+    //   * Unsupported RHS (e.g. `bigint`) or unresolved types fall through
+    //     to the Dynamic `AddDynamic` path.
+    //   * `SHAPE_V2_STRING_COERCE_CONCAT` (thread-local override in tests)
+    //     controls whether the typed path is taken.
+
+    /// Compile a source snippet with a flag override and return opcodes.
+    #[cfg(test)]
+    fn compile_opcodes_with_string_coerce_concat(
+        enabled: bool,
+        code: &str,
+    ) -> Vec<crate::bytecode::OpCode> {
+        super::super::helpers::with_typed_string_coerce_concat_flag(enabled, || {
+            compile_opcodes(code)
+        })
+    }
+
+    #[test]
+    fn r55_string_plus_int_emits_string_concat_int() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let s: string = "Cash: "
+                let c: int = 42
+                s + c
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatInt),
+            "expected StringConcatInt for string + int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::AddDynamic),
+            "Dynamic AddDynamic must not be emitted when typed string+int path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_number_emits_string_concat_number() {
+        // String-literal LHS + number local RHS. Using a string literal
+        // (instead of a `let s: string = ...` binding) sidesteps a
+        // pre-existing type-tracker quirk where adjacent `number` locals
+        // can override the string local's tracked type info; that quirk
+        // is orthogonal to R5.5 and would incorrectly route the whole
+        // Add to `AddNumber` regardless of our emission block.
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let n: number = 3.14
+                "X: " + n
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatNumber),
+            "expected StringConcatNumber for string + number, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::AddDynamic),
+            "AddDynamic must not be emitted when typed string+number path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_bool_emits_string_concat_bool() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let s: string = "flag: "
+                let b: bool = true
+                s + b
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatBool),
+            "expected StringConcatBool for string + bool, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::AddDynamic),
+            "AddDynamic must not be emitted when typed string+bool path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_flag_off_falls_back_to_dynamic() {
+        // Flag off: string+scalar Add must route through the Dynamic
+        // `AddDynamic` path (which the `try_heap_arithmetic` Case 2
+        // handler still services for int/number RHS). Pins the
+        // regression-safety contract.
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            false,
+            r#"
+            fn concat_test() {
+                let s: string = "Cash: "
+                let c: int = 42
+                s + c
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::AddDynamic),
+            "flag off: expected Dynamic AddDynamic, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::StringConcatInt),
+            "flag off: typed StringConcatInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {
+        // Regression guard: a pure string+string Add must NEVER emit one
+        // of the R5.5 typed scalar opcodes. (Whether it emits the pre-
+        // existing `StringConcatTyped` or falls through to `AddDynamic`
+        // depends on compile-time type inference, which is outside the
+        // R5.5 scope — we only assert that R5.5 did not accidentally
+        // claim string+string.)
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let b: string = "bar"
+                "foo" + b
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            !ops.contains(&OpCode::StringConcatInt)
+                && !ops.contains(&OpCode::StringConcatNumber)
+                && !ops.contains(&OpCode::StringConcatBool),
+            "string+string must not emit any R5.5 typed scalar opcode, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_scalar_runtime_values() {
+        // End-to-end: the three typed opcodes produce the expected
+        // strings when executed.
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        use shape_ast::parser::parse_program;
+        use shape_value::ValueWordExt;
+
+        let eval_str = |code: &str| -> String {
+            super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
+                let program = parse_program(code).expect("parse");
+                let mut compiler = BytecodeCompiler::new();
+                compiler.allow_internal_builtins = true;
+                let bc = compiler.compile(&program).expect("compile");
+                let mut vm = VirtualMachine::new(VMConfig::default());
+                vm.load_program(bc);
+                vm.execute(None)
+                    .expect("execute")
+                    .clone()
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .expect("string result")
+            })
+        };
+
+        // Using string literals for the LHS sidesteps a pre-existing
+        // type-tracker quirk where a `let _: string = ...` binding
+        // adjacent to a `let _: number = ...` binding in the same fn
+        // body can have its tracked type_name overridden. The R5.5
+        // emission block still correctly falls through to the right
+        // typed opcode for literal-LHS + local-RHS combinations.
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let c: int = 42
+                    "Cash: " + c
+                }
+                f()
+                "#,
+            ),
+            "Cash: 42",
+            "string + int"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let n: number = 3.14
+                    "X: " + n
+                }
+                f()
+                "#,
+            ),
+            "X: 3.14",
+            "string + number"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let n: number = 2.0
+                    "whole: " + n
+                }
+                f()
+                "#,
+            ),
+            "whole: 2",
+            "string + whole number formats without decimal"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let b: bool = true
+                    "flag: " + b
+                }
+                f()
+                "#,
+            ),
+            "flag: true",
+            "string + bool true"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let b: bool = false
+                    "flag: " + b
+                }
+                f()
+                "#,
+            ),
+            "flag: false",
+            "string + bool false"
+        );
     }
 }

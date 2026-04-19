@@ -715,8 +715,14 @@ impl VirtualMachine {
                 return self.exec_typed_map_access(instruction);
             }
 
-            // Typed String access (local-slot based or stack-based)
-            StringLenTyped | StringCharAt | StringConcatTyped => {
+            // Typed String access (local-slot based or stack-based).
+            //
+            // R5.5 adds the three typed string+scalar concat opcodes to this
+            // arm; they share the `exec_typed_string_access` handler since
+            // they are structurally identical to `StringConcatTyped` (stack-
+            // based, single heap allocation, no local-slot operand).
+            StringLenTyped | StringCharAt | StringConcatTyped
+            | StringConcatInt | StringConcatNumber | StringConcatBool => {
                 return self.exec_typed_string_access(instruction);
             }
 
