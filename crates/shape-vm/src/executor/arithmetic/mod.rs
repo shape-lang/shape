@@ -864,6 +864,47 @@ impl VirtualMachine {
                     self.push_raw_u64(val)?;
                 }
             }
+            // ===== R5.1B: Typed bitwise opcodes =====
+            //
+            // Int-typed siblings of the dynamic `BitAnd`/`BitOr`/`BitXor`/
+            // `BitShl`/`BitShr`/`BitNot` handlers in
+            // `exec_arithmetic_dynamic_fallback`. The compiler emits these
+            // (R5.1C) when both operand types are proved to be `int`; at
+            // this stage they are reachable only from hand-crafted
+            // bytecode. Semantics match the dynamic fallback exactly
+            // (plain i64 `&` / `|` / `^` / `<<` / `>>` / `!`) — no
+            // rhs-masking, matching the documented `>>` / `<<` semantics
+            // already shipped in Shape. Operands are raw i48-tagged int
+            // slots per the v2 runtime spec; no tag checks, no coercion.
+            BitAndInt => {
+                let b = self.pop_raw_i64()?;
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(a & b)?;
+            }
+            BitOrInt => {
+                let b = self.pop_raw_i64()?;
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(a | b)?;
+            }
+            BitXorInt => {
+                let b = self.pop_raw_i64()?;
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(a ^ b)?;
+            }
+            BitShlInt => {
+                let b = self.pop_raw_i64()?;
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(a << b)?;
+            }
+            BitShrInt => {
+                let b = self.pop_raw_i64()?;
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(a >> b)?;
+            }
+            BitNotInt => {
+                let a = self.pop_raw_i64()?;
+                self.push_raw_i64(!a)?;
+            }
             _ => unreachable!(
                 "exec_typed_arithmetic called with non-typed-arithmetic opcode: {:?}",
                 instruction.opcode
@@ -2890,5 +2931,163 @@ mod tests {
         let mut vm = make_raw_vm();
         vm.push_raw_u64(ValueWord::from_f64(2.718)).unwrap();
         assert!((vm.pop_raw_f64().unwrap() - 2.718).abs() < 1e-15);
+    }
+
+    // ===== R5.1B: Typed bitwise opcodes via raw API =====
+    //
+    // These exercise the executor handlers added in R5.1B. Values stay
+    // inside i48 range so `pop_raw_i64` / `push_raw_i64` round-trip
+    // cleanly; the compiler will not emit these typed variants unless
+    // both operands are proved to be `int` (i.e. i48-safe).
+
+    // --- BitAndInt ---
+    #[test]
+    fn test_typed_arithmetic_bit_and_int() {
+        assert_eq!(exec_typed_int_binop(0xF0, 0x0F, OpCode::BitAndInt), 0x00);
+        assert_eq!(exec_typed_int_binop(0xFF, 0x0F, OpCode::BitAndInt), 0x0F);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_and_int_negative() {
+        // -1 & x == x for any x (two's-complement all-ones pattern).
+        assert_eq!(exec_typed_int_binop(-1, 0x1234, OpCode::BitAndInt), 0x1234);
+    }
+
+    // --- BitOrInt ---
+    #[test]
+    fn test_typed_arithmetic_bit_or_int() {
+        assert_eq!(exec_typed_int_binop(0xF0, 0x0F, OpCode::BitOrInt), 0xFF);
+        assert_eq!(exec_typed_int_binop(0, 0, OpCode::BitOrInt), 0);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_or_int_negative() {
+        // 0 | -1 == -1.
+        assert_eq!(exec_typed_int_binop(0, -1, OpCode::BitOrInt), -1);
+    }
+
+    // --- BitXorInt ---
+    #[test]
+    fn test_typed_arithmetic_bit_xor_int() {
+        assert_eq!(exec_typed_int_binop(0xF0, 0x0F, OpCode::BitXorInt), 0xFF);
+        assert_eq!(exec_typed_int_binop(0xFF, 0xFF, OpCode::BitXorInt), 0x00);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_xor_int_self_is_zero() {
+        // x ^ x == 0, even for negative x.
+        assert_eq!(exec_typed_int_binop(-42, -42, OpCode::BitXorInt), 0);
+    }
+
+    // --- BitShlInt ---
+    #[test]
+    fn test_typed_arithmetic_bit_shl_int() {
+        assert_eq!(exec_typed_int_binop(3, 2, OpCode::BitShlInt), 12);
+        assert_eq!(exec_typed_int_binop(1, 10, OpCode::BitShlInt), 1024);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_shl_int_zero_shift() {
+        // << 0 is identity.
+        assert_eq!(exec_typed_int_binop(12345, 0, OpCode::BitShlInt), 12345);
+    }
+
+    // --- BitShrInt (arithmetic right shift) ---
+    #[test]
+    fn test_typed_arithmetic_bit_shr_int() {
+        assert_eq!(exec_typed_int_binop(12, 2, OpCode::BitShrInt), 3);
+        assert_eq!(exec_typed_int_binop(1024, 10, OpCode::BitShrInt), 1);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_shr_int_arithmetic_sign_extends() {
+        // Arithmetic right shift on a negative value preserves the sign
+        // bit -- matches the `a_int >> b_int` used by the dynamic BitShr
+        // handler (i64 `>>` is arithmetic).
+        assert_eq!(exec_typed_int_binop(-8, 1, OpCode::BitShrInt), -4);
+        assert_eq!(exec_typed_int_binop(-1, 1, OpCode::BitShrInt), -1);
+    }
+
+    // --- BitNotInt (unary) ---
+    #[test]
+    fn test_typed_arithmetic_bit_not_int() {
+        // !0 == -1, !(-1) == 0 (two's complement).
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(0).unwrap();
+        let instr = Instruction::simple(OpCode::BitNotInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), -1);
+
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(-1).unwrap();
+        let instr = Instruction::simple(OpCode::BitNotInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_bit_not_int_involution() {
+        // !!x == x for any x.
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(0x1234_5678).unwrap();
+        let instr = Instruction::simple(OpCode::BitNotInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), 0x1234_5678);
+    }
+
+    // --- End-to-end through dispatch (BytecodeProgram -> vm.execute) ---
+    //
+    // Mirrors the legacy `test_bitwise_*` tests further up in this file
+    // but uses the new R5.1B typed opcodes. Confirms the dispatch arm in
+    // `execute_instruction` routes the opcode to exec_typed_arithmetic.
+
+    #[test]
+    fn test_bit_and_int_end_to_end() {
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(0xF0));
+        let c1 = program.add_constant(Constant::Int(0x0F));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
+            Instruction::simple(OpCode::BitAndInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+        assert_eq!(result, ValueWord::from_i64(0x00));
+    }
+
+    #[test]
+    fn test_bit_shl_int_end_to_end() {
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(3));
+        let c1 = program.add_constant(Constant::Int(2));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
+            Instruction::simple(OpCode::BitShlInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+        assert_eq!(result, ValueWord::from_i64(12));
+    }
+
+    #[test]
+    fn test_bit_not_int_end_to_end() {
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(0));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::BitNotInt),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+        assert_eq!(result, ValueWord::from_i64(-1));
     }
 }

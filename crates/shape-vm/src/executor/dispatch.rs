@@ -434,11 +434,17 @@ impl VirtualMachine {
                 return self.exec_arithmetic_dynamic_fallback(instruction);
             }
 
-            // Typed arithmetic (compiler-guaranteed types, zero dispatch)
+            // Typed arithmetic (compiler-guaranteed types, zero dispatch).
+            //
+            // R5.1B adds the six int-typed bitwise opcodes to this arm.
+            // They are structurally identical to the other typed int ops
+            // (raw i48-tagged operand slots, zero dispatch) and therefore
+            // share the same exec_typed_arithmetic handler.
             AddInt | AddNumber | AddDecimal | SubInt | SubNumber | SubDecimal | MulInt
             | MulNumber | MulDecimal | DivInt | DivNumber | DivDecimal | ModInt | ModNumber
             | ModDecimal | PowInt | PowNumber | PowDecimal | IntToNumber | NumberToInt
-            | NegInt | NegNumber | NegDecimal => {
+            | NegInt | NegNumber | NegDecimal | BitAndInt | BitOrInt | BitXorInt
+            | BitShlInt | BitShrInt | BitNotInt => {
                 return self.exec_typed_arithmetic(instruction);
             }
 
@@ -770,21 +776,11 @@ impl VirtualMachine {
             // Stack-category arm alongside `PromoteToOwned`; no separate
             // arm is needed here. V1.2C will add compiler emission.
 
-            // R5.1A: unwired — R5.1B adds handlers.
-            //
-            // The typed bitwise opcodes (BitAndInt/BitOrInt/BitXorInt/
-            // BitShlInt/BitShrInt/BitNotInt) were added to the opcode table
-            // in R5.1A (see `bytecode/opcode_defs.rs`) but do not have
-            // executor handlers or compiler emission yet. Reaching any of
-            // them here indicates a bug — no compile path currently emits
-            // them. Panicking (instead of falling through to
-            // `InvalidOperand`) surfaces accidental emission immediately.
-            BitAndInt | BitOrInt | BitXorInt | BitShlInt | BitShrInt | BitNotInt => {
-                panic!(
-                    "R5.1A unreachable: {:?} has no executor handler (adds in R5.1B)",
-                    instruction.opcode
-                );
-            }
+            // R5.1B: typed bitwise opcodes (BitAndInt/BitOrInt/BitXorInt/
+            // BitShlInt/BitShrInt/BitNotInt) are dispatched above via the
+            // typed-arithmetic arm alongside the other typed int ops; no
+            // separate arm is needed here. R5.1C will add compiler
+            // emission behind `SHAPE_V2_TYPED_BITWISE=1`.
 
             _ => return Err(VMError::InvalidOperand),
         }
