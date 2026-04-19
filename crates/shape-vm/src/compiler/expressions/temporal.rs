@@ -42,6 +42,13 @@ impl BytecodeCompiler {
             OpCode::BuiltinCall,
             Some(Operand::Builtin(BuiltinFunction::EvalDateTimeExpr)),
         ));
+        // R5.3B: record the temporal display name on the expression-result
+        // slot so that `propagate_assignment_type_to_slot` can populate the
+        // local/binding tracker with `"DateTime"`. Reading that back at the
+        // arithmetic site then lets the retarget at
+        // `binary_ops.rs:750` / `:1049` fire for let-locals.
+        self.last_expr_type_info =
+            Some(crate::type_tracking::VariableTypeInfo::named("DateTime".to_string()));
         Ok(())
     }
 
@@ -57,6 +64,12 @@ impl BytecodeCompiler {
             OpCode::PushConst,
             Some(Operand::Const(const_idx)),
         ));
+        // R5.3B: record the temporal display name on the expression-result
+        // slot (see compile_expr_datetime). Duration literals produce
+        // `TimeSpan` at runtime; track it as `"Duration"` so the retarget
+        // guard's "Duration" arm fires uniformly for let-locals.
+        self.last_expr_type_info =
+            Some(crate::type_tracking::VariableTypeInfo::named("Duration".to_string()));
         Ok(())
     }
 

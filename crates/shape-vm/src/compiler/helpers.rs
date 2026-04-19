@@ -696,6 +696,17 @@ impl BytecodeCompiler {
         matches!(type_name, Some(name) if name.starts_with("Vec<") && name.ends_with('>'))
     }
 
+    /// R5.3B: return `true` when `type_name` is one of the temporal display
+    /// names the compiler uses for DateTime arithmetic retargeting. Used by
+    /// `propagate_assignment_type_to_slot` to keep the local/binding tracker
+    /// populated for let-locals bound to temporal literals.
+    fn is_temporal_type_name(type_name: Option<&str>) -> bool {
+        matches!(
+            type_name,
+            Some("DateTime") | Some("Duration") | Some("TimeSpan")
+        )
+    }
+
     /// Convert a source annotation to a tracked type name when we have a
     /// canonical runtime representation for it.
     pub(super) fn tracked_type_name_from_annotation(type_ann: &TypeAnnotation) -> Option<String> {
@@ -1477,6 +1488,14 @@ impl BytecodeCompiler {
                 || info.is_datatable()
                 || info.schema_id.is_some()
                 || Self::is_array_type_name(info.type_name.as_deref())
+                // R5.3B: temporal type names ("DateTime" / "Duration" /
+                // "TimeSpan") set by `compile_expr_datetime` /
+                // `compile_expr_duration` must propagate into the local /
+                // module-binding tracker. Without this, let-locals bound to
+                // temporal literals are recorded as `Unknown`, and
+                // `infer_expr_type` cannot resolve the retarget at the
+                // `dt + dur` site.
+                || Self::is_temporal_type_name(info.type_name.as_deref())
             {
                 if is_local {
                     self.type_tracker.set_local_type(slot, info.clone());

@@ -1506,34 +1506,33 @@ impl VirtualMachine {
             match (op, ah, bh) {
                 // DateTime + TimeSpan / TimeSpan + DateTime / TimeSpan +/- TimeSpan
                 //
-                // R5.3A audit (Option C / hybrid; retained reachable). The
-                // compiler's temporal retarget at
-                // `compiler/expressions/binary_ops.rs:755-771` (Add) and
-                // `:1053-1072` (Sub) guards on `infer_expr_type` returning a
-                // `"DateTime"`/`"Duration"`/`"TimeSpan"` display name, so
-                // the ideal path is a compile-time `CallMethod("add")` /
-                // `CallMethod("sub")` dispatch into the PHF-backed handlers
-                // in `executor/objects/datetime_methods.rs`
+                // Unreachable after R5.3B; retained until R5.6 cleanup audit.
+                // The compiler's temporal retarget at
+                // `compiler/expressions/binary_ops.rs:750-771` (Add) and
+                // `:1049-1072` (Sub) now fires uniformly for literal,
+                // let-local, and typed-parameter DateTime / Duration /
+                // TimeSpan arithmetic because `infer_expr_type` consults
+                // the compiler's `type_tracker` for `Expr::Identifier` and
+                // `compile_expr_datetime` / `compile_expr_duration`
+                // populate `last_expr_type_info` so
+                // `propagate_assignment_type_to_slot` records the temporal
+                // display name on let-locals. Dispatch goes through
+                // `CallMethod("add")` / `CallMethod("sub")` into the
+                // PHF-backed handlers in
+                // `executor/objects/datetime_methods.rs`
                 // (`datetime_add_v2`, `datetime_sub_v2`, `timespan_add_v2`,
                 // `timespan_sub_v2`) — mirroring R5.2's user-op retarget.
                 //
-                // In practice the retarget does NOT fire for reachable
-                // program forms: literal-only expressions (`@"..." + 3d`)
-                // are constant-folded away before reaching the binary-op
-                // compiler, and let-locals / typed function params lose
-                // the temporal display name through `infer_expr_type`,
-                // so the Add/Sub branches fall through to
-                // `AddDynamic` / `SubDynamic` and these arms handle the
-                // operation at runtime. That contract is pinned by
-                // `test_r5_3a_datetime_arithmetic_fallback_baseline` in
-                // `executor/tests/operator_overload.rs`.
-                //
-                // R5.3B will either (a) propagate the temporal type
-                // through let-locals / typed params so the existing
-                // retarget fires uniformly — no new opcode needed — or
-                // (b) add heap-pointer-typed opcodes that dispatch on the
-                // HeapKind directly. Once R5.3B lands these five temporal
-                // arms become truly unreachable and R5.6 can delete them.
+                // These arms remain present for symmetry with the rest of
+                // the dynamic-fallback match and because deleting them is
+                // outside R5.3B's scope (the remaining `*Dynamic` fallback
+                // wiring is collectively owned by R5.6). The R5.3B
+                // regression test
+                // `test_r5_3b_datetime_arithmetic_retargets_to_call_method`
+                // in `executor/tests/operator_overload.rs` pins the
+                // retarget emission and rejects `AddDynamic` / `SubDynamic`
+                // for DateTime arithmetic; if that test fails, these arms
+                // may have become live again and R5.3B has regressed.
                 (
                     Add,
                     HeapValue::Temporal(TemporalData::DateTime(dt)),

@@ -1304,15 +1304,65 @@ impl BytecodeCompiler {
     /// Infer the type of an expression using the type inference engine
     ///
     /// Used for match exhaustiveness checking and other type-based validations.
+    ///
+    /// R5.3B: for `Expr::Identifier`, the compiler-owned `type_tracker`
+    /// holds the authoritative type_name for let-locals, typed function
+    /// parameters, and module bindings. The `type_inference` engine does
+    /// not define those bindings in its environment, so it returns
+    /// `UndefinedVariable` for the same identifiers. Consulting the tracker
+    /// first preserves the temporal display name
+    /// (`"DateTime"` / `"Duration"` / `"TimeSpan"`) through identifier
+    /// resolution so the retarget guards at `binary_ops.rs:750-771` (Add)
+    /// and `:1049-1072` (Sub) fire uniformly. For non-temporal identifiers
+    /// the tracker value is equally valid (it matches the declared or
+    /// inferred type), but we scope the tracker short-circuit narrowly to
+    /// temporal names to avoid changing any existing non-temporal
+    /// `infer_expr_type` behavior.
     pub(super) fn infer_expr_type(
         &mut self,
         expr: &Expr,
     ) -> Result<shape_runtime::type_system::Type> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        if let Expr::Identifier(name, _) = expr {
+            if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
+                if matches!(
+                    type_name.as_str(),
+                    "DateTime" | "Duration" | "TimeSpan"
+                ) {
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
+                }
+            }
+        }
+
         self.type_inference.infer_expr(expr).map_err(|e| {
             shape_ast::error::ShapeError::SemanticError {
                 message: format!("Type inference failed: {:?}", e),
                 location: None,
             }
         })
+    }
+
+    /// R5.3B helper: return the tracker-recorded `type_name` for an
+    /// identifier, searching local slots first and falling back to module
+    /// bindings. Returns `None` if the identifier is neither a local nor a
+    /// module binding, or if the tracker has no type_name on that slot.
+    fn tracker_type_name_for_identifier(&self, name: &str) -> Option<String> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(info) = self.type_tracker.get_local_type(local_idx) {
+                if let Some(ref tn) = info.type_name {
+                    return Some(tn.clone());
+                }
+            }
+        }
+        if let Some(&binding_idx) = self.module_bindings.get(name) {
+            if let Some(info) = self.type_tracker.get_binding_type(binding_idx) {
+                if let Some(ref tn) = info.type_name {
+                    return Some(tn.clone());
+                }
+            }
+        }
+        None
     }
 }

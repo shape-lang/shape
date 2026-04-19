@@ -338,59 +338,44 @@ fn test_r5_2b_user_add_retargets_single_schema_fallback() {
     );
 }
 
-/// R5.3A baseline regression test for the v2 residuals closeout plan.
+/// R5.3B retarget regression test for the v2 residuals closeout plan.
 ///
-/// Pins the current emission shape for DateTime/Duration/TimeSpan
-/// arithmetic across the common reachable program forms. The audit recorded
-/// in this test discovered that the retarget code in
-/// `compiler/expressions/binary_ops.rs` temporal branches (`+` at L750-771,
-/// `-` at L1049-1072) guards on `infer_expr_type` returning a temporal
-/// display name, but that guard does not fire for real programs today:
+/// Replaces `test_r5_3a_datetime_arithmetic_fallback_baseline` (the R5.3A
+/// baseline that pinned the pre-fix `AddDynamic` / `SubDynamic` emission).
+/// After R5.3B the compiler's temporal retarget fires uniformly:
 ///
-///   - Literal-only expressions (`@"..." + 3d`) are constant-folded by the
-///     `EvalDateTimeExpr` + Duration-constant pipeline and never reach the
-///     binary-op compiler. They emit `[PushConst, BuiltinCall]` with no
-///     opcode for the `+` at all.
-///   - Let-local bindings (`let dt = @"..."; dt + dur`) lose the temporal
-///     display name through the tracker; the retarget declines and the Add
-///     branch falls through to `AddDynamic`. Same for typed function
-///     parameters (`fn test(dt: DateTime, dur: Duration) { dt + dur }`) —
-///     the type-inference call from `binary_ops.rs` does not see the
-///     parameter annotations as `"DateTime"` / `"Duration"` and the
-///     retarget declines.
+///   - `compile_expr_datetime` and `compile_expr_duration` now publish the
+///     temporal display name on `last_expr_type_info`, so
+///     `propagate_assignment_type_to_slot` records `"DateTime"` or
+///     `"Duration"` on let-locals bound to temporal literals.
+///   - `infer_expr_type` consults the compiler's `type_tracker` for
+///     `Expr::Identifier` and returns the temporal display name whenever
+///     the local/module-binding tracker records it, covering both typed
+///     function parameters (populated via
+///     `tracked_type_name_from_annotation`) and let-locals (populated via
+///     the new `propagate_assignment_type_to_slot` arm).
 ///
-/// The consequence: the temporal arms in `try_heap_arithmetic` at
-/// `executor/arithmetic/mod.rs:~L1523-L1577` are the live execution path
-/// for all DateTime/TimeSpan arithmetic today. The end-to-end semantics
-/// are correct (see `compiler/expressions/temporal.rs` execution tests
-/// `test_datetime_plus_duration_days`, `test_datetime_minus_duration`,
-/// `test_datetime_subtraction_yields_timespan`), but the v2 endgame
-/// wants this off the dynamic fallback.
+/// With those two fixes the retarget guards at
+/// `compiler/expressions/binary_ops.rs:750-771` (Add) and `:1049-1072`
+/// (Sub) fire for every reachable DateTime / Duration arithmetic shape
+/// and emit `CallMethod("add")` / `CallMethod("sub")`. The five temporal
+/// arms in `executor/arithmetic/mod.rs::try_heap_arithmetic` are now
+/// unreachable for any program these assertions can reach.
 ///
-/// Audit decision (Option C / hybrid, no new opcodes in R5.3A):
-///   - The `CallMethod` retarget mechanism is already wired to the
-///     PHF-backed method handlers in
-///     `executor/objects/datetime_methods.rs`. The retarget path is
-///     semantically complete; it just doesn't fire. R5.2A's precedent
-///     (`CallMethod` + `TypedMethodCall` covers user-trait dispatch)
-///     applies to temporal dispatch verbatim.
-///   - Adding new opcodes here would duplicate what `CallMethod` already
-///     does. R5.3B closes the gap by either (a) propagating temporal
-///     types through let-locals and typed params so the existing
-///     retarget fires uniformly, or (b) adding heap-pointer-typed
-///     opcodes that bypass `infer_expr_type` and dispatch on the heap
-///     kind directly.
-///
-/// This test pins all three reachable forms — both the retarget gap and
-/// the observable fallback opcodes. When R5.3B lands, each assertion will
-/// need to flip to require `CallMethod` and reject `AddDynamic` /
-/// `SubDynamic`.
+/// The three cases mirror the R5.3A baseline shapes: let-locals +
+/// literals, typed params with `DateTime - Duration`, typed params with
+/// `DateTime - DateTime`. Each asserts `CallMethod` is emitted and that
+/// the dynamic-fallback opcode is absent.
 ///
 /// Reference: `/home/dev/.claude/plans/v2-residuals-closeout.md` §R5.3.
+
 #[test]
-fn test_r5_3a_datetime_arithmetic_fallback_baseline() {
-    // Case 1: DateTime + Duration via let-locals. The compiler emits
-    // `AddDynamic` today; the fallback's temporal arm executes the add.
+fn test_r5_3b_datetime_arithmetic_retargets_to_call_method() {
+    // Case 1: DateTime + Duration via let-locals. After R5.3B the
+    // temporal-literal initializers populate the local tracker with
+    // `"DateTime"` / `"Duration"`, and `infer_expr_type` reads them back
+    // through the tracker for the `dt + dur` identifier references so the
+    // retarget fires.
     {
         let program = compile(
             r#"
@@ -404,19 +389,24 @@ fn test_r5_3a_datetime_arithmetic_fallback_baseline() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            ops.contains(&OpCode::AddDynamic),
-            "R5.3A baseline: let-local DateTime + Duration should emit \
-             AddDynamic today (the retarget gap R5.3B will close). If this \
-             assertion fails, R5.3B has landed — flip to reject AddDynamic \
-             and require CallMethod. Ops emitted: {:?}",
+            !ops.contains(&OpCode::AddDynamic),
+            "R5.3B regression: let-local DateTime + Duration fell through \
+             to AddDynamic instead of retargeting to CallMethod. \
+             Ops emitted: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::CallMethod),
+            "R5.3B regression: let-local DateTime + Duration did not emit \
+             CallMethod. Ops emitted: {:?}",
             ops
         );
     }
 
-    // Case 2: DateTime - Duration via typed function parameters. Today this
-    // also falls through to `SubDynamic` because `infer_expr_type` on the
-    // identifier references does not surface the param annotations as
-    // `"DateTime"` / `"Duration"` display names.
+    // Case 2: DateTime - Duration via typed function parameters. Param
+    // annotations seed the tracker via `tracked_type_name_from_annotation`
+    // in `compile_function`, so `infer_expr_type` finds `"DateTime"` /
+    // `"Duration"` for the identifiers and the Sub retarget fires.
     {
         let program = compile(
             r#"
@@ -428,16 +418,22 @@ fn test_r5_3a_datetime_arithmetic_fallback_baseline() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            ops.contains(&OpCode::SubDynamic),
-            "R5.3A baseline: annotated DateTime - Duration should emit \
-             SubDynamic today (retarget gap). Flip to reject SubDynamic and \
-             require CallMethod once R5.3B lands. Ops emitted: {:?}",
+            !ops.contains(&OpCode::SubDynamic),
+            "R5.3B regression: typed-param DateTime - Duration fell through \
+             to SubDynamic instead of retargeting to CallMethod. \
+             Ops emitted: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::CallMethod),
+            "R5.3B regression: typed-param DateTime - Duration did not emit \
+             CallMethod. Ops emitted: {:?}",
             ops
         );
     }
 
     // Case 3: DateTime - DateTime via typed function parameters. Yields a
-    // Duration/TimeSpan through the fallback today.
+    // Duration/TimeSpan via `datetime_sub_v2` through CallMethod.
     {
         let program = compile(
             r#"
@@ -449,9 +445,16 @@ fn test_r5_3a_datetime_arithmetic_fallback_baseline() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            ops.contains(&OpCode::SubDynamic),
-            "R5.3A baseline: DateTime - DateTime should emit SubDynamic \
-             today. Flip once R5.3B lands. Ops emitted: {:?}",
+            !ops.contains(&OpCode::SubDynamic),
+            "R5.3B regression: typed-param DateTime - DateTime fell through \
+             to SubDynamic instead of retargeting to CallMethod. \
+             Ops emitted: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::CallMethod),
+            "R5.3B regression: typed-param DateTime - DateTime did not emit \
+             CallMethod. Ops emitted: {:?}",
             ops
         );
     }

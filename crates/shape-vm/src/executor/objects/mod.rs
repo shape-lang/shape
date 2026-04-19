@@ -1059,8 +1059,14 @@ impl VirtualMachine {
                             self.dispatch_method_handler(handler, raw_args, ctx)?;
                         }
                         Some(HeapValue::Temporal(shape_value::TemporalData::TimeSpan(_))) => {
-                            // TimeSpan has operator methods (add, sub) — look in DATETIME_METHODS
-                            let handler = method_registry::DATETIME_METHODS
+                            // R5.3B: TimeSpan operator methods (add, sub) live in
+                            // TIMESPAN_METHODS. Previously this arm looked them up
+                            // in DATETIME_METHODS, which only happened to be
+                            // unreachable because the compiler never emitted
+                            // CallMethod for TimeSpan + TimeSpan. R5.3B's
+                            // retarget does emit CallMethod, so route to the
+                            // correct PHF map.
+                            let handler = method_registry::TIMESPAN_METHODS
                                 .get(method_name.as_str())
                                 .ok_or_else(|| {
                                     VMError::RuntimeError(format!(
