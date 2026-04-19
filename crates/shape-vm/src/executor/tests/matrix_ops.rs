@@ -342,58 +342,12 @@ fn test_matrix_inverse() {
 // Arithmetic operators
 // ============================================================
 
-#[test]
-fn test_matrix_add() {
-    // [[1,2],[3,4]] + [[5,6],[7,8]] => [[6,8],[10,12]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(&mat.data[..], &[6.0, 8.0, 10.0, 12.0]);
-}
-
-#[test]
-fn test_matrix_sub() {
-    // [[5,6],[7,8]] - [[1,2],[3,4]] => [[4,4],[4,4]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::SubDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(&mat.data[..], &[4.0, 4.0, 4.0, 4.0]);
-}
-
-#[test]
-fn test_matrix_matmul() {
-    // [[1,2],[3,4]] * [[5,6],[7,8]] => [[19,22],[43,50]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(mat.rows, 2);
-    assert_eq!(mat.cols, 2);
-    assert_eq!(&mat.data[..], &[19.0, 22.0, 43.0, 50.0]);
-}
+// R5.6: `Mat+Mat`, `Mat-Mat`, `Mat*Mat` via the dynamic-fallback match
+// arms were deleted because the compiler retargets those shapes to
+// `BuiltinCall(IntrinsicMat*)` at compile time (R5.4E). Runtime coverage
+// is provided end-to-end by `test_r5_4e_mat_add_runtime_returns_correct_values`
+// and the kernel-level tests in
+// `shape-runtime::intrinsics::matrix_kernels::tests`.
 
 #[test]
 fn test_matrix_scale_right() {
@@ -453,41 +407,9 @@ fn test_matrix_matvec() {
 // Non-square matrix operations
 // ============================================================
 
-#[test]
-fn test_matrix_matmul_non_square() {
-    // (2x3) * (3x2) => (2x2)
-    // [[1,2,3],[4,5,6]] * [[1,2],[3,4],[5,6]] => [[22,28],[49,64]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x3()),
-        Constant::Value(test_matrix_3x2()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(mat.rows, 2);
-    assert_eq!(mat.cols, 2);
-    assert_eq!(&mat.data[..], &[22.0, 28.0, 49.0, 64.0]);
-}
-
-#[test]
-fn test_matrix_dimension_mismatch_add() {
-    // 2x3 + 2x2 => error
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x3()),
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-    ];
-    let result = execute_bytecode(instructions, constants);
-    assert!(result.is_err());
-}
+// R5.6: `Mat*Mat` non-square and `Mat+Mat` dimension-mismatch tests were
+// deleted alongside the arms they exercised. Coverage now lives in the
+// kernel tests (`shape-runtime::intrinsics::matrix_kernels::tests`).
 
 #[test]
 fn test_matrix_row_negative_index() {

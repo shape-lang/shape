@@ -100,89 +100,13 @@ fn test_new_typed_array_mixed_falls_back() {
     assert!(result.to_array_arc().is_some());
 }
 
-// ===== SIMD Arithmetic: Vec + Vec =====
-
-#[test]
-fn test_float_array_add() {
-    // [1.0, 2.0, 3.0] + [4.0, 5.0, 6.0] = [5.0, 7.0, 9.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::Value(float_array(&[4.0, 5.0, 6.0])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[5.0, 7.0, 9.0]);
-}
-
-#[test]
-fn test_int_array_add() {
-    // Vec<int> [10, 20, 30] + [1, 2, 3] = [11, 22, 33]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[10, 20, 30])),
-        Constant::Value(int_array(&[1, 2, 3])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_int_array().unwrap();
-    assert_eq!(arr.as_slice(), &[11, 22, 33]);
-}
-
-#[test]
-fn test_float_array_sub() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::SubDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[10.0, 20.0, 30.0])),
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[9.0, 18.0, 27.0]);
-}
-
-#[test]
-fn test_float_array_mul() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[2.0, 3.0, 4.0])),
-        Constant::Value(float_array(&[5.0, 6.0, 7.0])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[10.0, 18.0, 28.0]);
-}
-
-#[test]
-fn test_float_array_div() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::DivDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[10.0, 20.0, 30.0])),
-        Constant::Value(float_array(&[2.0, 4.0, 5.0])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[5.0, 5.0, 6.0]);
-}
+// R5.6: `Vec<number> +/-/*// Vec<number>` and `Vec<int> + Vec<int>` via
+// the dynamic-fallback match arms were deleted because the compiler
+// retargets those shapes to `BuiltinCall(IntrinsicVec*)` at compile time
+// (R5.4E). The retarget emission is pinned by
+// `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` in
+// `operator_overload.rs`; the kernel semantics are covered by
+// `shape-runtime::intrinsics::vector::tests` (incl. overflow tests).
 
 // ===== SIMD Arithmetic: Vec * scalar broadcast =====
 

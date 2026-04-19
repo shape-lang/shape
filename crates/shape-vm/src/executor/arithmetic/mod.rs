@@ -2,35 +2,38 @@
 //!
 //! Handles: Add, Sub, Mul, Div, Mod, Neg, Pow
 //!
-//! # Dynamic fallback
+//! # Dynamic fallback (post-R5.6)
 //!
-//! The [`exec_arithmetic_dynamic_fallback`] handler only services the
-//! `*Dynamic` opcodes (`AddDynamic`, `SubDynamic`, ...). The V3 compiler
-//! migration (see `crates/shape-runtime/src/compiler/expressions/binary_ops.rs`
-//! `emit_binary_op`) routes every compiled arithmetic site through a shim that
-//! emits typed opcodes when the compiler can prove both operand types. The
-//! only remaining emitters of the Dynamic variants are the three
-//! class-(a)/(b) sites audited in commit `c1d7727` (V3.6):
+//! After R5.6, [`exec_arithmetic_dynamic_fallback`] handles only
+//! legitimately-dynamic arithmetic: polyglot values, comptime unresolved
+//! types, and unresolved type-vars / mixed-type arithmetic. Every typed
+//! shape has a direct compile-time retarget:
 //!
-//! - polyglot boundaries where a foreign-language value (Python/TypeScript)
-//!   materialises as a `ValueWord` without a Shape static type;
-//! - `comptime` expressions whose operand types are only known at comptime
-//!   evaluation;
-//! - certain prelude/pattern paths that still fall through to the dynamic
-//!   representation.
+//! - Int+Int / Number+Number / Decimal+Decimal → typed opcodes in
+//!   `exec_typed_arithmetic`.
+//! - Bitwise int+int → `BitAndInt` / `BitOrInt` / ... (R5.1).
+//! - User operator traits → `CallMethod` (R5.2).
+//! - DateTime / Duration / TimeSpan arithmetic (let-locals and typed
+//!   function parameters) → `CallMethod` into `datetime_methods.rs`
+//!   (R5.3). Untyped function returns of temporal values still land on
+//!   the fallback via the temporal arms in `try_heap_arithmetic`.
+//! - `Vec<number> +/-/*// Vec<number>`, `Vec<int> + Vec<int>`,
+//!   `Mat +/- Mat`, `Mat * Mat` → `BuiltinCall` intrinsics (R5.4).
+//! - `string + int/number/bool` (proved string LHS) → `StringConcatInt`
+//!   / `StringConcatNumber` / `StringConcatBool` (R5.5).
 //!
-//! No class-(c) compiler bugs remained after V3.6. Typed code never reaches
-//! the dispatch in this file. The handler name is suffixed `_dynamic_fallback`
-//! to make that contract visible at every call site.
+//! The handler name is suffixed `_dynamic_fallback` to make that
+//! contract visible at every call site.
+//!
+//! See §R5 in `/home/dev/.claude/plans/v2-residuals-closeout.md` and
+//! `/home/dev/.claude/plans/v2-nanbox-removal-plan.md` for context.
 //!
 //! # Typed path
 //!
 //! Typed opcodes (`AddInt`, `AddNumber`, `AddDecimal`, ...) live in
 //! `exec_typed_arithmetic`. That is the hot path for production code.
 //! Compact/width-parameterised opcodes (`AddTyped`, ...) live in
-//! `exec_compact_typed_arithmetic`. Operator-trait method dispatch and
-//! IC profiling helpers remain here because the Dynamic fallback still
-//! needs them for polyglot/comptime values.
+//! `exec_compact_typed_arithmetic`.
 
 use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
@@ -55,7 +58,7 @@ fn ic_tag(v: &ValueWord) -> u8 {
     }
 }
 
-/// Heap-typed binary op tag for the V4.3 `try_heap_arithmetic` helper.
+/// Heap-typed binary op tag for the `try_heap_arithmetic` helper.
 /// Distinct from `OpCode` because the helper only cares about the
 /// operator shape (Add/Sub/Mul/Div) and not about the dispatch-level
 /// Dynamic variant.
@@ -1258,22 +1261,22 @@ impl VirtualMachine {
 
     /// Dynamic arithmetic dispatch for `*Dynamic` opcodes only.
     ///
-    /// V4.3 collapsed state: after the V4.2 audit confirmed the Dynamic path
-    /// only fires from polyglot / comptime / operator-trait sites, this
-    /// handler was reduced from a 7x7 tag matrix (~1590 lines) down to a
-    /// typed-only dispatch. The supported operand domains are:
+    /// Post-R5.6: user operator traits, DateTime arithmetic, Matrix/Vec
+    /// arithmetic, and typed string+scalar concat are all retargeted at
+    /// compile time to dedicated opcodes / method dispatch / intrinsic
+    /// calls, so the Dynamic path is only reached for:
     ///
-    ///   * (int, int)           via `numeric_binary_result` / div / mod / pow
-    ///   * (f64, f64)
-    ///   * (decimal, decimal)
-    ///   * (string, string|char) on Add (concat)
-    ///   * user-defined `impl Add for T` trait dispatch (first-class feature)
+    ///   * (int, int) / (f64, f64) / (decimal, decimal) numeric
+    ///     arithmetic where the compiler could not prove types
+    ///     (polyglot / comptime / unresolved type-vars).
+    ///   * (string, string | char) concat on Add.
+    ///   * Live mixed-heap shapes that have no typed retarget yet:
+    ///     `Vec<int> + Vec<number>`, `Matrix * Vec<number>`, vector and
+    ///     matrix scalar-broadcasts.
+    ///   * The string+scalar residual paths documented on the heap-arm
+    ///     match below (flag-off / commutative / untyped-param).
     ///
-    /// Cross-type coercions (int+float, decimal+int, ...), SIMD Vec+Vec,
-    /// Matrix+Matrix, DateTime+TimeSpan, TypedObject struct-merge via
-    /// `__intersection_*`, BigInt heap-specials, and string+scalar coercion
-    /// were removed in V4.3 per the `foamy-eich` plan. See the V4.3 commit
-    /// body for the audit data that justified the deletion.
+    /// See the module-level docstring for the full R5 retarget set.
     #[inline(always)]
     pub(in crate::executor) fn exec_arithmetic_dynamic_fallback(
         &mut self,
@@ -1311,11 +1314,6 @@ impl VirtualMachine {
                 if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Add, &a_nb, &b_nb)? {
                     return self.push_raw_u64(result);
                 }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "add")?
-                {
-                    return self.push_raw_u64(result);
-                }
                 Err(VMError::RuntimeError(format!(
                     "Cannot apply '+' to {} and {}",
                     a_nb.type_name(),
@@ -1347,11 +1345,6 @@ impl VirtualMachine {
                     return self.push_raw_u64(result);
                 }
                 if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Sub, &a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "sub")?
-                {
                     return self.push_raw_u64(result);
                 }
                 Err(VMError::RuntimeError(format!(
@@ -1387,11 +1380,6 @@ impl VirtualMachine {
                 if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Mul, &a_nb, &b_nb)? {
                     return self.push_raw_u64(result);
                 }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "mul")?
-                {
-                    return self.push_raw_u64(result);
-                }
                 Err(VMError::RuntimeError(format!(
                     "Cannot apply '*' to {} and {}",
                     a_nb.type_name(),
@@ -1407,11 +1395,6 @@ impl VirtualMachine {
                 if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Div, &a_nb, &b_nb)? {
                     return self.push_raw_u64(result);
                 }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "div")?
-                {
-                    return self.push_raw_u64(result);
-                }
                 Err(VMError::RuntimeError(format!(
                     "Cannot apply '/' to {} and {}",
                     a_nb.type_name(),
@@ -1424,11 +1407,6 @@ impl VirtualMachine {
                 if let Some(result) = Self::numeric_mod_result(&a_nb, &b_nb)? {
                     return self.push_raw_u64(result);
                 }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "rem")?
-                {
-                    return self.push_raw_u64(result);
-                }
                 Err(VMError::RuntimeError(format!(
                     "Cannot apply '%' to {} and {}",
                     a_nb.type_name(),
@@ -1439,11 +1417,6 @@ impl VirtualMachine {
                 let b_nb = unwrap_annotated(self.pop_raw_u64()?);
                 let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 if let Some(result) = Self::numeric_pow_result(&a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) =
-                    self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "pow")?
-                {
                     return self.push_raw_u64(result);
                 }
                 Err(VMError::RuntimeError(format!(
@@ -1482,51 +1455,22 @@ impl VirtualMachine {
         Some(ValueWord::from_string(Arc::new(s)))
     }
 
-    /// Heap-typed arithmetic paths that the V4 collapse kept because they
-    /// back user-visible language features (DateTime+TimeSpan, Vec<T>+Vec<T>
-    /// SIMD, Matrix+Matrix, Matrix*Vec, string+scalar coercion). These are
-    /// shaped as `(HeapValue, HeapValue)` or `(HeapValue, scalar)` mixes and
-    /// are kept distinct from the pure-numeric `numeric_binary_result` fast
-    /// path because they need to inspect the heap variant.
+    /// Heap-typed arithmetic paths that remain live after R5.6.
     ///
-    /// The matrix cases are dispatched via an `op` tag rather than function
-    /// pointers so we can keep the bulky match bodies out of each arm while
-    /// still sharing a single allocation strategy.
+    /// After R5.1-R5.5 retargeted the load-bearing typed cases (typed
+    /// bitwise, user operator traits, DateTime, Matrix/Vec, string+scalar),
+    /// the only arms that still legitimately fire here are the ones the
+    /// compiler does not yet retarget:
     ///
-    /// ### R5.4 audit (Matrix / typed-vector arithmetic)
+    ///   * `Vec<int> + Vec<number>` / `Vec<number> + Vec<int>` — mixed-
+    ///     kind promotion, not in R5.4's retarget set.
+    ///   * `Matrix * Vec<number>` — mixed heap-kind dispatch.
+    ///   * `Vec<number> op scalar` / `scalar op Vec<number>` broadcast.
+    ///   * `Matrix * scalar` / `scalar * Matrix` broadcast.
+    ///   * `string + scalar` residual paths (flag-off, commutative
+    ///     `scalar + string`, and untyped-param sites); see R5.5.
     ///
-    /// All Matrix/Vec arithmetic shapes covered by R5.4A's baseline are
-    /// now retargeted; these arms are unreachable. See R5.4F annotations.
-    ///
-    /// The temporal arms above (annotated with R5.3B cleanup markers) are
-    /// unreachable after the R5.3B retarget. After R5.4E the compiler
-    /// retargets the 7 Matrix/Vec arithmetic shapes identified by R5.4A
-    /// — `Mat + Mat`, `Mat - Mat`, `Mat * Mat`,
-    /// `Vec<number> +/-/*// Vec<number>`, and `Vec<int> + Vec<int>` — to
-    /// intrinsic `BuiltinCall`s at compile time via
-    /// `compiler/expressions/matrix_ops.rs::try_compile_typed_matrix_arithmetic`
-    /// and `try_compile_typed_vec_arithmetic`, bypassing
-    /// `exec_arithmetic_dynamic_fallback` entirely. The corresponding arms
-    /// in this function are therefore unreachable and are annotated with
-    /// R5.4F cleanup markers; deletion is owned by R5.6.
-    ///
-    /// The remaining live arms — `Vec<int>+Vec<number>` promotion,
-    /// `Vec<number>+Vec<int>` promotion, `Matrix * Vec<number>`,
-    /// `Vec<number> op scalar`, `Matrix op scalar`, `scalar op Vec<number>`,
-    /// `scalar * Matrix`, and `string + scalar` — are NOT covered by the
-    /// R5.4A/R5.4E retarget set and continue to execute here when the
-    /// compiler falls through to `AddDynamic` / `SubDynamic` /
-    /// `MulDynamic` / `DivDynamic`. Retargeting those is outside R5.4's
-    /// scope.
-    ///
-    /// The R5.4E regression test
-    /// `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic` in
-    /// `executor/tests/operator_overload.rs` pins the retarget emission
-    /// and rejects `AddDynamic` / `SubDynamic` / `MulDynamic` /
-    /// `DivDynamic` for the 7 retargeted shapes; if that test fails,
-    /// these arms may have become live again and R5.4E has regressed.
-    ///
-    /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.4.
+    /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.6.
     fn try_heap_arithmetic(
         &mut self,
         op: HeapBinOp,
@@ -1536,38 +1480,15 @@ impl VirtualMachine {
         use HeapBinOp::*;
         let ah = unsafe { raw_helpers::extract_heap_ref(a.raw_bits()) };
         let bh = unsafe { raw_helpers::extract_heap_ref(b.raw_bits()) };
-        // Case 1: both heap.
+        // Case 1: both heap — remaining live mixed-kind shapes.
         if let (Some(ah), Some(bh)) = (ah, bh) {
             match (op, ah, bh) {
-                // DateTime + TimeSpan / TimeSpan + DateTime / TimeSpan +/- TimeSpan
+                // DateTime +/- TimeSpan / TimeSpan +/- TimeSpan / DateTime - DateTime.
                 //
-                // Unreachable after R5.3B; retained until R5.6 cleanup audit.
-                // The compiler's temporal retarget at
-                // `compiler/expressions/binary_ops.rs:750-771` (Add) and
-                // `:1049-1072` (Sub) now fires uniformly for literal,
-                // let-local, and typed-parameter DateTime / Duration /
-                // TimeSpan arithmetic because `infer_expr_type` consults
-                // the compiler's `type_tracker` for `Expr::Identifier` and
-                // `compile_expr_datetime` / `compile_expr_duration`
-                // populate `last_expr_type_info` so
-                // `propagate_assignment_type_to_slot` records the temporal
-                // display name on let-locals. Dispatch goes through
-                // `CallMethod("add")` / `CallMethod("sub")` into the
-                // PHF-backed handlers in
-                // `executor/objects/datetime_methods.rs`
-                // (`datetime_add_v2`, `datetime_sub_v2`, `timespan_add_v2`,
-                // `timespan_sub_v2`) — mirroring R5.2's user-op retarget.
-                //
-                // These arms remain present for symmetry with the rest of
-                // the dynamic-fallback match and because deleting them is
-                // outside R5.3B's scope (the remaining `*Dynamic` fallback
-                // wiring is collectively owned by R5.6). The R5.3B
-                // regression test
-                // `test_r5_3b_datetime_arithmetic_retargets_to_call_method`
-                // in `executor/tests/operator_overload.rs` pins the
-                // retarget emission and rejects `AddDynamic` / `SubDynamic`
-                // for DateTime arithmetic; if that test fails, these arms
-                // may have become live again and R5.3B has regressed.
+                // R5.3B's typed-retarget fires for let-locals and typed function
+                // parameters, but not for untyped function returns (where
+                // `make_dt()` returns a DateTime without the compiler tracking
+                // the return type). These arms catch that residual case.
                 (
                     Add,
                     HeapValue::Temporal(TemporalData::DateTime(dt)),
@@ -1620,84 +1541,6 @@ impl VirtualMachine {
                     })?;
                     return Ok(Some(ValueWord::from_timespan(out)));
                 }
-                // Vec<number> SIMD binary.
-                //
-                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
-                // `Vec<number> + Vec<number>`, `Vec<number> - Vec<number>`,
-                // `Vec<number> * Vec<number>`, and `Vec<number> / Vec<number>`
-                // are retargeted at compile time to
-                // `BuiltinCall(IntrinsicVecAdd / IntrinsicVecSub /
-                // IntrinsicVecMul / IntrinsicVecDiv)` via
-                // `try_compile_typed_vec_arithmetic` in
-                // `compiler/expressions/matrix_ops.rs`, so the
-                // `AddDynamic` / `SubDynamic` / `MulDynamic` / `DivDynamic`
-                // fallback no longer reaches this arm for reachable program
-                // forms. Pinned by
-                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
-                // in `executor/tests/operator_overload.rs`. Deletion owned
-                // by R5.6.
-                (
-                    _,
-                    HeapValue::TypedArray(TypedArrayData::F64(a_arr)),
-                    HeapValue::TypedArray(TypedArrayData::F64(b_arr)),
-                ) => {
-                    if a_arr.len() != b_arr.len() {
-                        return Err(VMError::RuntimeError(format!(
-                            "Vec<number> length mismatch: {} vs {}",
-                            a_arr.len(),
-                            b_arr.len()
-                        )));
-                    }
-                    let out = match op {
-                        Add => shape_runtime::intrinsics::vector::simd_vec_add_f64(
-                            a_arr.as_slice(), b_arr.as_slice(),
-                        ),
-                        Sub => shape_runtime::intrinsics::vector::simd_vec_sub_f64(
-                            a_arr.as_slice(), b_arr.as_slice(),
-                        ),
-                        Mul => shape_runtime::intrinsics::vector::simd_vec_mul_f64(
-                            a_arr.as_slice(), b_arr.as_slice(),
-                        ),
-                        Div => shape_runtime::intrinsics::vector::simd_vec_div_f64(
-                            a_arr.as_slice(), b_arr.as_slice(),
-                        ),
-                        _ => return Ok(None),
-                    };
-                    return Ok(Some(ValueWord::from_float_array(Arc::new(out.into()))));
-                }
-                // Vec<int> + Vec<int>.
-                //
-                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
-                // `Vec<int> + Vec<int>` is retargeted at compile time to
-                // `BuiltinCall(IntrinsicVecAddI64)` via
-                // `try_compile_typed_vec_arithmetic` in
-                // `compiler/expressions/matrix_ops.rs`, so the `AddDynamic`
-                // fallback no longer reaches this arm for reachable program
-                // forms. Pinned by
-                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
-                // in `executor/tests/operator_overload.rs`. Deletion owned
-                // by R5.6.
-                (
-                    Add,
-                    HeapValue::TypedArray(TypedArrayData::I64(a_arr)),
-                    HeapValue::TypedArray(TypedArrayData::I64(b_arr)),
-                ) => {
-                    if a_arr.len() != b_arr.len() {
-                        return Err(VMError::RuntimeError(format!(
-                            "Vec<int> length mismatch: {} vs {}",
-                            a_arr.len(),
-                            b_arr.len()
-                        )));
-                    }
-                    match shape_runtime::intrinsics::vector::simd_vec_add_i64(
-                        a_arr.as_slice(), b_arr.as_slice(),
-                    ) {
-                        Ok(r) => return Ok(Some(ValueWord::from_int_array(Arc::new(r.into())))),
-                        Err(()) => return Err(VMError::RuntimeError(
-                            "Integer overflow in Vec<int> element-wise addition".into(),
-                        )),
-                    }
-                }
                 // Vec<int> + Vec<number> / Vec<number> + Vec<int> — promote to f64
                 (
                     Add,
@@ -1726,49 +1569,6 @@ impl VirtualMachine {
                     let bf = shape_runtime::intrinsics::vector::i64_slice_to_f64(b_arr.as_slice());
                     let r = shape_runtime::intrinsics::vector::simd_vec_add_f64(a_arr.as_slice(), &bf);
                     return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                }
-                // Matrix + Matrix / Matrix - Matrix / Matrix * Matrix.
-                //
-                // Unreachable after R5.4E; retained until R5.6 cleanup audit.
-                // `Mat + Mat` and `Mat - Mat` are retargeted at compile time
-                // to `BuiltinCall(IntrinsicMatAdd / IntrinsicMatSub)` via
-                // `try_compile_typed_matrix_arithmetic`; `Mat * Mat` is
-                // retargeted to `BuiltinCall(IntrinsicMatMulMat)` via
-                // `try_compile_typed_matrix_mul` (in place since pre-R5.4,
-                // newly exercised by the R5.4E hook ordering). All three
-                // live in `compiler/expressions/matrix_ops.rs`. The
-                // `AddDynamic` / `SubDynamic` / `MulDynamic` fallback no
-                // longer reaches these arms for reachable program forms.
-                // Pinned by
-                // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsic`
-                // in `executor/tests/operator_overload.rs`. Deletion owned
-                // by R5.6.
-                (
-                    Add,
-                    HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)),
-                    HeapValue::TypedArray(TypedArrayData::Matrix(b_mat)),
-                ) => {
-                    let r = shape_runtime::intrinsics::matrix_kernels::matrix_add(a_mat, b_mat)
-                        .map_err(VMError::RuntimeError)?;
-                    return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
-                }
-                (
-                    Sub,
-                    HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)),
-                    HeapValue::TypedArray(TypedArrayData::Matrix(b_mat)),
-                ) => {
-                    let r = shape_runtime::intrinsics::matrix_kernels::matrix_sub(a_mat, b_mat)
-                        .map_err(VMError::RuntimeError)?;
-                    return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
-                }
-                (
-                    Mul,
-                    HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)),
-                    HeapValue::TypedArray(TypedArrayData::Matrix(b_mat)),
-                ) => {
-                    let r = shape_runtime::intrinsics::matrix_kernels::matrix_matmul(a_mat, b_mat)
-                        .map_err(VMError::RuntimeError)?;
-                    return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
                 }
                 // Matrix * Vec<number>
                 (
@@ -1812,21 +1612,17 @@ impl VirtualMachine {
                         return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
                     }
                 }
-                // R5.5: string + scalar — number/int concat.
+                // string + scalar (int/number) concat.
                 //
-                // Unreachable after R5.5 for proved `string` LHS + `int`
-                // / `number` / `bool` RHS: the compiler emits dedicated
-                // `StringConcatInt` / `StringConcatNumber` /
-                // `StringConcatBool` opcodes (see
-                // `compiler/expressions/binary_ops.rs` R5.5 block).
-                //
-                // Retained until R5.6 cleanup audit. Still reachable by:
+                // R5.5 retargeted the proved `string` LHS + `int` / `number`
+                // / `bool` RHS path to dedicated `StringConcatInt` /
+                // `StringConcatNumber` / `StringConcatBool` opcodes. This
+                // arm remains reachable for:
                 //   - `SHAPE_V2_STRING_COERCE_CONCAT=0` (flag-off fallback).
                 //   - Commutative `scalar + string` (typed path only covers
                 //     string-LHS).
                 //   - Paths where the compiler fails to resolve the operand
-                //     type name (e.g. untyped function params, certain
-                //     generic contexts).
+                //     type name (untyped params / certain generic contexts).
                 (Add, HeapValue::String(s)) => {
                     if let Some(i) = b.as_i64() {
                         return Ok(Some(ValueWord::from_string(Arc::new(format!("{}{}", s, i)))));
@@ -1916,70 +1712,6 @@ impl VirtualMachine {
         self.push_raw_u64(ValueWord::from_i64(!a_int))
     }
 
-    // ---------------------------------------------------------------
-    // Operator trait fallback helpers
-    // ---------------------------------------------------------------
-
-    /// Get the user-facing type name for a value, resolving TypedObject schema names.
-    fn operator_type_name(&self, val: &ValueWord) -> String {
-        if let Some((schema_id, _, _)) = val.as_typed_object() {
-            if let Some(schema) = self.lookup_schema(schema_id as u32) {
-                return schema.name.clone();
-            }
-        }
-        val.type_name().to_string()
-    }
-
-    /// Try to dispatch a binary operator via trait method.
-    /// Looks up `TypeName::method_name` in the function name index and calls it.
-    /// Returns Ok(Some(result)) on success, Ok(None) if no impl found.
-    ///
-    /// Unreachable after R5.2B; retained until R5.6 cleanup audit.
-    /// Every user-defined operator trait call (Add/Sub/Mul/Div/Ord) is now
-    /// retargeted to `CallMethod` at compile time via `try_emit_trait_dispatch`
-    /// in `compiler/expressions/binary_ops.rs`. The `*Dynamic` opcode paths
-    /// still call this helper, but for user-op inputs the call site is no
-    /// longer reached — the helper returns `None` for any built-in type name
-    /// that happens to arrive here. Deletion is owned by R5.6.
-    #[allow(dead_code)]
-    fn try_binary_operator_trait(
-        &mut self,
-        a: ValueWord,
-        b: ValueWord,
-        method_name: &str,
-    ) -> Result<Option<ValueWord>, VMError> {
-        let type_name = self.operator_type_name(&a);
-        let fn_name = format!("{}::{}", type_name, method_name);
-        let func_idx = match self.function_name_index.get(&fn_name) {
-            Some(&idx) => idx,
-            None => return Ok(None),
-        };
-        // Push args: self, other
-        self.push_raw_u64(a)?;
-        self.push_raw_u64(b)?;
-        self.call_function_from_stack(func_idx, 2)?;
-        let result = self.pop_raw_u64()?;
-        Ok(Some(result))
-    }
-
-    /// Try to dispatch a unary operator via trait method.
-    /// Returns Ok(Some(result)) on success, Ok(None) if no impl found.
-    fn try_unary_operator_trait(
-        &mut self,
-        val: ValueWord,
-        method_name: &str,
-    ) -> Result<Option<ValueWord>, VMError> {
-        let type_name = self.operator_type_name(&val);
-        let fn_name = format!("{}::{}", type_name, method_name);
-        let func_idx = match self.function_name_index.get(&fn_name) {
-            Some(&idx) => idx,
-            None => return Ok(None),
-        };
-        self.push_raw_u64(val)?;
-        self.call_function_from_stack(func_idx, 1)?;
-        let result = self.pop_raw_u64()?;
-        Ok(Some(result))
-    }
 }
 
 #[cfg(test)]
