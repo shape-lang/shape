@@ -14,9 +14,16 @@ use super::numeric_ops::{
     type_display_name, typed_opcode_for,
 };
 
-/// Map a strict arithmetic BinaryOp to its operator trait name, if one exists.
+/// Map a BinaryOp to its operator trait name, if one exists.
+///
+/// R5.2B: `Add` is included so `try_emit_trait_dispatch` covers the Add
+/// branch's `CoercedNeedsGeneric | NoPlan` fallback uniformly with the
+/// strict-arithmetic path. The other three strict-arithmetic callers
+/// (L1092, L1192, L1229) are gated by `is_strict_arithmetic(op)` which
+/// excludes Add, so they remain unaffected.
 fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
     match op {
+        BinaryOp::Add => Some("Add"),
         BinaryOp::Sub => Some("Sub"),
         BinaryOp::Mul => Some("Mul"),
         BinaryOp::Div => Some("Div"),
@@ -865,42 +872,41 @@ impl BytecodeCompiler {
                             self.last_expr_schema = None;
                         }
                         NumericEmitResult::CoercedNeedsGeneric | NumericEmitResult::NoPlan => {
-                            // Runtime-dispatched fallback for unresolvable operand
-                            // types. The VM's exec_arithmetic handles type dispatch
-                            // (numeric, string concat, DateTime, etc.) at runtime.
+                            // R5.2B: retarget user-defined `impl Add for T` to
+                            // `CallMethod` at compile time, mirroring the
+                            // symmetric strict-arithmetic path at L1230-1244 and
+                            // the numeric-declined paths at L1260/L1279. Uses
+                            // `left_schema` captured at L646. When the helper
+                            // emits `CallMethod`, we skip the dynamic fallthrough
+                            // so that `exec_arithmetic_dynamic_fallback::
+                            // try_binary_operator_trait` is never reached for
+                            // user-op Add. No new opcode is required; CallMethod
+                            // with `Operand::TypedMethodCall` already dispatches
+                            // to user impl methods via the function_name_index
+                            // (see `executor/objects/mod.rs::op_call_method`,
+                            // L1427-L1458).
                             //
-                            // V3.2 (Tranche A): route through the `emit_binary_op`
-                            // shim. Operand kinds are `Unknown` because the typed
-                            // Add-numeric path above has already declined for this
-                            // operand pair; the shim then emits `AddDynamic`.
-                            // V3.6 audit: class-(a) fallback — reached when an
-                            // operand is non-numeric (DateTime, mixed string, or
-                            // polyglot value), so dispatch legitimately happens
-                            // at runtime in `exec_arithmetic`.
-                            //
-                            // R5.2A audit: this Add-specific fallback is the one
-                            // remaining site where user-defined `impl Add for T`
-                            // can still funnel through `exec_arithmetic_dynamic_
-                            // fallback::try_binary_operator_trait` at runtime.
-                            // The symmetric strict-arithmetic path below (and the
-                            // numeric-declined paths at ~L1244/L1263) already call
-                            // `try_emit_trait_dispatch` to retarget to CallMethod.
-                            // R5.2B will insert the same `try_emit_trait_dispatch`
-                            // call HERE — using the `left_schema` captured above
-                            // (L646) — before `emit_binary_op`, so that
-                            // `impl Add for Vec2` compiles to `CallMethod` in this
-                            // branch as well. No new opcode is required; CallMethod
-                            // with `Operand::TypedMethodCall` already dispatches to
-                            // user impl methods via the function_name_index (see
-                            // `executor/objects/mod.rs::op_call_method`, L1427-L1458).
-                            use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-                            let _ = emit_binary_op(
-                                self,
-                                BinaryOp::Add,
-                                BinOperandKind::Unknown,
-                                BinOperandKind::Unknown,
-                            )
-                            .expect("emit_binary_op never returns Err for BinaryOp::Add");
+                            // When the helper declines (no schema / no matching
+                            // impl), fall through to the runtime-dispatched
+                            // `AddDynamic` below. That path remains legitimate
+                            // for non-numeric operand combinations (DateTime,
+                            // mixed string, polyglot value) where dispatch
+                            // happens at runtime in `exec_arithmetic`.
+                            if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left) {
+                                // V3.2 (Tranche A): route through the
+                                // `emit_binary_op` shim. Operand kinds are
+                                // `Unknown` because the typed Add-numeric path
+                                // above has already declined for this operand
+                                // pair; the shim then emits `AddDynamic`.
+                                use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+                                let _ = emit_binary_op(
+                                    self,
+                                    BinaryOp::Add,
+                                    BinOperandKind::Unknown,
+                                    BinOperandKind::Unknown,
+                                )
+                                .expect("emit_binary_op never returns Err for BinaryOp::Add");
+                            }
                         }
                     }
                 }

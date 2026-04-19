@@ -1815,6 +1815,15 @@ impl VirtualMachine {
     /// Try to dispatch a binary operator via trait method.
     /// Looks up `TypeName::method_name` in the function name index and calls it.
     /// Returns Ok(Some(result)) on success, Ok(None) if no impl found.
+    ///
+    /// Unreachable after R5.2B; retained until R5.6 cleanup audit.
+    /// Every user-defined operator trait call (Add/Sub/Mul/Div/Ord) is now
+    /// retargeted to `CallMethod` at compile time via `try_emit_trait_dispatch`
+    /// in `compiler/expressions/binary_ops.rs`. The `*Dynamic` opcode paths
+    /// still call this helper, but for user-op inputs the call site is no
+    /// longer reached — the helper returns `None` for any built-in type name
+    /// that happens to arrive here. Deletion is owned by R5.6.
+    #[allow(dead_code)]
     fn try_binary_operator_trait(
         &mut self,
         a: ValueWord,

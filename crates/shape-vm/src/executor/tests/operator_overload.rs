@@ -256,6 +256,88 @@ fn test_r5_2a_user_add_compiles_to_call_method_not_add_dynamic() {
     );
 }
 
+/// R5.2B regression test for the v2 residuals closeout plan.
+///
+/// Exercises the gap path closed by R5.2B: the Add branch's
+/// `NumericEmitResult::CoercedNeedsGeneric | NumericEmitResult::NoPlan`
+/// arm in `compiler/expressions/binary_ops.rs`. In R5.2A this arm fell
+/// through to `emit_binary_op(..., Unknown, Unknown, ...)` which emitted
+/// `AddDynamic`, so the user trait impl was only reached at runtime via
+/// `exec_arithmetic_dynamic_fallback::try_binary_operator_trait`. R5.2B
+/// retargets this arm to `CallMethod` at compile time.
+///
+/// To reach the arm we need a program where only the LHS has a schema
+/// (the priority-1 both-schemas fast path at L665-684 does not fire) AND
+/// `emit_numeric_binary_with_coercion_trusted` returns `NoPlan`. The RHS
+/// is an identity-style function call `pick(b)`: because `pick` has an
+/// untyped parameter, its inferred return is a fresh type variable, and
+/// the call-site value carries no TypedObject schema. After
+/// `compile_expr(right)` the compiler's `last_expr_schema` is None,
+/// defeating the priority-1 fast path and forcing the NoPlan arm.
+///
+/// Verified by stashing just the `binary_ops.rs` change on top of R5.2A:
+/// this test failed with `AddDynamic` appearing in the instruction
+/// stream at the `a + pick(b)` site. With R5.2B applied it retargets to
+/// `CallMethod` and this test passes.
+///
+/// Reference: `/home/dev/.claude/plans/v2-residuals-closeout.md` §R5.2.
+#[test]
+fn test_r5_2b_user_add_retargets_single_schema_fallback() {
+    let program = compile(
+        r#"
+        type Vec2 { x: number, y: number }
+
+        impl Add for Vec2 {
+            method add(other: Vec2) -> Vec2 {
+                Vec2 { x: self.x + other.x, y: self.y + other.y }
+            }
+        }
+
+        // Identity-style function with an untyped parameter: its inferred
+        // return type is a free type variable (not a concrete schema), so
+        // the call-site value has no TypedObject schema attached.
+        fn pick(x) { return x }
+
+        let a = Vec2 { x: 1.0, y: 2.0 }
+        let b = Vec2 { x: 3.0, y: 4.0 }
+        // `pick(b)` returns a schema-less value at compile time: the
+        // identity return type is a fresh type variable, so after
+        // `compile_expr(right)` the compiler's `last_expr_schema` is None.
+        // This defeats the priority-1 both-schemas fast path at L665-684
+        // and forces the Add branch into the `CoercedNeedsGeneric | NoPlan`
+        // arm — the gap R5.2B closes. The R5.2B-inserted
+        // `try_emit_trait_dispatch` call then picks up `left_schema = Vec2`
+        // and retargets to `CallMethod("add")` at compile time.
+        let r = a + pick(b)
+    "#,
+    );
+
+    let ops = all_opcodes(&program);
+
+    // R5.2B: the single-schema fallback must now retarget to `CallMethod`
+    // at compile time, not fall through to `AddDynamic`. Scanning the
+    // whole instruction vector is safe: every `+` inside `Vec2::add`
+    // operates on proven-numeric operands and emits `AddNumber`; any
+    // `AddDynamic` would be the R5.2B gap regressing.
+    assert!(
+        !ops.contains(&OpCode::AddDynamic),
+        "R5.2B regression: Add branch's CoercedNeedsGeneric | NoPlan arm \
+         fell through to AddDynamic instead of retargeting to CallMethod. \
+         Ops emitted: {:?}",
+        ops
+    );
+
+    // `CallMethod` must appear at least once — for the top-level
+    // `a + { ... }` retargeted to `a.add(rhs)`.
+    let call_method_count = ops.iter().filter(|&&o| o == OpCode::CallMethod).count();
+    assert!(
+        call_method_count >= 1,
+        "R5.2B regression: no CallMethod emitted for the single-schema \
+         user-op Add fallback. Ops emitted: {:?}",
+        ops
+    );
+}
+
 #[test]
 fn test_operator_overload_without_trait_fails() {
     // Without implementing Sub, - on custom types should fail at compile time
