@@ -6,12 +6,52 @@ use shape_ast::ast::{Expr, UnaryOp};
 use shape_ast::error::Result;
 
 use super::super::BytecodeCompiler;
+use super::numeric_ops::inferred_type_to_numeric;
 
 impl BytecodeCompiler {
     /// Compile a unary operation expression
     pub(super) fn compile_expr_unary_op(&mut self, op: &UnaryOp, operand: &Expr) -> Result<()> {
         self.compile_expr(operand)?;
         match op {
+            UnaryOp::BitNot => {
+                // Phase R5.1C: emit `BitNotInt` when the operand type is
+                // provably `int` at compile time. Otherwise fall through
+                // to the Dynamic `BitNot` opcode via `compile_unary_op`.
+                //
+                // Semantics match the Dynamic variant exactly — i48
+                // payload truncation applies. Gate:
+                // `SHAPE_V2_TYPED_BITWISE` (default ON via
+                // `typed_bitwise_enabled()`, shared with the binary
+                // bitwise ops).
+                let mut numeric = self.last_expr_numeric_type;
+                if let Expr::Identifier(name, _) = operand {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if self.param_locals.contains(&local_idx) {
+                            numeric = None;
+                        }
+                    }
+                }
+                if numeric.is_none() {
+                    numeric = self
+                        .infer_expr_type(operand)
+                        .ok()
+                        .and_then(|t| inferred_type_to_numeric(&t));
+                }
+                let is_int = matches!(numeric, Some(NumericType::Int));
+                let emit_typed =
+                    is_int && crate::compiler::helpers::typed_bitwise_enabled();
+                if emit_typed {
+                    self.emit(Instruction::simple(OpCode::BitNotInt));
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                    return Ok(());
+                }
+                // Fall through to Dynamic `BitNot` — preserves pre-R5.1C
+                // emission byte-identically.
+                self.compile_unary_op(op)?;
+                return Ok(());
+            }
             UnaryOp::Neg => {
                 // Emit typed negation when the operand type is known
                 let opcode = match self.last_expr_numeric_type {

@@ -268,6 +268,74 @@ pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) 
     f()
 }
 
+/// Phase R5.1C: default-on compiler emission of typed bitwise opcodes
+/// (`BitAndInt`, `BitOrInt`, `BitXorInt`, `BitShlInt`, `BitShrInt`,
+/// `BitNotInt`) when both (or the sole) operand type is proved `int` at
+/// compile time.
+///
+/// R5.1A added the opcode variants; R5.1B wired the executor handlers.
+/// R5.1C (this phase) turns on compiler emission. When `true`, bitwise
+/// expressions whose operand types are provably `int` emit the typed
+/// opcode instead of the Dynamic (`BitAnd`/`BitOr`/...) variant. Mixed
+/// or unresolved operand types continue to fall through to the Dynamic
+/// path — no behavior change for those cases.
+///
+/// Polarity matches `SHAPE_V2_OWNERSHIP_MOVES` / `SHAPE_V2_BOX_BY_DEFAULT`:
+/// the env var is an opt-OUT. Values `0` / `false` / `off` / `no`
+/// (case-insensitive, trimmed) disable the flag; unset, empty, or any
+/// other value keeps the R5.1C default of `true`.
+///
+/// Rollback: `SHAPE_V2_TYPED_BITWISE=0` restores pre-R5.1C byte-identical
+/// emission (bitwise ops always go to the Dynamic variants).
+///
+/// For unit-test determinism, a `#[cfg(test)]` thread-local override
+/// (`with_typed_bitwise_flag`) lets a single test force the flag on/off
+/// without touching the env-var cache.
+pub(super) fn typed_bitwise_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_TYPED_BITWISE_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_TYPED_BITWISE") {
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False"
+                | "off" | "OFF" | "Off"
+                | "no" | "NO" | "No"
+        ),
+        Err(_) => true,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Phase R5.1C test hook: per-thread override for
+    /// `typed_bitwise_enabled()`. Thread-local so concurrent
+    /// `cargo test` workers remain independent.
+    pub(super) static TEST_TYPED_BITWISE_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Phase R5.1C test helper: run `f` with the typed-bitwise flag forced to
+/// `enabled`. Restores the previous override on return (even on panic).
+/// Production code reads the env var exclusively via
+/// `typed_bitwise_enabled()`.
+#[cfg(test)]
+pub(crate) fn with_typed_bitwise_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_TYPED_BITWISE_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_TYPED_BITWISE_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
 // ── Phase V3.6: `emit_dynamic_*` helpers deleted ─────────────────────────
 //
 // V3.2-V3.5 migrated every arithmetic, comparison, and pattern-`Eq` emission
@@ -3398,5 +3466,316 @@ mod tests {
             BinOperandKind::from_numeric(Some(NumericType::Number)),
             BinOperandKind::Numeric(NumericType::Number)
         );
+    }
+
+    // ── Phase R5.1C: typed bitwise opcode emission tests ─────────────
+    //
+    // These tests pin the compiler's contract for the R5.1C typed
+    // bitwise opcodes (`BitAndInt` / `BitOrInt` / `BitXorInt` /
+    // `BitShlInt` / `BitShrInt` / `BitNotInt`):
+    //   * `int`-typed operands emit the typed opcode.
+    //   * Unresolved / dynamic operands emit the Dynamic fallback
+    //     (`BitAnd` / ... / `BitNot`) — byte-identical to pre-R5.1C.
+    //   * The `SHAPE_V2_TYPED_BITWISE` flag (thread-local override in
+    //     tests) controls whether the typed path is taken.
+
+    /// Compile a source snippet and return the flat opcode list.
+    #[cfg(test)]
+    fn compile_opcodes(code: &str) -> Vec<crate::bytecode::OpCode> {
+        use shape_ast::parser::parse_program;
+        let program = parse_program(code).expect("parse program");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        let bc = compiler.compile(&program).expect("compile program");
+        bc.instructions.iter().map(|ins| ins.opcode).collect()
+    }
+
+    /// Compile a source snippet with a flag override and return opcodes.
+    #[cfg(test)]
+    fn compile_opcodes_with_typed_bitwise(
+        enabled: bool,
+        code: &str,
+    ) -> Vec<crate::bytecode::OpCode> {
+        super::super::helpers::with_typed_bitwise_flag(enabled, || compile_opcodes(code))
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_bitand() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a & b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAndInt),
+            "expected BitAndInt for int & int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAnd),
+            "Dynamic BitAnd must not be emitted when typed path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_bitor_bitxor() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a | b
+            a ^ b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitOrInt),
+            "expected BitOrInt for int | int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::BitXorInt),
+            "expected BitXorInt for int ^ int, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_shifts() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            a << 2
+            a >> 1
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitShlInt),
+            "expected BitShlInt for int << int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::BitShrInt),
+            "expected BitShrInt for int >> int, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operand_emits_typed_bitnot() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            ~a
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitNotInt),
+            "expected BitNotInt for ~int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitNot),
+            "Dynamic BitNot must not be emitted when typed path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_flag_off_falls_back_to_dynamic_bitand() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            false,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a & b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAnd),
+            "flag off: expected Dynamic BitAnd, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAndInt),
+            "flag off: typed BitAndInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_flag_off_falls_back_to_dynamic_bitnot() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            false,
+            r#"
+            let a: int = 5
+            ~a
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitNot),
+            "flag off: expected Dynamic BitNot, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitNotInt),
+            "flag off: typed BitNotInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_untyped_param_falls_back_to_dynamic_bitand() {
+        // `a` is an untyped function parameter. The R5.1C path uses
+        // the same `param_locals` guard as the arithmetic branch in
+        // `_ => {}`: speculative inference hints for untyped params are
+        // discarded so bitwise ops land on the Dynamic path. This pins
+        // the fallback contract for class-(b) residuals (comptime /
+        // generic scopes, untyped params).
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            fn masked(a) {
+                a & 15
+            }
+            masked(5)
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAnd),
+            "untyped param: expected Dynamic BitAnd, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAndInt),
+            "untyped param: typed BitAndInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_bitwise_eval_produces_expected_values() {
+        // End-to-end behaviour: the typed opcodes match the Dynamic
+        // variants bit-for-bit. Exercises each op at least once.
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        use shape_ast::parser::parse_program;
+        use shape_value::ValueWordExt;
+
+        let eval_int = |code: &str| -> i64 {
+            let program = parse_program(code).expect("parse");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            let bc = compiler.compile(&program).expect("compile");
+            let mut vm = VirtualMachine::new(VMConfig::default());
+            vm.load_program(bc);
+            vm.execute(None)
+                .expect("execute")
+                .clone()
+                .as_i64()
+                .expect("i64 result")
+        };
+
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na & b")
+            }),
+            8,
+            "12 & 10 = 8"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na | b")
+            }),
+            14,
+            "12 | 10 = 14"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na ^ b")
+            }),
+            6,
+            "12 ^ 10 = 6"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 1\na << 4")
+            }),
+            16,
+            "1 << 4 = 16"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 32\na >> 2")
+            }),
+            8,
+            "32 >> 2 = 8"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 0\n~a")
+            }),
+            -1,
+            "~0 = -1 (two's complement)"
+        );
+    }
+
+    #[test]
+    fn r51c_typed_and_dynamic_paths_produce_identical_results() {
+        // The typed path must be semantically byte-identical to the
+        // Dynamic path. Flip the flag and confirm the computation
+        // result is the same — this is the R5.1B "no masking, same as
+        // AddInt truncation" contract surfaced at the compiler.
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        use shape_ast::parser::parse_program;
+        use shape_value::ValueWordExt;
+
+        let eval_int_with_flag = |flag: bool, code: &str| -> i64 {
+            super::super::helpers::with_typed_bitwise_flag(flag, || {
+                let program = parse_program(code).expect("parse");
+                let mut compiler = BytecodeCompiler::new();
+                compiler.allow_internal_builtins = true;
+                let bc = compiler.compile(&program).expect("compile");
+                let mut vm = VirtualMachine::new(VMConfig::default());
+                vm.load_program(bc);
+                vm.execute(None)
+                    .expect("execute")
+                    .clone()
+                    .as_i64()
+                    .expect("i64 result")
+            })
+        };
+
+        let samples = [
+            "let a: int = 12345\nlet b: int = 54321\na & b",
+            "let a: int = 12345\nlet b: int = 54321\na | b",
+            "let a: int = 12345\nlet b: int = 54321\na ^ b",
+            "let a: int = 7\na << 3",
+            "let a: int = -1024\na >> 2",
+            "let a: int = 42\n~a",
+        ];
+        for code in samples {
+            let typed = eval_int_with_flag(true, code);
+            let dynamic = eval_int_with_flag(false, code);
+            assert_eq!(
+                typed, dynamic,
+                "typed vs dynamic mismatch for {:?}: typed={} dynamic={}",
+                code, typed, dynamic
+            );
+        }
     }
 }

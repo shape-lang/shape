@@ -889,6 +889,95 @@ impl BytecodeCompiler {
                     }
                 }
             }
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitShl
+            | BinaryOp::BitShr => {
+                // Phase R5.1C: emit typed bitwise opcodes (`BitAndInt`,
+                // `BitOrInt`, `BitXorInt`, `BitShlInt`, `BitShrInt`) when
+                // both operand types are provably `int` at compile time.
+                // Mixed-type / unresolved cases fall through to the
+                // Dynamic (`BitAnd`/`BitOr`/...) variants emitted by
+                // `compile_binary_op`.
+                //
+                // Semantics match the Dynamic variants exactly: no
+                // shift-count masking, i48 payload truncation applies.
+                // See R5.1B commit body for the edge-case notes.
+                //
+                // Gate: `SHAPE_V2_TYPED_BITWISE` (default ON via
+                // `typed_bitwise_enabled()`). With the flag off, emission
+                // is byte-identical to pre-R5.1C.
+                self.compile_expr(left)?;
+                let mut left_numeric = self.last_expr_numeric_type;
+                self.compile_expr(right)?;
+                let mut right_numeric = self.last_expr_numeric_type;
+
+                // Don't trust inferred numeric types for untyped function
+                // parameters (same rationale as the `param_locals` guard
+                // in the `_ => {}` arithmetic branch below).
+                if let Expr::Identifier(name, _) = left {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if self.param_locals.contains(&local_idx) {
+                            left_numeric = None;
+                        }
+                    }
+                }
+                if let Expr::Identifier(name, _) = right {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if self.param_locals.contains(&local_idx) {
+                            right_numeric = None;
+                        }
+                    }
+                }
+
+                // Fall back to the inference engine when slot tracking
+                // did not produce a numeric hint. This mirrors the
+                // `NoPlan` path in the `_ => {}` arithmetic branch.
+                if left_numeric.is_none() {
+                    left_numeric = self
+                        .infer_expr_type(left)
+                        .ok()
+                        .and_then(|t| inferred_type_to_numeric(&t));
+                }
+                if right_numeric.is_none() {
+                    right_numeric = self
+                        .infer_expr_type(right)
+                        .ok()
+                        .and_then(|t| inferred_type_to_numeric(&t));
+                }
+
+                let both_int = matches!(left_numeric, Some(NumericType::Int))
+                    && matches!(right_numeric, Some(NumericType::Int));
+                let emit_typed = both_int
+                    && crate::compiler::helpers::typed_bitwise_enabled();
+
+                if emit_typed {
+                    let typed_opcode = match op {
+                        BinaryOp::BitAnd => OpCode::BitAndInt,
+                        BinaryOp::BitOr => OpCode::BitOrInt,
+                        BinaryOp::BitXor => OpCode::BitXorInt,
+                        BinaryOp::BitShl => OpCode::BitShlInt,
+                        BinaryOp::BitShr => OpCode::BitShrInt,
+                        _ => unreachable!(),
+                    };
+                    self.emit(Instruction::simple(typed_opcode));
+                    // Typed bitwise op on two ints yields an int — preserve
+                    // the numeric hint so downstream typed emission keeps
+                    // working (e.g. (a & b) + c stays on the int path).
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                } else {
+                    // Dynamic fallback: mixed / unresolved operand types,
+                    // or flag disabled. Preserves pre-R5.1C semantics
+                    // byte-identically.
+                    self.compile_binary_op(op)?;
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = None;
+                }
+            }
             _ => {
                 // Typed matrix kernels: Mat<number> * Vec<number>/Mat<number>.
                 // Lower before generic strict-arithmetic checks so typed matrix
