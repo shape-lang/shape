@@ -66,11 +66,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
             Rvalue::Clone(operand) => {
                 // Explicit clone: get the value and retain.
+                //
+                // R4.2D: `jit_arc_retain` takes a plain `u64` bit-pattern
+                // (implicitly ValueWord-encoded), so no `ensure_nanboxed`
+                // wrap is needed. Clones are only emitted for heap types,
+                // which already live in I64 slots at this site.
                 let val = self.compile_operand_raw(operand)?;
-                // v2-boundary: arc_retain FFI still takes NaN-boxed I64
-                let boxed = self.ensure_nanboxed(val);
-                self.builder.ins().call(self.ffi.arc_retain, &[boxed]);
-                Ok(boxed)
+                self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                Ok(val)
             }
 
             Rvalue::Borrow(_kind, place) => {
