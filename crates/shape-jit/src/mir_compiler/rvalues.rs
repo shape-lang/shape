@@ -359,16 +359,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Compile a binary operation using generic FFI calls for unknown types.
-    /// Ensures both operands are NaN-boxed I64 before calling FFI.
+    ///
+    /// R4.2A: The `generic_*` FFI signatures take plain `u64` bit-patterns
+    /// (implicitly ValueWord-encoded), so no `ensure_nanboxed` wrap is needed
+    /// at the call site — operands are expected to be I64 already. Native
+    /// F64/I32/I8 values should reach this path only via the inline fast
+    /// paths above; the generic fallback is for already-dynamic (I64) slots.
     fn compile_binop(
         &mut self,
         op: &BinOp,
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
-        // v2-boundary: generic_* FFI functions expect NaN-boxed I64 arguments
-        let l = self.ensure_nanboxed(lhs);
-        let r = self.ensure_nanboxed(rhs);
+        let l = lhs;
+        let r = rhs;
         match op {
             BinOp::Add => { let inst = self.builder.ins().call(self.ffi.generic_add, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
             BinOp::Sub => { let inst = self.builder.ins().call(self.ffi.generic_sub, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
