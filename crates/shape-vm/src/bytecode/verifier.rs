@@ -703,6 +703,52 @@ mod tests {
         );
     }
 
+    /// R5.1A: the six new typed bitwise opcodes
+    /// (BitAndInt/BitOrInt/BitXorInt/BitShlInt/BitShrInt/BitNotInt) are not
+    /// trusted and not v2-typed. Both verifier passes accept them as no-ops
+    /// (no FrameDescriptor requirement), matching the behavior of the
+    /// existing int-typed arithmetic family (AddInt/SubInt/MulInt). R5.1B
+    /// will add executor handlers; until then these opcodes are unreachable
+    /// via dispatch — reaching them panics.
+    #[test]
+    fn r51a_typed_bitwise_opcodes_pass_both_verifiers() {
+        let func = Function {
+            name: "bitwise_fn".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 7,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        };
+        let instructions = vec![
+            Instruction::simple(OpCode::BitAndInt),
+            Instruction::simple(OpCode::BitOrInt),
+            Instruction::simple(OpCode::BitXorInt),
+            Instruction::simple(OpCode::BitShlInt),
+            Instruction::simple(OpCode::BitShrInt),
+            Instruction::simple(OpCode::BitNotInt),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(vec![func], instructions);
+        assert!(
+            verify_trusted_opcodes(&prog).is_ok(),
+            "R5.1A typed bitwise opcodes should pass trusted verification"
+        );
+        assert!(
+            verify_v2_typed_opcodes(&prog).is_ok(),
+            "R5.1A typed bitwise opcodes should pass v2-typed verification"
+        );
+    }
+
     #[test]
     fn v2_multiple_errors_collected() {
         let func = Function {

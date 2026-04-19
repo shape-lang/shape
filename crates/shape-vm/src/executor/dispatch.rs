@@ -770,6 +770,22 @@ impl VirtualMachine {
             // Stack-category arm alongside `PromoteToOwned`; no separate
             // arm is needed here. V1.2C will add compiler emission.
 
+            // R5.1A: unwired — R5.1B adds handlers.
+            //
+            // The typed bitwise opcodes (BitAndInt/BitOrInt/BitXorInt/
+            // BitShlInt/BitShrInt/BitNotInt) were added to the opcode table
+            // in R5.1A (see `bytecode/opcode_defs.rs`) but do not have
+            // executor handlers or compiler emission yet. Reaching any of
+            // them here indicates a bug — no compile path currently emits
+            // them. Panicking (instead of falling through to
+            // `InvalidOperand`) surfaces accidental emission immediately.
+            BitAndInt | BitOrInt | BitXorInt | BitShlInt | BitShrInt | BitNotInt => {
+                panic!(
+                    "R5.1A unreachable: {:?} has no executor handler (adds in R5.1B)",
+                    instruction.opcode
+                );
+            }
+
             _ => return Err(VMError::InvalidOperand),
         }
 

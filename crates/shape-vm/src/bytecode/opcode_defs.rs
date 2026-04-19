@@ -891,6 +891,40 @@ define_opcodes! {
     /// Greater than or equal (i32 x i32 -> bool)
     GteI32 = 0xAF, Comparison, pops: 2, pushes: 1;
 
+    // ===== R5.1A: Typed bitwise opcodes (UNWIRED — R5.1B adds handlers) =====
+    //
+    // Phase R5.1A of the v2 residuals closeout. Mirrors the V1.1A staging
+    // pattern: enum variants only, dead. R5.1B wires executor handlers,
+    // R5.1C adds compiler emission behind `SHAPE_V2_TYPED_BITWISE=1`.
+    //
+    // These opcodes are the int-typed siblings of the existing dynamic
+    // `BitAnd`/`BitOr`/`BitXor`/`BitShl`/`BitShr`/`BitNot` operations and
+    // begin closing out the bitwise slice of `exec_arithmetic_dynamic_fallback`.
+    //
+    // Operand: none (simple instruction). Binary variants pop 2 / push 1;
+    // `BitNotInt` is unary: pop 1 / push 1. Shift semantics match Shape's
+    // existing `>>`/`<<` — `BitShrInt` is an arithmetic right-shift on i64,
+    // matching the `a_int >> b_int` used by the dynamic `BitShr` handler.
+    /// R5.1A (UNWIRED): Bitwise AND on two i64 values (int × int → int).
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitAndInt = 0x129, Arithmetic, pops: 2, pushes: 1;
+    /// R5.1A (UNWIRED): Bitwise OR on two i64 values (int × int → int).
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitOrInt = 0x12A, Arithmetic, pops: 2, pushes: 1;
+    /// R5.1A (UNWIRED): Bitwise XOR on two i64 values (int × int → int).
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitXorInt = 0x12B, Arithmetic, pops: 2, pushes: 1;
+    /// R5.1A (UNWIRED): Bitwise shift-left on two i64 values (int × int → int).
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitShlInt = 0x12C, Arithmetic, pops: 2, pushes: 1;
+    /// R5.1A (UNWIRED): Bitwise arithmetic shift-right on two i64 values
+    /// (int × int → int). Matches Shape's `>>` operator semantics.
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitShrInt = 0x12D, Arithmetic, pops: 2, pushes: 1;
+    /// R5.1A (UNWIRED): Bitwise NOT on an i64 value (int → int).
+    /// Executor handler added in R5.1B; currently unreachable via dispatch.
+    BitNotInt = 0x12E, Arithmetic, pops: 1, pushes: 1;
+
 }
 
 impl OpCode {
@@ -1869,5 +1903,96 @@ mod tests {
             instr.operand.is_none(),
             "PromoteToShared should have no operand (like PromoteToOwned)"
         );
+    }
+
+    // ===== R5.1A: Typed bitwise opcode tests =====
+
+    /// R5.1A: pin each new bitwise opcode's u16 discriminant. The bytecode
+    /// ABI is stable, so these IDs must not drift across phases. IDs were
+    /// chosen sequentially above the highest existing discriminant at the
+    /// time of landing (0x128 PromoteToShared).
+    #[test]
+    fn r51a_typed_bitwise_discriminants() {
+        assert_eq!(OpCode::BitAndInt as u16, 0x129);
+        assert_eq!(OpCode::BitOrInt as u16, 0x12A);
+        assert_eq!(OpCode::BitXorInt as u16, 0x12B);
+        assert_eq!(OpCode::BitShlInt as u16, 0x12C);
+        assert_eq!(OpCode::BitShrInt as u16, 0x12D);
+        assert_eq!(OpCode::BitNotInt as u16, 0x12E);
+    }
+
+    /// R5.1A: all six typed bitwise opcodes are Arithmetic-category, matching
+    /// both their dynamic fallback counterparts (BitAnd/BitOr/BitXor/...) and
+    /// the typed integer arithmetic opcodes (AddInt/SubInt/MulInt).
+    #[test]
+    fn r51a_typed_bitwise_opcodes_are_arithmetic_category() {
+        assert_eq!(OpCode::BitAndInt.category(), OpcodeCategory::Arithmetic);
+        assert_eq!(OpCode::BitOrInt.category(), OpcodeCategory::Arithmetic);
+        assert_eq!(OpCode::BitXorInt.category(), OpcodeCategory::Arithmetic);
+        assert_eq!(OpCode::BitShlInt.category(), OpcodeCategory::Arithmetic);
+        assert_eq!(OpCode::BitShrInt.category(), OpcodeCategory::Arithmetic);
+        assert_eq!(OpCode::BitNotInt.category(), OpcodeCategory::Arithmetic);
+    }
+
+    /// R5.1A: stack effects — binary bitwise ops pop two and push one;
+    /// `BitNotInt` is unary (pop 1, push 1). Mirrors `AddInt`/`NegInt`.
+    #[test]
+    fn r51a_typed_bitwise_opcode_stack_effects() {
+        for op in [
+            OpCode::BitAndInt,
+            OpCode::BitOrInt,
+            OpCode::BitXorInt,
+            OpCode::BitShlInt,
+            OpCode::BitShrInt,
+        ] {
+            assert_eq!(op.stack_pops(), 2, "{:?} should pop 2", op);
+            assert_eq!(op.stack_pushes(), 1, "{:?} should push 1", op);
+        }
+        assert_eq!(OpCode::BitNotInt.stack_pops(), 1);
+        assert_eq!(OpCode::BitNotInt.stack_pushes(), 1);
+    }
+
+    /// R5.1A: the six new typed bitwise opcodes are neither trusted nor
+    /// v2-typed, mirroring `AddInt`/`SubInt`/`MulInt` (the other int-typed
+    /// arithmetic opcodes). The v2-typed classification is reserved for the
+    /// sized-integer (i32) family and typed-array/typed-field ops, which
+    /// require a FrameDescriptor. R5.1B/R5.1C may extend classification once
+    /// handlers and compiler emission exist.
+    #[test]
+    fn r51a_typed_bitwise_opcodes_not_classified_as_trusted_or_v2() {
+        for op in [
+            OpCode::BitAndInt,
+            OpCode::BitOrInt,
+            OpCode::BitXorInt,
+            OpCode::BitShlInt,
+            OpCode::BitShrInt,
+            OpCode::BitNotInt,
+        ] {
+            assert!(!op.is_trusted(), "{:?} should not be trusted", op);
+            assert!(!op.is_v2_typed(), "{:?} should not be v2_typed", op);
+        }
+    }
+
+    /// R5.1A: `Instruction::simple` constructs every typed bitwise opcode
+    /// with no operand (same shape as `AddInt`/`BitAnd`) and round-trips the
+    /// opcode field.
+    #[test]
+    fn r51a_typed_bitwise_instructions_have_no_operand() {
+        for op in [
+            OpCode::BitAndInt,
+            OpCode::BitOrInt,
+            OpCode::BitXorInt,
+            OpCode::BitShlInt,
+            OpCode::BitShrInt,
+            OpCode::BitNotInt,
+        ] {
+            let instr = Instruction::simple(op);
+            assert_eq!(instr.opcode, op);
+            assert!(
+                instr.operand.is_none(),
+                "{:?} should have no operand (like AddInt/BitAnd)",
+                op
+            );
+        }
     }
 }
