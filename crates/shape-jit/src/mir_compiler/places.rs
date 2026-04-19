@@ -212,9 +212,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                let raw_base = self.read_place(base)?;
-                // v2-boundary: get_prop/typed_object_get_field FFI expects NaN-boxed I64
-                let base_val = self.ensure_nanboxed(raw_base);
+                // R4.2C: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. `get_prop` / `inline_typed_field_get`
+                // take the heap pointer as an already-ValueWord-encoded I64.
+                let base_val = self.read_place(base)?;
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
                     // Inline typed field read — 2 loads, no FFI call.
                     Ok(self.inline_typed_field_get(base_val, byte_off))
@@ -272,20 +273,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(())
             }
             Place::Field(base, field_idx) => {
-                let raw_base = self.read_place(base)?;
-                // v2-boundary: set_prop/typed_object_set_field FFI expects NaN-boxed I64
-                let base_val = self.ensure_nanboxed(raw_base);
-                let boxed_val = self.ensure_nanboxed(val);
+                // R4.2C: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. Both the heap pointer base
+                // and the field value reach `set_prop` / `typed_object_set_field`
+                // as already-ValueWord-encoded I64 slots.
+                let base_val = self.read_place(base)?;
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
                     // Inline typed field write — 2 loads + 1 store, no FFI call.
                     // Write barrier is a no-op without the `gc` feature, so we skip it.
-                    self.inline_typed_field_set(base_val, byte_off, boxed_val);
+                    self.inline_typed_field_set(base_val, byte_off, val);
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
-                    self.builder.ins().call(self.ffi.set_prop, &[base_val, key, boxed_val]);
+                    self.builder.ins().call(self.ffi.set_prop, &[base_val, key, val]);
                 } else {
                     let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
-                    self.builder.ins().call(self.ffi.set_prop, &[base_val, field, boxed_val]);
+                    self.builder.ins().call(self.ffi.set_prop, &[base_val, field, val]);
                 }
                 Ok(())
             }

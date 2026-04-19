@@ -81,8 +81,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if !rest_args.is_empty() {
                     return Ok(None);
                 }
+                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — the map
+                // handle reaches here as an already-ValueWord-encoded I64 slot.
                 let map_bits = self.read_place(receiver)?;
-                let map_bits = self.ensure_nanboxed(map_bits);
                 let inst = self.builder.ins().call(self.ffi.v2_map_len, &[map_bits]);
                 let len_i64 = self.builder.inst_results(inst)[0];
                 self.release_old_value_if_heap(destination)?;
@@ -95,10 +96,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
+                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map and
+                // key reach here as already-ValueWord-encoded I64 slots.
                 let map_bits = self.read_place(receiver)?;
-                let map_bits = self.ensure_nanboxed(map_bits);
                 let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let key_bits = self.ensure_nanboxed(key_bits);
                 let inst = self
                     .builder
                     .ins()
@@ -116,10 +117,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
+                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map and
+                // key reach here as already-ValueWord-encoded I64 slots.
                 let map_bits = self.read_place(receiver)?;
-                let map_bits = self.ensure_nanboxed(map_bits);
                 let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let key_bits = self.ensure_nanboxed(key_bits);
                 let result = match kinds.value {
                     SlotKind::Int64 | SlotKind::UInt64 => {
                         let inst = self.builder.ins().call(
@@ -153,12 +154,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if !matches!(kinds.value, SlotKind::Int64 | SlotKind::UInt64) {
                     return Ok(None);
                 }
+                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map,
+                // key, and value reach here as already-ValueWord-encoded
+                // I64 slots.
                 let map_bits = self.read_place(receiver)?;
-                let map_bits = self.ensure_nanboxed(map_bits);
                 let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let key_bits = self.ensure_nanboxed(key_bits);
                 let val_bits = self.compile_operand_raw(&rest_args[1])?;
-                let val_bits = self.ensure_nanboxed(val_bits);
                 let inst = self.builder.ins().call(
                     self.ffi.v2_map_set_str_i64,
                     &[map_bits, key_bits, val_bits],

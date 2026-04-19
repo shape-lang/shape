@@ -115,10 +115,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                // v2-boundary: typed_object_set_field FFI expects NaN-boxed I64 values
+                // R4.2C: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. `typed_object_set_field`
+                // takes field values as already-ValueWord-encoded I64 slots.
                 for (i, op) in operands.iter().enumerate() {
-                    let raw = self.compile_operand_raw(op)?;
-                    let val = self.ensure_nanboxed(raw);
+                    let val = self.compile_operand_raw(op)?;
                     let offset_val = self.builder.ins().iconst(
                         cranelift::prelude::types::I64,
                         (i as i64) * 8,
@@ -645,7 +646,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Coerce a Cranelift value to the target capture storage type.
     /// Performs zero-extension for narrowings and bitcasts for F64/I64.
-    /// Mismatches fall back to NaN-boxing (preserves dynamic semantics).
     fn coerce_for_capture_store(
         &mut self,
         val: Value,
@@ -656,10 +656,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if val_ty == target_ty {
             return val;
         }
-        // Widen native integers to the storage width.
+        // R4.2C: capture-store cells take ValueWord-encoded I64 bit-patterns
+        // directly — operands are already I64-slot values, so the I64 target
+        // branch and the last-resort fallback pass `val` through unchanged.
         if target_ty == cl_types::I64 {
-            // Anything becomes NaN-boxed I64 for the storage slot.
-            return self.ensure_nanboxed(val);
+            return val;
         }
         if target_ty == cl_types::I32 {
             if val_ty == cl_types::I8 || val_ty == cl_types::I16 {
@@ -681,8 +682,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 .ins()
                 .bitcast(cl_types::F64, MemFlags::new(), val);
         }
-        // Last-resort: NaN-box to I64 and store as dynamic.
-        self.ensure_nanboxed(val)
+        // Last-resort: already an I64 bit-pattern; pass through.
+        val
     }
 }
 

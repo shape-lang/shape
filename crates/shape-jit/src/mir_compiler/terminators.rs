@@ -251,12 +251,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Dispatch directly to the FFI implementation.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
                     if name == "print" && self.function_indices.get(name.as_str()).is_none() {
-                        // v2-boundary: jit_print FFI takes NaN-boxed I64
+                        // R4.2C: FFI signatures accept plain u64 bit-patterns
+                        // — no box wrap needed at call site. `jit_print`
+                        // takes the arg as an already-ValueWord-encoded I64.
                         let val = if args.is_empty() {
                             self.builder.ins().iconst(types::I64, 0i64)
                         } else {
-                            let raw = self.compile_operand(&args[0])?;
-                            self.ensure_nanboxed(raw)
+                            self.compile_operand(&args[0])?
                         };
                         self.builder.ins().call(self.ffi.print, &[val]);
 
