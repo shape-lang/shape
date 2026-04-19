@@ -239,9 +239,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(elem_val);
                 }
 
-                let raw_base = self.read_place(base)?;
-                // v2-boundary: inline_array_get uses NaN-boxed heap pointer layout
-                let base_val = self.ensure_nanboxed(raw_base);
+                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. `inline_array_get` takes the
+                // heap pointer as an already-ValueWord-encoded I64.
+                let base_val = self.read_place(base)?;
                 // Index can stay native — index_to_i64 handles all types
                 let index_val = self.compile_operand_raw(operand)?;
                 Ok(self.inline_array_get(base_val, index_val))
@@ -301,13 +302,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                let raw_base = self.read_place(base)?;
-                // v2-boundary: inline_array_set uses NaN-boxed heap pointer layout
-                let base_val = self.ensure_nanboxed(raw_base);
+                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. Both the heap pointer base
+                // and the element value reach `inline_array_set` as
+                // already-ValueWord-encoded I64 slots.
+                let base_val = self.read_place(base)?;
                 let index_val = self.compile_operand_raw(operand)?;
-                // v2-boundary: array elements stored as NaN-boxed I64
-                let boxed_val = self.ensure_nanboxed(val);
-                self.inline_array_set(base_val, index_val, boxed_val);
+                self.inline_array_set(base_val, index_val, val);
                 Ok(())
             }
             Place::Deref(inner) => {

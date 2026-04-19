@@ -288,10 +288,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         );
                         let mut arr = self.builder.inst_results(inst)[0];
 
-                        // v2-boundary: enum args pushed via NaN-boxed array_push_elem FFI
+                        // R4.2B: FFI signatures accept plain u64 bit-patterns
+                        // — no box wrap needed at call site. Enum payload args
+                        // are already ValueWord-encoded I64 slots when they
+                        // reach `array_push_elem`.
                         for arg in args.iter() {
-                            let raw = self.compile_operand(arg)?;
-                            let val = self.ensure_nanboxed(raw);
+                            let val = self.compile_operand(arg)?;
                             let inst = self.builder.ins().call(
                                 self.ffi.array_push_elem,
                                 &[arr, val],

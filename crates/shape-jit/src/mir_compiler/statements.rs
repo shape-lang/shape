@@ -62,10 +62,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
                 let mut arr = self.builder.inst_results(inst)[0];
 
-                // v2-boundary: jit_array_push_elem FFI expects NaN-boxed I64 elements
+                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. Array elements reach
+                // `array_push_elem` as already-ValueWord-encoded I64 slots.
                 for op in operands {
-                    let raw = self.compile_operand(op)?;
-                    let val = self.ensure_nanboxed(raw);
+                    let val = self.compile_operand(op)?;
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, val]);
@@ -162,10 +163,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     );
                     let mut arr = self.builder.inst_results(inst)[0];
 
-                    // v2-boundary: jit_array_push_elem FFI expects NaN-boxed I64 elements
+                    // R4.2B: FFI signatures accept plain u64 bit-patterns —
+                    // no box wrap needed at call site. Enum payload values
+                    // reach `array_push_elem` as already-ValueWord-encoded
+                    // I64 slots.
                     for op in operands {
-                        let raw = self.compile_operand(op)?;
-                        let val = self.ensure_nanboxed(raw);
+                        let val = self.compile_operand(op)?;
                         let inst = self.builder
                             .ins()
                             .call(self.ffi.array_push_elem, &[arr, val]);

@@ -103,10 +103,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
                 let mut arr = self.builder.inst_results(inst)[0];
 
-                // v2-boundary: jit_array_push_elem FFI still expects NaN-boxed I64 elements
+                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
+                // box wrap needed at call site. Operands reaching
+                // `jit_array_push_elem` are already ValueWord-encoded I64 slots.
                 for operand in operands {
-                    let raw = self.compile_operand_raw(operand)?;
-                    let elem = self.ensure_nanboxed(raw);
+                    let elem = self.compile_operand_raw(operand)?;
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, elem]);
