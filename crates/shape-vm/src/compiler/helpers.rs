@@ -1965,6 +1965,10 @@ impl BytecodeCompiler {
             "__intrinsic_vec_select" => BuiltinFunction::IntrinsicVecSelect,
             "__intrinsic_matmul_vec" => BuiltinFunction::IntrinsicMatMulVec,
             "__intrinsic_matmul_mat" => BuiltinFunction::IntrinsicMatMulMat,
+            // R5.4D: unwired intrinsics for Matrix/Vec arithmetic retarget.
+            "__intrinsic_vec_add_i64" => BuiltinFunction::IntrinsicVecAddI64,
+            "__intrinsic_mat_add" => BuiltinFunction::IntrinsicMatAdd,
+            "__intrinsic_mat_sub" => BuiltinFunction::IntrinsicMatSub,
 
             // Existing builtins
             "abs" => BuiltinFunction::Abs,
@@ -2291,8 +2295,11 @@ impl BytecodeCompiler {
                 | BuiltinFunction::IntrinsicVecMax
                 | BuiltinFunction::IntrinsicVecMin
                 | BuiltinFunction::IntrinsicVecSelect
+                | BuiltinFunction::IntrinsicVecAddI64
                 | BuiltinFunction::IntrinsicMatMulVec
                 | BuiltinFunction::IntrinsicMatMulMat
+                | BuiltinFunction::IntrinsicMatAdd
+                | BuiltinFunction::IntrinsicMatSub
                 | BuiltinFunction::Sign
                 | BuiltinFunction::Gcd
                 | BuiltinFunction::Lcm

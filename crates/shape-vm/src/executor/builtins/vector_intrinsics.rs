@@ -33,6 +33,10 @@ impl VirtualMachine {
             BuiltinFunction::IntrinsicVecMax => vector::intrinsic_vec_max(&nb_args, exec_ctx),
             BuiltinFunction::IntrinsicVecMin => vector::intrinsic_vec_min(&nb_args, exec_ctx),
             BuiltinFunction::IntrinsicVecSelect => vector::intrinsic_vec_select(&nb_args, exec_ctx),
+            // R5.4D: unwired `Vec<int> + Vec<int>` — compiler emission in R5.4E.
+            BuiltinFunction::IntrinsicVecAddI64 => {
+                vector::intrinsic_vec_add_i64(&nb_args, exec_ctx)
+            }
             _ => unreachable!("Not a vector intrinsic: {:?}", builtin),
         }
         .map_err(|e| VMError::RuntimeError(e.to_string()))?;

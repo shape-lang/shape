@@ -24,6 +24,9 @@ impl VirtualMachine {
         let result = match builtin {
             BuiltinFunction::IntrinsicMatMulVec => matrix::intrinsic_matmul_vec(&nb_args, exec_ctx),
             BuiltinFunction::IntrinsicMatMulMat => matrix::intrinsic_matmul_mat(&nb_args, exec_ctx),
+            // R5.4D: unwired matrix arithmetic — compiler emission in R5.4E.
+            BuiltinFunction::IntrinsicMatAdd => matrix::intrinsic_mat_add(&nb_args, exec_ctx),
+            BuiltinFunction::IntrinsicMatSub => matrix::intrinsic_mat_sub(&nb_args, exec_ctx),
             _ => unreachable!("Not a matrix intrinsic: {:?}", builtin),
         }
         .map_err(|e| VMError::RuntimeError(e.to_string()))?;

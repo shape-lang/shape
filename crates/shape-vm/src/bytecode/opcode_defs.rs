@@ -1419,10 +1419,25 @@ pub enum BuiltinFunction {
     IntrinsicVecMax,
     IntrinsicVecMin,
     IntrinsicVecSelect,
+    /// `Vec<int> + Vec<int>` — element-wise, overflow-checked (R5.4D).
+    /// Mirrors the dynamic-fallback `TypedArrayData::I64 + I64` arm:
+    /// returns an `IntArray` and surfaces an overflow error when any
+    /// element pair saturates (see `simd_vec_add_i64`). Wired up here as
+    /// scaffolding; compiler emission arrives in R5.4E.
+    IntrinsicVecAddI64,
 
-    // Matrix intrinsics (2 functions)
+    // Matrix intrinsics (4 functions)
     IntrinsicMatMulVec,
     IntrinsicMatMulMat,
+    /// `Mat<number> + Mat<number>` — element-wise (R5.4D). Dispatches to
+    /// `matrix_kernels::matrix_add` after extracting nested-array input
+    /// via `extract_matrix_f64`. Returns a matrix in the nested-array
+    /// shape that R5.4B's `Mat<number>` literals produce. Unwired from
+    /// the compiler side; emission lands in R5.4E.
+    IntrinsicMatAdd,
+    /// `Mat<number> - Mat<number>` — element-wise (R5.4D). Companion to
+    /// `IntrinsicMatAdd`, dispatches to `matrix_kernels::matrix_sub`.
+    IntrinsicMatSub,
 
     // Internal evaluation helpers
     EvalTimeRef,
@@ -1683,7 +1698,7 @@ impl BuiltinFunction {
             BuiltinFunction::IntrinsicFromCharCode,
             // Series (1)
             BuiltinFunction::IntrinsicSeries,
-            // Vector (11)
+            // Vector (12 — includes R5.4D IntrinsicVecAddI64)
             BuiltinFunction::IntrinsicVecAbs,
             BuiltinFunction::IntrinsicVecSqrt,
             BuiltinFunction::IntrinsicVecLn,
@@ -1695,9 +1710,12 @@ impl BuiltinFunction {
             BuiltinFunction::IntrinsicVecMax,
             BuiltinFunction::IntrinsicVecMin,
             BuiltinFunction::IntrinsicVecSelect,
-            // Matrix (2)
+            BuiltinFunction::IntrinsicVecAddI64,
+            // Matrix (4 — includes R5.4D IntrinsicMatAdd / IntrinsicMatSub)
             BuiltinFunction::IntrinsicMatMulVec,
             BuiltinFunction::IntrinsicMatMulMat,
+            BuiltinFunction::IntrinsicMatAdd,
+            BuiltinFunction::IntrinsicMatSub,
             // Eval helpers (6)
             BuiltinFunction::EvalTimeRef,
             BuiltinFunction::EvalDateTimeExpr,

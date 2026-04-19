@@ -8,6 +8,7 @@ use super::{extract_f64_array, f64_vec_to_float_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
 use shape_value::{ValueWord, ValueWordExt};
+use std::sync::Arc;
 use wide::f64x4;
 
 // Threshold for SIMD: arrays smaller than this use scalar fallback
@@ -287,6 +288,48 @@ pub fn intrinsic_vec_select(args: &[ValueWord], _ctx: &mut ExecutionContext) -> 
     }
 
     Ok(f64_vec_to_nb_array(result))
+}
+
+/// Core `Vec<int> + Vec<int>` — element-wise, overflow-checked (R5.4D).
+///
+/// Mirrors the dynamic-fallback arm at
+/// `shape-vm/executor/arithmetic/mod.rs::try_heap_arithmetic` (the
+/// `HeapValue::TypedArray(TypedArrayData::I64) + I64` case): the result
+/// is an `IntArray` (`ValueWord::from_int_array`) and any overflow
+/// surfaces as a runtime error rather than saturating. Used by
+/// R5.4E when retargeting `Vec<int> + Vec<int>` off
+/// `exec_arithmetic_dynamic_fallback`.
+pub fn intrinsic_vec_add_i64(
+    args: &[ValueWord],
+    _ctx: &mut ExecutionContext,
+) -> Result<ValueWord> {
+    if args.len() != 2 {
+        return Err(ShapeError::RuntimeError {
+            message: "vec_add_i64 requires 2 arguments".into(),
+            location: None,
+        });
+    }
+    let a = args[0].as_int_array().ok_or_else(|| ShapeError::RuntimeError {
+        message: "Left argument of vec_add_i64 must be a Vec<int>".into(),
+        location: None,
+    })?;
+    let b = args[1].as_int_array().ok_or_else(|| ShapeError::RuntimeError {
+        message: "Right argument of vec_add_i64 must be a Vec<int>".into(),
+        location: None,
+    })?;
+    if a.len() != b.len() {
+        return Err(ShapeError::RuntimeError {
+            message: format!("Vec<int> length mismatch: {} vs {}", a.len(), b.len()),
+            location: None,
+        });
+    }
+    match simd_vec_add_i64(a.as_slice(), b.as_slice()) {
+        Ok(r) => Ok(ValueWord::from_int_array(Arc::new(r.into()))),
+        Err(()) => Err(ShapeError::RuntimeError {
+            message: "Integer overflow in Vec<int> element-wise addition".into(),
+            location: None,
+        }),
+    }
 }
 
 // ===== Typed Vec<T> SIMD Kernels =====
@@ -709,5 +752,73 @@ mod tests {
         let data = [1i64, -2, 100];
         let result = super::i64_slice_to_f64(&data);
         assert_eq!(&*result, &[1.0, -2.0, 100.0]);
+    }
+
+    // ===== R5.4D: intrinsic_vec_add_i64 =====
+
+    fn make_int_array(vals: &[i64]) -> ValueWord {
+        ValueWord::from_int_array(std::sync::Arc::new(vals.to_vec().into()))
+    }
+
+    fn unwrap_int_array(nb: ValueWord) -> Vec<i64> {
+        nb.as_int_array()
+            .expect("Expected int array")
+            .as_slice()
+            .to_vec()
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_vec_add_i64_happy_path() {
+        let a = make_int_array(&[1, 2, 3, 4]);
+        let b = make_int_array(&[10, 20, 30, 40]);
+        let mut ctx = ExecutionContext::new_empty();
+        let result = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap();
+        assert_eq!(unwrap_int_array(result), vec![11, 22, 33, 44]);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_vec_add_i64_length_mismatch() {
+        let a = make_int_array(&[1, 2, 3]);
+        let b = make_int_array(&[10, 20]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("length mismatch"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_vec_add_i64_overflow() {
+        let a = make_int_array(&[i64::MAX]);
+        let b = make_int_array(&[1]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("overflow"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_vec_add_i64_arity_error() {
+        let a = make_int_array(&[1, 2, 3]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_vec_add_i64(&[a], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("2 arguments"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_vec_add_i64_non_int_array_rejected() {
+        // A float array should not be accepted — the intrinsic is strictly
+        // `Vec<int> + Vec<int>`; the compiler will emit
+        // `IntrinsicVecAdd` (f64) for the float case in R5.4E.
+        let a = f64_vec_to_float_array(vec![1.0, 2.0]);
+        let b = make_int_array(&[1, 2]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("Vec<int>"),
+            "expected Vec<int>-typed error, got: {}",
+            msg
+        );
     }
 }

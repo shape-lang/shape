@@ -429,7 +429,7 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::IntrinsicFromCharCode,
     // Series (1)
     BuiltinFunction::IntrinsicSeries,
-    // Vector intrinsics (11)
+    // Vector intrinsics (12 — includes R5.4D IntrinsicVecAddI64)
     BuiltinFunction::IntrinsicVecAbs,
     BuiltinFunction::IntrinsicVecSqrt,
     BuiltinFunction::IntrinsicVecLn,
@@ -441,9 +441,12 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::IntrinsicVecMax,
     BuiltinFunction::IntrinsicVecMin,
     BuiltinFunction::IntrinsicVecSelect,
-    // Matrix (2)
+    BuiltinFunction::IntrinsicVecAddI64,
+    // Matrix (4 — includes R5.4D IntrinsicMatAdd / IntrinsicMatSub)
     BuiltinFunction::IntrinsicMatMulVec,
     BuiltinFunction::IntrinsicMatMulMat,
+    BuiltinFunction::IntrinsicMatAdd,
+    BuiltinFunction::IntrinsicMatSub,
     // Eval helpers (6)
     BuiltinFunction::EvalTimeRef,
     BuiltinFunction::EvalDateTimeExpr,

@@ -2680,3 +2680,129 @@ bridge::invoke_once(plus_one)
         .expect("numeric");
     assert_eq!(number, 22.0);
 }
+
+// ============================================================================
+// R5.4D: pin the full dispatch chain for the three new intrinsics
+//
+// These tests hand-build a bytecode program that pushes two operands plus
+// the arg count, calls `BuiltinCall` with the new `BuiltinFunction` variant,
+// and executes via the real VM. A failure here indicates a break in the
+// opcode → helpers.rs → executor → kernel wiring — exactly the chain
+// R5.4E depends on when it starts emitting these opcodes.
+// ============================================================================
+
+/// Build a `Vec<int>` as a runtime-produced `ValueWord` so the constant
+/// pool can surface it via `PushConst`.
+fn r5_4d_int_array(values: &[i64]) -> ValueWord {
+    ValueWord::from_int_array(std::sync::Arc::new(values.to_vec().into()))
+}
+
+/// Build a nested-array `Mat<number>` matching the shape R5.4B's
+/// `Mat<number>` literals produce (outer array of per-row arrays).
+fn r5_4d_nested_matrix(rows: &[&[f64]]) -> ValueWord {
+    let nested = rows
+        .iter()
+        .map(|row| {
+            ValueWord::from_array(shape_value::vmarray_from_value_words(
+                row.iter().copied().map(ValueWord::from_f64),
+            ))
+        })
+        .collect::<Vec<_>>();
+    ValueWord::from_array(shape_value::vmarray_from_vec(nested))
+}
+
+#[test]
+fn test_r5_4d_intrinsic_vec_add_i64_bytecode_dispatch() {
+    // Push Vec<int>[1,2,3,4], Vec<int>[10,20,30,40], arg_count=2,
+    // then BuiltinCall(IntrinsicVecAddI64). Result must be an IntArray
+    // with element-wise sums.
+    let a = r5_4d_int_array(&[1, 2, 3, 4]);
+    let b = r5_4d_int_array(&[10, 20, 30, 40]);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::IntrinsicVecAddI64)),
+        ),
+    ];
+    let constants = vec![
+        Constant::Value(a),
+        Constant::Value(b),
+        Constant::Number(2.0), // arg count
+    ];
+
+    let result = execute_bytecode(instructions, constants)
+        .expect("IntrinsicVecAddI64 dispatch must succeed");
+    let int_array = result
+        .as_int_array()
+        .expect("IntrinsicVecAddI64 must produce an int array");
+    assert_eq!(int_array.as_slice(), &[11i64, 22, 33, 44]);
+}
+
+#[test]
+fn test_r5_4d_intrinsic_mat_add_bytecode_dispatch() {
+    // [[1,2],[3,4]] + [[10,20],[30,40]] = [[11,22],[33,44]], returned as
+    // nested arrays (post-R5.4B Mat<number> literal shape).
+    let a = r5_4d_nested_matrix(&[&[1.0, 2.0], &[3.0, 4.0]]);
+    let b = r5_4d_nested_matrix(&[&[10.0, 20.0], &[30.0, 40.0]]);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::IntrinsicMatAdd)),
+        ),
+    ];
+    let constants = vec![
+        Constant::Value(a),
+        Constant::Value(b),
+        Constant::Number(2.0),
+    ];
+
+    let result = execute_bytecode(instructions, constants)
+        .expect("IntrinsicMatAdd dispatch must succeed");
+    let outer = result.as_any_array().expect("matrix is a nested array");
+    let rows = outer.to_generic();
+    assert_eq!(rows.len(), 2);
+    let row0 = rows[0].as_any_array().expect("row is an array").to_generic();
+    let row1 = rows[1].as_any_array().expect("row is an array").to_generic();
+    let row0_nums: Vec<f64> = row0.iter().map(|v| v.as_number_coerce().unwrap()).collect();
+    let row1_nums: Vec<f64> = row1.iter().map(|v| v.as_number_coerce().unwrap()).collect();
+    assert_eq!(row0_nums, vec![11.0, 22.0]);
+    assert_eq!(row1_nums, vec![33.0, 44.0]);
+}
+
+#[test]
+fn test_r5_4d_intrinsic_mat_sub_bytecode_dispatch() {
+    let a = r5_4d_nested_matrix(&[&[10.0, 20.0], &[30.0, 40.0]]);
+    let b = r5_4d_nested_matrix(&[&[1.0, 2.0], &[3.0, 4.0]]);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::IntrinsicMatSub)),
+        ),
+    ];
+    let constants = vec![
+        Constant::Value(a),
+        Constant::Value(b),
+        Constant::Number(2.0),
+    ];
+
+    let result = execute_bytecode(instructions, constants)
+        .expect("IntrinsicMatSub dispatch must succeed");
+    let outer = result.as_any_array().expect("matrix is a nested array");
+    let rows = outer.to_generic();
+    assert_eq!(rows.len(), 2);
+    let row0 = rows[0].as_any_array().expect("row is an array").to_generic();
+    let row1 = rows[1].as_any_array().expect("row is an array").to_generic();
+    let row0_nums: Vec<f64> = row0.iter().map(|v| v.as_number_coerce().unwrap()).collect();
+    let row1_nums: Vec<f64> = row1.iter().map(|v| v.as_number_coerce().unwrap()).collect();
+    assert_eq!(row0_nums, vec![9.0, 18.0]);
+    assert_eq!(row1_nums, vec![27.0, 36.0]);
+}

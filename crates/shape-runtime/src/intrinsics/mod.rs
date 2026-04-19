@@ -262,6 +262,12 @@ impl IntrinsicsRegistry {
             "__intrinsic_vec_select".to_string(),
             vector::intrinsic_vec_select,
         );
+        // R5.4D: Vec<int> + Vec<int> — element-wise, overflow-checked.
+        // Compiler emission arrives in R5.4E.
+        functions.insert(
+            "__intrinsic_vec_add_i64".to_string(),
+            vector::intrinsic_vec_add_i64,
+        );
     }
 
     /// Register recurrence intrinsics
@@ -281,6 +287,16 @@ impl IntrinsicsRegistry {
         functions.insert(
             "__intrinsic_matmul_mat".to_string(),
             matrix::intrinsic_matmul_mat,
+        );
+        // R5.4D: Mat<number> + Mat<number> / Mat<number> - Mat<number>.
+        // Compiler emission arrives in R5.4E.
+        functions.insert(
+            "__intrinsic_mat_add".to_string(),
+            matrix::intrinsic_mat_add,
+        );
+        functions.insert(
+            "__intrinsic_mat_sub".to_string(),
+            matrix::intrinsic_mat_sub,
         );
     }
 

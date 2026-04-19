@@ -311,10 +311,14 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicVecDiv
                 | BuiltinFunction::IntrinsicVecMax
                 | BuiltinFunction::IntrinsicVecMin
-                | BuiltinFunction::IntrinsicVecSelect) => {
+                | BuiltinFunction::IntrinsicVecSelect
+                | BuiltinFunction::IntrinsicVecAddI64) => {
                     return self.handle_vector_intrinsic(b, ctx.as_deref_mut());
                 }
-                b @ (BuiltinFunction::IntrinsicMatMulVec | BuiltinFunction::IntrinsicMatMulMat) => {
+                b @ (BuiltinFunction::IntrinsicMatMulVec
+                | BuiltinFunction::IntrinsicMatMulMat
+                | BuiltinFunction::IntrinsicMatAdd
+                | BuiltinFunction::IntrinsicMatSub) => {
                     return self.handle_matrix_intrinsic(b, ctx.as_deref_mut());
                 }
                 BuiltinFunction::SomeCtor => {

@@ -167,3 +167,62 @@ pub extern "C" fn jit_intrinsic_matmul_mat(ctx: *mut JITContext, a_bits: u64, b_
         Err(_) => TAG_NULL,
     }
 }
+
+// ===== R5.4D: Matrix/Vec arithmetic intrinsics (unwired) =====
+//
+// Mirrors the existing `jit_intrinsic_matmul_mat` shape. Exposed as
+// direct-call helpers — there is no Cranelift symbol registration for
+// this family today (see `ffi_symbols/mod.rs`), so these entry points
+// piggy-back on the same pattern. R5.4E owns the compiler emission that
+// makes these reachable; R7 owns the eventual FuncRef consolidation.
+
+pub extern "C" fn jit_intrinsic_vec_add_i64(
+    ctx: *mut JITContext,
+    a_bits: u64,
+    b_bits: u64,
+) -> u64 {
+    if ctx.is_null() {
+        return TAG_NULL;
+    }
+    let a = jit_to_nb(a_bits, ctx);
+    let b = jit_to_nb(b_bits, ctx);
+    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
+    match shape_runtime::intrinsics::vector::intrinsic_vec_add_i64(&[a, b], &mut exec_ctx) {
+        Ok(res) => nb_to_bits(res),
+        Err(_) => TAG_NULL,
+    }
+}
+
+pub extern "C" fn jit_intrinsic_mat_add(
+    ctx: *mut JITContext,
+    a_bits: u64,
+    b_bits: u64,
+) -> u64 {
+    if ctx.is_null() {
+        return TAG_NULL;
+    }
+    let a = jit_to_nb(a_bits, ctx);
+    let b = jit_to_nb(b_bits, ctx);
+    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
+    match shape_runtime::intrinsics::matrix::intrinsic_mat_add(&[a, b], &mut exec_ctx) {
+        Ok(res) => nb_to_bits(res),
+        Err(_) => TAG_NULL,
+    }
+}
+
+pub extern "C" fn jit_intrinsic_mat_sub(
+    ctx: *mut JITContext,
+    a_bits: u64,
+    b_bits: u64,
+) -> u64 {
+    if ctx.is_null() {
+        return TAG_NULL;
+    }
+    let a = jit_to_nb(a_bits, ctx);
+    let b = jit_to_nb(b_bits, ctx);
+    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
+    match shape_runtime::intrinsics::matrix::intrinsic_mat_sub(&[a, b], &mut exec_ctx) {
+        Ok(res) => nb_to_bits(res),
+        Err(_) => TAG_NULL,
+    }
+}

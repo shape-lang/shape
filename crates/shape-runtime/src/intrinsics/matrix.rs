@@ -6,7 +6,10 @@
 
 use super::{extract_f64_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
+use crate::intrinsics::matrix_kernels;
 use shape_ast::error::{Result, ShapeError};
+use shape_value::aligned_vec::AlignedVec;
+use shape_value::heap_value::MatrixData;
 use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -164,6 +167,73 @@ pub fn intrinsic_matmul_mat(args: &[ValueWord], _ctx: &mut ExecutionContext) -> 
     Ok(matrix_to_nb(&out, a_rows, b_cols))
 }
 
+/// Build a `MatrixData` from the nested-array representation produced
+/// by R5.4B's `Mat<number>` literals. Shared by `intrinsic_mat_add` and
+/// `intrinsic_mat_sub` so their dimension-check error paths stay
+/// identical to `intrinsic_matmul_mat`.
+fn matrix_data_from_nb(nb: &ValueWord, label: &str) -> Result<MatrixData> {
+    let (flat, rows, cols) = extract_matrix_f64(nb, label)?;
+    let aligned = if flat.is_empty() {
+        AlignedVec::new()
+    } else {
+        AlignedVec::from_vec(flat)
+    };
+    Ok(MatrixData::from_flat(aligned, rows as u32, cols as u32))
+}
+
+/// Convert a kernel-produced `MatrixData` back to the nested-array
+/// shape that post-R5.4B `Mat<number>` literals produce. Keeps input
+/// and output representations symmetric so downstream method dispatch
+/// doesn't diverge between the fallback and intrinsic paths.
+fn matrix_data_to_nb(mat: &MatrixData) -> ValueWord {
+    matrix_to_nb(mat.data.as_slice(), mat.rows as usize, mat.cols as usize)
+}
+
+/// Core element-wise matrix addition: `Mat<number> + Mat<number>` (R5.4D).
+///
+/// Dispatches to `matrix_kernels::matrix_add` after extracting the
+/// nested-array inputs via `extract_matrix_f64`. Shape errors (non-
+/// rectangular / non-numeric rows) come from the extractor; dimension
+/// mismatch surfaces from the kernel. Result is the nested-array
+/// representation produced by R5.4B's `Mat<number>` literals.
+pub fn intrinsic_mat_add(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
+    if args.len() != 2 {
+        return Err(ShapeError::RuntimeError {
+            message: "mat_add requires 2 arguments".into(),
+            location: None,
+        });
+    }
+    let a = matrix_data_from_nb(&args[0], "Left matrix")?;
+    let b = matrix_data_from_nb(&args[1], "Right matrix")?;
+    let out =
+        matrix_kernels::matrix_add(&a, &b).map_err(|msg| ShapeError::RuntimeError {
+            message: msg,
+            location: None,
+        })?;
+    Ok(matrix_data_to_nb(&out))
+}
+
+/// Core element-wise matrix subtraction: `Mat<number> - Mat<number>` (R5.4D).
+/// Companion to `intrinsic_mat_add`, dispatching to
+/// `matrix_kernels::matrix_sub` with the same input / output shape
+/// contract.
+pub fn intrinsic_mat_sub(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
+    if args.len() != 2 {
+        return Err(ShapeError::RuntimeError {
+            message: "mat_sub requires 2 arguments".into(),
+            location: None,
+        });
+    }
+    let a = matrix_data_from_nb(&args[0], "Left matrix")?;
+    let b = matrix_data_from_nb(&args[1], "Right matrix")?;
+    let out =
+        matrix_kernels::matrix_sub(&a, &b).map_err(|msg| ShapeError::RuntimeError {
+            message: msg,
+            location: None,
+        })?;
+    Ok(matrix_data_to_nb(&out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +290,62 @@ mod tests {
         let mut ctx = ExecutionContext::new_empty();
         let out = intrinsic_matmul_mat(&[a, b], &mut ctx).expect("matmul_mat");
         assert_eq!(unwrap_mat(out), vec![vec![19.0, 22.0], vec![43.0, 50.0]]);
+    }
+
+    // ===== R5.4D: intrinsic_mat_add / intrinsic_mat_sub =====
+
+    #[test]
+    fn test_r5_4d_intrinsic_mat_add_happy_path() {
+        let a = nb_mat(&[&[1.0, 2.0], &[3.0, 4.0]]);
+        let b = nb_mat(&[&[10.0, 20.0], &[30.0, 40.0]]);
+        let mut ctx = ExecutionContext::new_empty();
+        let out = intrinsic_mat_add(&[a, b], &mut ctx).expect("mat_add");
+        assert_eq!(unwrap_mat(out), vec![vec![11.0, 22.0], vec![33.0, 44.0]]);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_mat_add_dimension_mismatch() {
+        let a = nb_mat(&[&[1.0, 2.0], &[3.0, 4.0]]);
+        let b = nb_mat(&[&[1.0, 2.0, 3.0]]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_mat_add(&[a, b], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("dimension mismatch") || msg.contains("Matrix"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_mat_sub_happy_path() {
+        let a = nb_mat(&[&[10.0, 20.0], &[30.0, 40.0]]);
+        let b = nb_mat(&[&[1.0, 2.0], &[3.0, 4.0]]);
+        let mut ctx = ExecutionContext::new_empty();
+        let out = intrinsic_mat_sub(&[a, b], &mut ctx).expect("mat_sub");
+        assert_eq!(unwrap_mat(out), vec![vec![9.0, 18.0], vec![27.0, 36.0]]);
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_mat_sub_dimension_mismatch() {
+        let a = nb_mat(&[&[1.0, 2.0], &[3.0, 4.0]]);
+        let b = nb_mat(&[&[1.0], &[2.0]]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_mat_sub(&[a, b], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("dimension mismatch") || msg.contains("Matrix"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_r5_4d_intrinsic_mat_add_arity_error() {
+        let a = nb_mat(&[&[1.0]]);
+        let mut ctx = ExecutionContext::new_empty();
+        let err = intrinsic_mat_add(&[a], &mut ctx).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("2 arguments"), "got: {}", msg);
     }
 }
