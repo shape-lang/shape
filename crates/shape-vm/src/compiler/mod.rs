@@ -711,6 +711,27 @@ pub struct BytecodeCompiler {
     pub(crate) pending_variable_typed_array_kind:
         Option<crate::compiler::v2_typed_emission::TypedArrayKind>,
 
+    /// R5.4B: nested-array-literal depth.
+    ///
+    /// Incremented while `compile_expr_array` compiles the elements of an
+    /// array literal, decremented after. When `> 0`, the compiler is inside
+    /// a nested array-literal context (e.g. the inner `[1.0, 2.0]` of
+    /// `[[1.0, 2.0], [3.0, 4.0]]`) and MUST refuse the typed-array fast
+    /// path (`NewTypedArrayF64`/etc.) regardless of annotation or
+    /// inference.
+    ///
+    /// Why: the v2 typed-array opcodes store the allocation as a raw
+    /// `NativeScalar::Ptr` ValueWord on the stack, not as a `HeapValue`
+    /// reference. Downstream consumers that unwrap the outer generic
+    /// `Array` via `as_any_array()` / `as_heap_ref()` cannot decode a
+    /// native-pointer ValueWord back into a typed array, so e.g.
+    /// `intrinsic_matmul_mat` fails with
+    /// "row 0 must be an array of numeric values". Refusing typed
+    /// emission for inner rows forces them onto the legacy `NewArray`
+    /// path, which produces heap-ref ValueWords that round-trip
+    /// correctly through a generic outer `Array`.
+    pub(crate) nested_array_literal_depth: u32,
+
     /// v2 Phase 3.1: per-local-slot record of which locals hold a v2
     /// typed array (allocated via `NewTypedArrayF64/I64/I32/Bool` rather
     /// than the legacy v1 `NewTypedArray`/`NewArray`). Populated by the

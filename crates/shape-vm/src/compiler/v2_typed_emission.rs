@@ -601,6 +601,130 @@ mod compile_integration_tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // R5.4B: nested-array-literal guard.
+    //
+    // The typed `NewTypedArrayF64/I64/I32/Bool` opcodes store scalars
+    // (raw f64/i64/i32/bool bits). An outer array whose rows are
+    // themselves arrays cannot use the typed fast path — it would store
+    // inner typed-array pointers as scalar bits, which downstream
+    // consumers (`intrinsic_matmul_mat`, `as_any_array()`) can't decode.
+    //
+    // The regression guard refuses typed emission at both:
+    //   - inference: `infer_array_element_type` returns None when any
+    //     element is `Expr::Array`.
+    //   - annotation override: `compile_expr_array` refuses the typed
+    //     path when any element is `Expr::Array`, regardless of
+    //     `pending_variable_typed_array_kind`.
+    //   - recursion: the inner rows compile with
+    //     `nested_array_literal_depth > 0`, which forces them back to
+    //     the legacy `NewArray` path so they round-trip as heap-ref
+    //     ValueWords, not as `NativeScalar::Ptr` words.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_nested_array_literal_mat_number_emits_new_array_for_outer_and_inner() {
+        // `let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]` — outer AND
+        // inner must fall back to the generic `NewArray` path (not the
+        // typed `NewTypedArrayF64` path).
+        let prog = compile(
+            r#"
+            let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]
+            m
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewArray),
+            "nested `Mat<number>` literal must emit legacy NewArray, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "nested `Mat<number>` literal must NOT emit NewTypedArrayF64 \
+             (would splice inner typed-array pointers into f64 slots); \
+             got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_nested_array_literal_array_number_annotation_refuses_typed() {
+        // Same nested shape but with an `Array<number>` annotation —
+        // without the R5.4B guard this path took the annotation-driven
+        // typed branch (`pending_variable_typed_array_kind = Some(F64)`)
+        // and emitted `NewTypedArrayF64` for BOTH outer and inner,
+        // splicing inner pointers into f64 slots of the outer.
+        let prog = compile(
+            r#"
+            let m: Array<number> = [[1.0, 2.0], [3.0, 4.0]]
+            m
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewArray),
+            "nested `Array<number>` literal must emit legacy NewArray, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "nested `Array<number>` annotation with nested rows must NOT \
+             emit NewTypedArrayF64; got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_non_nested_vec_number_still_emits_new_typed_array_f64() {
+        // Regression safety: the R5.4B nested-array guard must NOT
+        // disturb the typed fast path for a plain
+        // `let v: Vec<number> = [1.0, 2.0, 3.0]`.
+        let prog = compile(
+            r#"
+            let v: Vec<number> = [1.0, 2.0, 3.0]
+            v
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "non-nested `Vec<number>` must still emit NewTypedArrayF64, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_non_nested_vec_int_still_emits_new_typed_array_i64() {
+        // Same regression safety check for `Vec<int>`.
+        let prog = compile(
+            r#"
+            let v: Vec<int> = [1, 2, 3]
+            v
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "non-nested `Vec<int>` must still emit NewTypedArrayI64, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // v2 Phase 3.1 (Agent 3): method dispatch / index access / index
     // assignment / property access fast paths.
     //

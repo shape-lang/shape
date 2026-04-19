@@ -23,8 +23,24 @@ use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 /// - All elements have the same tracked `storage_hint` in the type tracker -> that kind
 /// - Empty array -> `None` (element type unknown)
 /// - Heterogeneous or unresolvable -> `None`
+/// - **Any element is itself an array literal (`Expr::Array`) -> `None`**
+///   (R5.4B guard: nested-array literals have no scalar element type; the
+///   outer literal must fall back to the generic `NewArray` path so the
+///   inner arrays round-trip as heap-ref ValueWords, not as raw
+///   `NativeScalar::Ptr` words that can't be decoded downstream.)
 pub fn infer_array_element_type(elements: &[Expr], type_tracker: &TypeTracker) -> Option<SlotKind> {
     if elements.is_empty() {
+        return None;
+    }
+
+    // R5.4B: refuse the typed fast path whenever any element is itself an
+    // array literal. An outer array whose rows are themselves arrays cannot
+    // be represented as `TypedArray<f64/i64/i32/bool>` — those opcodes
+    // store scalars, not pointers. Treating the outer as typed would
+    // splice raw `NativeScalar::Ptr` bit-patterns into f64 slots, which
+    // then fail to decode as arrays via `as_any_array()` downstream
+    // (e.g. `intrinsic_matmul_mat`).
+    if elements.iter().any(|e| matches!(e, Expr::Array(..))) {
         return None;
     }
 
@@ -309,6 +325,30 @@ mod tests {
     fn test_all_identifiers_without_tracking_returns_none() {
         let tt = tracker();
         let elems = vec![ident("a"), ident("b")];
+        assert_eq!(infer_array_element_type(&elems, &tt), None);
+    }
+
+    #[test]
+    fn test_nested_array_literal_element_returns_none() {
+        // R5.4B: an outer literal whose rows are themselves array
+        // literals has no scalar element type — typed fast path is
+        // invalid (inner typed-array pointers can't be spliced into
+        // scalar slots of `TypedArray<f64/i64/i32/bool>`).
+        let tt = tracker();
+        let inner = Expr::Array(vec![num_lit(1.0), num_lit(2.0)], span());
+        let outer_elems = vec![inner.clone(), inner];
+        assert_eq!(infer_array_element_type(&outer_elems, &tt), None);
+    }
+
+    #[test]
+    fn test_mixed_scalar_and_nested_array_returns_none() {
+        // R5.4B: also covers the heterogeneous case where only some
+        // rows are array literals.
+        let tt = tracker();
+        let elems = vec![
+            num_lit(1.0),
+            Expr::Array(vec![num_lit(2.0), num_lit(3.0)], span()),
+        ];
         assert_eq!(infer_array_element_type(&elems, &tt), None);
     }
 

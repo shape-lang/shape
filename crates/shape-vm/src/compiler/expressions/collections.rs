@@ -170,9 +170,25 @@ impl BytecodeCompiler {
         // `pending_variable_typed_array_kind` so the post-init capture
         // in `Statement::VarDecl` records the typed kind against the
         // local slot / module binding (Phase 3.1 Agent 3 wiring).
+        // R5.4B: detect nested-array literal shape upfront. When any
+        // element is itself an array literal, the outer array CANNOT use
+        // the typed fast path — `NewTypedArrayF64/I64/I32/Bool` store
+        // scalars, and splicing inner typed-array pointers in as f64
+        // bits produces a value that can't be decoded downstream (see
+        // `intrinsic_matmul_mat`'s `as_any_array()` failure). Also, the
+        // inner arrays themselves must be forced off the typed path so
+        // they round-trip as heap-ref ValueWords through the outer
+        // generic `NewArray`; `nested_array_literal_depth` propagates
+        // that signal into the recursive `compile_expr_array` call.
+        let has_nested_array_elem = elements
+            .iter()
+            .any(|e| matches!(e, Expr::Array(..)));
+        let in_nested_context = self.nested_array_literal_depth > 0;
         let typed_kind: Option<TypedArrayKind> = if elements
             .iter()
             .any(|e| matches!(e, Expr::Spread(..)))
+            || has_nested_array_elem
+            || in_nested_context
         {
             None
         } else if let Some(kind) = self.pending_variable_typed_array_kind {
@@ -212,6 +228,10 @@ impl BytecodeCompiler {
         } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
             self.compile_array_with_spread(elements)?;
         } else {
+            // R5.4B: while compiling elements of a generic-array literal,
+            // mark inner array-literal children as nested so they also
+            // refuse the typed fast path (see comment above).
+            self.nested_array_literal_depth += 1;
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 // Phase F: closure literals stored into an array escape
@@ -223,6 +243,7 @@ impl BytecodeCompiler {
                 }
                 self.compile_expr_as_value_or_placeholder(elem)?;
             }
+            self.nested_array_literal_depth -= 1;
             // Emit NewTypedArray for homogeneous int/number/bool literals
             let use_typed = !elements.is_empty()
                 && (matches!(
