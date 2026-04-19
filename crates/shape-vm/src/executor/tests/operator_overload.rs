@@ -476,3 +476,177 @@ fn test_operator_overload_without_trait_fails() {
         "Subtracting two Foo without impl Sub should fail"
     );
 }
+
+/// R5.4A baseline regression test for the v2 residuals closeout plan.
+///
+/// Pins the current emission shape for `Matrix + Matrix`, `Matrix - Matrix`,
+/// `Vec<number> ± * / Vec<number>`, and `Vec<int> + Vec<int>` so that R5.4B
+/// can flip the assertions to the retargeted intrinsic form in a single,
+/// reviewable commit — mirroring the R5.3A→R5.3B pattern for DateTime.
+///
+/// Today, `Mat<number> + Mat<number>`, `Mat<number> - Mat<number>`,
+/// `Vec<number> ± * / Vec<number>`, and `Vec<int> + Vec<int>` all fall
+/// through to `AddDynamic` / `SubDynamic` / `MulDynamic` / `DivDynamic`
+/// and dispatch via
+/// `executor/arithmetic/mod.rs::try_heap_arithmetic`'s Matrix /
+/// `TypedArrayData::F64` / `TypedArrayData::I64` arms. The compile-time
+/// retarget does not fire because:
+///
+///   - The inferred operand type names are `"Vec"` / `"Mat"` (from
+///     `type_display_name(Type::Concrete(TypeAnnotation::Generic { name, .. }))`),
+///     which are neither numeric (so `is_type_numeric` returns false and
+///     the strict-arithmetic error gate is sidestepped via the
+///     `Expr::IndexAccess` / `adopt_missing_numeric_operand_hint` paths
+///     or the operand-trait-check escape) nor registered in the Add-arm's
+///     typed-heap retargets at `binary_ops.rs:~L703-771`
+///     (String / Array / DateTime / Duration).
+///   - There is no schema attached (Vec / Mat aren't TypedObjects), so
+///     `try_emit_trait_dispatch` in the `CoercedNeedsGeneric | NoPlan`
+///     arm returns false and the shim emits `AddDynamic` for Add and
+///     dispatches the `_ => {}` strict-arithmetic branch for Sub / Mul /
+///     Div to `emit_generic_via_helper` / `compile_binary_op`.
+///
+/// The arms in `try_heap_arithmetic` corresponding to these operand
+/// shapes are currently the live execution path — they are not yet
+/// marked dead. R5.4B will (1) resolve the Mat*Mat representation bug
+/// and missing intrinsics, (2) retarget at compile time, and (3) flip
+/// each assertion below to require the retargeted lowering. See the
+/// expanded doc comment at `try_heap_arithmetic` in
+/// `executor/arithmetic/mod.rs` for the three unblocking preconditions.
+///
+/// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.4.
+#[test]
+fn test_r5_4a_matrix_vec_arithmetic_fallback_baseline() {
+    // Case 1: `Mat<number> + Mat<number>` via typed function parameters.
+    // Expected emission today: AddDynamic (via emit_binary_op shim).
+    {
+        let program = compile(
+            r#"
+            fn test(a: Mat<number>, b: Mat<number>) { a + b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::AddDynamic),
+            "R5.4A baseline regression: Mat+Mat must emit AddDynamic \
+             until R5.4B lands the retarget. Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 2: `Mat<number> - Mat<number>` via typed function parameters.
+    // Expected emission today: SubDynamic (via emit_generic_via_helper
+    // / compile_binary_op in the `_ => {}` strict-arithmetic arm).
+    {
+        let program = compile(
+            r#"
+            fn test(a: Mat<number>, b: Mat<number>) { a - b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::SubDynamic),
+            "R5.4A baseline regression: Mat-Mat must emit SubDynamic \
+             until R5.4B lands the retarget. Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 3: `Vec<number> + Vec<number>` via typed function parameters.
+    // Expected emission today: AddDynamic (via emit_binary_op shim). At
+    // runtime this reaches the SIMD arm in try_heap_arithmetic keyed on
+    // `(TypedArrayData::F64, TypedArrayData::F64)`.
+    {
+        let program = compile(
+            r#"
+            fn test(a: Vec<number>, b: Vec<number>) { a + b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::AddDynamic),
+            "R5.4A baseline regression: Vec<number>+Vec<number> must \
+             emit AddDynamic until R5.4B lands the retarget. \
+             Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 4: `Vec<number> - Vec<number>` via typed function parameters.
+    {
+        let program = compile(
+            r#"
+            fn test(a: Vec<number>, b: Vec<number>) { a - b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::SubDynamic),
+            "R5.4A baseline regression: Vec<number>-Vec<number> must \
+             emit SubDynamic until R5.4B lands the retarget. \
+             Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 5: `Vec<number> * Vec<number>` via typed function parameters.
+    // Elementwise SIMD multiply at the fallback. Does NOT route through
+    // `try_compile_typed_matrix_mul` (which only fires for Mat*Vec and
+    // Mat*Mat).
+    {
+        let program = compile(
+            r#"
+            fn test(a: Vec<number>, b: Vec<number>) { a * b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::MulDynamic),
+            "R5.4A baseline regression: Vec<number>*Vec<number> must \
+             emit MulDynamic until R5.4B lands the retarget. \
+             Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 6: `Vec<number> / Vec<number>` via typed function parameters.
+    {
+        let program = compile(
+            r#"
+            fn test(a: Vec<number>, b: Vec<number>) { a / b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::DivDynamic),
+            "R5.4A baseline regression: Vec<number>/Vec<number> must \
+             emit DivDynamic until R5.4B lands the retarget. \
+             Ops emitted: {:?}",
+            ops
+        );
+    }
+
+    // Case 7: `Vec<int> + Vec<int>` via typed function parameters.
+    // At runtime this reaches the integer-preserving arm in
+    // try_heap_arithmetic keyed on `(TypedArrayData::I64,
+    // TypedArrayData::I64)` which calls `simd_vec_add_i64` and returns
+    // overflow errors as `VMError::RuntimeError`.
+    {
+        let program = compile(
+            r#"
+            fn test(a: Vec<int>, b: Vec<int>) { a + b }
+            "#,
+        );
+        let ops = all_opcodes(&program);
+        assert!(
+            ops.contains(&OpCode::AddDynamic),
+            "R5.4A baseline regression: Vec<int>+Vec<int> must emit \
+             AddDynamic until R5.4B lands the retarget (and adds the \
+             IntrinsicVecAddI64 builtin to preserve overflow semantics). \
+             Ops emitted: {:?}",
+            ops
+        );
+    }
+}
+
+
