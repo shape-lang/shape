@@ -4,7 +4,7 @@
 //! critical for implementing custom indicators and math in Shape.
 //! Optimized using SIMD via the `wide` crate.
 
-use super::{extract_f64_array, f64_vec_to_nb_array};
+use super::{extract_f64_array, f64_vec_to_float_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
 use shape_value::{ValueWord, ValueWordExt};
@@ -101,12 +101,20 @@ pub fn intrinsic_vec_exp(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Res
     Ok(f64_vec_to_nb_array(result))
 }
 
-/// Helper for binary vector ops that also accept a scalar right-hand side
+/// Helper for binary vector ops that also accept a scalar right-hand side.
+///
+/// `build_result` wraps the final `Vec<f64>` into the caller-preferred
+/// ValueWord representation. The four `Vec<number>` arithmetic
+/// intrinsics pass `f64_vec_to_float_array` (HeapKind::FloatArray) so
+/// the result retains the 21-method FLOAT_ARRAY_METHODS PHF dispatch
+/// that the executor's dynamic fallback arm produces. Other callers
+/// (vec_max / vec_min) stay on `f64_vec_to_nb_array` (HeapKind::Array).
 fn binary_vec_op(
     args: &[ValueWord],
     name: &str,
     simd_op: fn(f64x4, f64x4) -> f64x4,
     scalar_op: fn(f64, f64) -> f64,
+    build_result: fn(Vec<f64>) -> ValueWord,
 ) -> Result<ValueWord> {
     if args.len() != 2 {
         return Err(ShapeError::RuntimeError {
@@ -138,7 +146,7 @@ fn binary_vec_op(
         }
         // If it was a scalar, it might not have an array — skip length check
         if args[0].as_any_array().is_some() {
-            return Ok(f64_vec_to_nb_array(result));
+            return Ok(build_result(result));
         }
     }
 
@@ -170,37 +178,73 @@ fn binary_vec_op(
             result[i] = scalar_op(a[i], b[i]);
         }
     }
-    Ok(f64_vec_to_nb_array(result))
+    Ok(build_result(result))
 }
 
 /// Core Vector Addition: a + b
 pub fn intrinsic_vec_add(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_add", |a, b| a + b, |a, b| a + b)
+    binary_vec_op(
+        args,
+        "vec_add",
+        |a, b| a + b,
+        |a, b| a + b,
+        f64_vec_to_float_array,
+    )
 }
 
 /// Core Vector Subtraction: a - b
 pub fn intrinsic_vec_sub(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_sub", |a, b| a - b, |a, b| a - b)
+    binary_vec_op(
+        args,
+        "vec_sub",
+        |a, b| a - b,
+        |a, b| a - b,
+        f64_vec_to_float_array,
+    )
 }
 
 /// Core Vector Multiplication: a * b
 pub fn intrinsic_vec_mul(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_mul", |a, b| a * b, |a, b| a * b)
+    binary_vec_op(
+        args,
+        "vec_mul",
+        |a, b| a * b,
+        |a, b| a * b,
+        f64_vec_to_float_array,
+    )
 }
 
 /// Core Vector Division: a / b
 pub fn intrinsic_vec_div(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_div", |a, b| a / b, |a, b| a / b)
+    binary_vec_op(
+        args,
+        "vec_div",
+        |a, b| a / b,
+        |a, b| a / b,
+        f64_vec_to_float_array,
+    )
 }
 
 /// Core Vector Max: max(a, b)
 pub fn intrinsic_vec_max(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_max", |a, b| a.max(b), f64::max)
+    binary_vec_op(
+        args,
+        "vec_max",
+        |a, b| a.max(b),
+        f64::max,
+        f64_vec_to_nb_array,
+    )
 }
 
 /// Core Vector Min: min(a, b)
 pub fn intrinsic_vec_min(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(args, "vec_min", |a, b| a.min(b), f64::min)
+    binary_vec_op(
+        args,
+        "vec_min",
+        |a, b| a.min(b),
+        f64::min,
+        f64_vec_to_nb_array,
+    )
 }
 
 /// Core Vector Select: condition ? true_val : false_val
@@ -490,6 +534,77 @@ mod tests {
         let result = intrinsic_vec_add(&[a, b], &mut ctx).unwrap();
         let arr = unwrap_array(result);
         assert_eq!(arr, vec![4.0, 6.0]);
+    }
+
+    // ===== R5.4C: Vec<number> arithmetic intrinsics return FloatArray =====
+    //
+    // After R5.4E retargets `Vec<number> + Vec<number>` (etc.) from the
+    // dynamic fallback arm to these intrinsics, the result must match
+    // the fallback's output — a `HeapValue::TypedArray(TypedArrayData::F64)`
+    // (reported as `HeapKind::TypedArray`, probed here via
+    // `as_float_array()` which narrows to the F64 inner variant). This
+    // representation enables the 21 FLOAT_ARRAY_METHODS PHF entries
+    // (sum / avg / dot / norm / cumsum / diff / abs / sqrt / ...) that
+    // the generic `HeapKind::Array` path does not.
+
+    #[test]
+    fn test_r5_4c_vec_add_returns_float_array_kind() {
+        use shape_value::HeapKind;
+        let a = make_array(&[1.0, 2.0, 3.0]);
+        let b = make_array(&[10.0, 20.0, 30.0]);
+        let mut ctx = ExecutionContext::new_empty();
+        let result = intrinsic_vec_add(&[a, b], &mut ctx).unwrap();
+        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
+        assert!(
+            result.as_float_array().is_some(),
+            "vec_add result must be a FloatArray (TypedArrayData::F64)"
+        );
+        assert_eq!(unwrap_array(result), vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn test_r5_4c_vec_sub_returns_float_array_kind() {
+        use shape_value::HeapKind;
+        let a = make_array(&[10.0, 20.0, 30.0]);
+        let b = make_array(&[1.0, 2.0, 3.0]);
+        let mut ctx = ExecutionContext::new_empty();
+        let result = intrinsic_vec_sub(&[a, b], &mut ctx).unwrap();
+        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
+        assert!(
+            result.as_float_array().is_some(),
+            "vec_sub result must be a FloatArray (TypedArrayData::F64)"
+        );
+        assert_eq!(unwrap_array(result), vec![9.0, 18.0, 27.0]);
+    }
+
+    #[test]
+    fn test_r5_4c_vec_mul_returns_float_array_kind() {
+        use shape_value::HeapKind;
+        let a = make_array(&[2.0, 3.0, 4.0]);
+        let b = make_array(&[5.0, 6.0, 7.0]);
+        let mut ctx = ExecutionContext::new_empty();
+        let result = intrinsic_vec_mul(&[a, b], &mut ctx).unwrap();
+        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
+        assert!(
+            result.as_float_array().is_some(),
+            "vec_mul result must be a FloatArray (TypedArrayData::F64)"
+        );
+        assert_eq!(unwrap_array(result), vec![10.0, 18.0, 28.0]);
+    }
+
+    #[test]
+    fn test_r5_4c_vec_div_returns_float_array_kind() {
+        use shape_value::HeapKind;
+        let a = make_array(&[10.0, 20.0, 30.0]);
+        let b = make_array(&[2.0, 5.0, 6.0]);
+        let mut ctx = ExecutionContext::new_empty();
+        let result = intrinsic_vec_div(&[a, b], &mut ctx).unwrap();
+        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
+        assert!(
+            result.as_float_array().is_some(),
+            "vec_div result must be a FloatArray (TypedArrayData::F64)"
+        );
+        assert_eq!(unwrap_array(result), vec![5.0, 4.0, 5.0]);
     }
 
     #[test]

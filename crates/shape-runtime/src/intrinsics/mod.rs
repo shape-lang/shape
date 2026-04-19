@@ -450,6 +450,29 @@ pub fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
     ))
 }
 
+/// Build a ValueWord FloatArray from a Vec<f64>.
+///
+/// Returns a typed FloatArray — `HeapValue::TypedArray(TypedArrayData::F64(Arc<AlignedTypedBuffer>))`,
+/// reported by `heap_kind()` as `HeapKind::TypedArray` (the legacy
+/// `HeapKind::FloatArray` discriminant is deprecated). Unlike
+/// `f64_vec_to_nb_array`, which produces a generic `HeapKind::Array`
+/// of boxed f64 ValueWords, this helper preserves the `Vec<number>`
+/// fast-path representation used by the executor's dynamic fallback
+/// arm in `executor/arithmetic/mod.rs`.
+///
+/// Used by the four binary `Vec<number>` arithmetic intrinsics
+/// (vec_add / vec_sub / vec_mul / vec_div) so that when R5.4E retargets
+/// `Vec<number> + Vec<number>` (etc.) from the dynamic fallback to
+/// these intrinsics, the result preserves the 21-method
+/// FLOAT_ARRAY_METHODS PHF dispatch (sum / avg / dot / norm / cumsum /
+/// diff / abs / sqrt / ...) that the generic `HeapKind::Array` path
+/// does not provide.
+pub fn f64_vec_to_float_array(data: Vec<f64>) -> ValueWord {
+    use shape_value::aligned_vec::AlignedVec;
+    let aligned = AlignedVec::<f64>::from_vec(data);
+    ValueWord::from_float_array(std::sync::Arc::new(aligned.into()))
+}
+
 /// Build a ValueWord IntArray from a Vec<i64>.
 ///
 /// Returns a typed IntArray (preserves integer type fidelity) rather than
