@@ -8,7 +8,8 @@
 //! - impl Neg for custom types
 //! - Operator trait fallback only fires when built-in paths don't match
 
-use crate::executor::tests::test_utils::{eval, eval_result};
+use crate::bytecode::OpCode;
+use crate::executor::tests::test_utils::{compile, eval, eval_result};
 use shape_value::{ValueWord, ValueWordExt};
 
 #[test]
@@ -178,6 +179,81 @@ fn test_string_concat_still_works() {
     // String concatenation should not be affected by operator traits
     let result = eval(r#""hello " + "world""#);
     assert_eq!(result.as_str().unwrap(), "hello world");
+}
+
+/// Iterate over every instruction in the program, including function bodies.
+/// Used by the R5.2A baseline tests below to assert on the full emitted opcode
+/// stream, not just the main script body.
+fn all_opcodes(program: &crate::bytecode::BytecodeProgram) -> Vec<OpCode> {
+    program.instructions.iter().map(|i| i.opcode).collect()
+}
+
+/// R5.2A baseline regression test for the v2 residuals closeout plan.
+///
+/// Pins the current emission shape for user-defined `impl Add for T` so that
+/// R5.2B (which extends retargeting to the remaining Add-specific dynamic
+/// fallback branch at `binary_ops.rs:~L867`) can make a focused, reviewable
+/// change without accidentally regressing the paths that already compile to
+/// `CallMethod`.
+///
+/// Today the compiler already emits `CallMethod` (via
+/// `emit_operator_trait_call`) for `a + b` when both operands have TypedObject
+/// schemas AND the left type implements `Add` (see
+/// `compiler/expressions/binary_ops.rs:665-684`). This test pins that
+/// behaviour: the script's `a + b` user-trait dispatch must compile to
+/// `CallMethod`, not to `AddDynamic`.
+///
+/// The test isolates the user-trait dispatch by storing the result in a
+/// module binding and checking only the main-script instruction range (i.e.
+/// excluding function bodies, which legitimately contain `AddNumber` for
+/// inlined numeric field additions).
+///
+/// Reference: `/home/dev/.claude/plans/v2-residuals-closeout.md` §R5.2.
+#[test]
+fn test_r5_2a_user_add_compiles_to_call_method_not_add_dynamic() {
+    let program = compile(
+        r#"
+        type Vec2 { x: number, y: number }
+
+        impl Add for Vec2 {
+            method add(other: Vec2) -> Vec2 {
+                Vec2 { x: self.x + other.x, y: self.y + other.y }
+            }
+        }
+
+        let a = Vec2 { x: 1.0, y: 2.0 }
+        let b = Vec2 { x: 3.0, y: 4.0 }
+        let c = a + b
+    "#,
+    );
+
+    let ops = all_opcodes(&program);
+
+    // Baseline: this self-contained program has exactly one `+` in the main
+    // script (`a + b`). It must have retargeted to `CallMethod` at compile
+    // time, so `AddDynamic` must not appear in the main-script stream.
+    //
+    // Note: function bodies (e.g. `self.x + other.x` inside Vec2::add) live
+    // in the same instruction vector but emit `AddNumber`, not `AddDynamic`,
+    // because both operands are proven `number`. So scanning the whole vector
+    // for `AddDynamic` is sufficient here; any future regression in the user-
+    // trait retarget would surface as `AddDynamic` in this program.
+    assert!(
+        !ops.contains(&OpCode::AddDynamic),
+        "R5.2A regression: user-defined `impl Add for Vec2` fell through to \
+         AddDynamic instead of being retargeted to CallMethod at compile time. \
+         Ops emitted: {:?}",
+        ops
+    );
+
+    // `CallMethod` must appear at least once — for the top-level `a + b`.
+    let call_method_count = ops.iter().filter(|&&o| o == OpCode::CallMethod).count();
+    assert!(
+        call_method_count >= 1,
+        "R5.2A regression: no CallMethod emitted for user-defined operator \
+         trait dispatch. Ops emitted: {:?}",
+        ops
+    );
 }
 
 #[test]

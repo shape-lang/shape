@@ -877,6 +877,22 @@ impl BytecodeCompiler {
                             // operand is non-numeric (DateTime, mixed string, or
                             // polyglot value), so dispatch legitimately happens
                             // at runtime in `exec_arithmetic`.
+                            //
+                            // R5.2A audit: this Add-specific fallback is the one
+                            // remaining site where user-defined `impl Add for T`
+                            // can still funnel through `exec_arithmetic_dynamic_
+                            // fallback::try_binary_operator_trait` at runtime.
+                            // The symmetric strict-arithmetic path below (and the
+                            // numeric-declined paths at ~L1244/L1263) already call
+                            // `try_emit_trait_dispatch` to retarget to CallMethod.
+                            // R5.2B will insert the same `try_emit_trait_dispatch`
+                            // call HERE — using the `left_schema` captured above
+                            // (L646) — before `emit_binary_op`, so that
+                            // `impl Add for Vec2` compiles to `CallMethod` in this
+                            // branch as well. No new opcode is required; CallMethod
+                            // with `Operand::TypedMethodCall` already dispatches to
+                            // user impl methods via the function_name_index (see
+                            // `executor/objects/mod.rs::op_call_method`, L1427-L1458).
                             use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
                             let _ = emit_binary_op(
                                 self,
