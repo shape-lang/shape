@@ -978,4 +978,90 @@ mod tests {
         let report = preflight_jit_compatibility(&program);
         assert!(report.can_jit());
     }
+
+    // Track A.1D — the preflight gate on OwnedMutable opcodes stays in
+    // place until Load/StoreOwnedMutableCapture have a Cranelift lowering
+    // that matches the MIR-level LoadLocal/StoreLocal mismatch (captures
+    // passed as native arg pointer bits rather than values). A.1D adds
+    // the `emit_heap_closure` Box allocator + `jit_alloc_owned_mut_cell`
+    // FFI, but the capture-read/write opcodes themselves are still VM-
+    // only — see `statements.rs::emit_heap_closure` comments on the
+    // Shared branch debug_assert and the selective-compile gate in
+    // `program.rs::compile_program_selective` that requires
+    // `bytecode_ok` to JIT.
+
+    #[test]
+    fn a1d_preflight_still_rejects_load_owned_mutable_capture() {
+        // Regression guard: A.1D must not flip the preflight gate on
+        // LoadOwnedMutableCapture. Full lowering is deferred; until then
+        // any function containing the opcode bails to the interpreter.
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::LoadOwnedMutableCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(
+            !report.can_jit(),
+            "A.1D must not remove the LoadOwnedMutableCapture preflight gate"
+        );
+        assert!(
+            report
+                .vm_only_opcodes
+                .contains(&OpCode::LoadOwnedMutableCapture)
+        );
+    }
+
+    #[test]
+    fn a1d_preflight_still_rejects_store_owned_mutable_capture() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::StoreOwnedMutableCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(
+            !report.can_jit(),
+            "A.1D must not remove the StoreOwnedMutableCapture preflight gate"
+        );
+        assert!(
+            report
+                .vm_only_opcodes
+                .contains(&OpCode::StoreOwnedMutableCapture)
+        );
+    }
+
+    #[test]
+    fn a1d_preflight_still_rejects_shared_opcodes() {
+        // A.1E lifts these. Double-check they're still gated after A.1D.
+        for op in [
+            OpCode::LoadSharedCapture,
+            OpCode::StoreSharedCapture,
+            OpCode::AllocSharedLocal,
+            OpCode::LoadSharedLocal,
+            OpCode::StoreSharedLocal,
+            OpCode::DropSharedLocal,
+            OpCode::AllocSharedModuleBinding,
+            OpCode::LoadSharedModuleBinding,
+            OpCode::StoreSharedModuleBinding,
+        ] {
+            let program = BytecodeProgram {
+                instructions: vec![
+                    Instruction::new(op, Some(Operand::Local(0))),
+                    Instruction::simple(OpCode::ReturnValue),
+                ],
+                ..Default::default()
+            };
+            let report = preflight_jit_compatibility(&program);
+            assert!(
+                !report.can_jit(),
+                "Shared opcode {:?} must remain preflight-rejected until A.1E",
+                op
+            );
+        }
+    }
 }

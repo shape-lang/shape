@@ -45,6 +45,10 @@ pub struct FFIFuncRefs {
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,
     pub(crate) finalize_heap_closure: FuncRef,
+    // Track A.1D: OwnedMutable capture cell allocator. Called from
+    // `emit_heap_closure` once per `CaptureKind::OwnedMutable` capture to
+    // obtain the `*mut ValueWord` pointer installed into the Ptr slot.
+    pub(crate) alloc_owned_mut_cell: FuncRef,
 
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,

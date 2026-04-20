@@ -36,4 +36,9 @@ pub use closure::jit_make_closure;
 
 pub use closure::jit_finalize_heap_closure;
 
+// Track A.1D: OwnedMutable capture cell allocator (Box<ValueWord>). Called
+// from `MirToIR::emit_heap_closure` to materialise the cell pointer that
+// gets installed into the closure's `Ptr` capture slot.
+pub use closure::jit_alloc_owned_mut_cell;
+
 pub use pattern::{jit_pattern_check_constructor, jit_pattern_extract_constructor};

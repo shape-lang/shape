@@ -171,6 +171,104 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
     }
 }
 
+// ============================================================================
+// Track A.1D: OwnedMutable capture cell allocator
+// ============================================================================
+
+/// Allocate a heap cell for an `OwnedMutable` closure capture.
+///
+/// The closure's capture slot for a `CaptureKind::OwnedMutable` capture must
+/// hold a `*mut ValueWord` pointer — a raw Box allocation that the closure
+/// exclusively owns. `op_make_closure` (interpreter) and
+/// `MirToIR::emit_heap_closure` (JIT) both call this shim to materialise a
+/// fresh cell from the capture's initial `ValueWord` bits.
+///
+/// Rust's `Box` has a stable layout for `Sized` types under the current
+/// allocator and uses the system allocator for `u64`-sized allocations, so
+/// the pointer returned here can be reclaimed via `Box::from_raw` —
+/// `release_typed_closure` (A.1A) does exactly that for every bit set in
+/// `ClosureLayout::owned_mutable_capture_mask`.
+///
+/// # Safety invariants
+///
+/// - This function is the **sole** allocator for OwnedMutable cells. The
+///   pointer it returns is owned by the closure block it gets installed
+///   into; the block releases it via `Box::from_raw` when the closure's
+///   refcount hits zero (see `release_typed_closure` in
+///   `shape-value/src/v2/closure_raw.rs`).
+/// - The caller (JIT codegen or the interpreter's `op_make_closure`) must
+///   write the returned pointer into the capture's `Ptr` slot and must NOT
+///   drop the closure block between allocation and the pointer write —
+///   otherwise the pointer leaks. This matches the interpreter's
+///   `Box::into_raw(Box::new(initial))` pattern introduced in A.1B.
+/// - `initial` is a raw `ValueWord` bit pattern. If those bits encode a
+///   heap-refcounted pointer, the caller must ensure the appropriate
+///   refcount share was already taken for the capture slot — this FFI
+///   does not retain or release heap refs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell(initial: u64) -> *mut u64 {
+    Box::into_raw(Box::new(initial))
+}
+
+#[cfg(test)]
+mod a1d_owned_mutable_cell_tests {
+    //! Track A.1D unit tests for `jit_alloc_owned_mut_cell`.
+    //!
+    //! The FFI helper is the sole allocator for `CaptureKind::OwnedMutable`
+    //! cells. These tests verify:
+    //! - The returned pointer deref yields the exact `initial` bits.
+    //! - Multiple allocations are distinct and independently owned.
+    //! - The pointer layout matches `Box::<u64>::into_raw`, so
+    //!   `Box::from_raw` reclaims without UB.
+    use super::*;
+
+    #[test]
+    fn a1d_ffi_alloc_owned_mut_cell_roundtrip() {
+        let initial: u64 = 42;
+        let ptr = unsafe { jit_alloc_owned_mut_cell(initial) };
+        assert!(!ptr.is_null(), "allocator must return a non-null pointer");
+        let read = unsafe { *ptr };
+        assert_eq!(read, initial, "deref of fresh cell must yield the initial bits");
+        // Reclaim via Box::from_raw — matching `release_typed_closure`'s path.
+        let _boxed: Box<u64> = unsafe { Box::from_raw(ptr) };
+    }
+
+    #[test]
+    fn a1d_ffi_alloc_owned_mut_cell_independent_cells() {
+        let a = unsafe { jit_alloc_owned_mut_cell(10) };
+        let b = unsafe { jit_alloc_owned_mut_cell(20) };
+        assert_ne!(a, b, "distinct allocations must yield distinct pointers");
+        // Writes through one pointer must not bleed into the other.
+        unsafe {
+            std::ptr::write(a, 999);
+            assert_eq!(*a, 999);
+            assert_eq!(*b, 20);
+        }
+        unsafe {
+            let _ = Box::from_raw(a);
+            let _ = Box::from_raw(b);
+        }
+    }
+
+    #[test]
+    fn a1d_ffi_alloc_owned_mut_cell_store_then_read() {
+        // Simulate Load/Store semantics: the interpreter's
+        // `op_store_owned_mutable_capture` writes through the pointer with
+        // `std::ptr::write`, and `op_load_owned_mutable_capture` reads with
+        // `std::ptr::read`. This mirrors that usage pattern on the FFI
+        // helper's output.
+        let ptr = unsafe { jit_alloc_owned_mut_cell(0) };
+        for new_bits in [7u64, 13, 99, u64::MAX, 0] {
+            unsafe { std::ptr::write(ptr, new_bits) };
+            let out = unsafe { std::ptr::read(ptr) };
+            assert_eq!(out, new_bits);
+        }
+        unsafe {
+            let _ = Box::from_raw(ptr);
+        }
+    }
+}
+
 #[cfg(test)]
 mod phase_h2_finalizer_tests {
     //! Closure-spec Phase H2 (updated for §14.6 / H6.5) unit tests for

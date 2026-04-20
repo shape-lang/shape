@@ -537,7 +537,33 @@ impl JITCompiler {
             let mir_ok = func.mir_data.as_ref().is_some_and(|md| {
                 crate::mir_compiler::preflight(md).can_compile
             });
-            jit_compatible.push(bytecode_ok || mir_ok);
+            // Track A.1D: the A.1B/A.1C.1/A.1C.3 mutable-cell opcodes
+            // (`LoadOwnedMutableCapture`, `StoreOwnedMutableCapture`,
+            // `LoadSharedCapture`, `StoreSharedCapture`,
+            // `AllocSharedLocal`, `LoadSharedLocal`, `StoreSharedLocal`,
+            // `DropSharedLocal`, `AllocSharedModuleBinding`,
+            // `LoadSharedModuleBinding`, `StoreSharedModuleBinding`)
+            // carry runtime semantics the MIR layer cannot reconstruct
+            // from its slot-based model — MIR just sees `LoadLocal` /
+            // `StoreLocal`, erasing the pointer-deref semantics the
+            // cell opcodes encode. Until A.1D/A.1E land full Cranelift
+            // lowerings (or teach MIR about mutable-cell captures), any
+            // function whose bytecode contains one of these opcodes
+            // MUST fall back to the interpreter even if its MIR passes
+            // preflight — the MIR path would silently misinterpret the
+            // capture slot's pointer bits as the captured value.
+            //
+            // `bytecode_ok` is false precisely when at least one of
+            // these opcodes appears (they're the only entries in
+            // `vm_only_opcode_reason` today), so we keep the original
+            // `bytecode_ok || mir_ok` disjunction but make `bytecode_ok`
+            // a hard requirement: a function must clear bytecode
+            // preflight to be JIT-eligible. MIR preflight still has to
+            // pass too (otherwise MirToIR will fail compilation
+            // anyway), but it is no longer an independent way to
+            // bypass the bytecode gate.
+            let _ = mir_ok;
+            jit_compatible.push(bytecode_ok);
         }
 
         // Phase 1b: Preflight main code (non-stdlib, non-function-body instructions).

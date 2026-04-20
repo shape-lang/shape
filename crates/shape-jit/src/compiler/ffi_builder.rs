@@ -41,6 +41,8 @@ impl JITCompiler {
             // Closure construction
             make_closure: r!("jit_make_closure"),
             finalize_heap_closure: r!("jit_finalize_heap_closure"),
+            // Track A.1D: OwnedMutable capture cell allocator.
+            alloc_owned_mut_cell: r!("jit_alloc_owned_mut_cell"),
 
             // TypedObject allocation + field store
             typed_object_alloc: r!("jit_typed_object_alloc"),

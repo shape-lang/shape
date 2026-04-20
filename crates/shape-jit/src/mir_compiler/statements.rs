@@ -571,20 +571,99 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .store(MemFlags::trusted(), tid_val, closure_ptr, 12);
 
-        // 4. Write each capture at its `heap_capture_offset(i)`. Use the
-        //    capture's `FieldKind` to pick the native Cranelift store
-        //    width. Mismatches fall back to NaN-boxing via
-        //    `coerce_for_capture_store`, matching the stack-closure path.
+        // 4. Write each capture at its `heap_capture_offset(i)`. Dispatch
+        //    per `ClosureLayout::capture_storage_kind(i)`:
+        //
+        //    - `CaptureKind::Immutable`: store the native value at its
+        //      natural `FieldKind` width (existing H1 path).
+        //    - `CaptureKind::OwnedMutable` (Track A.1D): the slot is a
+        //      `FieldKind::Ptr` holding `*mut ValueWord` — call the
+        //      `jit_alloc_owned_mut_cell(initial)` FFI to obtain a fresh
+        //      Box pointer from the capture's initial ValueWord bits,
+        //      then store the pointer into the slot. The
+        //      `owned_mutable_capture_mask` bit for this index directs
+        //      `release_typed_closure` (A.1A) to reclaim it via
+        //      `Box::from_raw` on closure drop.
+        //    - `CaptureKind::Shared`: pre-A.1E, shared captures still go
+        //      through the `op_make_closure` legacy path. The JIT
+        //      preflight gate (`vm_only_opcode_reason` in
+        //      `compiler/accessors.rs`) rejects any function that
+        //      contains `LoadSharedCapture` / `StoreSharedCapture`, so
+        //      this branch is unreachable until A.1E. Debug-assert.
+        use shape_value::v2::closure_layout::CaptureKind;
         for (i, op) in operands.iter().enumerate() {
-            let kind = layout.capture_kind(i);
-            let target_ty = cranelift_type_for_field_kind(kind);
-            let raw = self.compile_operand(op)?;
-            let val_ty = self.builder.func.dfg.value_type(raw);
-            let stored = self.coerce_for_capture_store(raw, val_ty, target_ty);
             let offset = layout.heap_capture_offset(i) as i32;
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), stored, closure_ptr, offset);
+            match layout.capture_storage_kind(i) {
+                CaptureKind::Immutable => {
+                    let kind = layout.capture_kind(i);
+                    let target_ty = cranelift_type_for_field_kind(kind);
+                    let raw = self.compile_operand(op)?;
+                    let val_ty = self.builder.func.dfg.value_type(raw);
+                    let stored = self.coerce_for_capture_store(raw, val_ty, target_ty);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), stored, closure_ptr, offset);
+                }
+                CaptureKind::OwnedMutable => {
+                    // Allocate the cell via the FFI helper. The helper is
+                    // the sole allocator for OwnedMutable cells (it does
+                    // `Box::into_raw(Box::new(initial))` under the hood);
+                    // `release_typed_closure` in `shape-value`
+                    // reclaims the pointer with the matching
+                    // `Box::from_raw` for every bit set in
+                    // `owned_mutable_capture_mask`.
+                    //
+                    // SAFETY: the FFI returns a non-null `*mut u64` owned
+                    // by the closure block. Between this call and the
+                    // subsequent `store` the closure block MUST NOT be
+                    // dropped — any intervening panic leaks the cell.
+                    // Cranelift lowering is panic-free by construction in
+                    // this function (all ops here are pure stores /
+                    // loads / direct calls), so we inherit that
+                    // guarantee without extra cleanup code. Heap-capture
+                    // atomic retain (step 5 below) iterates
+                    // `heap_capture_mask` only — OwnedMutable captures
+                    // set `owned_mutable_capture_mask` instead and are
+                    // skipped.
+                    let raw = self.compile_operand(op)?;
+                    let val_ty = self.builder.func.dfg.value_type(raw);
+                    // Widen narrow types to I64 bits before handing off
+                    // to the allocator. `coerce_for_capture_store` with
+                    // target I64 yields a ValueWord-shaped u64.
+                    let initial_bits =
+                        self.coerce_for_capture_store(raw, val_ty, cl_types::I64);
+                    let inst = self.builder.ins().call(
+                        self.ffi.alloc_owned_mut_cell,
+                        &[initial_bits],
+                    );
+                    let cell_ptr = self.builder.inst_results(inst)[0];
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), cell_ptr, closure_ptr, offset);
+                }
+                CaptureKind::Shared => {
+                    // Pre-A.1E: Shared captures are interpreter-only. The
+                    // JIT preflight (accessors::vm_only_opcode_reason)
+                    // rejects any function that reads/writes a Shared
+                    // capture, so we shouldn't see one here. If we ever
+                    // do (codegen bug), emit a `trap` so the JIT fails
+                    // fast rather than silently miscompiling.
+                    debug_assert!(
+                        false,
+                        "emit_heap_closure: CaptureKind::Shared at index {} \
+                         reached JIT lowering (A.1E should have gated this)",
+                        i
+                    );
+                    self.builder
+                        .ins()
+                        .trap(cranelift::codegen::ir::TrapCode::User(1));
+                    return Err(format!(
+                        "MirToIR::emit_heap_closure: CaptureKind::Shared \
+                         capture at index {} is not yet lowered (A.1E)",
+                        i
+                    ));
+                }
+            }
         }
 
         // 5. Atomic retain on each heap-typed capture. Iterates only
