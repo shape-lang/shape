@@ -28,6 +28,7 @@ pub mod method_id;
 pub mod scalar;
 pub mod value_bits;
 pub mod value_word;
+pub mod value_word_ext;
 /// Backward-compatibility alias for the renamed module.
 pub mod nanboxed {
     pub use crate::value_word::*;
@@ -110,7 +111,8 @@ pub use heap_value::{
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
-pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay, ValueWordExt};
+pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay};
+pub use value_word_ext::ValueWordExt;
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

@@ -1,0 +1,2508 @@
+//! `ValueWordExt`: method-style extension trait on the NaN-boxed 8-byte value word.
+//!
+//! `ValueWord` is a type alias for `u64`, so method-style access (`val.as_i64()`,
+//! `ValueWord::from_f64(v)`, etc.) is provided by this extension trait rather than
+//! an inherent impl. The trait covers the full "ValueWord" API surface that
+//! consumers use day-to-day: constructors for every inline/heap variant,
+//! type-check predicates, checked/unchecked extractors, and a small set of
+//! arithmetic helpers that operate directly on bits.
+//!
+//! Free-function tag machinery (`make_tagged`, `get_tag`, `sign_extend_i48`, …)
+//! remains in `crate::value_word` and is imported here — this module depends on
+//! that bit-layout layer but does not own it.
+//!
+//! This module was extracted from `value_word.rs` in Phase R6.2 of the
+//! v2 residuals closeout (pure reorganization — zero behavior change).
+
+use crate::content::ContentNode;
+use crate::datatable::DataTable;
+use crate::enums::EnumValue;
+use crate::heap_value::{
+    ChannelData, ConcurrencyData, DequeData, HashMapData, HeapValue, NativeScalar,
+    NativeTypeLayout, NativeViewData, PriorityQueueData, ProjectedRefData, RareHeapData,
+    RefProjection, SetData, TableViewData, TemporalData, TypedArrayData,
+};
+use crate::slot::ValueSlot;
+use crate::value::{FilterNode, HostCallable, PrintResult, VMArray, VTable};
+use crate::value_word::{
+    ArrayView, ArrayViewMut, CANONICAL_NAN, HEAP_OWNED_BIT, HEAP_PTR_MASK, I48_MAX, I48_MIN,
+    PAYLOAD_MASK, RefTarget, TAG_BOOL, TAG_FUNCTION, TAG_HEAP, TAG_INT, TAG_MODULE_FN, TAG_NONE,
+    TAG_REF, TAG_UNIT, ValueWord, get_payload, get_tag, is_tagged, make_tagged,
+    nan_tag_is_truthy, nan_tag_type_name, sign_extend_i48, string_intern, vw_heap_box,
+};
+#[cfg(not(feature = "gc"))]
+use crate::value_word::vw_heap_box_owned;
+use chrono::{DateTime, FixedOffset, Utc};
+use shape_ast::ast::{DataDateTimeRef, DateTimeExpr, Duration, TimeReference, TypeAnnotation};
+use shape_ast::data::Timeframe;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+// `Ref` target bit layout is private to this module: the flag/index packing
+// is an implementation detail of `from_module_binding_ref` / `as_ref_target`
+// and nothing outside this file should construct these bits.
+const REF_TARGET_MODULE_FLAG: u64 = 1 << 47;
+const REF_TARGET_INDEX_MASK: u64 = REF_TARGET_MODULE_FLAG - 1;
+
+// ---------------------------------------------------------------------------
+// Macros to generate trivial heap-boxing constructors on both the trait
+// declaration and the `impl ValueWordExt for u64` block, eliminating ~700
+// lines of one-liner boilerplate.
+// ---------------------------------------------------------------------------
+
+/// Emit trait declarations for `fn $method($($arg: $ty),*) -> ValueWord`.
+macro_rules! heap_constructors_trait {
+    ($( fn $method:ident( $($arg:ident : $ty:ty),* ) => $variant:ident; )*) => {
+        $( fn $method( $($arg : $ty),* ) -> ValueWord; )*
+    };
+}
+/// Emit implementations: `heap_box(HeapValue::$variant($($arg),*))`.
+macro_rules! heap_constructors_impl {
+    ($( fn $method:ident( $($arg:ident : $ty:ty),* ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( $($arg : $ty),* ) -> ValueWord {
+            ValueWord::heap_box(HeapValue::$variant($($arg),*))
+        } )*
+    };
+}
+
+/// Emit trait declarations for box-wrapped constructors.
+macro_rules! heap_box_constructors_trait {
+    ($( fn $method:ident( $arg:ident : $ty:ty ) => $variant:ident; )*) => {
+        $( fn $method( $arg : $ty ) -> ValueWord; )*
+    };
+}
+/// Emit implementations: `heap_box(HeapValue::$variant(Box::new($arg)))`.
+macro_rules! heap_box_constructors_impl {
+    ($( fn $method:ident( $arg:ident : $ty:ty ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( $arg : $ty ) -> ValueWord {
+            ValueWord::heap_box(HeapValue::$variant(Box::new($arg)))
+        } )*
+    };
+}
+
+/// Emit trait declarations for native scalar sub-constructors.
+macro_rules! native_scalar_constructors_trait {
+    ($( fn $method:ident( v : $ty:ty ) => $variant:ident; )*) => {
+        $( fn $method( v : $ty ) -> ValueWord; )*
+    };
+}
+/// Emit implementations delegating to `from_native_scalar(NativeScalar::$variant(v))`.
+macro_rules! native_scalar_constructors_impl {
+    ($( fn $method:ident( v : $ty:ty ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( v : $ty ) -> ValueWord {
+            ValueWord::from_native_scalar(NativeScalar::$variant(v))
+        } )*
+    };
+}
+
+// Shared invocation lists used by both trait and impl blocks.
+
+macro_rules! define_heap_constructors {
+    ($mac:ident) => { $mac! {
+        // NOTE: `from_string` is NOT in this list — it has an explicit impl
+        // that interns short strings via `string_intern::intern_short_string`
+        // (see `from_string` on `ValueWordExt`). See module docs in
+        // `value_word.rs` for the interning design and future SSO opportunity.
+        fn from_char(c: char) => Char;
+        fn from_array(a: crate::value::VMArray) => Array;
+        fn from_decimal(d: rust_decimal::Decimal) => Decimal;
+        fn from_datatable(dt: Arc<DataTable>) => DataTable;
+        fn from_native_scalar(value: NativeScalar) => NativeScalar;
+        fn from_iterator(state: Box<crate::heap_value::IteratorState>) => Iterator;
+        fn from_generator(state: Box<crate::heap_value::GeneratorState>) => Generator;
+        fn from_future(id: u64) => Future;
+        fn from_host_closure(nc: HostCallable) => HostClosure;
+    } };
+}
+
+macro_rules! define_heap_box_constructors {
+    ($mac:ident) => { $mac! {
+        fn from_enum(e: EnumValue) => Enum;
+        fn from_some(inner: ValueWord) => Some;
+        fn from_ok(inner: ValueWord) => Ok;
+        fn from_err(inner: ValueWord) => Err;
+        fn from_content(node: ContentNode) => Content;
+        fn from_instant(t: std::time::Instant) => Instant;
+        fn from_io_handle(data: crate::heap_value::IoHandleData) => IoHandle;
+    } };
+}
+
+macro_rules! define_native_scalar_constructors {
+    ($mac:ident) => { $mac! {
+        fn from_native_i8(v: i8) => I8;
+        fn from_native_u8(v: u8) => U8;
+        fn from_native_i16(v: i16) => I16;
+        fn from_native_u16(v: u16) => U16;
+        fn from_native_i32(v: i32) => I32;
+        fn from_native_u32(v: u32) => U32;
+        fn from_native_u64(v: u64) => U64;
+        fn from_native_isize(v: isize) => Isize;
+        fn from_native_usize(v: usize) => Usize;
+        fn from_native_ptr(v: usize) => Ptr;
+        fn from_native_f32(v: f32) => F32;
+    } };
+}
+
+// ---------------------------------------------------------------------------
+// Macros to generate trivial heap-ref extractors on both the trait
+// declaration and the impl block.
+// ---------------------------------------------------------------------------
+
+/// Extractors that return `&T` — direct reference into HeapValue variant.
+macro_rules! heap_ref_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<&$ret>; )*
+    };
+}
+macro_rules! heap_ref_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<&$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(v), _ => None }
+        } )*
+    };
+}
+
+/// Extractors that return `&T` via `.as_ref()` (deref Box/Arc).
+macro_rules! heap_deref_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<&$ret>; )*
+    };
+}
+macro_rules! heap_deref_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<&$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(v.as_ref()), _ => None }
+        } )*
+    };
+}
+
+/// Extractors that return `T` by copy (for Copy types).
+macro_rules! heap_copy_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<$ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<$ret>; )*
+    };
+}
+macro_rules! heap_copy_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<$ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(*v), _ => None }
+        } )*
+    };
+}
+
+/// Mutable extractors that return `&mut T` via `as_heap_mut()`.
+macro_rules! heap_mut_extractors_trait {
+    ($( fn $method:ident(&mut self) -> Option<&mut $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&mut self) -> Option<&mut $ret>; )*
+    };
+}
+macro_rules! heap_mut_extractors_impl {
+    ($( fn $method:ident(&mut self) -> Option<&mut $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&mut self) -> Option<&mut $ret> {
+            match self.as_heap_mut()? { HeapValue::$variant(d) => Some(d), _ => None }
+        } )*
+    };
+}
+
+macro_rules! define_heap_ref_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_datatable(&self) -> Option<& Arc<DataTable>> => DataTable;
+        fn as_some_inner(&self) -> Option<& ValueWord> => Some;
+        fn as_ok_inner(&self) -> Option<& ValueWord> => Ok;
+        fn as_err_inner(&self) -> Option<& ValueWord> => Err;
+        fn as_host_closure(&self) -> Option<& HostCallable> => HostClosure;
+        fn as_arc_string(&self) -> Option<& Arc<String>> => String;
+    } };
+}
+
+macro_rules! define_heap_deref_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_iterator(&self) -> Option<& crate::heap_value::IteratorState> => Iterator;
+        fn as_generator(&self) -> Option<& crate::heap_value::GeneratorState> => Generator;
+        fn as_instant(&self) -> Option<& std::time::Instant> => Instant;
+        fn as_io_handle(&self) -> Option<& crate::heap_value::IoHandleData> => IoHandle;
+        fn as_native_view(&self) -> Option<& NativeViewData> => NativeView;
+        fn as_content(&self) -> Option<& ContentNode> => Content;
+    } };
+}
+
+macro_rules! define_heap_copy_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_native_scalar(&self) -> Option<NativeScalar> => NativeScalar;
+    } };
+}
+
+macro_rules! define_heap_mut_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_hashmap_mut(&mut self) -> Option<&mut HashMapData> => HashMap;
+        fn as_set_mut(&mut self) -> Option<&mut SetData> => Set;
+        fn as_deque_mut(&mut self) -> Option<&mut DequeData> => Deque;
+        fn as_priority_queue_mut(&mut self) -> Option<&mut PriorityQueueData> => PriorityQueue;
+    } };
+}
+
+/// Extension trait providing methods on ValueWord (u64).
+pub trait ValueWordExt {
+    // --- Inline-tag constructors (non-trivial, hand-written) ---
+    fn from_f64(v: f64) -> ValueWord;
+    fn from_i64(v: i64) -> ValueWord;
+    fn from_bool(v: bool) -> ValueWord;
+    fn none() -> ValueWord;
+    fn unit() -> ValueWord;
+    fn from_function(id: u16) -> ValueWord;
+    fn from_module_function(index: u32) -> ValueWord;
+    fn from_ref(absolute_slot: usize) -> ValueWord;
+    fn from_module_binding_ref(binding_idx: usize) -> ValueWord;
+    fn heap_box(v: HeapValue) -> ValueWord;
+    fn from_heap_value(v: HeapValue) -> ValueWord;
+    fn as_char(&self) -> Option<char>;
+
+    /// Construct a ValueWord from an `Arc<String>`. Short strings are routed
+    /// through the process-global intern pool — repeated short strings (field
+    /// names, enum tags, short literals) share a single `Arc<String>` allocation
+    /// across the whole program. See `string_intern` module in `value_word.rs`.
+    fn from_string(s: Arc<String>) -> ValueWord;
+
+    // --- Macro-generated heap-boxing constructors ---
+    define_heap_constructors!(heap_constructors_trait);
+    define_heap_box_constructors!(heap_box_constructors_trait);
+    define_native_scalar_constructors!(native_scalar_constructors_trait);
+
+    // --- Typed array constructors (via TypedArrayData) ---
+    fn from_int_array(a: Arc<crate::typed_buffer::TypedBuffer<i64>>) -> ValueWord;
+    fn from_float_array(a: Arc<crate::typed_buffer::AlignedTypedBuffer>) -> ValueWord;
+    fn from_bool_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord;
+    fn from_i8_array(a: Arc<crate::typed_buffer::TypedBuffer<i8>>) -> ValueWord;
+    fn from_i16_array(a: Arc<crate::typed_buffer::TypedBuffer<i16>>) -> ValueWord;
+    fn from_i32_array(a: Arc<crate::typed_buffer::TypedBuffer<i32>>) -> ValueWord;
+    fn from_u8_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord;
+    fn from_u16_array(a: Arc<crate::typed_buffer::TypedBuffer<u16>>) -> ValueWord;
+    fn from_u32_array(a: Arc<crate::typed_buffer::TypedBuffer<u32>>) -> ValueWord;
+    fn from_u64_array(a: Arc<crate::typed_buffer::TypedBuffer<u64>>) -> ValueWord;
+    fn from_f32_array(a: Arc<crate::typed_buffer::TypedBuffer<f32>>) -> ValueWord;
+    fn from_matrix(m: Arc<crate::heap_value::MatrixData>) -> ValueWord;
+    fn from_float_array_slice(parent: Arc<crate::heap_value::MatrixData>, offset: u32, len: u32) -> ValueWord;
+    // --- Temporal constructors ---
+    fn from_time(t: DateTime<FixedOffset>) -> ValueWord;
+    fn from_duration(d: Duration) -> ValueWord;
+    fn from_timespan(ts: chrono::Duration) -> ValueWord;
+    fn from_timeframe(tf: Timeframe) -> ValueWord;
+    fn from_time_reference(tr: TimeReference) -> ValueWord;
+    fn from_datetime_expr(de: DateTimeExpr) -> ValueWord;
+    fn from_data_datetime_ref(dr: DataDateTimeRef) -> ValueWord;
+    // --- Rare constructors ---
+    fn from_expr_proxy(col_name: Arc<String>) -> ValueWord;
+    fn from_filter_expr(node: Arc<FilterNode>) -> ValueWord;
+    fn from_print_result(pr: PrintResult) -> ValueWord;
+    fn from_type_annotation(ta: TypeAnnotation) -> ValueWord;
+    fn from_simulation_call(name: String, params: HashMap<String, ValueWord>) -> ValueWord;
+    fn from_data_reference(datetime: DateTime<FixedOffset>, id: String, timeframe: Timeframe) -> ValueWord;
+    fn from_type_annotated_value(type_name: String, value: ValueWord) -> ValueWord;
+    // --- Concurrency constructors ---
+    fn from_mutex(value: ValueWord) -> ValueWord;
+    fn from_atomic(value: i64) -> ValueWord;
+    fn from_lazy(initializer: ValueWord) -> ValueWord;
+    fn from_channel(data: ChannelData) -> ValueWord;
+    // --- Table view constructors ---
+    fn from_typed_table(schema_id: u64, table: Arc<DataTable>) -> ValueWord;
+    fn from_row_view(schema_id: u64, table: Arc<DataTable>, row_idx: usize) -> ValueWord;
+    fn from_column_ref(schema_id: u64, table: Arc<DataTable>, col_id: u32) -> ValueWord;
+    fn from_indexed_table(schema_id: u64, table: Arc<DataTable>, index_col: u32) -> ValueWord;
+    // --- Multi-arg struct constructors ---
+    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
+    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
+    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord;
+    fn from_range(start: Option<ValueWord>, end: Option<ValueWord>, inclusive: bool) -> ValueWord;
+    fn from_hashmap(keys: Vec<ValueWord>, values: Vec<ValueWord>, index: HashMap<u64, Vec<usize>>) -> ValueWord;
+    fn empty_hashmap() -> ValueWord;
+    fn from_hashmap_pairs(keys: Vec<ValueWord>, values: Vec<ValueWord>) -> ValueWord;
+    fn from_set(items: Vec<ValueWord>) -> ValueWord;
+    fn empty_set() -> ValueWord;
+    fn from_deque(items: Vec<ValueWord>) -> ValueWord;
+    fn empty_deque() -> ValueWord;
+    fn from_priority_queue(items: Vec<ValueWord>) -> ValueWord;
+    fn empty_priority_queue() -> ValueWord;
+    fn from_task_group(kind: u8, task_ids: Vec<u64>) -> ValueWord;
+    fn from_trait_object(value: ValueWord, vtable: Arc<VTable>) -> ValueWord;
+    fn from_time_utc(t: DateTime<Utc>) -> ValueWord;
+    fn from_function_ref(name: String, closure: Option<ValueWord>) -> ValueWord;
+
+    // --- Cloning ---
+    unsafe fn clone_from_bits(bits: u64) -> ValueWord;
+
+    // --- Type checks & extractors ---
+    fn is_f64(&self) -> bool;
+    fn is_i64(&self) -> bool;
+    fn is_bool(&self) -> bool;
+    fn is_none(&self) -> bool;
+    fn is_unit(&self) -> bool;
+    fn is_function(&self) -> bool;
+    fn is_heap(&self) -> bool;
+    fn is_ref(&self) -> bool;
+    fn as_ref_target(&self) -> Option<RefTarget>;
+    fn as_ref_slot(&self) -> Option<usize>;
+    fn as_f64(&self) -> Option<f64>;
+    fn as_i64(&self) -> Option<i64>;
+    fn as_u64_value(&self) -> Option<u64>;
+    fn as_i128_exact(&self) -> Option<i128>;
+    fn as_number_strict(&self) -> Option<f64>;
+    fn as_bool(&self) -> Option<bool>;
+    fn as_function_id(&self) -> Option<u16>;
+    unsafe fn as_f64_unchecked(&self) -> f64;
+    unsafe fn as_i64_unchecked(&self) -> i64;
+    unsafe fn as_bool_unchecked(&self) -> bool;
+    unsafe fn as_function_unchecked(&self) -> u16;
+    fn as_heap_ref(&self) -> Option<&HeapValue>;
+    fn as_heap_mut(&mut self) -> Option<&mut HeapValue>;
+    fn is_truthy(&self) -> bool;
+    fn as_number_coerce(&self) -> Option<f64>;
+    fn is_module_function(&self) -> bool;
+    fn as_module_function(&self) -> Option<usize>;
+    fn heap_kind(&self) -> Option<crate::heap_value::HeapKind>;
+    fn as_str(&self) -> Option<&str>;
+    fn as_decimal(&self) -> Option<rust_decimal::Decimal>;
+    unsafe fn as_decimal_unchecked(&self) -> rust_decimal::Decimal;
+    fn as_array(&self) -> Option<&VMArray>;
+    fn as_any_array(&self) -> Option<ArrayView<'_>>;
+    fn as_any_array_mut(&mut self) -> Option<ArrayViewMut<'_>>;
+    // --- Macro-generated heap extractors ---
+    define_heap_ref_extractors!(heap_ref_extractors_trait);
+    define_heap_deref_extractors!(heap_deref_extractors_trait);
+    define_heap_copy_extractors!(heap_copy_extractors_trait);
+    define_heap_mut_extractors!(heap_mut_extractors_trait);
+
+    // --- Hand-written extractors for consolidated variants ---
+    fn as_expr_proxy(&self) -> Option<&Arc<String>>;
+    fn as_filter_expr(&self) -> Option<&Arc<FilterNode>>;
+    fn as_duration(&self) -> Option<&shape_ast::ast::Duration>;
+    fn as_int_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<i64>>>;
+    fn as_float_array(&self) -> Option<&Arc<crate::typed_buffer::AlignedTypedBuffer>>;
+    fn as_bool_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<u8>>>;
+    fn as_timeframe(&self) -> Option<&Timeframe>;
+    fn as_datetime(&self) -> Option<&DateTime<FixedOffset>>;
+    fn as_time(&self) -> Option<DateTime<FixedOffset>>;
+    fn as_timespan(&self) -> Option<chrono::Duration>;
+    fn as_matrix(&self) -> Option<&crate::heap_value::MatrixData>;
+
+    // --- Multi-field and special extractors ---
+    fn as_typed_table(&self) -> Option<(u64, &Arc<DataTable>)>;
+    fn as_row_view(&self) -> Option<(u64, &Arc<DataTable>, usize)>;
+    fn as_column_ref(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
+    fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
+    fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)>;
+    fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])>;
+    /// Obtain a [`crate::vm_closure_handle::VmClosureHandle`] over this
+    /// value's closure backing, if any.
+    ///
+    /// Closure spec §14.2 (H6.1): additive accessor that delegates to
+    /// `as_closure` through the Legacy backing today; H6.5 swaps the
+    /// producer to the Raw backing and flips the backing in place.
+    fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>>;
+    fn as_err_payload(&self) -> Option<ValueWord>;
+    fn as_future(&self) -> Option<u64>;
+    fn as_trait_object(&self) -> Option<(&ValueWord, &Arc<VTable>)>;
+    fn as_range(&self) -> Option<(Option<&ValueWord>, Option<&ValueWord>, bool)>;
+    fn as_hashmap(&self) -> Option<(&Vec<ValueWord>, &Vec<ValueWord>, &HashMap<u64, Vec<usize>>)>;
+    fn as_hashmap_data(&self) -> Option<&HashMapData>;
+    fn typed_array_len(&self) -> Option<usize>;
+    fn coerce_to_float_array(&self) -> Option<Arc<crate::typed_buffer::AlignedTypedBuffer>>;
+    fn to_generic_array(&self) -> Option<crate::value::VMArray>;
+    fn to_array_arc(&self) -> Option<crate::value::VMArray>;
+    fn vw_equals(&self, other: &ValueWord) -> bool;
+    fn vw_hash(&self) -> u64;
+    unsafe fn add_i64(a: &ValueWord, b: &ValueWord) -> ValueWord;
+    unsafe fn sub_i64(a: &ValueWord, b: &ValueWord) -> ValueWord;
+    unsafe fn mul_i64(a: &ValueWord, b: &ValueWord) -> ValueWord;
+    fn binary_int_preserving(a: &ValueWord, b: &ValueWord, a_num: f64, b_num: f64, int_op: impl FnOnce(i64, i64) -> Option<i64>, float_op: impl FnOnce(f64, f64) -> f64) -> ValueWord;
+    fn raw_bits(&self) -> u64;
+    fn from_raw_bits(bits: u64) -> ValueWord;
+    fn into_raw_bits(self) -> u64;
+    fn type_name(&self) -> &'static str;
+    fn to_number(&self) -> Option<f64>;
+    fn to_bool(&self) -> Option<bool>;
+    fn as_usize(&self) -> Option<usize>;
+    fn to_json_value(&self) -> serde_json::Value;
+}
+
+impl ValueWordExt for u64 {
+    // ===== Inline-tag constructors (non-trivial, hand-written) =====
+
+    #[inline]
+    fn from_f64(v: f64) -> ValueWord {
+        let bits = v.to_bits();
+        if v.is_nan() {
+            CANONICAL_NAN
+        } else if is_tagged(bits) {
+            CANONICAL_NAN
+        } else {
+            bits
+        }
+    }
+
+    #[inline]
+    fn from_i64(v: i64) -> ValueWord {
+        if v >= I48_MIN && v <= I48_MAX {
+            let payload = (v as u64) & PAYLOAD_MASK;
+            make_tagged(TAG_INT, payload)
+        } else {
+            ValueWord::heap_box(HeapValue::BigInt(v))
+        }
+    }
+
+    #[inline] fn from_bool(v: bool) -> ValueWord { make_tagged(TAG_BOOL, v as u64) }
+    #[inline] fn none() -> ValueWord { make_tagged(TAG_NONE, 0) }
+    #[inline] fn unit() -> ValueWord { make_tagged(TAG_UNIT, 0) }
+    #[inline] fn from_function(id: u16) -> ValueWord { make_tagged(TAG_FUNCTION, id as u64) }
+    #[inline] fn from_module_function(index: u32) -> ValueWord { make_tagged(TAG_MODULE_FN, index as u64) }
+    #[inline] fn from_ref(absolute_slot: usize) -> ValueWord { make_tagged(TAG_REF, absolute_slot as u64) }
+
+    #[inline]
+    fn from_module_binding_ref(binding_idx: usize) -> ValueWord {
+        make_tagged(TAG_REF, REF_TARGET_MODULE_FLAG | (binding_idx as u64 & REF_TARGET_INDEX_MASK))
+    }
+
+    #[inline] fn heap_box(v: HeapValue) -> ValueWord { vw_heap_box(v) }
+
+    #[inline]
+    fn from_heap_value(v: HeapValue) -> ValueWord {
+        match v {
+            HeapValue::BigInt(i) => ValueWord::from_i64(i),
+            other => ValueWord::heap_box(other),
+        }
+    }
+
+    #[inline]
+    fn as_char(&self) -> Option<char> {
+        if let Some(HeapValue::Char(c)) = self.as_heap_ref() { Some(*c) } else { std::option::Option::None }
+    }
+
+    // ===== String constructor (explicit: uses intern pool) =====
+
+    /// Construct a ValueWord from an `Arc<String>`.
+    ///
+    /// Short strings (len <= `string_intern::INTERN_THRESHOLD`) are interned
+    /// in a process-global pool so that repeated field names, enum tags, and
+    /// short literals share a single heap allocation. Long strings bypass
+    /// the pool and are heap-boxed directly (the pool lookup cost isn't
+    /// worth it for long unique payloads).
+    ///
+    /// This is the Phase D.4 "small string optimization" approach: rather
+    /// than fitting short strings inline in the ValueWord (infeasible because
+    /// all 8 NaN-box tag values are already consumed), we collapse duplicates
+    /// so that N copies of `"name"` share one allocation. See the
+    /// `string_intern` module in `value_word.rs` for the full design
+    /// rationale.
+    #[inline]
+    fn from_string(s: Arc<String>) -> ValueWord {
+        let interned = string_intern::intern_short_string(s);
+        ValueWord::heap_box(HeapValue::String(interned))
+    }
+
+    // ===== Macro-generated trivial constructors =====
+
+    define_heap_constructors!(heap_constructors_impl);
+    define_heap_box_constructors!(heap_box_constructors_impl);
+    define_native_scalar_constructors!(native_scalar_constructors_impl);
+
+    // ===== Typed array constructors (via TypedArrayData) =====
+
+    #[inline] fn from_int_array(a: Arc<crate::typed_buffer::TypedBuffer<i64>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::I64(a)))
+    }
+    #[inline] fn from_float_array(a: Arc<crate::typed_buffer::AlignedTypedBuffer>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::F64(a)))
+    }
+    #[inline] fn from_bool_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::Bool(a)))
+    }
+    #[inline] fn from_i8_array(a: Arc<crate::typed_buffer::TypedBuffer<i8>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::I8(a)))
+    }
+    #[inline] fn from_i16_array(a: Arc<crate::typed_buffer::TypedBuffer<i16>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::I16(a)))
+    }
+    #[inline] fn from_i32_array(a: Arc<crate::typed_buffer::TypedBuffer<i32>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::I32(a)))
+    }
+    #[inline] fn from_u8_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::U8(a)))
+    }
+    #[inline] fn from_u16_array(a: Arc<crate::typed_buffer::TypedBuffer<u16>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::U16(a)))
+    }
+    #[inline] fn from_u32_array(a: Arc<crate::typed_buffer::TypedBuffer<u32>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::U32(a)))
+    }
+    #[inline] fn from_u64_array(a: Arc<crate::typed_buffer::TypedBuffer<u64>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::U64(a)))
+    }
+    #[inline] fn from_f32_array(a: Arc<crate::typed_buffer::TypedBuffer<f32>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::F32(a)))
+    }
+    #[inline] fn from_matrix(m: Arc<crate::heap_value::MatrixData>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::Matrix(m)))
+    }
+    #[inline] fn from_float_array_slice(parent: Arc<crate::heap_value::MatrixData>, offset: u32, len: u32) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len }))
+    }
+
+    // ===== Temporal constructors =====
+
+    #[inline] fn from_time(t: DateTime<FixedOffset>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::DateTime(t)))
+    }
+    #[inline] fn from_duration(d: Duration) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::Duration(d)))
+    }
+    #[inline] fn from_timespan(ts: chrono::Duration) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::TimeSpan(ts)))
+    }
+    #[inline] fn from_timeframe(tf: Timeframe) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::Timeframe(tf)))
+    }
+    #[inline] fn from_time_reference(tr: TimeReference) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::TimeReference(Box::new(tr))))
+    }
+    #[inline] fn from_datetime_expr(de: DateTimeExpr) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::DateTimeExpr(Box::new(de))))
+    }
+    #[inline] fn from_data_datetime_ref(dr: DataDateTimeRef) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::DataDateTimeRef(Box::new(dr))))
+    }
+
+    // ===== Rare constructors =====
+
+    #[inline] fn from_expr_proxy(col_name: Arc<String>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::ExprProxy(col_name)))
+    }
+    #[inline] fn from_filter_expr(node: Arc<FilterNode>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::FilterExpr(node)))
+    }
+    #[inline] fn from_print_result(pr: PrintResult) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::PrintResult(Box::new(pr))))
+    }
+    #[inline] fn from_type_annotation(ta: TypeAnnotation) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::TypeAnnotation(Box::new(ta))))
+    }
+    #[inline] fn from_simulation_call(name: String, params: HashMap<String, ValueWord>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::SimulationCall(Box::new(crate::heap_value::SimulationCallData { name, params }))))
+    }
+    #[inline] fn from_data_reference(datetime: DateTime<FixedOffset>, id: String, timeframe: Timeframe) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::DataReference(Box::new(crate::heap_value::DataReferenceData { datetime, id, timeframe }))))
+    }
+    #[inline] fn from_type_annotated_value(type_name: String, value: ValueWord) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::TypeAnnotatedValue { type_name, value: Box::new(value) }))
+    }
+
+    // ===== Concurrency constructors =====
+
+    #[inline] fn from_mutex(value: ValueWord) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Concurrency(ConcurrencyData::Mutex(Box::new(crate::heap_value::MutexData::new(value)))))
+    }
+    #[inline] fn from_atomic(value: i64) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Concurrency(ConcurrencyData::Atomic(Box::new(crate::heap_value::AtomicData::new(value)))))
+    }
+    #[inline] fn from_lazy(initializer: ValueWord) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Concurrency(ConcurrencyData::Lazy(Box::new(crate::heap_value::LazyData::new(initializer)))))
+    }
+    #[inline] fn from_channel(data: ChannelData) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Concurrency(ConcurrencyData::Channel(Box::new(data))))
+    }
+
+    // ===== Table view constructors =====
+
+    #[inline] fn from_typed_table(schema_id: u64, table: Arc<DataTable>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TableView(TableViewData::TypedTable { schema_id, table }))
+    }
+    #[inline] fn from_row_view(schema_id: u64, table: Arc<DataTable>, row_idx: usize) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TableView(TableViewData::RowView { schema_id, table, row_idx }))
+    }
+    #[inline] fn from_column_ref(schema_id: u64, table: Arc<DataTable>, col_id: u32) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TableView(TableViewData::ColumnRef { schema_id, table, col_id }))
+    }
+    #[inline] fn from_indexed_table(schema_id: u64, table: Arc<DataTable>, index_col: u32) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TableView(TableViewData::IndexedTable { schema_id, table, index_col }))
+    }
+
+    // ===== Multi-arg struct constructors (not macro-friendly) =====
+
+    #[inline]
+    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData { ptr, layout, mutable: false })))
+    }
+    #[inline]
+    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData { ptr, layout, mutable: true })))
+    }
+    #[inline]
+    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord {
+        ValueWord::heap_box(HeapValue::ProjectedRef(Box::new(ProjectedRefData { base, projection })))
+    }
+    #[inline]
+    fn from_range(start: Option<ValueWord>, end: Option<ValueWord>, inclusive: bool) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Range { start: start.map(Box::new), end: end.map(Box::new), inclusive })
+    }
+    #[inline]
+    fn from_hashmap(keys: Vec<ValueWord>, values: Vec<ValueWord>, index: HashMap<u64, Vec<usize>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys, values, index, shape_id: None })))
+    }
+    #[inline]
+    fn empty_hashmap() -> ValueWord {
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys: Vec::new(), values: Vec::new(), index: HashMap::new(), shape_id: None })))
+    }
+    #[inline]
+    fn from_hashmap_pairs(keys: Vec<ValueWord>, values: Vec<ValueWord>) -> ValueWord {
+        let index = HashMapData::rebuild_index(&keys);
+        let shape_id = HashMapData::compute_shape(&keys);
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys, values, index, shape_id })))
+    }
+    #[inline]
+    fn from_set(items: Vec<ValueWord>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Set(Box::new(SetData::from_items(items))))
+    }
+    #[inline]
+    fn empty_set() -> ValueWord {
+        ValueWord::heap_box(HeapValue::Set(Box::new(SetData { items: Vec::new(), index: HashMap::new() })))
+    }
+    #[inline]
+    fn from_deque(items: Vec<ValueWord>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Deque(Box::new(DequeData::from_items(items))))
+    }
+    #[inline]
+    fn empty_deque() -> ValueWord {
+        ValueWord::heap_box(HeapValue::Deque(Box::new(DequeData::new())))
+    }
+    #[inline]
+    fn from_priority_queue(items: Vec<ValueWord>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::PriorityQueue(Box::new(PriorityQueueData::from_items(items))))
+    }
+    #[inline]
+    fn empty_priority_queue() -> ValueWord {
+        ValueWord::heap_box(HeapValue::PriorityQueue(Box::new(PriorityQueueData::new())))
+    }
+    #[inline]
+    fn from_task_group(kind: u8, task_ids: Vec<u64>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TaskGroup { kind, task_ids })
+    }
+    #[inline]
+    fn from_trait_object(value: ValueWord, vtable: Arc<VTable>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::TraitObject { value: Box::new(value), vtable })
+    }
+    #[inline]
+    fn from_time_utc(t: DateTime<Utc>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::Temporal(TemporalData::DateTime(t.fixed_offset())))
+    }
+    #[inline]
+    fn from_function_ref(name: String, closure: Option<ValueWord>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::FunctionRef { name, closure: closure.map(Box::new) })
+    }
+
+    // ===== Cloning =====
+
+    #[inline(always)]
+    #[cfg(not(feature = "gc"))]
+    unsafe fn clone_from_bits(bits: u64) -> ValueWord {
+        if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
+            let payload = get_payload(bits);
+            let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
+            if (payload & HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): deep clone into a new owned allocation
+                let hv = unsafe { &*ptr };
+                return vw_heap_box_owned(hv.clone());
+            } else {
+                // Shared (Arc-backed): cheap refcount bump
+                unsafe { Arc::increment_strong_count(ptr) };
+            }
+        }
+        bits
+    }
+    #[inline(always)]
+    #[cfg(feature = "gc")]
+    unsafe fn clone_from_bits(bits: u64) -> ValueWord {
+        bits
+    }
+
+    // ===== Type checks =====
+
+    #[inline(always)] fn is_f64(&self) -> bool { !is_tagged(*self) }
+    #[inline(always)] fn is_i64(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_INT }
+    #[inline(always)] fn is_bool(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_BOOL }
+    #[inline(always)] fn is_none(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_NONE }
+    #[inline(always)] fn is_unit(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_UNIT }
+    #[inline(always)] fn is_function(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_FUNCTION }
+    #[inline(always)] fn is_heap(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_HEAP }
+
+    #[inline(always)]
+    fn is_ref(&self) -> bool {
+        if is_tagged(*self) { get_tag(*self) == TAG_REF }
+        else { matches!(self.as_heap_ref(), Some(HeapValue::ProjectedRef(_))) }
+    }
+
+    /// Extract the reference target.
+    #[inline]
+    fn as_ref_target(&self) -> Option<RefTarget> {
+        if is_tagged(*self) && get_tag(*self) == TAG_REF {
+            let payload = get_payload(*self);
+            let idx = (payload & REF_TARGET_INDEX_MASK) as usize;
+            if payload & REF_TARGET_MODULE_FLAG != 0 {
+                return Some(RefTarget::ModuleBinding(idx));
+            }
+            return Some(RefTarget::Stack(idx));
+        }
+        if let Some(HeapValue::ProjectedRef(data)) = self.as_heap_ref() {
+            return Some(RefTarget::Projected((**data).clone()));
+        }
+        None
+    }
+
+    /// Extract the absolute stack slot index from a stack reference.
+    #[inline]
+    fn as_ref_slot(&self) -> Option<usize> {
+        match self.as_ref_target() {
+            Some(RefTarget::Stack(slot)) => Some(slot),
+            _ => None,
+        }
+    }
+
+    // ===== Checked extractors =====
+
+    /// Extract as f64, returning None if this is not an inline f64.
+    #[inline]
+    fn as_f64(&self) -> Option<f64> {
+        if self.is_f64() {
+            Some(f64::from_bits(*self))
+        } else {
+            None
+        }
+    }
+
+    /// Extract as i64, returning None if this is not an exact signed integer.
+    ///
+    /// Accepts inline i48 values, heap BigInt, and signed-compatible native scalars.
+    #[inline]
+    fn as_i64(&self) -> Option<i64> {
+        if self.is_i64() {
+            Some(sign_extend_i48(get_payload(*self)))
+        } else if let Some(HeapValue::BigInt(v)) = self.as_heap_ref() {
+            Some(*v)
+        } else if let Some(HeapValue::NativeScalar(v)) = self.as_heap_ref() {
+            v.as_i64()
+        } else {
+            None
+        }
+    }
+
+    /// Extract as u64 when the value is an exact non-negative integer.
+    #[inline]
+    fn as_u64_value(&self) -> Option<u64> {
+        if self.is_i64() {
+            let v = sign_extend_i48(get_payload(*self));
+            return u64::try_from(v).ok();
+        }
+
+        if let Some(hv) = self.as_heap_ref() {
+            return match hv {
+                HeapValue::BigInt(v) => u64::try_from(*v).ok(),
+                HeapValue::NativeScalar(v) => v.as_u64(),
+                _ => None,
+            };
+        }
+
+        None
+    }
+
+    /// Extract exact integer domain as i128 (used for width-aware arithmetic/comparison).
+    #[inline]
+    fn as_i128_exact(&self) -> Option<i128> {
+        if self.is_i64() {
+            return Some(sign_extend_i48(get_payload(*self)) as i128);
+        }
+
+        if let Some(hv) = self.as_heap_ref() {
+            return match hv {
+                HeapValue::BigInt(v) => Some(*v as i128),
+                HeapValue::NativeScalar(v) => v.as_i128(),
+                _ => None,
+            };
+        }
+
+        None
+    }
+
+    /// Extract numeric values as f64, including lossless i48→f64 coercion.
+    #[inline]
+    fn as_number_strict(&self) -> Option<f64> {
+        if self.is_f64() {
+            return Some(f64::from_bits(*self));
+        }
+        // Inline i48 integers — lossless conversion to f64.
+        if is_tagged(*self) && get_tag(*self) == TAG_INT {
+            return Some(sign_extend_i48(get_payload(*self)) as f64);
+        }
+        if let Some(hv) = self.as_heap_ref() {
+            return match hv {
+                HeapValue::NativeScalar(NativeScalar::F32(v)) => Some(*v as f64),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    #[inline]
+    fn as_bool(&self) -> Option<bool> {
+        if self.is_bool() { Some(get_payload(*self) != 0) } else { None }
+    }
+    #[inline]
+    fn as_function_id(&self) -> Option<u16> {
+        if self.is_function() { Some(get_payload(*self) as u16) } else { None }
+    }
+
+    // ===== Unchecked extractors (hot paths, caller guarantees type) =====
+
+    /// # Safety: caller must ensure the value is numeric (f64 or i48).
+    #[inline(always)]
+    unsafe fn as_f64_unchecked(&self) -> f64 {
+        if self.is_f64() { f64::from_bits(*self) }
+        else if is_tagged(*self) && get_tag(*self) == TAG_INT { sign_extend_i48(get_payload(*self)) as f64 }
+        else { debug_assert!(false, "as_f64_unchecked on non-numeric"); 0.0 }
+    }
+    /// # Safety: caller must ensure the value is numeric (i48 or f64).
+    #[inline(always)]
+    unsafe fn as_i64_unchecked(&self) -> i64 {
+        if is_tagged(*self) && get_tag(*self) == TAG_INT { sign_extend_i48(get_payload(*self)) }
+        else if self.is_f64() { f64::from_bits(*self) as i64 }
+        else { debug_assert!(false, "as_i64_unchecked on non-numeric"); 0 }
+    }
+    /// # Safety: caller must ensure `self.is_bool()`.
+    #[inline(always)]
+    unsafe fn as_bool_unchecked(&self) -> bool {
+        debug_assert!(self.is_bool()); get_payload(*self) != 0
+    }
+    /// # Safety: caller must ensure `self.is_function()`.
+    #[inline(always)]
+    unsafe fn as_function_unchecked(&self) -> u16 {
+        debug_assert!(self.is_function()); get_payload(*self) as u16
+    }
+
+    #[inline]
+    fn as_heap_ref(&self) -> Option<&HeapValue> {
+        if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
+            Some(unsafe { &*((get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue) })
+        } else { None }
+    }
+
+    /// Get a mutable reference to the heap-boxed HeapValue, cloning if shared.
+    #[inline]
+    #[cfg(not(feature = "gc"))]
+    fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
+        if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
+            let payload = get_payload(*self);
+            if (payload & HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): already uniquely owned, mutate in place
+                let ptr = (payload & HEAP_PTR_MASK) as *mut HeapValue;
+                Some(unsafe { &mut *ptr })
+            } else {
+                // Shared (Arc-backed): clone-on-write via Arc::make_mut
+                let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
+                let mut arc = unsafe { Arc::from_raw(ptr) };
+                Arc::make_mut(&mut arc);
+                let new_ptr = Arc::into_raw(arc) as u64;
+                *self = make_tagged(TAG_HEAP, new_ptr & PAYLOAD_MASK);
+                let final_ptr = (get_payload(*self) & HEAP_PTR_MASK) as *mut HeapValue;
+                Some(unsafe { &mut *final_ptr })
+            }
+        } else {
+            None
+        }
+    }
+    /// Get a mutable reference to the heap-boxed HeapValue (GC variant).
+    #[inline]
+    #[cfg(feature = "gc")]
+    fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
+        if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *mut HeapValue;
+            Some(unsafe { &mut *ptr })
+        } else {
+            None
+        }
+    }
+
+    /// Check truthiness without materializing HeapValue.
+    #[inline]
+    fn is_truthy(&self) -> bool {
+        if !is_tagged(*self) {
+            // f64: truthy if non-zero and not NaN
+            let f = f64::from_bits(*self);
+            return f != 0.0 && !f.is_nan();
+        }
+        let tag = get_tag(*self);
+        if tag == TAG_HEAP {
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
+            return unsafe { (*ptr).is_truthy() };
+        }
+        nan_tag_is_truthy(tag, get_payload(*self))
+    }
+
+    #[inline]
+    fn as_number_coerce(&self) -> Option<f64> {
+        self.as_number_strict()
+            .or_else(|| if is_tagged(*self) && get_tag(*self) == TAG_INT { Some(sign_extend_i48(get_payload(*self)) as f64) } else { None })
+    }
+
+    #[inline(always)] fn is_module_function(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_MODULE_FN }
+    #[inline]
+    fn as_module_function(&self) -> Option<usize> {
+        if self.is_module_function() { Some(get_payload(*self) as usize) } else { None }
+    }
+
+    // ===== Macro-generated extractors =====
+
+    define_heap_ref_extractors!(heap_ref_extractors_impl);
+    define_heap_deref_extractors!(heap_deref_extractors_impl);
+    define_heap_copy_extractors!(heap_copy_extractors_impl);
+    define_heap_mut_extractors!(heap_mut_extractors_impl);
+
+    // ===== Hand-written extractors for consolidated variants =====
+
+    #[inline]
+    fn as_expr_proxy(&self) -> Option<&Arc<String>> {
+        match self.as_heap_ref()? { HeapValue::Rare(RareHeapData::ExprProxy(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_filter_expr(&self) -> Option<&Arc<FilterNode>> {
+        match self.as_heap_ref()? { HeapValue::Rare(RareHeapData::FilterExpr(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_duration(&self) -> Option<&shape_ast::ast::Duration> {
+        match self.as_heap_ref()? { HeapValue::Temporal(TemporalData::Duration(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_int_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<i64>>> {
+        match self.as_heap_ref()? { HeapValue::TypedArray(TypedArrayData::I64(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_float_array(&self) -> Option<&Arc<crate::typed_buffer::AlignedTypedBuffer>> {
+        match self.as_heap_ref()? { HeapValue::TypedArray(TypedArrayData::F64(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_bool_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<u8>>> {
+        match self.as_heap_ref()? { HeapValue::TypedArray(TypedArrayData::Bool(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_timeframe(&self) -> Option<&Timeframe> {
+        match self.as_heap_ref()? { HeapValue::Temporal(TemporalData::Timeframe(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_datetime(&self) -> Option<&DateTime<FixedOffset>> {
+        match self.as_heap_ref()? { HeapValue::Temporal(TemporalData::DateTime(v)) => Some(v), _ => None }
+    }
+    #[inline]
+    fn as_time(&self) -> Option<DateTime<FixedOffset>> {
+        match self.as_heap_ref()? { HeapValue::Temporal(TemporalData::DateTime(v)) => Some(*v), _ => None }
+    }
+    #[inline]
+    fn as_timespan(&self) -> Option<chrono::Duration> {
+        match self.as_heap_ref()? { HeapValue::Temporal(TemporalData::TimeSpan(v)) => Some(*v), _ => None }
+    }
+    #[inline]
+    fn as_matrix(&self) -> Option<&crate::heap_value::MatrixData> {
+        match self.as_heap_ref()? { HeapValue::TypedArray(TypedArrayData::Matrix(m)) => Some(m.as_ref()), _ => None }
+    }
+
+    // ===== Hand-written extractors (non-trivial) =====
+
+    #[inline]
+    fn heap_kind(&self) -> Option<crate::heap_value::HeapKind> {
+        self.as_heap_ref().map(|hv| hv.kind())
+    }
+
+    #[inline]
+    fn as_str(&self) -> Option<&str> {
+        match self.as_heap_ref()? { HeapValue::String(s) => Some(s.as_str()), _ => None }
+    }
+
+    #[inline]
+    fn as_decimal(&self) -> Option<rust_decimal::Decimal> {
+        match self.as_heap_ref()? { HeapValue::Decimal(d) => Some(*d), _ => None }
+    }
+
+    #[inline(always)]
+    unsafe fn as_decimal_unchecked(&self) -> rust_decimal::Decimal {
+        debug_assert!(matches!(self.as_heap_ref(), Some(HeapValue::Decimal(_))));
+        match unsafe { self.as_heap_ref().unwrap_unchecked() } {
+            HeapValue::Decimal(d) => *d,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
+    #[inline]
+    fn as_array(&self) -> Option<&VMArray> {
+        match self.as_heap_ref()? { HeapValue::Array(arr) => Some(arr), _ => None }
+    }
+
+    #[inline]
+    fn as_any_array(&self) -> Option<ArrayView<'_>> {
+        match self.as_heap_ref()? {
+            HeapValue::Array(a) => Some(ArrayView::Generic(a)),
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => Some(ArrayView::Int(a)),
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(ArrayView::Float(a)),
+            HeapValue::TypedArray(TypedArrayData::Bool(a)) => Some(ArrayView::Bool(a)),
+            HeapValue::TypedArray(TypedArrayData::I8(a)) => Some(ArrayView::I8(a)),
+            HeapValue::TypedArray(TypedArrayData::I16(a)) => Some(ArrayView::I16(a)),
+            HeapValue::TypedArray(TypedArrayData::I32(a)) => Some(ArrayView::I32(a)),
+            HeapValue::TypedArray(TypedArrayData::U8(a)) => Some(ArrayView::U8(a)),
+            HeapValue::TypedArray(TypedArrayData::U16(a)) => Some(ArrayView::U16(a)),
+            HeapValue::TypedArray(TypedArrayData::U32(a)) => Some(ArrayView::U32(a)),
+            HeapValue::TypedArray(TypedArrayData::U64(a)) => Some(ArrayView::U64(a)),
+            HeapValue::TypedArray(TypedArrayData::F32(a)) => Some(ArrayView::F32(a)),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_any_array_mut(&mut self) -> Option<ArrayViewMut<'_>> {
+        match self.as_heap_mut()? {
+            HeapValue::Array(a) => Some(ArrayViewMut::Generic(a)),
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => Some(ArrayViewMut::Int(a)),
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(ArrayViewMut::Float(a)),
+            HeapValue::TypedArray(TypedArrayData::Bool(a)) => Some(ArrayViewMut::Bool(a)),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_typed_table(&self) -> Option<(u64, &Arc<DataTable>)> {
+        match self.as_heap_ref()? {
+            HeapValue::TableView(TableViewData::TypedTable { schema_id, table }) => Some((*schema_id, table)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_row_view(&self) -> Option<(u64, &Arc<DataTable>, usize)> {
+        match self.as_heap_ref()? {
+            HeapValue::TableView(TableViewData::RowView { schema_id, table, row_idx }) => Some((*schema_id, table, *row_idx)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_column_ref(&self) -> Option<(u64, &Arc<DataTable>, u32)> {
+        match self.as_heap_ref()? {
+            HeapValue::TableView(TableViewData::ColumnRef { schema_id, table, col_id }) => Some((*schema_id, table, *col_id)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)> {
+        match self.as_heap_ref()? {
+            HeapValue::TableView(TableViewData::IndexedTable { schema_id, table, index_col }) => Some((*schema_id, table, *index_col)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)> {
+        match self.as_heap_ref()? {
+            HeapValue::TypedObject { schema_id, slots, heap_mask } => Some((*schema_id, slots, *heap_mask)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])> {
+        // Closure spec H6.2: read through the shim so H6.5's producer swap
+        // does not revisit this body. The `upvalues_legacy` escape hatch
+        // preserves the `&[Upvalue]` return type that existing callers
+        // (VM dispatch — H6.3 scope) still consume; both this accessor
+        // and the hatch are retired together in H6.5–H6.6.
+        let handle = self.as_closure_handle()?;
+        let fid = handle.function_id() as u16;
+        let upvalues = handle
+            .upvalues_legacy()
+            .expect("H6.2: Legacy backing is the only producer until H6.5");
+        Some((fid, upvalues))
+    }
+
+    #[inline]
+    fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>> {
+        self.as_heap_ref()?.as_closure_handle()
+    }
+
+    fn as_err_payload(&self) -> Option<ValueWord> {
+        let inner = match self.as_heap_ref()? {
+            HeapValue::Err(inner) => inner.as_ref(),
+            _ => return None,
+        };
+        if let Some(HeapValue::TypedObject { slots, heap_mask, .. }) = inner.as_heap_ref() {
+            const PAYLOAD_SLOT: usize = 1;
+            if slots.len() >= 6 && *heap_mask & 1 != 0 {
+                let cat = slots[0].as_heap_value();
+                if let HeapValue::String(s) = cat {
+                    if s.as_str() == "AnyError" && PAYLOAD_SLOT < slots.len() {
+                        let is_heap = *heap_mask & (1u64 << PAYLOAD_SLOT) != 0;
+                        return Some(slots[PAYLOAD_SLOT].as_value_word(is_heap));
+                    }
+                }
+            }
+        }
+        Some(inner.clone())
+    }
+
+    #[inline]
+    fn as_future(&self) -> Option<u64> {
+        match self.as_heap_ref()? { HeapValue::Future(id) => Some(*id), _ => None }
+    }
+    #[inline]
+    fn as_trait_object(&self) -> Option<(&ValueWord, &Arc<VTable>)> {
+        match self.as_heap_ref()? {
+            HeapValue::TraitObject { value, vtable } => Some((value, vtable)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_range(&self) -> Option<(Option<&ValueWord>, Option<&ValueWord>, bool)> {
+        match self.as_heap_ref()? {
+            HeapValue::Range { start, end, inclusive } => Some((
+                start.as_ref().map(|b| b.as_ref()),
+                end.as_ref().map(|b| b.as_ref()),
+                *inclusive,
+            )),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_hashmap(&self) -> Option<(&Vec<ValueWord>, &Vec<ValueWord>, &HashMap<u64, Vec<usize>>)> {
+        match self.as_heap_ref()? {
+            HeapValue::HashMap(d) => Some((&d.keys, &d.values, &d.index)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn as_hashmap_data(&self) -> Option<&HashMapData> {
+        match self.as_heap_ref()? { HeapValue::HashMap(d) => Some(d), _ => None }
+    }
+
+    #[inline]
+    fn typed_array_len(&self) -> Option<usize> {
+        match self.as_heap_ref()? {
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::Bool(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::I8(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::I16(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::I32(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::U8(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::U16(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::U32(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::U64(a)) => Some(a.len()),
+            HeapValue::TypedArray(TypedArrayData::F32(a)) => Some(a.len()),
+            _ => None,
+        }
+    }
+
+    fn coerce_to_float_array(&self) -> Option<Arc<crate::typed_buffer::AlignedTypedBuffer>> {
+        match self.as_heap_ref()? {
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(Arc::clone(a)),
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => {
+                let mut buf = crate::typed_buffer::AlignedTypedBuffer::with_capacity(a.len());
+                for &v in a.iter() { buf.push(v as f64); }
+                Some(Arc::new(buf))
+            }
+            _ => None,
+        }
+    }
+
+    fn to_generic_array(&self) -> Option<crate::value::VMArray> {
+        if let Some(HeapValue::Array(arc)) = self.as_heap_ref() {
+            return Some(arc.clone());
+        }
+        match self.as_heap_ref()? {
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_i64(v)).collect())),
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_f64(v)).collect())),
+            HeapValue::TypedArray(TypedArrayData::Bool(a)) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_bool(v != 0)).collect())),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn to_array_arc(&self) -> Option<crate::value::VMArray> { self.to_generic_array() }
+
+    /// Fast equality comparison without materializing HeapValue.
+    /// For inline types (f64, i48, bool, none, unit, function), compares bits directly.
+    /// For heap types, falls back to HeapValue equality.
+    #[inline]
+    fn vw_equals(&self, other: &ValueWord) -> bool {
+        // Fast path: identical bits means identical value (except NaN)
+        if *self == *other {
+            // Special case: f64 NaN != NaN
+            if !is_tagged(*self) {
+                let f = f64::from_bits(*self);
+                return !f.is_nan();
+            }
+            // For heap values, same bits = same pointer = definitely equal
+            return true;
+        }
+        // Different bits — for inline types, they're definitely not equal
+        if !is_tagged(*self) || !is_tagged(*other) {
+            // At least one is f64 — if they're both f64 with different bits, not equal
+            // (we already handled the case where both are identical)
+            // Cross-type: f64 == i48 coercion
+            if let (Some(a), Some(b)) = (self.as_number_coerce(), other.as_number_coerce()) {
+                return a == b;
+            }
+            return false;
+        }
+        let tag_a = get_tag(*self);
+        let tag_b = get_tag(*other);
+        if tag_a != tag_b {
+            // Different tags — check numeric coercion (f64 vs i48)
+            if (tag_a == TAG_INT || !is_tagged(*self)) && (tag_b == TAG_INT || !is_tagged(*other))
+            {
+                if let (Some(a), Some(b)) = (self.as_number_coerce(), other.as_number_coerce()) {
+                    return a == b;
+                }
+            }
+            return false;
+        }
+        // Same tag, different bits — for heap values, compare HeapValue
+        if tag_a == TAG_HEAP {
+            let ptr_a = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
+            let ptr_b = (get_payload(*other) & HEAP_PTR_MASK) as *const HeapValue;
+            return unsafe { (*ptr_a).equals(&*ptr_b) };
+        }
+        // For other same-tag inline values with different bits, not equal
+        false
+    }
+
+    /// Compute a hash for a ValueWord value, suitable for HashMap key usage.
+    /// Uses the existing tag dispatch for O(1) inline types.
+    fn vw_hash(&self) -> u64 {
+        use ahash::AHasher;
+        use std::hash::{Hash, Hasher};
+        #[inline]
+        fn ahash<H: Hash>(v: &H) -> u64 { let mut h = AHasher::default(); v.hash(&mut h); h.finish() }
+
+        let bits = *self;
+        if !is_tagged(bits) {
+            let f = unsafe { self.as_f64_unchecked() };
+            return ahash(&if f == 0.0 { 0u64 } else { f.to_bits() });
+        }
+        let tag = get_tag(bits);
+        match tag {
+            TAG_INT => ahash(&unsafe { self.as_i64_unchecked() }),
+            TAG_BOOL => if unsafe { self.as_bool_unchecked() } { 1 } else { 0 },
+            TAG_NONE => 0x_DEAD_0000,
+            TAG_UNIT => 0x_DEAD_0001,
+            TAG_HEAP => match self.as_heap_ref() {
+                Some(HeapValue::String(s)) => ahash(s.as_ref()),
+                Some(HeapValue::BigInt(i)) => ahash(i),
+                Some(HeapValue::Decimal(d)) => {
+                    let mut h = AHasher::default();
+                    d.mantissa().hash(&mut h); d.scale().hash(&mut h); h.finish()
+                }
+                Some(HeapValue::NativeScalar(v)) => {
+                    let mut h = AHasher::default();
+                    v.type_name().hash(&mut h); v.to_string().hash(&mut h); h.finish()
+                }
+                Some(HeapValue::NativeView(v)) => {
+                    let mut h = AHasher::default();
+                    v.ptr.hash(&mut h); v.layout.name.hash(&mut h); v.mutable.hash(&mut h); h.finish()
+                }
+                _ => ahash(&bits),
+            },
+            _ => ahash(&bits),
+        }
+    }
+
+    // ===== Arithmetic helpers (operate directly on bits, no conversion) =====
+
+    /// Add two inline i48 values with overflow promotion to f64.
+    ///
+    /// # Safety
+    /// Both `a` and `b` must be inline i48 values (`is_i64()` is true).
+    #[inline(always)]
+    unsafe fn add_i64(a: &Self, b: &Self) -> ValueWord {
+        debug_assert!(a.is_i64() && b.is_i64());
+        let lhs = unsafe { a.as_i64_unchecked() };
+        let rhs = unsafe { b.as_i64_unchecked() };
+        match lhs.checked_add(rhs) {
+            Some(result) if result >= I48_MIN && result <= I48_MAX => ValueWord::from_i64(result),
+            _ => ValueWord::from_f64(lhs as f64 + rhs as f64),
+        }
+    }
+
+    /// Subtract two inline i48 values with overflow promotion to f64.
+    ///
+    /// # Safety
+    /// Both `a` and `b` must be inline i48 values.
+    #[inline(always)]
+    unsafe fn sub_i64(a: &Self, b: &Self) -> ValueWord {
+        debug_assert!(a.is_i64() && b.is_i64());
+        let lhs = unsafe { a.as_i64_unchecked() };
+        let rhs = unsafe { b.as_i64_unchecked() };
+        match lhs.checked_sub(rhs) {
+            Some(result) if result >= I48_MIN && result <= I48_MAX => ValueWord::from_i64(result),
+            _ => ValueWord::from_f64(lhs as f64 - rhs as f64),
+        }
+    }
+
+    /// Multiply two inline i48 values with overflow promotion to f64.
+    ///
+    /// # Safety
+    /// Both `a` and `b` must be inline i48 values.
+    #[inline(always)]
+    unsafe fn mul_i64(a: &Self, b: &Self) -> ValueWord {
+        debug_assert!(a.is_i64() && b.is_i64());
+        let lhs = unsafe { a.as_i64_unchecked() };
+        let rhs = unsafe { b.as_i64_unchecked() };
+        match lhs.checked_mul(rhs) {
+            Some(result) if result >= I48_MIN && result <= I48_MAX => ValueWord::from_i64(result),
+            _ => ValueWord::from_f64(lhs as f64 * rhs as f64),
+        }
+    }
+
+    /// Binary arithmetic with integer-preserving semantics and overflow promotion.
+    ///
+    /// If both operands are inline I48, applies `int_op` (checked) to the i64 values.
+    /// On overflow (None), falls back to `float_op` with the f64 coercions.
+    /// If either operand is f64, applies `float_op` directly.
+    /// Callers must ensure `a_num` and `b_num` are the `as_number_coerce()` results
+    /// from the same `a`/`b` operands.
+    #[inline(always)]
+    fn binary_int_preserving(
+        a: &Self,
+        b: &Self,
+        a_num: f64,
+        b_num: f64,
+        int_op: impl FnOnce(i64, i64) -> Option<i64>,
+        float_op: impl FnOnce(f64, f64) -> f64,
+    ) -> ValueWord {
+        if a.is_i64() && b.is_i64() {
+            match int_op(unsafe { a.as_i64_unchecked() }, unsafe {
+                b.as_i64_unchecked()
+            }) {
+                Some(result) => ValueWord::from_i64(result),
+                None => ValueWord::from_f64(float_op(a_num, b_num)),
+            }
+        } else {
+            ValueWord::from_f64(float_op(a_num, b_num))
+        }
+    }
+
+    /// Returns the raw u64 bits (for debugging/testing).
+    #[inline(always)]
+    fn raw_bits(&self) -> u64 {
+        *self
+    }
+
+    /// Create a ValueWord from raw u64 bits without any NaN-boxing or tagging.
+    ///
+    /// This is the inverse of `raw_bits()`. The caller is responsible for
+    /// ensuring the bits are interpreted correctly (e.g. via `push_raw_f64` /
+    /// `pop_raw_f64`). No Drop/heap semantics are attached to the resulting
+    /// value — it is treated as an opaque 8-byte slot.
+    #[inline(always)]
+    fn from_raw_bits(bits: u64) -> ValueWord {
+        bits
+    }
+
+    /// Return the raw u64 bits. Identity since ValueWord is u64.
+    #[inline(always)]
+    fn into_raw_bits(self) -> u64 {
+        self
+    }
+
+    /// Get the type name of this value.
+    #[inline]
+    fn type_name(&self) -> &'static str {
+        if !is_tagged(*self) {
+            return "number";
+        }
+        let tag = get_tag(*self);
+        if tag == TAG_HEAP {
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
+            return unsafe { (*ptr).type_name() };
+        }
+        nan_tag_type_name(tag)
+    }
+
+    #[inline] fn to_number(&self) -> Option<f64> { self.as_number_coerce() }
+    #[inline] fn to_bool(&self) -> Option<bool> { self.as_bool() }
+
+    /// Convert Int or Number to usize (for indexing operations).
+    fn as_usize(&self) -> Option<usize> {
+        if let Some(i) = self.as_i64() {
+            if i >= 0 {
+                return Some(i as usize);
+            }
+        } else if let Some(n) = self.as_f64() {
+            if n >= 0.0 && n.is_finite() {
+                return Some(n as usize);
+            }
+        } else if let Some(d) = self.as_decimal() {
+            use rust_decimal::prelude::ToPrimitive;
+            if let Some(n) = d.to_f64() {
+                if n >= 0.0 {
+                    return Some(n as usize);
+                }
+            }
+        } else if let Some(view) = self.as_native_view() {
+            return Some(view.ptr);
+        }
+        None
+    }
+
+    /// Convert this value to a JSON value for serialization.
+    fn to_json_value(&self) -> serde_json::Value {
+        use crate::heap_value::HeapValue;
+        if let Some(n) = self.as_f64() {
+            return serde_json::json!(n);
+        }
+        if let Some(i) = self.as_i64() {
+            return serde_json::json!(i);
+        }
+        if let Some(b) = self.as_bool() {
+            return serde_json::json!(b);
+        }
+        if self.is_none() || self.is_unit() {
+            return serde_json::Value::Null;
+        }
+        if self.is_function() || self.is_module_function() {
+            return serde_json::json!(format!("<{}>", self.type_name()));
+        }
+        match self.as_heap_ref() {
+            Some(HeapValue::String(s)) => serde_json::json!(s.as_str()),
+            Some(HeapValue::Decimal(d)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                if let Some(f) = d.to_f64() {
+                    serde_json::json!(f)
+                } else {
+                    serde_json::json!(d.to_string())
+                }
+            }
+            Some(HeapValue::Array(arr)) => {
+                let values: Vec<serde_json::Value> =
+                    arr.iter().map(|v| v.to_json_value()).collect();
+                serde_json::json!(values)
+            }
+            Some(HeapValue::Some(v)) => v.to_json_value(),
+            Some(HeapValue::Ok(v)) => serde_json::json!({
+                "status": "ok",
+                "value": v.to_json_value()
+            }),
+            Some(HeapValue::Err(v)) => serde_json::json!({
+                "status": "error",
+                "value": v.to_json_value()
+            }),
+            Some(HeapValue::DataTable(dt)) => serde_json::json!({
+                "type": "datatable",
+                "rows": dt.row_count(),
+                "columns": dt.column_names(),
+            }),
+            Some(HeapValue::TableView(TableViewData::TypedTable { table, schema_id })) => serde_json::json!({
+                "type": "typed_table",
+                "schema_id": schema_id,
+                "rows": table.row_count(),
+                "columns": table.column_names(),
+            }),
+            Some(HeapValue::TableView(TableViewData::RowView {
+                schema_id, row_idx, ..
+            })) => serde_json::json!({
+                "type": "row",
+                "schema_id": schema_id,
+                "row_idx": row_idx,
+            }),
+            Some(HeapValue::TableView(TableViewData::ColumnRef {
+                schema_id, col_id, ..
+            })) => serde_json::json!({
+                "type": "column_ref",
+                "schema_id": schema_id,
+                "col_id": col_id,
+            }),
+            Some(HeapValue::TableView(TableViewData::IndexedTable {
+                schema_id,
+                table,
+                index_col,
+            })) => serde_json::json!({
+                "type": "indexed_table",
+                "schema_id": schema_id,
+                "rows": table.row_count(),
+                "columns": table.column_names(),
+                "index_col": index_col,
+            }),
+            Some(HeapValue::HashMap(d)) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in d.keys.iter().zip(d.values.iter()) {
+                    map.insert(format!("{}", crate::value_word::ValueWordDisplay(*k)), v.to_json_value());
+                }
+                serde_json::Value::Object(map)
+            }
+            Some(HeapValue::Set(d)) => {
+                serde_json::Value::Array(d.items.iter().map(|v| v.to_json_value()).collect())
+            }
+            Some(HeapValue::Deque(d)) => {
+                serde_json::Value::Array(d.items.iter().map(|v| v.to_json_value()).collect())
+            }
+            Some(HeapValue::PriorityQueue(d)) => {
+                serde_json::Value::Array(d.items.iter().map(|v| v.to_json_value()).collect())
+            }
+            Some(HeapValue::NativeScalar(v)) => {
+                let (ty, val): (&str, serde_json::Value) = match v {
+                    NativeScalar::I8(n) => ("i8", serde_json::json!(n)),
+                    NativeScalar::U8(n) => ("u8", serde_json::json!(n)),
+                    NativeScalar::I16(n) => ("i16", serde_json::json!(n)),
+                    NativeScalar::U16(n) => ("u16", serde_json::json!(n)),
+                    NativeScalar::I32(n) => ("i32", serde_json::json!(n)),
+                    NativeScalar::U32(n) => ("u32", serde_json::json!(n)),
+                    NativeScalar::I64(n) => ("i64", serde_json::json!(n.to_string())),
+                    NativeScalar::U64(n) => ("u64", serde_json::json!(n.to_string())),
+                    NativeScalar::Isize(n) => ("isize", serde_json::json!(n.to_string())),
+                    NativeScalar::Usize(n) => ("usize", serde_json::json!(n.to_string())),
+                    NativeScalar::Ptr(n) => ("ptr", serde_json::json!(format!("0x{n:x}"))),
+                    NativeScalar::F32(n) => ("f32", serde_json::json!(n)),
+                };
+                serde_json::json!({ "type": ty, "value": val })
+            }
+            Some(HeapValue::NativeView(v)) => serde_json::json!({
+                "type": if v.mutable { "cmut" } else { "cview" },
+                "layout": v.layout.name,
+                "ptr": v.ptr,
+            }),
+            // Typed arrays — serialize as JSON arrays of their element values
+            Some(HeapValue::TypedArray(TypedArrayData::I64(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::F64(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v != 0)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::I8(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::I16(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::I32(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::U8(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::U16(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::U32(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::U64(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::TypedArray(TypedArrayData::F32(buf))) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            _ => serde_json::json!(format!("<{}>", self.type_name())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::heap_value::HeapValue;
+    use crate::value_word::{TAG_MODULE_FN, ValueWordDisplay};
+    use std::sync::Arc;
+
+    // ===== f64 round-trips =====
+
+    #[test]
+    fn test_f64_roundtrip_positive() {
+        let v = ValueWord::from_f64(3.14);
+        assert!(v.is_f64());
+        assert_eq!(v.as_f64(), Some(3.14));
+        unsafe { assert_eq!(v.as_f64_unchecked(), 3.14) };
+    }
+
+    #[test]
+    fn test_f64_roundtrip_negative() {
+        let v = ValueWord::from_f64(-123.456);
+        assert!(v.is_f64());
+        assert_eq!(v.as_f64(), Some(-123.456));
+    }
+
+    #[test]
+    fn test_f64_zero() {
+        let v = ValueWord::from_f64(0.0);
+        assert!(v.is_f64());
+        assert_eq!(v.as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_f64_negative_zero() {
+        let v = ValueWord::from_f64(-0.0);
+        assert!(v.is_f64());
+        let extracted = v.as_f64().unwrap();
+        // -0.0 and 0.0 are equal per IEEE 754
+        assert_eq!(extracted, 0.0);
+        // But the sign bit should be preserved
+        assert!(extracted.is_sign_negative());
+    }
+
+    #[test]
+    fn test_f64_infinity() {
+        let pos = ValueWord::from_f64(f64::INFINITY);
+        assert!(pos.is_f64());
+        assert_eq!(pos.as_f64(), Some(f64::INFINITY));
+
+        let neg = ValueWord::from_f64(f64::NEG_INFINITY);
+        assert!(neg.is_f64());
+        assert_eq!(neg.as_f64(), Some(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn test_f64_nan_canonicalized() {
+        let v = ValueWord::from_f64(f64::NAN);
+        // NaN is stored as a canonical NaN, which is still a valid f64 NaN
+        assert!(v.is_f64());
+        let extracted = v.as_f64().unwrap();
+        assert!(extracted.is_nan());
+    }
+
+    #[test]
+    fn test_f64_subnormal() {
+        let tiny = f64::MIN_POSITIVE / 2.0; // subnormal
+        let v = ValueWord::from_f64(tiny);
+        assert!(v.is_f64());
+        assert_eq!(v.as_f64(), Some(tiny));
+    }
+
+    #[test]
+    fn test_f64_max_min() {
+        let max = ValueWord::from_f64(f64::MAX);
+        assert!(max.is_f64());
+        assert_eq!(max.as_f64(), Some(f64::MAX));
+
+        let min = ValueWord::from_f64(f64::MIN);
+        assert!(min.is_f64());
+        assert_eq!(min.as_f64(), Some(f64::MIN));
+    }
+
+    // ===== i64 round-trips =====
+
+    #[test]
+    fn test_i64_small_positive() {
+        let v = ValueWord::from_i64(42);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(42));
+        unsafe { assert_eq!(v.as_i64_unchecked(), 42) };
+    }
+
+    #[test]
+    fn test_i64_small_negative() {
+        let v = ValueWord::from_i64(-42);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(-42));
+    }
+
+    #[test]
+    fn test_i64_zero() {
+        let v = ValueWord::from_i64(0);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn test_i64_i48_max() {
+        let max = I48_MAX;
+        let v = ValueWord::from_i64(max);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(max));
+    }
+
+    #[test]
+    fn test_i64_i48_min() {
+        let min = I48_MIN;
+        let v = ValueWord::from_i64(min);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(min));
+    }
+
+    #[test]
+    fn test_i64_large_needs_heap() {
+        // i64::MAX exceeds 48 bits, should heap-box as BigInt
+        let v = ValueWord::from_i64(i64::MAX);
+        assert!(v.is_heap());
+        assert_eq!(v.as_i64(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn test_i64_min_needs_heap() {
+        let v = ValueWord::from_i64(i64::MIN);
+        assert!(v.is_heap());
+        assert_eq!(v.as_i64(), Some(i64::MIN));
+    }
+
+    #[test]
+    fn test_i64_just_outside_i48_positive() {
+        let val = I48_MAX + 1;
+        let v = ValueWord::from_i64(val);
+        assert!(v.is_heap());
+        assert_eq!(v.as_i64(), Some(val));
+    }
+
+    #[test]
+    fn test_i64_just_outside_i48_negative() {
+        let val = I48_MIN - 1;
+        let v = ValueWord::from_i64(val);
+        assert!(v.is_heap());
+        assert_eq!(v.as_i64(), Some(val));
+    }
+
+    // ===== bool round-trips =====
+
+    #[test]
+    fn test_bool_true() {
+        let v = ValueWord::from_bool(true);
+        assert!(v.is_bool());
+        assert_eq!(v.as_bool(), Some(true));
+        unsafe { assert_eq!(v.as_bool_unchecked(), true) };
+    }
+
+    #[test]
+    fn test_bool_false() {
+        let v = ValueWord::from_bool(false);
+        assert!(v.is_bool());
+        assert_eq!(v.as_bool(), Some(false));
+        unsafe { assert_eq!(v.as_bool_unchecked(), false) };
+    }
+
+    // ===== None / Unit =====
+
+    #[test]
+    fn test_none() {
+        let v = ValueWord::none();
+        assert!(v.is_none());
+        assert!(!v.is_f64());
+        assert!(!v.is_i64());
+        assert!(!v.is_bool());
+    }
+
+    #[test]
+    fn test_unit() {
+        let v = ValueWord::unit();
+        assert!(v.is_unit());
+    }
+
+    // ===== Function =====
+
+    #[test]
+    fn test_function() {
+        let v = ValueWord::from_function(42);
+        assert!(v.is_function());
+        assert_eq!(v.as_function_id(), Some(42));
+        unsafe { assert_eq!(v.as_function_unchecked(), 42) };
+    }
+
+    #[test]
+    fn test_function_max_id() {
+        let v = ValueWord::from_function(u16::MAX);
+        assert!(v.is_function());
+        assert_eq!(v.as_function_id(), Some(u16::MAX));
+    }
+
+    // ===== Module function =====
+
+    #[test]
+    fn test_module_function() {
+        let v = ValueWord::from_module_function(99);
+        assert!(is_tagged(v));
+        assert_eq!(get_tag(v), TAG_MODULE_FN);
+        assert_eq!(v.as_module_function(), Some(99));
+    }
+
+    // ===== Heap round-trips =====
+
+    #[test]
+    fn test_heap_string_roundtrip() {
+        let v = ValueWord::from_string(Arc::new("hello world".to_string()));
+        assert!(v.is_heap());
+        assert_eq!(v.as_arc_string().map(|s| s.as_str()), Some("hello world"));
+    }
+
+    #[test]
+    fn test_heap_array_roundtrip() {
+        let arr = crate::value::vmarray_from_vec(vec![
+            ValueWord::from_i64(1),
+            ValueWord::from_i64(2),
+            ValueWord::from_i64(3),
+        ]);
+        let v = ValueWord::from_array(arr.clone());
+        assert!(v.is_heap());
+        let extracted = v.as_array().expect("should be array");
+        assert_eq!(extracted.len(), 3);
+    }
+
+    #[test]
+    fn test_heap_clone() {
+        let v = ValueWord::from_string(Arc::new("clone me".to_string()));
+        let cloned = v.clone();
+
+        // Both should extract the same string
+        assert_eq!(v.as_arc_string().map(|s| s.as_str()), Some("clone me"));
+        assert_eq!(cloned.as_arc_string().map(|s| s.as_str()), Some("clone me"));
+
+        // Clones share the same Arc allocation (refcount bump, not deep copy)
+        assert_eq!(
+            get_payload(v),
+            get_payload(cloned),
+            "cloned heap pointers should be identical (Arc shared)"
+        );
+    }
+
+    // ===== Type discrimination =====
+
+    #[test]
+    fn test_type_checks_exclusive() {
+        let f = ValueWord::from_f64(1.0);
+        assert!(f.is_f64());
+        assert!(!f.is_i64());
+        assert!(!f.is_bool());
+        assert!(!f.is_none());
+        assert!(!f.is_unit());
+        assert!(!f.is_function());
+        assert!(!f.is_heap());
+
+        let i = ValueWord::from_i64(1);
+        assert!(!i.is_f64());
+        assert!(i.is_i64());
+        assert!(!i.is_bool());
+        assert!(!i.is_none());
+        assert!(!i.is_unit());
+        assert!(!i.is_function());
+        assert!(!i.is_heap());
+
+        let b = ValueWord::from_bool(true);
+        assert!(!b.is_f64());
+        assert!(!b.is_i64());
+        assert!(b.is_bool());
+        assert!(!b.is_none());
+
+        let n = ValueWord::none();
+        assert!(!n.is_f64());
+        assert!(!n.is_i64());
+        assert!(!n.is_bool());
+        assert!(n.is_none());
+
+        let u = ValueWord::unit();
+        assert!(u.is_unit());
+        assert!(!u.is_none());
+
+        let func = ValueWord::from_function(0);
+        assert!(func.is_function());
+        assert!(!func.is_f64());
+    }
+
+    // ===== Size check =====
+
+    #[test]
+    fn test_size_is_8_bytes() {
+        assert_eq!(std::mem::size_of::<ValueWord>(), 8);
+    }
+
+    // ===== Debug output =====
+
+    #[test]
+    fn test_debug_format() {
+        let v = ValueWord::from_f64(3.14);
+        let dbg = format!("{:?}", ValueWordDisplay(v));
+        assert!(dbg.contains("f64"));
+        assert!(dbg.contains("3.14"));
+
+        let v = ValueWord::from_i64(42);
+        let dbg = format!("{:?}", ValueWordDisplay(v));
+        assert!(dbg.contains("i64"));
+        assert!(dbg.contains("42"));
+
+        let v = ValueWord::none();
+        let dbg = format!("{:?}", ValueWordDisplay(v));
+        assert!(dbg.contains("None"));
+    }
+
+    // ===== Edge: sign extension correctness =====
+
+    #[test]
+    fn test_sign_extension_negative_one() {
+        let v = ValueWord::from_i64(-1);
+        assert!(v.is_i64());
+        assert_eq!(v.as_i64(), Some(-1));
+    }
+
+    #[test]
+    fn test_sign_extension_boundary() {
+        // -1 in 48-bit two's complement is 0x0000_FFFF_FFFF_FFFF (all 48 bits set)
+        let v = ValueWord::from_i64(-1);
+        let payload = get_payload(v);
+        assert_eq!(payload, 0x0000_FFFF_FFFF_FFFF);
+        assert_eq!(sign_extend_i48(payload), -1);
+
+        // Most negative i48: -2^47
+        let v = ValueWord::from_i64(I48_MIN);
+        let payload = get_payload(v);
+        // Bit 47 should be set, bits 46-0 should be 0
+        assert_eq!(payload, 0x0000_8000_0000_0000);
+        assert_eq!(sign_extend_i48(payload), I48_MIN);
+    }
+
+    // ===== Drop safety =====
+
+    #[test]
+    fn test_drop_non_heap_is_noop() {
+        // These should drop without issue (no heap allocation).
+        let _ = ValueWord::from_f64(1.0);
+        let _ = ValueWord::from_i64(1);
+        let _ = ValueWord::from_bool(true);
+        let _ = ValueWord::none();
+        let _ = ValueWord::unit();
+        let _ = ValueWord::from_function(0);
+    }
+
+    #[test]
+    fn test_drop_heap_frees_memory() {
+        // Create a heap value and let it drop — should not leak or crash.
+        let _v = ValueWord::from_string(Arc::new("drop test".to_string()));
+        // Dropped here — if Drop is wrong, ASAN/MSAN would catch it.
+    }
+
+    #[test]
+    fn test_multiple_clones_and_drops() {
+        let v1 = ValueWord::from_string(Arc::new("multi clone".to_string()));
+        let v2 = v1.clone();
+        let v3 = v2.clone();
+
+        assert_eq!(v1.as_arc_string().map(|s| s.as_str()), Some("multi clone"));
+        assert_eq!(v2.as_arc_string().map(|s| s.as_str()), Some("multi clone"));
+        assert_eq!(v3.as_arc_string().map(|s| s.as_str()), Some("multi clone"));
+
+        // All three drop independently without double-free.
+        drop(v2);
+        assert_eq!(v1.as_arc_string().map(|s| s.as_str()), Some("multi clone"));
+        assert_eq!(v3.as_arc_string().map(|s| s.as_str()), Some("multi clone"));
+    }
+
+    // ===== DateTime<FixedOffset> round-trips =====
+
+    #[test]
+    fn test_datetime_fixed_offset_roundtrip() {
+        use chrono::TimeZone;
+        let offset = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap(); // +05:30
+        let dt = offset.with_ymd_and_hms(2024, 6, 15, 14, 30, 0).unwrap();
+        let v = ValueWord::from_time(dt);
+        let extracted = v.as_time().unwrap();
+        assert_eq!(extracted, dt);
+        assert_eq!(extracted.offset().local_minus_utc(), 5 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn test_datetime_utc_convenience() {
+        use chrono::TimeZone;
+        let utc_dt = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
+        let v = ValueWord::from_time_utc(utc_dt);
+        let extracted = v.as_time().unwrap();
+        assert_eq!(extracted.offset().local_minus_utc(), 0);
+        assert_eq!(extracted.timestamp(), utc_dt.timestamp());
+    }
+
+    #[test]
+    fn test_as_datetime_returns_ref() {
+        use chrono::TimeZone;
+        let offset = chrono::FixedOffset::west_opt(4 * 3600).unwrap(); // -04:00
+        let dt = offset.with_ymd_and_hms(2024, 12, 25, 8, 0, 0).unwrap();
+        let v = ValueWord::from_time(dt);
+        let dt_ref = v.as_datetime().unwrap();
+        assert_eq!(*dt_ref, dt);
+        assert_eq!(dt_ref.offset().local_minus_utc(), -4 * 3600);
+    }
+
+    #[test]
+    fn test_datetime_display() {
+        use chrono::TimeZone;
+        let utc_dt = chrono::Utc.with_ymd_and_hms(2024, 3, 1, 12, 0, 0).unwrap();
+        let v = ValueWord::from_time_utc(utc_dt);
+        let display = format!("{}", ValueWordDisplay(v));
+        assert!(display.contains("2024-03-01"));
+    }
+
+    #[test]
+    fn test_as_number_coerce_rejects_native_i64_u64() {
+        let i64_nb = ValueWord::from_native_scalar(NativeScalar::I64(42));
+        let u64_nb = ValueWord::from_native_u64(u64::MAX);
+        assert_eq!(i64_nb.as_number_coerce(), None);
+        assert_eq!(u64_nb.as_number_coerce(), None);
+    }
+
+    #[test]
+    fn test_as_number_coerce_accepts_native_f32() {
+        let v = ValueWord::from_native_f32(12.5);
+        assert_eq!(v.as_number_coerce(), Some(12.5));
+    }
+
+    #[test]
+    fn test_exact_integer_extractors_cover_u64() {
+        let v = ValueWord::from_native_u64(u64::MAX);
+        assert_eq!(v.as_u64_value(), Some(u64::MAX));
+        assert_eq!(v.as_i128_exact(), Some(u64::MAX as i128));
+    }
+
+    // ===== Typed array (IntArray/FloatArray/BoolArray) tests =====
+
+    #[test]
+    fn test_int_array_construction_and_roundtrip() {
+        let data = vec![1i64, 2, 3, -100, 0];
+        let nb = ValueWord::from_int_array(Arc::new(data.clone().into()));
+        assert!(nb.is_heap());
+        let arr = nb.as_int_array().unwrap();
+        assert_eq!(arr.as_slice(), &data);
+    }
+
+    #[test]
+    fn test_float_array_construction_and_roundtrip() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(4);
+        aligned.push(1.0);
+        aligned.push(2.5);
+        aligned.push(-3.14);
+        aligned.push(0.0);
+        let nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        assert!(nb.is_heap());
+        let arr = nb.as_float_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0], 1.0);
+        assert_eq!(arr[2], -3.14);
+    }
+
+    #[test]
+    fn test_bool_array_construction_and_roundtrip() {
+        let data = vec![1u8, 0, 1, 1, 0];
+        let nb = ValueWord::from_bool_array(Arc::new(data.clone().into()));
+        assert!(nb.is_heap());
+        let arr = nb.as_bool_array().unwrap();
+        assert_eq!(arr.as_slice(), &data);
+    }
+
+    #[test]
+    fn test_int_array_type_name() {
+        let nb = ValueWord::from_int_array(Arc::new(vec![1i64, 2, 3].into()));
+        assert_eq!(nb.type_name(), "Vec<int>");
+    }
+
+    #[test]
+    fn test_float_array_type_name() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(1);
+        aligned.push(1.0);
+        let nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        assert_eq!(nb.type_name(), "Vec<number>");
+    }
+
+    #[test]
+    fn test_bool_array_type_name() {
+        let nb = ValueWord::from_bool_array(Arc::new(vec![0u8, 1].into()));
+        assert_eq!(nb.type_name(), "Vec<bool>");
+    }
+
+    #[test]
+    fn test_int_array_is_truthy_nonempty() {
+        let nb = ValueWord::from_int_array(Arc::new(vec![42i64].into()));
+        assert!(nb.is_truthy());
+    }
+
+    #[test]
+    fn test_int_array_is_truthy_empty() {
+        let nb = ValueWord::from_int_array(Arc::new(Vec::<i64>::new().into()));
+        assert!(!nb.is_truthy());
+    }
+
+    #[test]
+    fn test_float_array_is_truthy_nonempty() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(1);
+        aligned.push(0.0);
+        let nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        assert!(nb.is_truthy());
+    }
+
+    #[test]
+    fn test_float_array_is_truthy_empty() {
+        use crate::aligned_vec::AlignedVec;
+        let nb = ValueWord::from_float_array(Arc::new(AlignedVec::new().into()));
+        assert!(!nb.is_truthy());
+    }
+
+    #[test]
+    fn test_bool_array_is_truthy_nonempty() {
+        let nb = ValueWord::from_bool_array(Arc::new(vec![0u8].into()));
+        assert!(nb.is_truthy());
+    }
+
+    #[test]
+    fn test_bool_array_is_truthy_empty() {
+        let nb = ValueWord::from_bool_array(Arc::new(Vec::<u8>::new().into()));
+        assert!(!nb.is_truthy());
+    }
+
+    #[test]
+    fn test_int_array_clone_arc_refcount() {
+        let data: Arc<crate::typed_buffer::TypedBuffer<i64>> = Arc::new(vec![10i64, 20, 30].into());
+        let nb1 = ValueWord::from_int_array(data.clone());
+        let nb2 = nb1.clone();
+        let arr1 = nb1.as_int_array().unwrap();
+        let arr2 = nb2.as_int_array().unwrap();
+        assert_eq!(arr1.as_ref(), arr2.as_ref());
+        assert!(Arc::ptr_eq(arr1, arr2));
+    }
+
+    #[test]
+    fn test_float_array_clone_arc_refcount() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(2);
+        aligned.push(1.0);
+        aligned.push(2.0);
+        let data: Arc<crate::typed_buffer::AlignedTypedBuffer> = Arc::new(aligned.into());
+        let nb1 = ValueWord::from_float_array(data.clone());
+        let nb2 = nb1.clone();
+        let arr1 = nb1.as_float_array().unwrap();
+        let arr2 = nb2.as_float_array().unwrap();
+        assert!(Arc::ptr_eq(arr1, arr2));
+    }
+
+    #[test]
+    fn test_typed_array_len() {
+        let int_nb = ValueWord::from_int_array(Arc::new(vec![1i64, 2, 3].into()));
+        assert_eq!(int_nb.typed_array_len(), Some(3));
+
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(2);
+        aligned.push(1.0);
+        aligned.push(2.0);
+        let float_nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        assert_eq!(float_nb.typed_array_len(), Some(2));
+
+        let bool_nb = ValueWord::from_bool_array(Arc::new(vec![0u8, 1, 1, 0].into()));
+        assert_eq!(bool_nb.typed_array_len(), Some(4));
+
+        let number_nb = ValueWord::from_f64(42.0);
+        assert_eq!(number_nb.typed_array_len(), None);
+    }
+
+    #[test]
+    fn test_coerce_to_float_array_from_float() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(3);
+        aligned.push(1.0);
+        aligned.push(2.0);
+        aligned.push(3.0);
+        let nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        let result = nb.coerce_to_float_array().unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], 1.0);
+    }
+
+    #[test]
+    fn test_coerce_to_float_array_from_int() {
+        let nb = ValueWord::from_int_array(Arc::new(vec![10i64, 20, 30].into()));
+        let result = nb.coerce_to_float_array().unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], 10.0);
+        assert_eq!(result[1], 20.0);
+        assert_eq!(result[2], 30.0);
+    }
+
+    #[test]
+    fn test_to_generic_array_int() {
+        let nb = ValueWord::from_int_array(Arc::new(vec![5i64, 10].into()));
+        let generic = nb.to_generic_array().unwrap();
+        assert_eq!(generic.len(), 2);
+        assert_eq!(generic[0].as_i64(), Some(5));
+        assert_eq!(generic[1].as_i64(), Some(10));
+    }
+
+    #[test]
+    fn test_to_generic_array_float() {
+        use crate::aligned_vec::AlignedVec;
+        let mut aligned = AlignedVec::with_capacity(2);
+        aligned.push(1.5);
+        aligned.push(2.5);
+        let nb = ValueWord::from_float_array(Arc::new(aligned.into()));
+        let generic = nb.to_generic_array().unwrap();
+        assert_eq!(generic.len(), 2);
+        assert_eq!(generic[0].as_f64(), Some(1.5));
+        assert_eq!(generic[1].as_f64(), Some(2.5));
+    }
+
+    #[test]
+    fn test_to_generic_array_bool() {
+        let nb = ValueWord::from_bool_array(Arc::new(vec![1u8, 0, 1].into()));
+        let generic = nb.to_generic_array().unwrap();
+        assert_eq!(generic.len(), 3);
+        assert_eq!(generic[0].as_bool(), Some(true));
+        assert_eq!(generic[1].as_bool(), Some(false));
+        assert_eq!(generic[2].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_int_array_nb_equals() {
+        let a = ValueWord::from_int_array(Arc::new(vec![1i64, 2, 3].into()));
+        let b = ValueWord::from_int_array(Arc::new(vec![1i64, 2, 3].into()));
+        let c = ValueWord::from_int_array(Arc::new(vec![1i64, 2, 4].into()));
+        assert!(a.vw_equals(&b));
+        assert!(!a.vw_equals(&c));
+    }
+
+    #[test]
+    fn test_float_array_nb_equals() {
+        use crate::aligned_vec::AlignedVec;
+        let mut a_data = AlignedVec::with_capacity(2);
+        a_data.push(1.0);
+        a_data.push(2.0);
+        let mut b_data = AlignedVec::with_capacity(2);
+        b_data.push(1.0);
+        b_data.push(2.0);
+        let a = ValueWord::from_float_array(Arc::new(a_data.into()));
+        let b = ValueWord::from_float_array(Arc::new(b_data.into()));
+        assert!(a.vw_equals(&b));
+    }
+
+    #[test]
+    fn test_cross_type_accessor_returns_none() {
+        let int_nb = ValueWord::from_int_array(Arc::new(vec![1i64, 2].into()));
+        assert!(int_nb.as_float_array().is_none());
+        assert!(int_nb.as_bool_array().is_none());
+        assert!(int_nb.as_array().is_none());
+
+        use crate::aligned_vec::AlignedVec;
+        let float_nb = ValueWord::from_float_array(Arc::new(AlignedVec::new().into()));
+        assert!(float_nb.as_int_array().is_none());
+
+        let bool_nb = ValueWord::from_bool_array(Arc::new(Vec::<u8>::new().into()));
+        assert!(bool_nb.as_int_array().is_none());
+        assert!(bool_nb.as_float_array().is_none());
+    }
+
+    // ===== to_json_value for typed arrays =====
+
+    #[test]
+    fn test_to_json_value_int_array() {
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1i64, 2, 3],
+            validity: None,
+        };
+        let v = ValueWord::from_int_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_to_json_value_float_array() {
+        use crate::aligned_vec::AlignedVec;
+        let mut av = AlignedVec::new();
+        av.push(1.5);
+        av.push(2.5);
+        let buf = crate::typed_buffer::AlignedTypedBuffer {
+            data: av,
+            validity: None,
+        };
+        let v = ValueWord::from_float_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1.5, 2.5]));
+    }
+
+    #[test]
+    fn test_to_json_value_bool_array() {
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1u8, 0, 1],
+            validity: None,
+        };
+        let v = ValueWord::from_bool_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([true, false, true]));
+    }
+
+    #[test]
+    fn test_to_json_value_empty_int_array() {
+        let buf = crate::typed_buffer::TypedBuffer::<i64> {
+            data: vec![],
+            validity: None,
+        };
+        let v = ValueWord::from_int_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_to_json_value_i32_array() {
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![10i32, 20, 30],
+            validity: None,
+        };
+        let v = ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::I32(Arc::new(buf))));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([10, 20, 30]));
+    }
+
+    #[test]
+    fn test_to_json_value_u64_array() {
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![100u64, 200],
+            validity: None,
+        };
+        let v = ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::U64(Arc::new(buf))));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([100, 200]));
+    }
+
+    #[test]
+    fn test_to_json_value_f32_array() {
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1.0f32, 2.0],
+            validity: None,
+        };
+        let v = ValueWord::heap_box(HeapValue::TypedArray(TypedArrayData::F32(Arc::new(buf))));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1.0, 2.0]));
+    }
+
+    // ===== Owned heap allocation (dual-heap) =====
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_allocation() {
+        use crate::value_word::{is_heap_owned, is_heap_shared};
+        let owned = vw_heap_box_owned(HeapValue::String(Arc::new("owned".to_string())));
+        assert!(is_heap_owned(owned));
+        assert!(!is_heap_shared(owned));
+        assert!(owned.is_heap());
+        assert_eq!(owned.as_str(), Some("owned"));
+
+        // Clone an owned value produces a new owned allocation
+        let cloned = unsafe { ValueWord::clone_from_bits(owned) };
+        assert!(is_heap_owned(cloned));
+        assert_eq!(cloned.as_str(), Some("owned"));
+
+        // The two values are equal but backed by different allocations
+        assert!(owned.vw_equals(&cloned));
+
+        // Shared (Arc) path still works as before
+        let shared = vw_heap_box(HeapValue::String(Arc::new("shared".to_string())));
+        assert!(!is_heap_owned(shared));
+        assert!(is_heap_shared(shared));
+        assert_eq!(shared.as_str(), Some("shared"));
+
+        // Clone shared bumps refcount (returns same bits)
+        let shared_clone = unsafe { ValueWord::clone_from_bits(shared) };
+        assert_eq!(shared, shared_clone); // same bits = same Arc
+        assert_eq!(shared_clone.as_str(), Some("shared"));
+
+        // Drop all (no double-free, no leak)
+        // For owned: Box dealloc; for shared: Arc decrement
+        unsafe {
+            ValueWord::clone_from_bits(owned); // bump then drop via scope
+            ValueWord::clone_from_bits(cloned);
+            ValueWord::clone_from_bits(shared);
+            ValueWord::clone_from_bits(shared_clone);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_get_heap_ptr() {
+        use crate::value_word::get_heap_ptr;
+        let owned = vw_heap_box_owned(HeapValue::String(Arc::new("test".to_string())));
+        let ptr = get_heap_ptr(owned);
+        assert!(!ptr.is_null());
+        // The pointer should be valid and readable
+        let hv = unsafe { &*ptr };
+        match hv {
+            HeapValue::String(s) => assert_eq!(s.as_str(), "test"),
+            _ => panic!("expected String variant"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_as_heap_mut() {
+        use crate::value_word::is_heap_owned;
+        let mut owned = vw_heap_box_owned(HeapValue::BigInt(42));
+        assert!(is_heap_owned(owned));
+        // as_heap_mut on owned should give direct mutable access (no Arc clone-on-write)
+        if let Some(hv) = owned.as_heap_mut() {
+            if let HeapValue::BigInt(v) = hv {
+                *v = 99;
+            } else {
+                panic!("expected BigInt");
+            }
+        } else {
+            panic!("expected heap value");
+        }
+        // Value is still owned after mutation
+        assert!(is_heap_owned(owned));
+        // Mutation was applied
+        if let Some(HeapValue::BigInt(v)) = owned.as_heap_ref() {
+            assert_eq!(*v, 99);
+        } else {
+            panic!("expected BigInt(99)");
+        }
+    }
+
+    // ===== Small-string interning (Phase D.4) — `from_string` end-to-end =====
+
+    #[test]
+    fn test_from_string_uses_interning() {
+        // End-to-end: two ValueWords built via `from_string` with identical
+        // short content should point to the same underlying `Arc<String>`.
+        let v1 = ValueWord::from_string(Arc::new("intern_test_e2e_id".to_string()));
+        let v2 = ValueWord::from_string(Arc::new("intern_test_e2e_id".to_string()));
+
+        // The two ValueWords wrap distinct Arc<HeapValue> allocations (each
+        // `from_string` call makes its own outer Arc), but the inner
+        // `Arc<String>` they hold must be the same allocation.
+        let s1 = match v1.as_heap_ref().expect("heap ref") {
+            HeapValue::String(s) => s.clone(),
+            _ => panic!("expected String variant"),
+        };
+        let s2 = match v2.as_heap_ref().expect("heap ref") {
+            HeapValue::String(s) => s.clone(),
+            _ => panic!("expected String variant"),
+        };
+        assert!(Arc::ptr_eq(&s1, &s2), "from_string must share short-string Arcs");
+        assert_eq!(&**s1, "intern_test_e2e_id");
+    }
+
+    // ── Closure spec H6.2 — ValueWord::as_closure_handle integration ────
+    //
+    // H6.2 migrates introspection readers to `VmClosureHandle`. These
+    // tests exercise the accessor directly on a `ValueWord` so the shim
+    // path is covered at the `ValueWordExt` layer (not just on
+    // `HeapValue`, which `vm_closure_handle::tests` already covers).
+
+    #[test]
+    fn test_value_word_as_closure_handle_reads_function_id_and_captures() {
+        use crate::heap_value::HeapValue;
+        use crate::value::Upvalue;
+
+        let captures = vec![
+            Upvalue::new(ValueWord::from_i64(11)),
+            Upvalue::new(ValueWord::from_f64(2.5)),
+            Upvalue::new(ValueWord::from_bool(false)),
+        ];
+        let vw = ValueWord::from_heap_value(HeapValue::Closure {
+            function_id: 17,
+            upvalues: captures,
+        });
+
+        let handle = vw.as_closure_handle().expect("closure handle");
+        assert_eq!(handle.function_id(), 17);
+        assert_eq!(handle.capture_count(), 3);
+
+        let vs = handle.captures_as_values();
+        assert_eq!(vs[0].as_i64(), Some(11));
+        assert_eq!(vs[1].as_f64(), Some(2.5));
+        assert_eq!(vs[2].as_bool(), Some(false));
+
+        // `as_closure` body (also H6.2-migrated) must agree with the
+        // handle on both `function_id` and the borrowed `Upvalue` slice.
+        let (fid, upvalues) = vw.as_closure().expect("legacy accessor");
+        assert_eq!(fid, 17);
+        assert_eq!(upvalues.len(), 3);
+        assert_eq!(upvalues[0].get().as_i64(), Some(11));
+    }
+
+    #[test]
+    fn test_value_word_as_closure_handle_none_on_non_closure() {
+        // Non-closure values (inline + heap) must return None.
+        assert!(ValueWord::from_i64(0).as_closure_handle().is_none());
+        assert!(ValueWord::from_f64(3.14).as_closure_handle().is_none());
+        assert!(ValueWord::from_bool(true).as_closure_handle().is_none());
+        assert!(ValueWord::none().as_closure_handle().is_none());
+        assert!(ValueWord::unit().as_closure_handle().is_none());
+
+        let str_vw = ValueWord::from_string(Arc::new("hello".to_string()));
+        assert!(str_vw.as_closure_handle().is_none());
+    }
+
+}
