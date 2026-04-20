@@ -285,7 +285,7 @@ impl JITExecutor {
             HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
             unbox_number,
         };
-        use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
+        use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
         if is_number(bits) {
             WireValue::Number(unbox_number(bits))

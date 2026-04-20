@@ -40,8 +40,8 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
         // collide with low JIT kinds. Reliable check: use is_unified_heap for
         // unified arrays, then check if heap_kind matches a known JIT type.
         // If the kind is NOT a recognized JIT type, try VM interpretation.
-        if shape_value::tags::is_tagged(obj_bits)
-            && shape_value::tags::get_tag(obj_bits) == shape_value::tags::TAG_HEAP
+        if shape_value::tag_bits::is_tagged(obj_bits)
+            && shape_value::tag_bits::get_tag(obj_bits) == shape_value::tag_bits::TAG_HEAP
         {
             let jit_kind = heap_kind(obj_bits);
             let is_known_jit = matches!(

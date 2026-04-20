@@ -28,7 +28,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(array_nb.raw_bits())
                 };
@@ -219,7 +219,7 @@ impl VirtualMachine {
         let vb_bits = shape_value::ValueBits::from_raw(bits);
         if is_tagged && tag == 0 && vb_bits.is_unified_heap() {
             let kind = unsafe { vb_bits.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(bits)
                 };
@@ -234,7 +234,7 @@ impl VirtualMachine {
             // Mask off the ownership bit (bit 0) before casting to pointer.
             // Owned values (Box-backed) have bit 0 set; using the raw payload
             // as a pointer causes misaligned dereference (UB).
-            let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *mut HeapValue;
+            let ptr = (bits & PAYLOAD_MASK & shape_value::tag_bits::HEAP_PTR_MASK) as *mut HeapValue;
             if !ptr.is_null() {
                 let heap_val = unsafe { &mut *ptr };
                 match heap_val {
@@ -341,7 +341,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(array_nb.raw_bits())
                 };

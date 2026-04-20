@@ -12,7 +12,7 @@ use crate::{
 };
 use crate::executor::objects::raw_helpers;
 use shape_value::{VMError, ValueWord, ValueWordExt};
-use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
+use shape_value::tag_bits::{TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
 impl VirtualMachine {
     #[inline(always)]
@@ -426,7 +426,7 @@ impl VirtualMachine {
         let callee_nb = self.stack_read_raw(callee_idx);
 
         let _bits = callee_nb.raw_bits();
-        if !shape_value::tags::is_tagged(_bits) {
+        if !shape_value::tag_bits::is_tagged(_bits) {
             return Err(VMError::RuntimeError(
                 "Cannot call non-function value".to_string(),
             ));
@@ -437,7 +437,7 @@ impl VirtualMachine {
         // on the call opcode's IP to match what the JIT observes in
         // its MIR view of the bytecode.
         let call_ip = self.ip.saturating_sub(1);
-        match shape_value::tags::get_tag(_bits) {
+        match shape_value::tag_bits::get_tag(_bits) {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);
@@ -541,10 +541,10 @@ impl VirtualMachine {
 
         // Tag dispatch (no ValueWord materialization)
         let _bits = callee_nb.raw_bits();
-        if !shape_value::tags::is_tagged(_bits) {
+        if !shape_value::tag_bits::is_tagged(_bits) {
             return Err(VMError::RuntimeError("Cannot call non-function value".to_string()));
         }
-        match shape_value::tags::get_tag(_bits) {
+        match shape_value::tag_bits::get_tag(_bits) {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);

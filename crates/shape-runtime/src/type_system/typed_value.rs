@@ -233,7 +233,7 @@ impl From<ValueWord> for TypedValue {
 /// Dispatches on tag bits for inline types and HeapValue for heap-allocated types.
 /// This avoids the allocation overhead of `nb.clone()` for type inference.
 fn infer_semantic_type_nb(nb: &ValueWord) -> SemanticType {
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
     let bits = nb.raw_bits();
     if !is_tagged(bits) {
         return SemanticType::Number;

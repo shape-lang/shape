@@ -9,7 +9,7 @@
 
 use shape_value::heap_value::{HashMapData, HeapValue};
 use shape_value::slot::ValueSlot;
-use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
+use shape_value::tag_bits::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
 use shape_value::{TypedArrayData, TemporalData, RareHeapData, ArrayView, Upvalue, VMError, ValueWord, ValueWordExt};
 
 // ─── Inline scalar extraction ─────────────────────────────────────────────
@@ -52,7 +52,7 @@ pub fn extract_bool(bits: u64) -> bool {
 #[inline(always)]
 pub fn extract_heap_ptr(bits: u64) -> Option<*const HeapValue> {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-        let ptr = (get_payload(bits) & shape_value::tags::HEAP_PTR_MASK) as *const HeapValue;
+        let ptr = (get_payload(bits) & shape_value::tag_bits::HEAP_PTR_MASK) as *const HeapValue;
         if !ptr.is_null() {
             return Some(ptr);
         }
@@ -481,16 +481,16 @@ pub fn type_name_from_bits(bits: u64) -> &'static str {
             return hv.type_name();
         }
     }
-    if tag == shape_value::tags::TAG_BOOL {
+    if tag == shape_value::tag_bits::TAG_BOOL {
         return "bool";
     }
-    if tag == shape_value::tags::TAG_NONE {
+    if tag == shape_value::tag_bits::TAG_NONE {
         return "null";
     }
-    if tag == shape_value::tags::TAG_UNIT {
+    if tag == shape_value::tag_bits::TAG_UNIT {
         return "unit";
     }
-    if tag == shape_value::tags::TAG_FUNCTION || tag == shape_value::tags::TAG_MODULE_FN {
+    if tag == shape_value::tag_bits::TAG_FUNCTION || tag == shape_value::tag_bits::TAG_MODULE_FN {
         return "function";
     }
     "unknown"
@@ -511,7 +511,7 @@ pub fn type_error(expected: &'static str, bits: u64) -> VMError {
 /// closure, or host closure).
 #[inline]
 pub fn is_callable_raw(bits: u64) -> bool {
-    use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN};
+    use shape_value::tag_bits::{TAG_FUNCTION, TAG_MODULE_FN};
 
     if !is_tagged(bits) {
         return false;
@@ -551,9 +551,9 @@ pub fn is_truthy_raw(bits: u64) -> bool {
 pub fn clone_raw_bits(bits: u64) -> u64 {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
         let payload = get_payload(bits);
-        let ptr = (payload & shape_value::tags::HEAP_PTR_MASK) as *const HeapValue;
+        let ptr = (payload & shape_value::tag_bits::HEAP_PTR_MASK) as *const HeapValue;
         if !ptr.is_null() {
-            if (payload & shape_value::tags::HEAP_OWNED_BIT) != 0 {
+            if (payload & shape_value::tag_bits::HEAP_OWNED_BIT) != 0 {
                 // Owned (Box-backed): deep clone into a new owned allocation
                 let hv = unsafe { &*ptr };
                 return shape_value::ValueBits::heap_box_owned(hv.clone()).raw();
@@ -576,9 +576,9 @@ pub fn clone_raw_bits(bits: u64) -> u64 {
 pub fn drop_raw_bits(bits: u64) {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
         let payload = get_payload(bits);
-        let ptr = (payload & shape_value::tags::HEAP_PTR_MASK) as *mut HeapValue;
+        let ptr = (payload & shape_value::tag_bits::HEAP_PTR_MASK) as *mut HeapValue;
         if !ptr.is_null() {
-            if (payload & shape_value::tags::HEAP_OWNED_BIT) != 0 {
+            if (payload & shape_value::tag_bits::HEAP_OWNED_BIT) != 0 {
                 // Owned (Box-backed): immediate free, no atomic ops
                 unsafe { drop(Box::from_raw(ptr)); }
             } else {
@@ -660,7 +660,7 @@ pub fn callable_arity_raw(
     program: &crate::bytecode::BytecodeProgram,
     callee_bits: u64,
 ) -> Option<u16> {
-    use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN};
+    use shape_value::tag_bits::{TAG_FUNCTION, TAG_MODULE_FN};
 
     if !is_tagged(callee_bits) {
         return None;

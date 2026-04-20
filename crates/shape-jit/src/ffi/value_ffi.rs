@@ -9,7 +9,7 @@
 //! - Column reference and typed object helpers
 
 // Re-export shape_value::tags items that consumers previously got from nan_boxing
-pub use shape_value::tags::{
+pub use shape_value::tag_bits::{
     // Bit layout constants
     CANONICAL_NAN, UNIFIED_HEAP_FLAG, UNIFIED_PTR_MASK,
     // HeapKind constants
@@ -95,19 +95,19 @@ pub const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 
 /// Null/None value. Uses shared TAG_NONE (0b011).
 pub const TAG_NULL: u64 =
-    shape_value::tags::TAG_BASE | (shape_value::tags::TAG_NONE << shape_value::tags::TAG_SHIFT);
+    shape_value::tag_bits::TAG_BASE | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
 
 /// Boolean false. Uses shared TAG_BOOL (0b010) with payload 0.
 pub const TAG_BOOL_FALSE: u64 =
-    shape_value::tags::TAG_BASE | (shape_value::tags::TAG_BOOL << shape_value::tags::TAG_SHIFT);
+    shape_value::tag_bits::TAG_BASE | (shape_value::tag_bits::TAG_BOOL << shape_value::tag_bits::TAG_SHIFT);
 
 /// Boolean true. Uses shared TAG_BOOL (0b010) with payload 1.
 pub const TAG_BOOL_TRUE: u64 =
-    shape_value::tags::TAG_BASE | (shape_value::tags::TAG_BOOL << shape_value::tags::TAG_SHIFT) | 1;
+    shape_value::tag_bits::TAG_BASE | (shape_value::tag_bits::TAG_BOOL << shape_value::tag_bits::TAG_SHIFT) | 1;
 
 /// Unit (void return). Uses shared TAG_UNIT (0b100).
 pub const TAG_UNIT: u64 =
-    shape_value::tags::TAG_BASE | (shape_value::tags::TAG_UNIT << shape_value::tags::TAG_SHIFT);
+    shape_value::tag_bits::TAG_BASE | (shape_value::tag_bits::TAG_UNIT << shape_value::tag_bits::TAG_SHIFT);
 
 /// None (alias for TAG_NULL, Option::None).
 pub const TAG_NONE: u64 = TAG_NULL;
@@ -122,7 +122,7 @@ pub const TAG_NUMBER: u64 = 0x0000_0000_0000_0000;
 /// Data row tag: uses the shared TAG_INT (0b001) encoding in negative NaN space.
 /// Row indices are stored as i48 in the 48-bit payload.
 /// Full tagged value: TAG_BASE | (TAG_INT << TAG_SHIFT) | row_index
-pub const TAG_DATA_ROW: u64 = TAG_BASE | (shape_value::tags::TAG_INT << TAG_SHIFT);
+pub const TAG_DATA_ROW: u64 = TAG_BASE | (shape_value::tag_bits::TAG_INT << TAG_SHIFT);
 
 // ============================================================================
 // Heap Kind shortcuts (HK_* = HEAP_KIND_* as u16)
@@ -210,7 +210,7 @@ const _: () = {
 /// All tags live in negative NaN space (sign bit = 1).
 #[inline]
 pub fn is_number(bits: u64) -> bool {
-    !shape_value::tags::is_tagged(bits)
+    !shape_value::tag_bits::is_tagged(bits)
 }
 
 /// Unbox a number (assumes value is a number -- check with `is_number()` first).
@@ -234,14 +234,14 @@ pub const fn box_bool(b: bool) -> u64 {
 /// Box an inline function reference (shared TAG_FUNCTION, payload = function_id).
 #[inline]
 pub fn box_function(fn_id: u16) -> u64 {
-    shape_value::ValueBits::make_tagged(shape_value::tags::TAG_FUNCTION, fn_id as u64).raw()
+    shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_FUNCTION, fn_id as u64).raw()
 }
 
 /// Check if a value is an inline function reference.
 #[inline]
 pub fn is_inline_function(bits: u64) -> bool {
-    shape_value::tags::is_tagged(bits)
-        && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_FUNCTION
+    shape_value::tag_bits::is_tagged(bits)
+        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_FUNCTION
 }
 
 /// Extract function_id from an inline function reference.
@@ -257,8 +257,8 @@ pub fn unbox_function_id(bits: u64) -> u16 {
 /// Check if a value has TAG_HEAP (tag bits 50-48 == 0, in negative NaN space).
 #[inline]
 pub fn is_heap(bits: u64) -> bool {
-    shape_value::tags::is_tagged(bits)
-        && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_HEAP
+    shape_value::tag_bits::is_tagged(bits)
+        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_HEAP
 }
 
 /// Get the heap kind of a value, or None if not a heap value.
@@ -290,7 +290,7 @@ pub fn is_heap_kind(bits: u64, expected_kind: u16) -> bool {
 pub fn unbox_heap_pointer(bits: u64) -> *const u8 {
     // Mask off the ownership bit (bit 0): owned Box-backed values have bit 0
     // set, which would offset the pointer by 1 byte.
-    (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const u8
+    (bits & PAYLOAD_MASK & shape_value::tag_bits::HEAP_PTR_MASK) as *const u8
 }
 
 // ============================================================================
@@ -386,8 +386,8 @@ pub const fn unbox_data_row(bits: u64) -> usize {
 /// Data rows use the shared TAG_INT encoding (tag bits 50-48 == 0b001).
 #[inline]
 pub fn is_data_row(bits: u64) -> bool {
-    shape_value::tags::is_tagged(bits)
-        && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT
+    shape_value::tag_bits::is_tagged(bits)
+        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_INT
 }
 
 // ============================================================================
@@ -538,10 +538,10 @@ mod tests {
 
     #[test]
     fn test_inline_constants_match_shared_scheme() {
-        assert_eq!(TAG_NULL, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_NONE, 0).raw());
-        assert_eq!(TAG_BOOL_FALSE, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, 0).raw());
-        assert_eq!(TAG_BOOL_TRUE, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, 1).raw());
-        assert_eq!(TAG_UNIT, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_UNIT, 0).raw());
+        assert_eq!(TAG_NULL, shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_NONE, 0).raw());
+        assert_eq!(TAG_BOOL_FALSE, shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_BOOL, 0).raw());
+        assert_eq!(TAG_BOOL_TRUE, shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_BOOL, 1).raw());
+        assert_eq!(TAG_UNIT, shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_UNIT, 0).raw());
     }
 
     #[test]

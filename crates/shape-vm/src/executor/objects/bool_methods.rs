@@ -7,7 +7,7 @@
 use crate::executor::objects::raw_helpers::{extract_bool, type_error};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::tags::is_tagged;
+use shape_value::tag_bits::is_tagged;
 use shape_value::value_word::*;
 use shape_value::VMError;
 use std::sync::Arc;

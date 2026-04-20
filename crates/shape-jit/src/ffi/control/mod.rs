@@ -253,10 +253,10 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
 
         // Check for TAG_MODULE_FN (native module functions like read_text).
         // These are dispatched through the trampoline VM's invoke_module_fn.
-        if shape_value::tags::is_tagged(callee_bits)
-            && shape_value::tags::get_tag(callee_bits) == shape_value::tags::TAG_MODULE_FN
+        if shape_value::tag_bits::is_tagged(callee_bits)
+            && shape_value::tag_bits::get_tag(callee_bits) == shape_value::tag_bits::TAG_MODULE_FN
         {
-            let module_fn_id = shape_value::tags::get_payload(callee_bits) as u32;
+            let module_fn_id = shape_value::tag_bits::get_payload(callee_bits) as u32;
             return dispatch_module_fn_call(module_fn_id, &args, ctx);
         }
 

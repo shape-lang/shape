@@ -27,7 +27,7 @@ use crate::content_renderer::RendererCapabilities;
 use crate::type_schema::{SchemaId, lookup_schema_by_id_public};
 use shape_value::content::{BorderStyle, ContentNode, ContentTable};
 use shape_value::heap_value::{HeapValue, TypedArrayData, TableViewData};
-use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
+use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
 use shape_value::{DataTable, ValueWord, ValueWordExt};
 
 /// Well-known adapter names for ContentFor<Adapter> dispatch.
@@ -150,7 +150,7 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
     let vb = shape_value::ValueBits::from_raw(value.raw_bits());
     if vb.is_unified_heap() {
         let kind = unsafe { vb.unified_heap_kind() };
-        if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
             if let Some(view) = value.as_any_array() {
                 let elems = view.to_generic();
                 return render_array_as_content(&elems);

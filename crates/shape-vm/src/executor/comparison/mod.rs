@@ -28,7 +28,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::{FilterLiteral, FilterNode, FilterOp, VMError, ValueWord, ValueWordExt};
-use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP, TAG_REF};
 use std::cmp::Ordering;
 use std::sync::Arc;
 

@@ -60,12 +60,12 @@ fn slot_as_i64(slots: &[ValueSlot], heap_mask: u64, slot_index: usize) -> Option
     } else {
         let raw = slots[slot_index].raw();
         // Check if this is a ValueWord-tagged value (I48 integer stored via nb_to_slot)
-        if shape_value::tags::is_tagged(raw) {
-            let tag = shape_value::tags::get_tag(raw);
-            if tag == shape_value::tags::TAG_INT {
+        if shape_value::tag_bits::is_tagged(raw) {
+            let tag = shape_value::tag_bits::get_tag(raw);
+            if tag == shape_value::tag_bits::TAG_INT {
                 // I48: sign-extend the 48-bit payload
-                return Some(shape_value::tags::sign_extend_i48(
-                    shape_value::tags::get_payload(raw),
+                return Some(shape_value::tag_bits::sign_extend_i48(
+                    shape_value::tag_bits::get_payload(raw),
                 ));
             }
             // Other tagged types (Bool, None, etc.) are not integers

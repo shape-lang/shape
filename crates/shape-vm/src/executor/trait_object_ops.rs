@@ -111,7 +111,7 @@ impl VirtualMachine {
                 let concrete_kind = value
                     .heap_kind()
                     .map(|k| k as u8)
-                    .unwrap_or_else(|| { let b = value.raw_bits(); if !shape_value::tags::is_tagged(b) { 0xFF } else { shape_value::tags::get_tag(b) as u8 } });
+                    .unwrap_or_else(|| { let b = value.raw_bits(); if !shape_value::tag_bits::is_tagged(b) { 0xFF } else { shape_value::tag_bits::get_tag(b) as u8 } });
                 let method_hash = {
                     let mut h: u32 = 5381;
                     for b in method_name.bytes() {

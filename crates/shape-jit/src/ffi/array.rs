@@ -428,7 +428,7 @@ pub extern "C" fn jit_array_filled(size_bits: u64, value_bits: u64) -> u64 {
 
     // Build directly to avoid O(n) kind inference + typed-mirror initialization.
     let arr = JitArray {
-        kind: shape_value::tags::HEAP_KIND_ARRAY as u16,
+        kind: shape_value::tag_bits::HEAP_KIND_ARRAY as u16,
         flags: 0,
         _reserved: 0,
         refcount: std::sync::atomic::AtomicU32::new(1),

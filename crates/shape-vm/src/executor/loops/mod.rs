@@ -114,7 +114,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(iter.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
                 };
@@ -198,7 +198,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(iter.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
                 };

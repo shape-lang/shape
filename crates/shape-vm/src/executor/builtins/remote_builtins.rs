@@ -268,7 +268,7 @@ fn remote_ping(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
 /// Falls back to `None` only for truly unsupported types (BlobRef-backed, IoHandle, etc.).
 fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVMValue {
     use shape_runtime::snapshot::SerializableVMValue;
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_HEAP};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_HEAP};
 
     let bits = nb.raw_bits();
     if !is_tagged(bits) {

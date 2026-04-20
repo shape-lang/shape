@@ -320,12 +320,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let payload_mask = self
                     .builder
                     .ins()
-                    .iconst(types::I64, shape_value::tags::PAYLOAD_MASK as i64);
+                    .iconst(types::I64, shape_value::tag_bits::PAYLOAD_MASK as i64);
                 let payload = self.builder.ins().band(result, payload_mask);
                 let int_tag = self.builder.ins().iconst(
                     types::I64,
-                    (shape_value::tags::TAG_BASE
-                        | (shape_value::tags::TAG_INT << shape_value::tags::TAG_SHIFT))
+                    (shape_value::tag_bits::TAG_BASE
+                        | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
                         as i64,
                 );
                 Ok(self.builder.ins().bor(int_tag, payload))

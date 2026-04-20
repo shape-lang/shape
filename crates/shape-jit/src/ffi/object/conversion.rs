@@ -44,16 +44,16 @@ pub fn drain_unified_heap_refs() {
                 if prev == 1 {
                     std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
                     let kind = *(ptr as *const u16);
-                    if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                    if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                         shape_value::unified_array::UnifiedArray::heap_drop(bits);
-                    } else if kind == shape_value::tags::HEAP_KIND_MATRIX as u16 {
+                    } else if kind == shape_value::tag_bits::HEAP_KIND_MATRIX as u16 {
                         shape_value::unified_matrix::UnifiedMatrix::heap_drop(bits);
-                    } else if kind == shape_value::tags::HEAP_KIND_OK as u16
-                        || kind == shape_value::tags::HEAP_KIND_ERR as u16
-                        || kind == shape_value::tags::HEAP_KIND_SOME as u16
+                    } else if kind == shape_value::tag_bits::HEAP_KIND_OK as u16
+                        || kind == shape_value::tag_bits::HEAP_KIND_ERR as u16
+                        || kind == shape_value::tag_bits::HEAP_KIND_SOME as u16
                     {
                         shape_value::unified_wrapper::UnifiedWrapper::heap_drop(bits);
-                    } else if kind == shape_value::tags::HEAP_KIND_STRING as u16 {
+                    } else if kind == shape_value::tag_bits::HEAP_KIND_STRING as u16 {
                         shape_value::unified_string::UnifiedString::heap_drop(bits);
                     }
                 }
@@ -170,10 +170,10 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         return ValueWord::unit();
     }
     // NaN-boxed i48 integers (TAG_INT, tag=1)
-    if shape_value::tags::is_tagged(bits)
-        && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT
+    if shape_value::tag_bits::is_tagged(bits)
+        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_INT
     {
-        let int_val = shape_value::tags::sign_extend_i48(shape_value::tags::get_payload(bits));
+        let int_val = shape_value::tag_bits::sign_extend_i48(shape_value::tag_bits::get_payload(bits));
         return ValueWord::from_i64(int_val);
     }
     if is_inline_function(bits) {
@@ -481,7 +481,7 @@ pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
 
 /// Convert a ValueWord value directly to JIT NaN-boxed bits (no intermediate VMValue).
 pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
     use shape_value::heap_value::HeapValue;
     use shape_value::{TypedArrayData, TemporalData};
 

@@ -199,7 +199,7 @@ fn value_to_wire(value: &ValueWord, ctx: &Context) -> WireValue {
 /// (f64, i48, bool, None, Unit) it avoids heap allocation entirely. For heap types
 /// it dispatches on HeapValue directly.
 pub fn nb_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
     let bits = nb.raw_bits();
     if !is_tagged(bits) {
@@ -235,26 +235,26 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
     let vb = shape_value::ValueBits::from_raw(nb.raw_bits());
     if vb.is_unified_heap() {
         let kind = unsafe { vb.unified_heap_kind() };
-        if kind == shape_value::tags::HEAP_KIND_OK as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_OK as u16 {
             let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
             let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
             return WireValue::Result { ok: true, value: Box::new(nb_to_wire(iv, ctx)) };
         }
-        if kind == shape_value::tags::HEAP_KIND_ERR as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_ERR as u16 {
             let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
             let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
             return WireValue::Result { ok: false, value: Box::new(nb_to_wire(iv, ctx)) };
         }
-        if kind == shape_value::tags::HEAP_KIND_SOME as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_SOME as u16 {
             let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
             let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
             return nb_to_wire(iv, ctx);
         }
-        if kind == shape_value::tags::HEAP_KIND_STRING as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_STRING as u16 {
             let us = unsafe { shape_value::unified_string::UnifiedString::from_heap_bits(nb.raw_bits()) };
             return WireValue::String(us.as_str().to_string());
         }
-        if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+        if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
             let arr = unsafe {
                 shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
             };

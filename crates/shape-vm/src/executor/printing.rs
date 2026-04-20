@@ -10,7 +10,7 @@ use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::type_schema::field_types::FieldType;
 use shape_runtime::type_system::annotation_to_string;
 use shape_value::heap_value::HeapValue;
-use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use shape_value::{TypedArrayData, TemporalData, RareHeapData, ConcurrencyData, TableViewData};
 use shape_value::{ValueWord, ValueWordExt};
 
@@ -123,7 +123,7 @@ impl<'a> ValueFormatter<'a> {
         let vb = shape_value::ValueBits::from_raw(value.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(value.raw_bits())
                 };

@@ -154,7 +154,7 @@ pub(crate) fn megamorphic_property_insert(
 
 /// Tag constants for IC comparison.
 /// F64 is untagged (0xFF sentinel), I48 matches TAG_INT.
-const NANTAG_I48: u8 = shape_value::tags::TAG_INT as u8;
+const NANTAG_I48: u8 = shape_value::tag_bits::TAG_INT as u8;
 const NANTAG_F64: u8 = 0xFF; // F64 is untagged — sentinel value
 
 /// Arithmetic IC specialization hint.

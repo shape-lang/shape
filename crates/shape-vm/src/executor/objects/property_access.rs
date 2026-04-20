@@ -382,7 +382,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(obj_ref.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(obj_ref.raw_bits())
                 };
@@ -909,7 +909,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(object_nb.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let idx = Self::parse_array_index(key_nb)?;
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(object_nb.raw_bits())
@@ -930,8 +930,8 @@ impl VirtualMachine {
                     write_barrier_vw(&old, &value_nb);
                     drop(old);
                     // Decrement old element refcount
-                    if shape_value::tags::is_tagged(old_bits)
-                        && shape_value::tags::get_tag(old_bits) == shape_value::tags::TAG_HEAP
+                    if shape_value::tag_bits::is_tagged(old_bits)
+                        && shape_value::tag_bits::get_tag(old_bits) == shape_value::tag_bits::TAG_HEAP
                     {
                         let old_vw = unsafe { ValueWord::clone_from_bits(old_bits) };
                         drop(old_vw); // extra decrement
@@ -1138,7 +1138,7 @@ impl VirtualMachine {
         let vb = shape_value::ValueBits::from_raw(nb.raw_bits());
         if vb.is_unified_heap() {
             let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
                 };

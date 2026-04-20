@@ -132,8 +132,8 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
             // Safety valve: refuse to construct an invalid closure. Callers
             // must not deref the TAG_NONE return as a function — this is a
             // codegen bug if it ever fires.
-            return shape_value::tags::TAG_BASE
-                | (shape_value::tags::TAG_NONE << shape_value::tags::TAG_SHIFT);
+            return shape_value::tag_bits::TAG_BASE
+                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
         }
 
         let layout_ref: &ClosureLayout = &*layout_ptr;
@@ -597,8 +597,8 @@ mod phase_h2_finalizer_tests {
         // the test so `Arc::strong_count` reflects the live count; we
         // drop it at the very end.
         let outer_ptr = {
-            let payload = shape_value::tags::get_payload(s_bits);
-            let masked = payload & shape_value::tags::HEAP_PTR_MASK;
+            let payload = shape_value::tag_bits::get_payload(s_bits);
+            let masked = payload & shape_value::tag_bits::HEAP_PTR_MASK;
             masked as *const HeapValue
         };
         // +1 observer share on top of s_bits' own share.
@@ -632,8 +632,8 @@ mod phase_h2_finalizer_tests {
         // calls `release_typed_closure` → block refcount 1→0 → heap-
         // capture mask walk → outer String Arc count 3→2.
         unsafe {
-            let payload = shape_value::tags::get_payload(bits);
-            let block_ptr = (payload & shape_value::tags::HEAP_PTR_MASK)
+            let payload = shape_value::tag_bits::get_payload(bits);
+            let block_ptr = (payload & shape_value::tag_bits::HEAP_PTR_MASK)
                 as *const HeapValue;
             Arc::decrement_strong_count(block_ptr);
         }

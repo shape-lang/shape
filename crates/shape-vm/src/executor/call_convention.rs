@@ -407,7 +407,7 @@ impl VirtualMachine {
         args: &[ValueWord],
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
-        use shape_value::tags::{is_tagged, get_tag, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
+        use shape_value::tag_bits::{is_tagged, get_tag, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
         let target_depth = self.call_stack.len();
 
         let bits = callee.raw_bits();
@@ -484,7 +484,7 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         use super::objects::raw_helpers;
-        use shape_value::tags::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN, get_payload, get_tag, is_tagged};
+        use shape_value::tag_bits::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN, get_payload, get_tag, is_tagged};
 
         let target_depth = self.call_stack.len();
 

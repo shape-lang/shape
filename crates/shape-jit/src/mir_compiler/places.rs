@@ -10,7 +10,7 @@ use cranelift::prelude::*;
 use super::MirToIR;
 // v2-boundary: inline array access still uses NaN-boxed heap pointer layout
 use crate::ffi::jit_kinds::JIT_ALLOC_DATA_OFFSET;
-use shape_value::tags::UNIFIED_PTR_MASK;
+use shape_value::tag_bits::UNIFIED_PTR_MASK;
 use shape_vm::mir::types::*;
 
 /// Byte offset of the `data` field within `UnifiedValue<T>` (kind u16 + flags u8 + _reserved u8 + refcount u32 = 8).

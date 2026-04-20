@@ -7,7 +7,7 @@ use crate::executor::VirtualMachine;
 use rust_decimal::prelude::ToPrimitive;
 use shape_ast::ast::TypeAnnotation;
 use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
-use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use std::sync::Arc;
 
 const INTO_DISPATCH_TAG: &str = "__IntoDispatch";

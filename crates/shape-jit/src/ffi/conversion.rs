@@ -200,7 +200,7 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
 
 /// Format a ValueWord (tagged 8-byte word) as a string for display
 pub(crate) fn format_value_word(value_bits: u64) -> String {
-    use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
+    use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
     if is_number(value_bits) {
         let n = unbox_number(value_bits);

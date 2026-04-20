@@ -7,7 +7,7 @@
 use crate::hashing::HashDigest;
 use crate::type_schema::TypeSchemaRegistry;
 use sha2::{Digest, Sha256};
-use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;

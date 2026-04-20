@@ -238,10 +238,10 @@ impl VirtualMachine {
             let ptr = self.stack.as_ptr();
             let b_bits = std::ptr::read(ptr.add(self.sp - 1) as *const u64);
             let a_bits = std::ptr::read(ptr.add(self.sp - 2) as *const u64);
-            shape_value::tags::is_tagged(a_bits)
-                && shape_value::tags::get_tag(a_bits) == shape_value::tags::TAG_INT
-                && shape_value::tags::is_tagged(b_bits)
-                && shape_value::tags::get_tag(b_bits) == shape_value::tags::TAG_INT
+            shape_value::tag_bits::is_tagged(a_bits)
+                && shape_value::tag_bits::get_tag(a_bits) == shape_value::tag_bits::TAG_INT
+                && shape_value::tag_bits::is_tagged(b_bits)
+                && shape_value::tag_bits::get_tag(b_bits) == shape_value::tag_bits::TAG_INT
         }
     }
 
@@ -253,8 +253,8 @@ impl VirtualMachine {
         }
         unsafe {
             let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            shape_value::tags::is_tagged(bits)
-                && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT
+            shape_value::tag_bits::is_tagged(bits)
+                && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_INT
         }
     }
 
@@ -269,7 +269,7 @@ impl VirtualMachine {
             let ptr = self.stack.as_ptr();
             let b_bits = std::ptr::read(ptr.add(self.sp - 1) as *const u64);
             let a_bits = std::ptr::read(ptr.add(self.sp - 2) as *const u64);
-            !shape_value::tags::is_tagged(a_bits) && !shape_value::tags::is_tagged(b_bits)
+            !shape_value::tag_bits::is_tagged(a_bits) && !shape_value::tag_bits::is_tagged(b_bits)
         }
     }
 
@@ -281,7 +281,7 @@ impl VirtualMachine {
         }
         unsafe {
             let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            !shape_value::tags::is_tagged(bits)
+            !shape_value::tag_bits::is_tagged(bits)
         }
     }
 
@@ -293,8 +293,8 @@ impl VirtualMachine {
         }
         unsafe {
             let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            shape_value::tags::is_tagged(bits)
-                && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_BOOL
+            shape_value::tag_bits::is_tagged(bits)
+                && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_BOOL
         }
     }
 
@@ -324,8 +324,8 @@ impl VirtualMachine {
             // Write None sentinel (non-heap, so no Drop needed on previous value
             // since we know it was an inline i48).
             std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(shape_value::tags::sign_extend_i48(
-                shape_value::tags::get_payload(bits),
+            Ok(shape_value::tag_bits::sign_extend_i48(
+                shape_value::tag_bits::get_payload(bits),
             ))
         }
     }
@@ -343,8 +343,8 @@ impl VirtualMachine {
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
             // Construct tagged i48 inline: TAG_BASE | (TAG_INT << 48) | (payload & PAYLOAD_MASK)
-            let payload = (value as u64) & shape_value::tags::PAYLOAD_MASK;
-            let bits = shape_value::ValueBits::make_tagged(shape_value::tags::TAG_INT, payload).raw();
+            let payload = (value as u64) & shape_value::tag_bits::PAYLOAD_MASK;
+            let bits = shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_INT, payload).raw();
             std::ptr::write(ptr, bits);
         }
         self.sp += 1;
@@ -433,7 +433,7 @@ impl VirtualMachine {
             // Write None sentinel — bool is inline, no heap Drop needed.
             std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
             // Bool payload is bit 0; nonzero = true.
-            Ok(shape_value::tags::get_payload(bits) != 0)
+            Ok(shape_value::tag_bits::get_payload(bits) != 0)
         }
     }
 
@@ -449,7 +449,7 @@ impl VirtualMachine {
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            let bits = shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, value as u64).raw();
+            let bits = shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_BOOL, value as u64).raw();
             std::ptr::write(ptr, bits);
         }
         self.sp += 1;
@@ -464,7 +464,7 @@ impl VirtualMachine {
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
             let bits = if value.is_nan() {
-                shape_value::tags::CANONICAL_NAN
+                shape_value::tag_bits::CANONICAL_NAN
             } else {
                 value.to_bits()
             };

@@ -826,7 +826,7 @@ pub(crate) fn nb_to_literal(nb: &ValueWord) -> shape_ast::ast::Literal {
     use shape_runtime::type_system::annotation_to_string;
     use shape_value::heap_value::HeapValue;
 
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
     let bits = nb.raw_bits();
     if !is_tagged(bits) {
         return Literal::Number(nb.as_f64().unwrap_or(0.0));

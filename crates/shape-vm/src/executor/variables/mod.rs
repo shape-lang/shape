@@ -694,7 +694,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         use crate::type_tracking::SlotKind;
-        use shape_value::tags::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
+        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
 
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
@@ -915,7 +915,7 @@ impl VirtualMachine {
     /// If the slot contains a SharedCell (mutable closure capture), the
     /// new value is written through the Arc so all holders see the update.
     fn op_store_local_drop(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        use shape_value::tags::{get_tag, is_tagged, TAG_HEAP};
+        use shape_value::tag_bits::{get_tag, is_tagged, TAG_HEAP};
 
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
@@ -968,7 +968,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         use crate::type_tracking::SlotKind;
-        use shape_value::tags::{get_tag, is_tagged, TAG_BOOL, TAG_HEAP, TAG_INT};
+        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_HEAP, TAG_INT};
 
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
@@ -2017,7 +2017,7 @@ mod tests {
     #[cfg(not(feature = "gc"))]
     fn strong_count_of(bits: u64) -> usize {
         use shape_value::heap_value::HeapValue;
-        use shape_value::tags::{
+        use shape_value::tag_bits::{
             get_payload, get_tag, is_tagged, HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP,
         };
         if !is_tagged(bits) || get_tag(bits) != TAG_HEAP {

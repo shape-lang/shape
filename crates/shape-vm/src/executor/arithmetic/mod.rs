@@ -51,10 +51,10 @@ use crate::constants::EXACT_F64_INT_LIMIT;
 #[inline(always)]
 fn ic_tag(v: &ValueWord) -> u8 {
     let bits = v.raw_bits();
-    if !shape_value::tags::is_tagged(bits) {
+    if !shape_value::tag_bits::is_tagged(bits) {
         0xFF
     } else {
-        shape_value::tags::get_tag(bits) as u8
+        shape_value::tag_bits::get_tag(bits) as u8
     }
 }
 
@@ -83,7 +83,7 @@ fn cannot_apply_without_cast(op: &str, value: i128) -> VMError {
 /// Values outside this range would be heap-boxed as BigInt, so we promote to f64 instead.
 #[inline(always)]
 fn fits_i48(v: i64) -> bool {
-    v >= shape_value::tags::I48_MIN && v <= shape_value::tags::I48_MAX
+    v >= shape_value::tag_bits::I48_MIN && v <= shape_value::tag_bits::I48_MAX
 }
 
 #[derive(Clone, Copy)]
@@ -1225,7 +1225,7 @@ impl VirtualMachine {
         f64_op: fn(f64, f64) -> f64,
     ) -> Result<Option<()>, VMError> {
         use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-        use shape_value::tags::TAG_INT;
+        use shape_value::tag_bits::TAG_INT;
 
         let hint = arithmetic_ic_check(self, self.ip);
         if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {

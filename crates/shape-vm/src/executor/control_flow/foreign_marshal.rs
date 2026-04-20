@@ -320,7 +320,7 @@ fn marshal_typed_object(
 
 /// Convert a ValueWord value to an rmpv::Value.
 fn nanboxed_to_msgpack_value(nb: &ValueWord, schemas: &TypeSchemaRegistry) -> rmpv::Value {
-    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP};
+    use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP};
     let bits = nb.raw_bits();
     if !is_tagged(bits) {
         if let Some(f) = nb.as_f64() {

@@ -490,8 +490,8 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // Try VM-allocated object methods first (HashMap.get, TypedObject methods, etc.)
         // These are Arc<HeapValue> values that the JIT's heap_kind check misidentifies.
         // Check before built-in dispatch to avoid reading garbage from non-JitAlloc headers.
-        if shape_value::tags::is_tagged(receiver_bits)
-            && shape_value::tags::get_tag(receiver_bits) == shape_value::tags::TAG_HEAP
+        if shape_value::tag_bits::is_tagged(receiver_bits)
+            && shape_value::tag_bits::get_tag(receiver_bits) == shape_value::tag_bits::TAG_HEAP
             && !shape_value::ValueBits::from_raw(receiver_bits).is_unified_heap()
         {
             let vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
