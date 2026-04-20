@@ -74,7 +74,7 @@ pub type SharedCell = parking_lot::Mutex<crate::ValueWord>;
 ///   8-byte slot holds `*const SharedCell` obtained from
 ///   `Arc::into_raw(Arc::new(Mutex::new(...)))`. Each slot counts as one
 ///   `Arc` strong share; reads/writes take the parking_lot mutex.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CaptureKind {
     /// `let` binding: value in slot, width per `FieldKind`.
     Immutable,
@@ -351,15 +351,21 @@ impl ClosureLayout {
     }
 }
 
-/// Registry of closure capture layouts, keyed on capture signature.
+/// Registry of closure capture layouts, keyed on capture signature AND
+/// per-capture kind.
 ///
-/// Two closures with identical capture signatures share a `ClosureTypeId`.
-/// The body is identified separately by `function_id` in the program's
-/// function table.
+/// Track A.1C.2: the registry key is `(capture_types, capture_kinds)`.
+/// Two closures with identical capture types but different kinds (e.g.
+/// one captures a `let` and another captures a `var` of the same type)
+/// MUST NOT share a layout — the masks, release glue, and code emission
+/// differ. The legacy `intern(capture_types)` entry point defaults all
+/// kinds to `Immutable` and is the common case; the new
+/// `intern_with_kinds` variant keys on the kind vector as well.
 #[derive(Debug, Default, Clone)]
 pub struct ClosureRegistry {
     layouts: Vec<ClosureLayout>,
-    signature_to_id: HashMap<Vec<ConcreteType>, ClosureTypeId>,
+    /// (capture_types, capture_kinds) → ClosureTypeId
+    signature_to_id: HashMap<(Vec<ConcreteType>, Vec<CaptureKind>), ClosureTypeId>,
 }
 
 impl ClosureRegistry {
@@ -368,24 +374,35 @@ impl ClosureRegistry {
         Self::default()
     }
 
-    /// Intern a capture signature and return its `ClosureTypeId`. If the
-    /// signature has been seen before, returns the existing id; otherwise
-    /// allocates a fresh one and records the layout.
-    ///
-    /// Registered layouts default every capture to `CaptureKind::Immutable`
-    /// — the registry key is purely type-level. Closures with mutable
-    /// captures use a distinct layout constructed directly via
-    /// [`ClosureLayout::from_capture_types`] and are not shared through
-    /// this intern table.
+    /// Intern a capture signature with every capture defaulted to
+    /// `CaptureKind::Immutable`. Returns an existing id if the
+    /// (types, all-Immutable kinds) key is present.
     pub fn intern(&mut self, capture_types: Vec<ConcreteType>) -> ClosureTypeId {
-        if let Some(&id) = self.signature_to_id.get(&capture_types) {
+        let kinds = vec![CaptureKind::Immutable; capture_types.len()];
+        self.intern_with_kinds(capture_types, kinds)
+    }
+
+    /// Intern a capture signature with explicit per-capture kinds.
+    /// Two closures with identical types but different kinds get
+    /// distinct `ClosureTypeId`s.
+    pub fn intern_with_kinds(
+        &mut self,
+        capture_types: Vec<ConcreteType>,
+        capture_kinds: Vec<CaptureKind>,
+    ) -> ClosureTypeId {
+        assert_eq!(
+            capture_types.len(),
+            capture_kinds.len(),
+            "intern_with_kinds: types and kinds must match in length",
+        );
+        let key = (capture_types, capture_kinds);
+        if let Some(&id) = self.signature_to_id.get(&key) {
             return id;
         }
         let id = ClosureTypeId(self.layouts.len() as u32);
-        let kinds = vec![CaptureKind::Immutable; capture_types.len()];
-        let layout = ClosureLayout::from_capture_types(&capture_types, &kinds);
+        let layout = ClosureLayout::from_capture_types(&key.0, &key.1);
         self.layouts.push(layout);
-        self.signature_to_id.insert(capture_types, id);
+        self.signature_to_id.insert(key, id);
         id
     }
 
@@ -412,10 +429,13 @@ impl ClosureRegistry {
             .map(|(i, l)| (ClosureTypeId(i as u32), l))
     }
 
-    /// Look up a `ClosureTypeId` by capture signature without interning
-    /// (returns `None` if not seen before).
+    /// Look up a `ClosureTypeId` by capture signature (all-Immutable
+    /// kinds) without interning. Returns `None` if not seen before.
     pub fn lookup(&self, capture_types: &[ConcreteType]) -> Option<ClosureTypeId> {
-        self.signature_to_id.get(capture_types).copied()
+        let kinds = vec![CaptureKind::Immutable; capture_types.len()];
+        self.signature_to_id
+            .get(&(capture_types.to_vec(), kinds))
+            .copied()
     }
 }
 

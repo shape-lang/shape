@@ -185,7 +185,8 @@ impl BytecodeCompiler {
         });
 
         // Record closure function_id for MIR back-patching (ClosurePlaceholder → Function)
-        self.closure_function_ids.push((closure_name.clone(), func_idx as u16));
+        self.closure_function_ids
+            .push((closure_name.clone(), func_idx as u16));
         // Phase A: record the closure's ClosureTypeId against its function index.
         self.closure_type_ids
             .push((func_idx as u16, closure_type_id));
@@ -220,7 +221,6 @@ impl BytecodeCompiler {
         // `let mut` / `var` bindings still flow through `LoadClosure` +
         // `HeapValue::SharedCell` auto-deref. Full routing is the A.1C
         // residual.
-        use crate::type_tracking::BindingOwnershipClass;
         use shape_value::v2::closure_layout::CaptureKind;
         let capture_kinds: Vec<CaptureKind> = captured_vars
             .iter()
@@ -236,18 +236,68 @@ impl BytecodeCompiler {
                 if !mutable_flags.get(i).copied().unwrap_or(false) {
                     return CaptureKind::Immutable;
                 }
+                // Track A.1C.2 gate: only classify as `Shared` for
+                // **local-slot** captures. Module-binding `var` captures
+                // stay on the legacy `HeapValue::Closure + SharedCell`
+                // path (retired by A.1C.3) and must present an
+                // Immutable-shaped layout so op_make_closure does not
+                // route them through the Raw Arc allocation path.
+                let is_local_slot = self.resolve_local(name).is_some();
                 let ownership = self
                     .binding_semantics_for_name(name)
                     .map(|(_, _, sem)| sem.ownership_class);
                 match ownership {
                     Some(BindingOwnershipClass::OwnedMutable) => CaptureKind::OwnedMutable,
-                    Some(BindingOwnershipClass::Flexible) => CaptureKind::Shared,
+                    Some(BindingOwnershipClass::Flexible) if is_local_slot => CaptureKind::Shared,
+                    Some(BindingOwnershipClass::Flexible) => {
+                        // Module-binding var: legacy SharedCell path.
+                        CaptureKind::Immutable
+                    }
+                    // Track A.1C.2: semantics lookup can return `None` when
+                    // a prior closure's `compile_function` wiped the outer
+                    // function's type-tracker local semantics. Fall back
+                    // to the persistent `shared_locals` witness: if the
+                    // local was already promoted by a previous closure,
+                    // the capture classification is still `Shared`.
+                    _ if is_local_slot && self.shared_locals.contains(name) => CaptureKind::Shared,
                     _ => CaptureKind::Immutable,
                 }
             })
             .collect();
         self.closure_capture_kinds
-            .push((func_idx as u16, capture_kinds));
+            .push((func_idx as u16, capture_kinds.clone()));
+
+        // Track A.1C.2: if any capture is non-Immutable, re-intern the
+        // closure_type_id under the kinds-aware registry key so two
+        // closures with identical types but different kinds get distinct
+        // `ClosureTypeId`s. When all captures are Immutable, the original
+        // types-only intern already returned the canonical id — skip.
+        if capture_kinds
+            .iter()
+            .any(|k| !matches!(k, CaptureKind::Immutable))
+        {
+            use shape_value::v2::concrete_type::ConcreteType;
+            let capture_types: Vec<ConcreteType> = captured_vars
+                .iter()
+                .map(|name| {
+                    let ident = Expr::Identifier(name.clone(), Span::DUMMY);
+                    concrete_type_for_expr(self, &ident)
+                        .unwrap_or_else(|| ConcreteType::Pointer(Box::new(ConcreteType::Void)))
+                })
+                .collect();
+            let kinds_id = self
+                .closure_registry
+                .intern_with_kinds(capture_types, capture_kinds.clone());
+            // Overwrite the last-pushed `closure_type_ids` entry for this
+            // function with the kinds-aware id. The Immutable entry
+            // produced by `mint_closure_type_id` (which ignores kinds)
+            // remains in the registry for all-immutable closures.
+            if let Some(last) = self.closure_type_ids.last_mut() {
+                debug_assert_eq!(last.0, func_idx as u16);
+                last.1 = kinds_id;
+            }
+            let _ = closure_type_id; // the kinds-aware id supersedes it.
+        }
 
         // Phase D / H4 — classify each mutable capture as LocalMutablePtr vs legacy.
         //
@@ -278,8 +328,7 @@ impl BytecodeCompiler {
         // path. Legacy path stays alive until H3.B's universal frame-pointer
         // model replaces the SharedCell backing.
         let closure_is_escaping = self.emit_make_closure_heap_next;
-        let mut local_mutable_ptr_flags: Vec<Option<FieldKind>> =
-            vec![None; captured_vars.len()];
+        let mut local_mutable_ptr_flags: Vec<Option<FieldKind>> = vec![None; captured_vars.len()];
         for (i, name) in captured_vars.iter().enumerate() {
             if !mutable_flags.get(i).copied().unwrap_or(false) {
                 continue;
@@ -333,9 +382,7 @@ impl BytecodeCompiler {
                 && (self.resolve_scoped_module_binding_name(name).is_some()
                     || self.module_bindings.contains_key(name));
 
-            if qualifies_for_local_mutable_ptr_by_plan
-                || qualifies_by_module_binding_path
-            {
+            if qualifies_for_local_mutable_ptr_by_plan || qualifies_by_module_binding_path {
                 // Derive the pointee's FieldKind from the capture's concrete
                 // type. If we can't resolve a concrete type (rare, typically
                 // top-level closures with unannotated bindings), fall back to
@@ -361,12 +408,36 @@ impl BytecodeCompiler {
 
         // Set up mutable_closure_captures so that during body compilation,
         // variable accesses for mutable captures emit LoadClosure/StoreClosure
-        // (or LoadCaptureMutPtr<T>/StoreCaptureMutPtr<T> when Phase D says so).
+        // (or LoadCaptureMutPtr<T>/StoreCaptureMutPtr<T> when Phase D says so,
+        // or LoadSharedCapture/StoreSharedCapture for Track A.1C.2 Shared).
         let saved_mutable_captures = std::mem::take(&mut self.mutable_closure_captures);
         let saved_local_mutable_ptr = std::mem::take(&mut self.local_mutable_ptr_captures);
+        let saved_shared_captures = std::mem::take(&mut self.shared_closure_captures);
         for (i, name) in captured_vars.iter().enumerate() {
             if mutable_flags.get(i).copied().unwrap_or(false) {
                 self.mutable_closure_captures.insert(name.clone(), i as u16);
+                // Track A.1C.2: Shared (var) captures route through the
+                // A.1B LoadSharedCapture / StoreSharedCapture opcodes
+                // during closure-body compilation. Registered in a
+                // dedicated map so the identifier / assignment lowerers
+                // can dispatch without re-running kind inference.
+                //
+                // Gate: only populate for captures whose outer slot is
+                // a **local** (resolvable via `resolve_local`). Module-
+                // binding `var` captures stay on the legacy SharedCell +
+                // `LoadClosure`/`LoadCaptureMutPtr*` body path until
+                // A.1C.3 retires the module-binding side of the closure
+                // pipeline — A.1C.1's opcodes cover local slots only.
+                if matches!(
+                    capture_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or(CaptureKind::Immutable),
+                    CaptureKind::Shared
+                ) && self.resolve_local(name).is_some()
+                {
+                    self.shared_closure_captures.insert(name.clone(), i as u16);
+                }
                 if let Some(kind) = local_mutable_ptr_flags[i] {
                     self.local_mutable_ptr_captures
                         .insert(name.clone(), (i as u16, kind));
@@ -383,6 +454,7 @@ impl BytecodeCompiler {
         // Restore mutable_closure_captures
         self.mutable_closure_captures = saved_mutable_captures;
         self.local_mutable_ptr_captures = saved_local_mutable_ptr;
+        self.shared_closure_captures = saved_shared_captures;
 
         // Capture boxing decisions
         // ────────────────────────
@@ -442,18 +514,75 @@ impl BytecodeCompiler {
                 };
 
                 if should_box {
-                    // Mutable capture: emit BoxLocal/BoxModuleBinding to convert the
-                    // variable to a SharedCell and push the cell onto the stack.
-                    // MakeClosure will extract the Arc so the closure and enclosing
-                    // scope share the same mutable cell.
-                    // Track that this variable has been boxed so subsequent closures
-                    // in the same scope also use the SharedCell path.
-                    self.boxed_locals.insert(captured.clone());
+                    // Mutable capture: promote the outer binding so the
+                    // closure and its enclosing scope observe the same
+                    // mutable state, then push the value (OwnedMutable) or
+                    // pointer (Shared) the enclosing `MakeClosure` needs
+                    // to install into the closure's capture slot.
+                    //
+                    // Dispatch by `capture_kinds[i]`:
+                    //   * `Shared` (`var` binding captured mutably) →
+                    //     Track A.1C.2 path. For local slots: emit
+                    //     `LoadLocal + AllocSharedLocal + LoadLocal` to
+                    //     promote the slot into `Arc<SharedCell>` and
+                    //     push the pointer bits; add the binding to
+                    //     `shared_locals` so every outer-scope read /
+                    //     write / scope-exit goes through the new
+                    //     opcodes. For module bindings keep the legacy
+                    //     `BoxModuleBinding` path — A.1C.1's opcodes
+                    //     cover only local slots; module bindings retire
+                    //     with A.1C.3.
+                    //   * `OwnedMutable` / other (`let mut`) → legacy
+                    //     `BoxLocal` / `BoxModuleBinding` path. A.1C.2
+                    //     intentionally leaves OwnedMutable on SharedCell
+                    //     auto-deref; migrating it requires moving Phase
+                    //     D's `LoadCaptureMutPtr*` body emissions onto
+                    //     A.1B's `LoadOwnedMutableCapture`, which is
+                    //     A.1C.3-or-later work.
                     self.set_binding_storage_class_for_name(
                         captured,
                         BindingStorageClass::SharedCow,
                     );
-                    if let Some(local_idx) = self.resolve_local(captured) {
+                    let kind = capture_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or(CaptureKind::Immutable);
+                    let is_shared_local_slot = matches!(kind, CaptureKind::Shared)
+                        && self.resolve_local(captured).is_some();
+                    if is_shared_local_slot {
+                        let local_idx = self
+                            .resolve_local(captured)
+                            .expect("checked is_shared_local_slot");
+                        if !self.shared_locals.contains(captured) {
+                            // First promotion: push current value, alloc
+                            // the Arc cell, then push the pointer bits.
+                            self.emit(Instruction::new(
+                                OpCode::LoadLocal,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                            self.emit(Instruction::new(
+                                OpCode::AllocSharedLocal,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                            self.shared_locals.insert(captured.clone());
+                            if let Some(scope) = self.shared_drop_locals.last_mut() {
+                                scope.push(local_idx);
+                            }
+                        }
+                        // Push the *pointer bits* of the (possibly just-
+                        // allocated) shared cell. op_make_closure will
+                        // `Arc::increment_strong_count` for each Shared
+                        // capture before installing it in the closure.
+                        self.emit(Instruction::new(
+                            OpCode::LoadLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    } else if let Some(local_idx) = self.resolve_local(captured) {
+                        // Legacy path: OwnedMutable (let mut) captures,
+                        // or Shared captures whose outer slot could not
+                        // be resolved to a local (should not happen, but
+                        // kept for safety).
+                        self.boxed_locals.insert(captured.clone());
                         self.emit(Instruction::new(
                             OpCode::BoxLocal,
                             Some(Operand::Local(local_idx)),
@@ -461,12 +590,14 @@ impl BytecodeCompiler {
                     } else if let Some(scoped_name) =
                         self.resolve_scoped_module_binding_name(captured)
                     {
+                        self.boxed_locals.insert(captured.clone());
                         let mb_idx = self.get_or_create_module_binding(&scoped_name);
                         self.emit(Instruction::new(
                             OpCode::BoxModuleBinding,
                             Some(Operand::ModuleBinding(mb_idx)),
                         ));
                     } else if self.module_bindings.contains_key(captured) {
+                        self.boxed_locals.insert(captured.clone());
                         let mb_idx = self.get_or_create_module_binding(captured);
                         self.emit(Instruction::new(
                             OpCode::BoxModuleBinding,
@@ -501,9 +632,7 @@ impl BytecodeCompiler {
                 // Non-escaping closures share the caller's scope by
                 // construction — the Box stays unique for the closure's
                 // lifetime and the promotion is unnecessary.
-                if closure_is_escaping
-                    && crate::compiler::helpers::promote_to_shared_enabled()
-                {
+                if closure_is_escaping && crate::compiler::helpers::promote_to_shared_enabled() {
                     if let Some(local_idx) = self.resolve_local(captured) {
                         // Mirror V1.1C's `slot_is_heap_backed_owned`:
                         // `UniqueHeap` is the canonical owned-heap class,
@@ -572,9 +701,7 @@ impl BytecodeCompiler {
     /// `(function_id, FunctionTypeId)` pairs, one per closure literal.
     /// Phase F uses this to pick a Cranelift `call_indirect` signature for
     /// polymorphic `Function<A, R>` dispatch.
-    pub fn function_type_ids(
-        &self,
-    ) -> &[(u16, shape_value::v2::concrete_type::FunctionTypeId)] {
+    pub fn function_type_ids(&self) -> &[(u16, shape_value::v2::concrete_type::FunctionTypeId)] {
         &self.function_type_ids
     }
 
@@ -586,10 +713,7 @@ impl BytecodeCompiler {
     /// slot that the layout treats as heap-refcounted. This keeps semantics
     /// conservative (no missed Drop glue) while Phase B/C/D grow the
     /// resolution coverage.
-    pub(crate) fn mint_closure_type_id(
-        &mut self,
-        captured_vars: &[String],
-    ) -> ClosureTypeId {
+    pub(crate) fn mint_closure_type_id(&mut self, captured_vars: &[String]) -> ClosureTypeId {
         let capture_types: Vec<ConcreteType> = captured_vars
             .iter()
             .map(|name| {
@@ -913,7 +1037,10 @@ mod tests {
         let layout = compiler.closure_registry().get(ids[0].1).expect("layout");
         assert_eq!(layout.capture_count(), 1);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
-        assert_eq!(layout.heap_capture_mask, 0b1, "opaque pointer is heap-refcounted");
+        assert_eq!(
+            layout.heap_capture_mask, 0b1,
+            "opaque pointer is heap-refcounted"
+        );
     }
 
     #[test]
@@ -1065,6 +1192,11 @@ mod tests {
 
     #[test]
     fn test_phase_d_var_non_escaping_uses_typed_capture_opcodes() {
+        // Track A.1C.2: `var` captures now route through the A.1B
+        // LoadSharedCapture / StoreSharedCapture pipeline; the legacy
+        // Phase D LoadCaptureMutPtr<T> path still applies to `let mut`
+        // captures until A.1C.3. Accept either the A.1B opcode pair or
+        // the Phase D pair.
         let program = compile_source(
             "fn main() -> int {\n\
                  var n: int = 0\n\
@@ -1076,7 +1208,9 @@ mod tests {
         );
         assert!(any_opcode_in_program(&program, |op| op
             == OC::LoadCaptureMutPtrI64
-            || op == OC::StoreCaptureMutPtrI64));
+            || op == OC::StoreCaptureMutPtrI64
+            || op == OC::LoadSharedCapture
+            || op == OC::StoreSharedCapture));
     }
 
     #[test]
@@ -1203,12 +1337,16 @@ mod tests {
 
     #[test]
     fn test_phase_d_does_not_emit_typed_capture_for_escaping_var_closure() {
-        // Either the legacy SharedCow path or H4's typed-capture path must be
-        // active for a `var`-hosted module-binding capture. Phase D only reached
-        // local-slot captures; H4 extends the typed-capture path to non-escaping
-        // module-binding captures, so this assertion now passes via the H4
-        // branch. The assertion remains a generic smoke check — specific path
-        // coverage lives in `test_phase_h4_*` below.
+        // Some capture-side opcode must fire for `var`-hosted module-binding
+        // captures. Path matrix:
+        //   * Phase D LocalMutablePtr (`LoadCaptureMutPtrI64` etc.) when
+        //     the MIR plan promotes the local to `LocalMutablePtr`.
+        //   * H4 module-binding typed-capture path (also
+        //     `LoadCaptureMutPtr*`).
+        //   * Legacy `LoadClosure` / `StoreClosure` when neither of the
+        //     above qualifies.
+        //   * Track A.1C.2 `LoadSharedCapture` / `StoreSharedCapture` for
+        //     local-slot `var` captures.
         let program = compile_source(
             "var n: int = 0\n\
              let f = |x: int| { n = n + x }",
@@ -1219,9 +1357,12 @@ mod tests {
         let has_new_typed = any_opcode_in_program(&program, |op| {
             op == OC::StoreCaptureMutPtrI64 || op == OC::LoadCaptureMutPtrI64
         });
+        let has_shared_capture = any_opcode_in_program(&program, |op| {
+            op == OC::LoadSharedCapture || op == OC::StoreSharedCapture
+        });
         assert!(
-            has_legacy_closure || has_new_typed,
-            "one of the two paths must be active for `var` capture"
+            has_legacy_closure || has_new_typed || has_shared_capture,
+            "one of the three paths must be active for `var` capture"
         );
     }
 
@@ -1596,16 +1737,9 @@ mod tests {
         // Capture-only registry: two closures with identical captures
         // (both capture one int) share a ClosureTypeId regardless of
         // their signature.
-        let ctid_a = compiler
-            .closure_registry
-            .intern(vec![ConcreteType::I64]);
-        let ctid_b = compiler
-            .closure_registry
-            .intern(vec![ConcreteType::I64]);
-        assert_eq!(
-            ctid_a, ctid_b,
-            "same capture layout → same ClosureTypeId"
-        );
+        let ctid_a = compiler.closure_registry.intern(vec![ConcreteType::I64]);
+        let ctid_b = compiler.closure_registry.intern(vec![ConcreteType::I64]);
+        assert_eq!(ctid_a, ctid_b, "same capture layout → same ClosureTypeId");
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -2180,8 +2314,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&int_prog, |op| op
-            == OC::StoreCaptureMutPtrI64));
+        assert!(any_opcode_in_program(&int_prog, |op| op == OC::StoreCaptureMutPtrI64));
 
         let f64_prog = compile_source(
             "fn main() -> number {\n\
@@ -2192,8 +2325,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&f64_prog, |op| op
-            == OC::StoreCaptureMutPtrF64));
+        assert!(any_opcode_in_program(&f64_prog, |op| op == OC::StoreCaptureMutPtrF64));
 
         let bool_prog = compile_source(
             "fn main() -> bool {\n\
@@ -2204,8 +2336,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&bool_prog, |op| op
-            == OC::StoreCaptureMutPtrBool));
+        assert!(any_opcode_in_program(&bool_prog, |op| op == OC::StoreCaptureMutPtrBool));
     }
 
     #[test]
@@ -2288,10 +2419,7 @@ mod tests {
             i.opcode == OC::MakeClosure
                 && matches!(
                     i.operand,
-                    Some(crate::bytecode::Operand::ClosureAlloc {
-                        escapes: true,
-                        ..
-                    })
+                    Some(crate::bytecode::Operand::ClosureAlloc { escapes: true, .. })
                 )
         });
         assert!(
@@ -2584,16 +2712,27 @@ mod tests {
 
         // Captures are collected in sorted order of names (see
         // `compile_expr_closure` — `captured_vars.sort()`): a, b, c.
-        assert_eq!(layout.capture_kinds[0], CaptureKind::Immutable, "`a` is let");
+        assert_eq!(
+            layout.capture_kinds[0],
+            CaptureKind::Immutable,
+            "`a` is let"
+        );
         assert_eq!(
             layout.capture_kinds[1],
             CaptureKind::OwnedMutable,
             "`b` is let mut"
         );
         assert_eq!(layout.capture_kinds[2], CaptureKind::Shared, "`c` is var");
-        // Masks stay zero by design (A.1C partial). See the design note
-        // on `build_closure_function_layouts`.
+        // Track A.1C.2: Shared captures now flip `shared_capture_mask`
+        // bit (var → Arc<SharedCell> Raw-path allocation). OwnedMutable
+        // captures still leave `owned_mutable_capture_mask` zero because
+        // the Phase D LoadCaptureMutPtr<T> body pipeline reads through
+        // SharedCell auto-deref; A.1C.3 migrates that to A.1B and flips
+        // the bit.
         assert_eq!(layout.owned_mutable_capture_mask, 0);
-        assert_eq!(layout.shared_capture_mask, 0);
+        assert_eq!(
+            layout.shared_capture_mask, 0b100,
+            "`c` (index 2) is var → Shared bit set"
+        );
     }
 }

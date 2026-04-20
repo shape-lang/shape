@@ -454,19 +454,54 @@ impl BytecodeCompiler {
                     let mut has_capture = false;
                     for block in &mut mir.blocks {
                         for stmt in &mut block.statements {
-                            let is_placeholder = matches!(&stmt.kind, crate::mir::types::StatementKind::Assign(_, crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::ClosurePlaceholder))));
+                            let is_placeholder = matches!(
+                                &stmt.kind,
+                                crate::mir::types::StatementKind::Assign(
+                                    _,
+                                    crate::mir::types::Rvalue::Use(
+                                        crate::mir::types::Operand::Constant(
+                                            crate::mir::types::MirConstant::ClosurePlaceholder
+                                        )
+                                    )
+                                )
+                            );
                             if is_placeholder {
-                                if has_capture { stmt.kind = crate::mir::types::StatementKind::Nop; has_capture = false; }
-                                else if closure_idx < closure_ids.len() {
+                                if has_capture {
+                                    stmt.kind = crate::mir::types::StatementKind::Nop;
+                                    has_capture = false;
+                                } else if closure_idx < closure_ids.len() {
                                     let (ref name, _) = closure_ids[closure_idx];
-                                    let slot = match &stmt.kind { crate::mir::types::StatementKind::Assign(p, _) => p.root_local(), _ => unreachable!() };
-                                    stmt.kind = crate::mir::types::StatementKind::Assign(crate::mir::types::Place::Local(slot), crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::Function(name.clone()))));
+                                    let slot = match &stmt.kind {
+                                        crate::mir::types::StatementKind::Assign(p, _) => {
+                                            p.root_local()
+                                        }
+                                        _ => unreachable!(),
+                                    };
+                                    stmt.kind = crate::mir::types::StatementKind::Assign(
+                                        crate::mir::types::Place::Local(slot),
+                                        crate::mir::types::Rvalue::Use(
+                                            crate::mir::types::Operand::Constant(
+                                                crate::mir::types::MirConstant::Function(
+                                                    name.clone(),
+                                                ),
+                                            ),
+                                        ),
+                                    );
                                     closure_idx += 1;
                                 }
                                 continue;
                             }
-                            if let crate::mir::types::StatementKind::ClosureCapture { function_id, .. } = &mut stmt.kind {
-                                if closure_idx < closure_ids.len() { let (_, idx) = closure_ids[closure_idx]; *function_id = Some(idx); closure_idx += 1; has_capture = true; }
+                            if let crate::mir::types::StatementKind::ClosureCapture {
+                                function_id,
+                                ..
+                            } = &mut stmt.kind
+                            {
+                                if closure_idx < closure_ids.len() {
+                                    let (_, idx) = closure_ids[closure_idx];
+                                    *function_id = Some(idx);
+                                    closure_idx += 1;
+                                    has_capture = true;
+                                }
                             }
                         }
                     }
@@ -985,6 +1020,20 @@ impl BytecodeCompiler {
         // corrupting results like `test()`'s DateTime return value.
         let saved_ownership_drop_locals = std::mem::take(&mut self.ownership_drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
+        // Track A.1C.2: isolate per-function shared-local tracking so an
+        // `AllocSharedLocal` emitted inside a nested function body does
+        // not accidentally extend the outer function's DropSharedLocal
+        // scope (parallel to the ownership/boxed restoration above).
+        let saved_shared_locals = std::mem::take(&mut self.shared_locals);
+        let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
+        // Track A.1C.2: snapshot the outer function's local binding
+        // semantics. `compile_function` calls `type_tracker.clear_locals`
+        // below to prepare the nested function's own slot indexing, which
+        // would otherwise erase the outer function's `var` / `let mut`
+        // classification and leave the subsequent closure literals in
+        // the outer scope unable to derive `CaptureKind`s. Restored after
+        // the nested compilation completes.
+        let saved_local_binding_semantics = self.type_tracker.snapshot_local_binding_semantics();
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
@@ -1227,6 +1276,10 @@ impl BytecodeCompiler {
                         self.drop_locals = saved_drop_locals;
                         self.ownership_drop_locals = saved_ownership_drop_locals;
                         self.boxed_locals = saved_boxed_locals;
+                        self.shared_locals = saved_shared_locals;
+                        self.shared_drop_locals = saved_shared_drop_locals;
+                        self.type_tracker
+                            .restore_local_binding_semantics(saved_local_binding_semantics);
                         self.param_locals = saved_param_locals;
                         self.current_function_params = saved_function_params;
                         self.pop_scope();
@@ -1325,6 +1378,10 @@ impl BytecodeCompiler {
         self.drop_locals = saved_drop_locals;
         self.ownership_drop_locals = saved_ownership_drop_locals;
         self.boxed_locals = saved_boxed_locals;
+        self.shared_locals = saved_shared_locals;
+        self.shared_drop_locals = saved_shared_drop_locals;
+        self.type_tracker
+            .restore_local_binding_semantics(saved_local_binding_semantics);
         self.current_function_params = saved_function_params;
         self.pop_scope();
         self.locals = saved_locals;

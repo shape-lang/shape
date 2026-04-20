@@ -8,9 +8,7 @@ use shape_ast::error::{Result, ShapeError};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
-use super::{
-    BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope,
-};
+use super::{BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope};
 
 /// Phase V1.1D: default-on ownership-aware local opcodes.
 ///
@@ -67,9 +65,7 @@ pub(super) fn ownership_moves_enabled() -> bool {
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_OWNERSHIP_MOVES") {
         Ok(v) => !matches!(
             v.trim(),
-            "0" | "false" | "FALSE" | "False"
-                | "off" | "OFF" | "Off"
-                | "no" | "NO" | "No"
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
         ),
         Err(_) => true,
     })
@@ -153,9 +149,7 @@ pub(super) fn promote_to_shared_enabled() -> bool {
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_PROMOTE_TO_SHARED") {
         Ok(v) => !matches!(
             v.trim(),
-            "0" | "false" | "FALSE" | "False"
-                | "off" | "OFF" | "Off"
-                | "no" | "NO" | "No"
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
         ),
         Err(_) => true,
     })
@@ -234,9 +228,7 @@ pub(super) fn box_by_default_enabled() -> bool {
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_BOX_BY_DEFAULT") {
         Ok(v) => !matches!(
             v.trim(),
-            "0" | "false" | "FALSE" | "False"
-                | "off" | "OFF" | "Off"
-                | "no" | "NO" | "No"
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
         ),
         Err(_) => true,
     })
@@ -302,9 +294,7 @@ pub(super) fn typed_bitwise_enabled() -> bool {
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_TYPED_BITWISE") {
         Ok(v) => !matches!(
             v.trim(),
-            "0" | "false" | "FALSE" | "False"
-                | "off" | "OFF" | "Off"
-                | "no" | "NO" | "No"
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
         ),
         Err(_) => true,
     })
@@ -369,9 +359,7 @@ pub(super) fn typed_string_coerce_concat_enabled() -> bool {
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_STRING_COERCE_CONCAT") {
         Ok(v) => !matches!(
             v.trim(),
-            "0" | "false" | "FALSE" | "False"
-                | "off" | "OFF" | "Off"
-                | "no" | "NO" | "No"
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
         ),
         Err(_) => true,
     })
@@ -391,18 +379,14 @@ thread_local! {
 /// (even on panic). Production code reads the env var exclusively via
 /// `typed_string_coerce_concat_enabled()`.
 #[cfg(test)]
-pub(crate) fn with_typed_string_coerce_concat_flag<R>(
-    enabled: bool,
-    f: impl FnOnce() -> R,
-) -> R {
+pub(crate) fn with_typed_string_coerce_concat_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
         fn drop(&mut self) {
             TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE.with(|cell| cell.set(self.0));
         }
     }
-    let prev = TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE
-        .with(|cell| cell.replace(Some(enabled)));
+    let prev = TEST_TYPED_STRING_COERCE_CONCAT_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
     let _guard = Guard(prev);
     f()
 }
@@ -621,7 +605,14 @@ pub(in crate::compiler) fn emit_binary_op(
     // Priority 2: both operands are String and op is Add — emit StringConcatTyped.
     // Matches the short-circuit already wired into `compile_expr_binary_op`
     // for the proven-strings case.
-    if matches!((lhs, rhs, op), (BinOperandKind::String, BinOperandKind::String, BinaryOp::Add)) {
+    if matches!(
+        (lhs, rhs, op),
+        (
+            BinOperandKind::String,
+            BinOperandKind::String,
+            BinaryOp::Add
+        )
+    ) {
         compiler.emit(Instruction::simple(OpCode::StringConcatTyped));
         compiler.last_expr_schema = None;
         compiler.last_expr_type_info = None;
@@ -695,8 +686,6 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
     s.to_string()
 }
 
-
-
 impl BytecodeCompiler {
     /// Resolve a ConcreteType type_tag from compiler state for the receiver.
     /// Returns 0xFF when the type cannot be determined.
@@ -708,21 +697,21 @@ impl BytecodeCompiler {
         // Priority 1: numeric type (most precise)
         if let Some(nt) = numeric_type {
             return match nt {
-                NumericType::Number => 0,   // F64
-                NumericType::Int => 1,      // I64
+                NumericType::Number => 0,      // F64
+                NumericType::Int => 1,         // I64
                 NumericType::IntWidth(_) => 1, // I64 (treat all int widths as I64 for dispatch)
-                NumericType::Decimal => 22, // Decimal
+                NumericType::Decimal => 22,    // Decimal
             };
         }
         // Priority 2: type_info type_name
         if let Some(info) = type_info {
             if let Some(ref name) = info.type_name {
                 return match name.as_str() {
-                    "number" | "Number" => 0,    // F64
-                    "int" | "Int" => 1,          // I64
-                    "bool" | "Bool" => 9,        // Bool
-                    "string" | "String" => 10,   // String
-                    "DateTime" => 25,            // DateTime
+                    "number" | "Number" => 0,  // F64
+                    "int" | "Int" => 1,        // I64
+                    "bool" | "Bool" => 9,      // Bool
+                    "string" | "String" => 10, // String
+                    "DateTime" => 25,          // DateTime
                     _ => {
                         // Check for collection types
                         if name.starts_with("Array") || name.starts_with("Vec") {
@@ -794,9 +783,7 @@ impl BytecodeCompiler {
             }
             // Track Option/Result wrapper types so conversion lifting can
             // detect them (even though generic args are lost in the tracker).
-            TypeAnnotation::Generic { name, .. }
-                if name == "Option" || name == "Result" =>
-            {
+            TypeAnnotation::Generic { name, .. } if name == "Option" || name == "Result" => {
                 Some(name.to_lowercase())
             }
             _ => None,
@@ -858,17 +845,9 @@ impl BytecodeCompiler {
     fn is_type_known_direct(&self, name: &str) -> bool {
         self.struct_types.contains_key(name)
             || self.type_aliases.contains_key(name)
-            || self
-                .type_inference
-                .env
-                .lookup_type_alias(name)
-                .is_some()
+            || self.type_inference.env.lookup_type_alias(name).is_some()
             || self.type_inference.env.get_enum(name).is_some()
-            || self
-                .type_inference
-                .env
-                .lookup_interface(name)
-                .is_some()
+            || self.type_inference.env.lookup_interface(name).is_some()
             || self.type_inference.env.lookup_trait(name).is_some()
             || self.type_tracker.schema_registry().get(name).is_some()
     }
@@ -1438,6 +1417,18 @@ impl BytecodeCompiler {
             .unwrap_or(false)
     }
 
+    /// Track A.1C.2: true when the slot has been promoted to
+    /// `Arc<SharedCell>` via `AllocSharedLocal` (tracked in
+    /// `self.shared_locals` keyed by binding name). Outer-scope reads
+    /// and writes on such a slot must use `LoadSharedLocal` /
+    /// `StoreSharedLocal`; plain `LoadLocal` / `StoreLocal` would
+    /// observe the raw `*const SharedCell` pointer bits.
+    pub(super) fn slot_is_shared(&self, slot: u16) -> bool {
+        self.local_name_for_slot(slot)
+            .map(|name| self.shared_locals.contains(name))
+            .unwrap_or(false)
+    }
+
     /// Declare a temporary local variable
     pub(super) fn declare_temp_local(&mut self, prefix: &str) -> Result<u16> {
         let name = format!("{}{}", prefix, self.next_local);
@@ -1913,8 +1904,17 @@ impl BytecodeCompiler {
     /// Emit store instruction for an identifier
     pub(super) fn emit_store_identifier(&mut self, name: &str) -> Result<()> {
         // Mutable closure captures: emit StoreClosure (or Phase D's typed
-        // StoreCaptureMutPtr<T> when the outer slot is `LocalMutablePtr`).
+        // StoreCaptureMutPtr<T> when the outer slot is `LocalMutablePtr`;
+        // or Track A.1C.2's StoreSharedCapture for `var` captures).
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
+            if let Some(&shared_idx) = self.shared_closure_captures.get(name) {
+                debug_assert_eq!(upvalue_idx, shared_idx);
+                self.emit(Instruction::new(
+                    OpCode::StoreSharedCapture,
+                    Some(Operand::Local(shared_idx)),
+                ));
+                return Ok(());
+            }
             if let Some(&(ptr_idx, kind)) = self.local_mutable_ptr_captures.get(name) {
                 use shape_value::v2::struct_layout::FieldKind;
                 let op = match kind {
@@ -1930,6 +1930,18 @@ impl BytecodeCompiler {
             self.emit(Instruction::new(
                 OpCode::StoreClosure,
                 Some(Operand::Local(upvalue_idx)),
+            ));
+            return Ok(());
+        }
+        // Track A.1C.2: outer-scope write to a shared-promoted local
+        // (`var` captured by closure) must go through StoreSharedLocal so
+        // the store hits the inner ValueWord bits, not the pointer slot.
+        if self.shared_locals.contains(name)
+            && let Some(local_idx) = self.resolve_local(name)
+        {
+            self.emit(Instruction::new(
+                OpCode::StoreSharedLocal,
+                Some(Operand::Local(local_idx)),
             ));
             return Ok(());
         }
@@ -2476,7 +2488,12 @@ impl BytecodeCompiler {
                         } else {
                             self.type_tracker.set_binding_type(slot, info);
                         }
-                    } else if type_name.len() == 1 && type_name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                    } else if type_name.len() == 1
+                        && type_name
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_ascii_uppercase())
+                    {
                         // Generic type parameter (e.g., T) — skip DataTable tracking,
                         // the concrete type will be determined at the call site.
                     } else {
@@ -2730,6 +2747,11 @@ impl BytecodeCompiler {
         // Pushed in lockstep regardless of flag state; only the emission in
         // `pop_drop_scope` is gated.
         self.ownership_drop_locals.push(Vec::new());
+        // Track A.1C.2: parallel shared-local drop scope (`var` locals
+        // promoted to Arc<SharedCell> via AllocSharedLocal). Pushed in
+        // lockstep with the other drop stacks; pop_drop_scope emits
+        // DropSharedLocal for each entry.
+        self.shared_drop_locals.push(Vec::new());
     }
 
     /// Pop the current drop scope, emitting DropCall instructions for all
@@ -2747,20 +2769,34 @@ impl BytecodeCompiler {
         let ownership_locals = self.ownership_drop_locals.pop().unwrap_or_default();
         if ownership_moves_enabled() {
             for local_idx in ownership_locals.into_iter().rev() {
-                // Phase V1.1C fix: `BoxLocal` may have converted the slot
-                // to a `SharedCell` wrapper between declaration time
-                // (when `track_ownership_drop_local` captured the slot)
-                // and scope exit. `DropLocal` poisons the slot with
-                // `0u64`, which breaks the `LoadLocal` + `DropCall` pass
-                // that immediately follows (it would no longer see the
-                // Arc-backed cell). The pre-existing refcount release
-                // path in the `DropCall` pass handles boxed slots
-                // correctly, so skip here.
-                if self.slot_is_boxed(local_idx) {
+                // Phase V1.1C fix: a promoted slot (prior SharedCell wrap
+                // pre-A.1C.2, or prior `AllocSharedLocal` post-A.1C.2)
+                // holds a cell pointer, not an inline value. `DropLocal`
+                // poisons the slot with `0u64` and breaks the legacy
+                // `LoadLocal` + `DropCall` pass that immediately follows
+                // (the Arc-refcount release is handled by the DropCall
+                // pass for legacy boxed slots, and by DropSharedLocal
+                // for A.1C.2-promoted Shared slots). Skip here.
+                if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {
                     continue;
                 }
                 self.emit(Instruction::new(
                     OpCode::DropLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+            }
+        }
+        // Track A.1C.2: emit DropSharedLocal for each shared-promoted slot
+        // declared in this scope, in reverse order. The DropSharedLocal
+        // handler reconstructs Arc::from_raw and drops it (one atomic
+        // strong-count decrement) — this is the sole releaser for slots
+        // promoted by AllocSharedLocal. Emitted BEFORE the legacy
+        // DropCall pass so that by the time DropCall runs the slot has
+        // been poisoned with NONE_BITS and no accidental re-read occurs.
+        if let Some(shared_locals) = self.shared_drop_locals.pop() {
+            for local_idx in shared_locals.into_iter().rev() {
+                self.emit(Instruction::new(
+                    OpCode::DropSharedLocal,
                     Some(Operand::Local(local_idx)),
                 ));
             }
@@ -2839,7 +2875,9 @@ impl BytecodeCompiler {
         // which breaks the auto-unwrap in `LoadLocal` / `LoadClosure` for any
         // subsequent read (e.g. compiler-injected reads like `LoadLocal` +
         // `DropCall` pairs that immediately follow the `DropLocal`).
-        if self.slot_is_boxed(local_idx) {
+        // Track A.1C.2: symmetrically skip slots promoted via
+        // `AllocSharedLocal` — `DropSharedLocal` owns their release.
+        if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {
             return false;
         }
         match self.mir_storage_class_for_slot(local_idx) {
@@ -2962,12 +3000,37 @@ impl BytecodeCompiler {
                         // Phase V1.1C fix: skip `DropLocal` emission for
                         // slots that were SharedCell-wrapped by a prior
                         // `BoxLocal`. See the companion comment in
-                        // `pop_drop_scope` for the rationale.
-                        if self.slot_is_boxed(local_idx) {
+                        // `pop_drop_scope` for the rationale. Track A.1C.2
+                        // additionally skips slots promoted via
+                        // `AllocSharedLocal` — `DropSharedLocal` is emitted
+                        // below in parallel.
+                        if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {
                             continue;
                         }
                         self.emit(Instruction::new(
                             OpCode::DropLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    }
+                }
+            }
+        }
+        // Track A.1C.2: emit DropSharedLocal for each Shared-promoted slot
+        // in the scopes being exited. Mirrors the ownership-drop emission
+        // strategy above (clone, do not consume — the scope stack is popped
+        // later by the enclosing block).
+        {
+            let shared_total = self.shared_drop_locals.len();
+            if scopes_to_exit <= shared_total {
+                let mut shared_scopes: Vec<Vec<u16>> = Vec::new();
+                for i in (shared_total - scopes_to_exit..shared_total).rev() {
+                    let locals = self.shared_drop_locals.get(i).cloned().unwrap_or_default();
+                    shared_scopes.push(locals);
+                }
+                for locals in shared_scopes {
+                    for local_idx in locals.into_iter().rev() {
+                        self.emit(Instruction::new(
+                            OpCode::DropSharedLocal,
                             Some(Operand::Local(local_idx)),
                         ));
                     }
@@ -2994,7 +3057,6 @@ impl BytecodeCompiler {
         self.drop_module_bindings.push((binding_idx, is_async));
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -3551,10 +3613,7 @@ mod tests {
         use crate::compiler::helpers::BinOperandKind;
         use crate::type_tracking::NumericType;
 
-        assert_eq!(
-            BinOperandKind::from_numeric(None),
-            BinOperandKind::Unknown
-        );
+        assert_eq!(BinOperandKind::from_numeric(None), BinOperandKind::Unknown);
         assert_eq!(
             BinOperandKind::from_numeric(Some(NumericType::Int)),
             BinOperandKind::Numeric(NumericType::Int)

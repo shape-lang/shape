@@ -1140,6 +1140,24 @@ impl TypeTracker {
         self.local_binding_semantic_scopes.push(HashMap::new());
     }
 
+    /// Track A.1C.2: snapshot the outer function's local binding
+    /// semantics before entering a nested function compilation. Pairs
+    /// with [`restore_local_binding_semantics`] to preserve ownership
+    /// / storage classification across `compile_function`'s
+    /// `clear_locals` call so subsequent closures in the outer scope
+    /// still observe the binding's classification (e.g. `var` →
+    /// `Flexible`, `let mut` → `OwnedMutable`).
+    pub fn snapshot_local_binding_semantics(&self) -> HashMap<u16, BindingSemantics> {
+        self.local_binding_semantics.clone()
+    }
+
+    /// Track A.1C.2: restore a previously-snapshotted local binding
+    /// semantics map. Used by `compile_function` after a nested closure
+    /// body compilation wipes the outer function's semantics.
+    pub fn restore_local_binding_semantics(&mut self, snapshot: HashMap<u16, BindingSemantics>) {
+        self.local_binding_semantics = snapshot;
+    }
+
     /// Register an inline object schema from field names
     ///
     /// Creates a TypeSchema for an object literal with the given fields.
@@ -1704,10 +1722,7 @@ mod tests {
 
         let mut tracker = TypeTracker::empty();
 
-        let layout = StructLayout::new(&[
-            ("x", FieldKind::F64),
-            ("y", FieldKind::F64),
-        ]);
+        let layout = StructLayout::new(&[("x", FieldKind::F64), ("y", FieldKind::F64)]);
         assert_eq!(layout.total_size(), 24);
 
         // Use a fake schema ID

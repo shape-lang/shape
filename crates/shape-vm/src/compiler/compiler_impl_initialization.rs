@@ -121,8 +121,11 @@ impl BytecodeCompiler {
             drop_type_info: HashMap::new(),
             drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
+            shared_closure_captures: HashMap::new(),
             local_mutable_ptr_captures: HashMap::new(),
             boxed_locals: HashSet::new(),
+            shared_locals: HashSet::new(),
+            shared_drop_locals: Vec::new(),
             permission_set: None,
             current_blob_builder: None,
             completed_blobs: Vec::new(),
@@ -145,7 +148,8 @@ impl BytecodeCompiler {
             graph_namespace_map: HashMap::new(),
             module_graph: None,
             current_function_local_concrete_types: HashMap::new(),
-            monomorphization_cache: crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
+            monomorphization_cache:
+                crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             next_monomorphization_id: 0,
             closure_specialization_count: 0,
         }

@@ -122,8 +122,24 @@ impl BytecodeCompiler {
             });
         }
         // Mutable closure captures: emit LoadClosure (or, Phase D, the typed
-        // LoadCaptureMutPtr<T>) to read from the shared upvalue / stack pointer.
+        // LoadCaptureMutPtr<T>; or Track A.1C.2, LoadSharedCapture) to read
+        // from the shared upvalue / stack pointer.
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
+            // Track A.1C.2: Shared (var) captures route through the A.1B
+            // LoadSharedCapture opcode, which takes the parking_lot mutex
+            // on the `Arc<SharedCell>` pointer stored in the capture slot
+            // and pushes the inner ValueWord bits.
+            if let Some(&shared_idx) = self.shared_closure_captures.get(name) {
+                debug_assert_eq!(upvalue_idx, shared_idx);
+                self.emit(Instruction::new(
+                    OpCode::LoadSharedCapture,
+                    Some(Operand::Local(shared_idx)),
+                ));
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = None;
+                return Ok(());
+            }
             // Phase D: if the capture was classified as LocalMutablePtr by the
             // enclosing function's storage plan, emit a typed load that skips
             // tag dispatch on the hot path.
@@ -198,7 +214,21 @@ impl BytecodeCompiler {
                         .map(|s| s.storage_class)
                 });
 
-                if self.boxed_locals.contains(name)
+                if self.shared_locals.contains(name) {
+                    // Track A.1C.2: the slot has been promoted to
+                    // `Arc<SharedCell>` via `AllocSharedLocal`. Every
+                    // subsequent outer-scope read must go through
+                    // `LoadSharedLocal`, which takes the parking_lot
+                    // mutex, reads the inner ValueWord bits, and pushes
+                    // them onto the stack. Plain `LoadLocal` would push
+                    // the raw `*const SharedCell` pointer bits, which
+                    // subsequent arithmetic / dispatch would treat as
+                    // an opaque word.
+                    self.emit(Instruction::new(
+                        OpCode::LoadSharedLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                } else if self.boxed_locals.contains(name)
                     && matches!(
                         storage_class,
                         Some(BindingStorageClass::UniqueHeap | BindingStorageClass::SharedCow)

@@ -234,14 +234,10 @@ impl BytecodeCompiler {
                                 //     promotion). `LoadLocal` /
                                 //     `CloneLocal` will have pushed
                                 //     a Box on TOS.
-                                if let Expr::Identifier(src_name, _) =
-                                    assign_expr.value.as_ref()
-                                {
+                                if let Expr::Identifier(src_name, _) = assign_expr.value.as_ref() {
                                     if let Some(src_idx) = self.resolve_local(src_name) {
                                         if self.slot_is_heap_backed_owned(src_idx) {
-                                            self.emit(Instruction::simple(
-                                                OpCode::PromoteToShared,
-                                            ));
+                                            self.emit(Instruction::simple(OpCode::PromoteToShared));
                                         }
                                     }
                                 }
@@ -252,8 +248,22 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(OpCode::Dup));
                 // Mutable closure captures: emit StoreClosure (or, Phase D, a
                 // typed StoreCaptureMutPtr<T> when the storage plan classified
-                // the outer binding as LocalMutablePtr).
+                // the outer binding as LocalMutablePtr; or Track A.1C.2,
+                // StoreSharedCapture for `var` captures).
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
+                    // Track A.1C.2: Shared (var) captures route through the
+                    // A.1B StoreSharedCapture opcode, which takes the
+                    // parking_lot mutex on the `Arc<SharedCell>` pointer
+                    // stored in the capture slot and overwrites the inner
+                    // ValueWord bits.
+                    if let Some(&shared_idx) = self.shared_closure_captures.get(name.as_str()) {
+                        debug_assert_eq!(upvalue_idx, shared_idx);
+                        self.emit(Instruction::new(
+                            OpCode::StoreSharedCapture,
+                            Some(Operand::Local(shared_idx)),
+                        ));
+                        return Ok(());
+                    }
                     if let Some(&(ptr_idx, kind)) =
                         self.local_mutable_ptr_captures.get(name.as_str())
                     {
@@ -288,6 +298,19 @@ impl BytecodeCompiler {
                         // Reference parameter or reference-valued binding: write through the reference
                         self.emit(Instruction::new(
                             OpCode::DerefStore,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    } else if self.shared_locals.contains(name) {
+                        // Track A.1C.2: the slot has been promoted to
+                        // `Arc<SharedCell>` via `AllocSharedLocal`. The
+                        // new value on top of the stack must be stored
+                        // into the cell through the parking_lot mutex,
+                        // not into the slot itself (which holds the
+                        // `*const SharedCell` pointer bits).
+                        let source_loc = self.span_to_source_location(*id_span);
+                        self.check_named_binding_write_allowed(name, Some(source_loc))?;
+                        self.emit(Instruction::new(
+                            OpCode::StoreSharedLocal,
                             Some(Operand::Local(local_idx)),
                         ));
                     } else {
@@ -559,8 +582,7 @@ impl BytecodeCompiler {
                                     )?;
                                     self.compile_expr(index)?;
                                     self.compile_expr(&assign_expr.value)?;
-                                    let value_local =
-                                        self.declare_temp_local("__assign_value_")?;
+                                    let value_local = self.declare_temp_local("__assign_value_")?;
                                     self.emit(Instruction::simple(OpCode::Dup));
                                     self.emit(Instruction::new(
                                         OpCode::StoreLocal,
@@ -618,8 +640,7 @@ impl BytecodeCompiler {
                                 self.compile_expr(&assign_expr.value)?;
                                 // Stash the value for the assignment-result
                                 // expression.
-                                let value_local =
-                                    self.declare_temp_local("__assign_value_")?;
+                                let value_local = self.declare_temp_local("__assign_value_")?;
                                 self.emit(Instruction::simple(OpCode::Dup));
                                 self.emit(Instruction::new(
                                     OpCode::StoreLocal,
@@ -668,8 +689,7 @@ impl BytecodeCompiler {
                             ));
                             self.compile_expr(index)?;
                             self.compile_expr(&assign_expr.value)?;
-                            let value_local =
-                                self.declare_temp_local("__assign_value_")?;
+                            let value_local = self.declare_temp_local("__assign_value_")?;
                             self.emit(Instruction::simple(OpCode::Dup));
                             self.emit(Instruction::new(
                                 OpCode::StoreLocal,

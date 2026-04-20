@@ -306,7 +306,6 @@ impl BytecodeCompiler {
     }
 }
 
-
 impl BytecodeCompiler {
     pub(super) fn analyze_expr_for_ref_mutation(
         expr: &shape_ast::ast::Expr,
@@ -767,7 +766,6 @@ impl BytecodeCompiler {
     }
 }
 
-
 impl BytecodeCompiler {
     pub(super) fn infer_reference_model(
         program: &Program,
@@ -933,7 +931,11 @@ impl BytecodeCompiler {
         annotation: &shape_ast::ast::Annotation,
     ) -> Option<(String, crate::bytecode::CompiledAnnotation)> {
         let resolved_name = self.resolve_compiled_annotation_name(annotation)?;
-        let compiled = self.program.compiled_annotations.get(&resolved_name)?.clone();
+        let compiled = self
+            .program
+            .compiled_annotations
+            .get(&resolved_name)?
+            .clone();
         Some((resolved_name, compiled))
     }
 
@@ -942,9 +944,7 @@ impl BytecodeCompiler {
         annotation: &shape_ast::ast::Annotation,
         compiled_name: &str,
     ) -> bool {
-        self.resolve_compiled_annotation_name(annotation)
-            .as_deref()
-            == Some(compiled_name)
+        self.resolve_compiled_annotation_name(annotation).as_deref() == Some(compiled_name)
     }
 
     pub(crate) fn annotation_args_for_compiled_name(
@@ -1253,8 +1253,7 @@ impl BytecodeCompiler {
         self.program.expanded_function_defs = self.function_defs.clone();
 
         // Transfer monomorphization cache keys for diagnostics/testing.
-        self.program.monomorphization_keys =
-            self.monomorphization_cache.keys().cloned().collect();
+        self.program.monomorphization_keys = self.monomorphization_cache.keys().cloned().collect();
 
         // Cache top-level MIR data for JIT v2 (MirToIR compilation of __main__).
         // The MIR and borrow analysis were computed by analyze_non_function_items_with_mir
@@ -1269,19 +1268,54 @@ impl BytecodeCompiler {
                     let mut has_capture = false;
                     for block in &mut mir.blocks {
                         for stmt in &mut block.statements {
-                            let is_placeholder = matches!(&stmt.kind, crate::mir::types::StatementKind::Assign(_, crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::ClosurePlaceholder))));
+                            let is_placeholder = matches!(
+                                &stmt.kind,
+                                crate::mir::types::StatementKind::Assign(
+                                    _,
+                                    crate::mir::types::Rvalue::Use(
+                                        crate::mir::types::Operand::Constant(
+                                            crate::mir::types::MirConstant::ClosurePlaceholder
+                                        )
+                                    )
+                                )
+                            );
                             if is_placeholder {
-                                if has_capture { stmt.kind = crate::mir::types::StatementKind::Nop; has_capture = false; }
-                                else if closure_idx < closure_ids.len() {
+                                if has_capture {
+                                    stmt.kind = crate::mir::types::StatementKind::Nop;
+                                    has_capture = false;
+                                } else if closure_idx < closure_ids.len() {
                                     let (ref name, _) = closure_ids[closure_idx];
-                                    let slot = match &stmt.kind { crate::mir::types::StatementKind::Assign(p, _) => p.root_local(), _ => unreachable!() };
-                                    stmt.kind = crate::mir::types::StatementKind::Assign(crate::mir::types::Place::Local(slot), crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::Function(name.clone()))));
+                                    let slot = match &stmt.kind {
+                                        crate::mir::types::StatementKind::Assign(p, _) => {
+                                            p.root_local()
+                                        }
+                                        _ => unreachable!(),
+                                    };
+                                    stmt.kind = crate::mir::types::StatementKind::Assign(
+                                        crate::mir::types::Place::Local(slot),
+                                        crate::mir::types::Rvalue::Use(
+                                            crate::mir::types::Operand::Constant(
+                                                crate::mir::types::MirConstant::Function(
+                                                    name.clone(),
+                                                ),
+                                            ),
+                                        ),
+                                    );
                                     closure_idx += 1;
                                 }
                                 continue;
                             }
-                            if let crate::mir::types::StatementKind::ClosureCapture { function_id, .. } = &mut stmt.kind {
-                                if closure_idx < closure_ids.len() { let (_, idx) = closure_ids[closure_idx]; *function_id = Some(idx); closure_idx += 1; has_capture = true; }
+                            if let crate::mir::types::StatementKind::ClosureCapture {
+                                function_id,
+                                ..
+                            } = &mut stmt.kind
+                            {
+                                if closure_idx < closure_ids.len() {
+                                    let (_, idx) = closure_ids[closure_idx];
+                                    *function_id = Some(idx);
+                                    closure_idx += 1;
+                                    has_capture = true;
+                                }
                             }
                         }
                     }
@@ -1314,37 +1348,38 @@ impl BytecodeCompiler {
         // through the `ContentAddressedProgram` → `LinkedProgram` →
         // `BytecodeProgram` path into the VM's producer.
         //
-        // Track A.1C (partial): the compiler records per-capture
-        // `CaptureKind`s in `closure_capture_kinds` based on the source
-        // binding form (see `compile_expr_closure`). The `capture_kinds`
-        // field on the emitted `ClosureLayout` reflects those kinds so
-        // downstream consumers (A.1D/A.1E JIT lowering; diagnostics; the
-        // layout-aware Drop glue in `release_typed_closure`) see the
-        // correct classification.
+        // Track A.1C.2: the compiler derives per-capture `CaptureKind`s
+        // from the source binding form (see `compile_expr_closure`) and
+        // stores them in `closure_capture_kinds`. For each closure literal
+        // we rebuild the layout so the `capture_kinds` vector reflects
+        // those kinds AND the `owned_mutable_capture_mask` /
+        // `shared_capture_mask` bits are flipped for the corresponding
+        // capture indices. `op_make_closure` reads those masks to pick
+        // the per-capture allocation discipline:
+        //   * `CaptureKind::Immutable`   — write the capture bits as-is
+        //     at the typed offset.
+        //   * `CaptureKind::OwnedMutable` — `Box::into_raw` a fresh
+        //     `Box<ValueWord>` around the stack value, write the pointer.
+        //   * `CaptureKind::Shared`       — the stack value carries the
+        //     raw `*const SharedCell` pointer bits of a previously-
+        //     promoted outer slot. `op_make_closure` does
+        //     `Arc::increment_strong_count` to give the closure its own
+        //     refcount share, then writes the same pointer.
         //
-        // IMPORTANT — Raw-path guard interaction: the bitmask fields
-        // (`owned_mutable_capture_mask`, `shared_capture_mask`) are
-        // DELIBERATELY kept at their registry-default values (all zero)
-        // in this commit. The interpreter's `op_make_closure`
-        // (`executor/control_flow/mod.rs`) uses those masks to decide
-        // whether to take the A.1B raw allocation path
-        // (`Box::into_raw` / `Arc::into_raw`) vs. the legacy
-        // `HeapValue::Closure { upvalues }` fallback. The legacy fallback
-        // is still correct today because the compiler continues to emit
-        // `BoxLocal` / `BoxModuleBinding` for mutable captures, and the
-        // inner closure body reads/writes through `LoadClosure` +
-        // `SharedCell` auto-deref. Flipping the mask bits here without
-        // rerouting the compiler's read/write emission (and the outer-
-        // scope's SharedCell lifecycle) would cause the Raw path to wrap
-        // the already-boxed SharedCell ValueWord in a *fresh*
-        // `Box<ValueWord>` / `Arc<SharedCell>`, breaking cross-scope
-        // observability. A.1D/A.1E and the outer-scope refactor will
-        // lift the mask bits once the read/write opcodes are rerouted.
+        // This was gated to "masks stay zero" during A.1C partial so the
+        // legacy `HeapValue::Closure + SharedCell` fallback could keep
+        // running while the compiler migration was incomplete. With
+        // A.1C.2 rerouting the outer-scope var lifecycle onto
+        // `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
+        // `DropSharedLocal` and the closure-body reads/writes onto
+        // `Load/StoreSharedCapture` and `Load/StoreOwnedMutableCapture`,
+        // the Raw-path guard can flip bits freely — there is no longer
+        // any SharedCell-wrapped ValueWord sitting on the stack at
+        // closure-creation time.
         {
             use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
             let total_fns = self.program.functions.len();
-            let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> =
-                vec![None; total_fns];
+            let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; total_fns];
             // Map function index → per-capture CaptureKind vector.
             let kinds_by_fn: std::collections::HashMap<u16, &Vec<CaptureKind>> = self
                 .closure_capture_kinds
@@ -1354,22 +1389,56 @@ impl BytecodeCompiler {
             for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
                 if let Some(registry_layout) = self.closure_registry.get(type_id) {
                     if (fn_idx as usize) < total_fns {
-                        let layout_arc = match kinds_by_fn.get(&fn_idx) {
-                            Some(kinds)
-                                if kinds.len() == registry_layout.capture_types.len()
-                                    && kinds.iter().any(|k| !matches!(k, CaptureKind::Immutable)) =>
-                            {
-                                // Carry the compiler's CaptureKind metadata
-                                // on the layout WITHOUT touching the mask
-                                // bits that drive the Raw allocation path.
-                                // `capture_kinds` becomes the authoritative
-                                // source for A.1D/A.1E JIT lowering and
-                                // for the eventual outer-scope refactor.
-                                let mut rebuilt = registry_layout.clone();
-                                rebuilt.capture_kinds = (*kinds).clone();
-                                std::sync::Arc::new(rebuilt)
-                            }
-                            _ => std::sync::Arc::new(registry_layout.clone()),
+                        // Track A.1C.2: authoritative per-function kinds.
+                        // The registry may hold a layout whose masks were
+                        // set via `intern_with_kinds` (Shared/OwnedMutable
+                        // bits flipped). We rebuild the per-function layout
+                        // from the *sanitized* kinds vector so only
+                        // `Shared` captures get their mask bit set at this
+                        // commit; `OwnedMutable` captures stay on the
+                        // Phase D / legacy SharedCell body path and must
+                        // present an Immutable-shaped layout (zero
+                        // `owned_mutable_capture_mask`). A.1C.3 migrates
+                        // OwnedMutable to A.1B's
+                        // Load/StoreOwnedMutableCapture and removes the
+                        // sanitization.
+                        let per_fn_kinds = kinds_by_fn.get(&fn_idx);
+                        let layout_arc = if let Some(kinds) = per_fn_kinds
+                            && kinds.len() == registry_layout.capture_types.len()
+                        {
+                            let sanitized_kinds: Vec<CaptureKind> = kinds
+                                .iter()
+                                .map(|k| match k {
+                                    CaptureKind::Shared => CaptureKind::Shared,
+                                    // OwnedMutable → Immutable-shaped
+                                    // layout (masks zero, FieldKind per
+                                    // the capture's natural width).
+                                    _ => CaptureKind::Immutable,
+                                })
+                                .collect();
+                            let has_any_shared = sanitized_kinds
+                                .iter()
+                                .any(|k| matches!(k, CaptureKind::Shared));
+                            let rebuilt = ClosureLayout::from_capture_types(
+                                &registry_layout.capture_types,
+                                &sanitized_kinds,
+                            );
+                            // Preserve the authoritative per-capture
+                            // `capture_kinds` (including OwnedMutable)
+                            // for diagnostics and A.1D/E JIT lowering;
+                            // the MASKS come from the sanitized rebuild.
+                            let mut rebuilt = rebuilt;
+                            rebuilt.capture_kinds = (*kinds).clone();
+                            // Second guard: if the sanitization yielded no
+                            // Shared captures AND there are no OwnedMutable
+                            // annotations either, fall through to the
+                            // registry layout to keep Immutable-only
+                            // closures byte-identical to the pre-A.1C.2
+                            // emission.
+                            let _ = has_any_shared;
+                            std::sync::Arc::new(rebuilt)
+                        } else {
+                            std::sync::Arc::new(registry_layout.clone())
                         };
                         layouts[fn_idx as usize] = Some(layout_arc);
                     }
@@ -1486,7 +1555,9 @@ impl BytecodeCompiler {
 
         // Strip import items from root program (imports already resolved via graph)
         let mut stripped_program = root_program.clone();
-        stripped_program.items.retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
+        stripped_program
+            .items
+            .retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
 
         // Compile the stripped root program using the standard two-pass pipeline
         self.compile(&stripped_program)

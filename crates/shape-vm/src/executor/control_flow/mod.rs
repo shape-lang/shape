@@ -6,13 +6,13 @@ pub mod foreign_marshal;
 pub mod jit_abi;
 pub mod native_abi;
 
+use crate::executor::objects::raw_helpers;
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::{ForeignFunctionHandle, VirtualMachine},
 };
-use crate::executor::objects::raw_helpers;
+use shape_value::tag_bits::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN};
 use shape_value::{VMError, ValueWord, ValueWordExt};
-use shape_value::tag_bits::{TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
 impl VirtualMachine {
     #[inline(always)]
@@ -542,7 +542,9 @@ impl VirtualMachine {
         // Tag dispatch (no ValueWord materialization)
         let _bits = callee_nb.raw_bits();
         if !shape_value::tag_bits::is_tagged(_bits) {
-            return Err(VMError::RuntimeError("Cannot call non-function value".to_string()));
+            return Err(VMError::RuntimeError(
+                "Cannot call non-function value".to_string(),
+            ));
         }
         match shape_value::tag_bits::get_tag(_bits) {
             TAG_FUNCTION => {
@@ -583,7 +585,9 @@ impl VirtualMachine {
             }
             TAG_HEAP => {
                 // Extract closure info via raw_helpers
-                if let Some((function_id, upvalues_slice)) = raw_helpers::extract_closure_info(callee_nb.raw_bits()) {
+                if let Some((function_id, upvalues_slice)) =
+                    raw_helpers::extract_closure_info(callee_nb.raw_bits())
+                {
                     let function_id = function_id;
                     let upvalues = upvalues_slice.to_vec();
                     drop(callee_nb);
@@ -598,7 +602,10 @@ impl VirtualMachine {
                     self.sp = callee_idx;
                     self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
                 // cold-path: as_heap_ref retained — HostClosure fallback (no typed extractor)
-                } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) = callee_nb.as_heap_ref() { // cold-path
+                } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
+                    callee_nb.as_heap_ref()
+                {
+                    // cold-path
                     let callable = callable.clone();
                     drop(callee_nb);
                     let args_base = callee_idx + 1;
@@ -784,8 +791,7 @@ impl VirtualMachine {
                                     // at `heap_capture_offset(i)` is
                                     // 8-byte aligned and in-bounds per
                                     // layout invariants.
-                                    let cell_ptr: *mut ValueWord =
-                                        Box::into_raw(Box::new(*bits));
+                                    let cell_ptr: *mut ValueWord = Box::into_raw(Box::new(*bits));
                                     let off = layout.heap_capture_offset(i);
                                     std::ptr::write(
                                         (ptr as *mut u8).add(off) as *mut *mut ValueWord,
@@ -793,32 +799,48 @@ impl VirtualMachine {
                                     );
                                 }
                                 CaptureKind::Shared => {
-                                    // A.1B assumption: each `var`
-                                    // capture gets a fresh `Arc<SharedCell>`
-                                    // initialised to the ValueWord on
-                                    // the stack. Multi-closure sharing
-                                    // of the SAME var (where closure A
-                                    // writes and closure B observes) is
-                                    // refined in A.1C — the compiler
-                                    // will arrange `Arc::clone` of a
-                                    // pre-existing cell at that point,
-                                    // so two closures capture distinct
-                                    // `*const SharedCell` bit patterns
-                                    // that point at the same allocation.
-                                    // For A.1B we construct fresh cells
-                                    // and rely on A.1C for sharing
-                                    // semantics.
+                                    // Track A.1C.2: the compiler emits
+                                    // code that pushes the raw
+                                    // `*const SharedCell` pointer bits
+                                    // of a previously-promoted outer
+                                    // slot (see `AllocSharedLocal` and
+                                    // the closure-creation path in
+                                    // `compile_expr_closure`). The
+                                    // outer slot owns one Arc strong
+                                    // share; the closure needs its own
+                                    // share.
                                     //
-                                    // SAFETY: Arc::into_raw yields a
-                                    // non-null 8-aligned
-                                    // `*const SharedCell` with one
-                                    // strong-count share owned by this
-                                    // closure. Released via
-                                    // Arc::from_raw in
-                                    // `release_typed_closure`.
-                                    let arc: std::sync::Arc<SharedCell> =
-                                        std::sync::Arc::new(parking_lot::Mutex::new(*bits));
-                                    let cell_ptr: *const SharedCell = std::sync::Arc::into_raw(arc);
+                                    // `Arc::increment_strong_count` on
+                                    // the raw pointer bumps the refcount
+                                    // without reconstructing the Arc
+                                    // (which would take ownership and
+                                    // drop the share on return). The
+                                    // same pointer bits are then
+                                    // written into the Ptr slot.
+                                    // `release_typed_closure` calls
+                                    // `Arc::from_raw` +drop on
+                                    // `shared_capture_mask` bits to
+                                    // release this share.
+                                    //
+                                    // SAFETY: the bit pattern in
+                                    // `*bits` was produced by
+                                    // `AllocSharedLocal` via
+                                    // `Arc::into_raw::<SharedCell>`;
+                                    // it is non-null, 8-aligned, and
+                                    // points at a live allocation for
+                                    // the lifetime of the outer slot
+                                    // (which only releases on
+                                    // `DropSharedLocal`). The compiler
+                                    // guarantees the outer slot is
+                                    // still live at this point — the
+                                    // shared-local lifecycle places
+                                    // `AllocSharedLocal` before every
+                                    // closure that captures the slot
+                                    // and `DropSharedLocal` at the
+                                    // scope-exit point that dominates
+                                    // all such closure creations.
+                                    let cell_ptr = *bits as *const SharedCell;
+                                    std::sync::Arc::<SharedCell>::increment_strong_count(cell_ptr);
                                     let off = layout.heap_capture_offset(i);
                                     std::ptr::write(
                                         (ptr as *mut u8).add(off) as *mut *const SharedCell,
@@ -838,10 +860,7 @@ impl VirtualMachine {
                 // legacy path rather than UB on a size mismatch.
             }
 
-            let upvalues: Vec<Upvalue> = upvalues
-                .into_iter()
-                .map(Upvalue::new)
-                .collect();
+            let upvalues: Vec<Upvalue> = upvalues.into_iter().map(Upvalue::new).collect();
 
             self.push_raw_u64(ValueWord::from_heap_value(
                 shape_value::heap_value::HeapValue::Closure {
@@ -1180,9 +1199,7 @@ mod h6_5_tests {
              }\n\
              make(10)",
         );
-        let hv = result
-            .as_heap_ref()
-            .expect("closure result is heap-tagged");
+        let hv = result.as_heap_ref().expect("closure result is heap-tagged");
         assert!(
             matches!(hv, shape_value::HeapValue::ClosureRaw(..)),
             "H6.5 expects ClosureRaw variant for immutable captures, got {}",
@@ -1229,9 +1246,7 @@ mod h6_5_tests {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod a1b_make_closure_tests {
-    use crate::bytecode::{
-        BytecodeProgram, Constant, Function, Instruction, OpCode, Operand,
-    };
+    use crate::bytecode::{BytecodeProgram, Constant, Function, Instruction, OpCode, Operand};
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout, SharedCell};
@@ -1305,19 +1320,15 @@ mod a1b_make_closure_tests {
         // MakeClosure with Function operand carrying fid — we need the
         // fid before we emit this. Do it in two steps.
         let makeclosure_placeholder_idx = program.instructions.len();
-        program
-            .instructions
-            .push(Instruction::simple(OpCode::Halt)); // placeholder
+        program.instructions.push(Instruction::simple(OpCode::Halt)); // placeholder
         program.instructions.push(Instruction::simple(OpCode::Halt));
 
         let body = vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
             Instruction::simple(OpCode::ReturnValue),
         ];
-        let layout = ClosureLayout::from_capture_types(
-            &[ConcreteType::I64],
-            &[CaptureKind::OwnedMutable],
-        );
+        let layout =
+            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::OwnedMutable]);
         let fid = register_closure_function(
             &mut program,
             1,
@@ -1364,69 +1375,17 @@ mod a1b_make_closure_tests {
         drop(vm);
     }
 
-    #[test]
-    fn a1b_make_closure_shared_allocates_arc_and_releases() {
-        // Same shape as the OwnedMutable test but with Shared. Inspect
-        // the allocated SharedCell via the handle, write through it,
-        // observe the new value on re-read.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(100));
-
-        program.instructions.push(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(c0)),
-        ));
-        let makeclosure_idx = program.instructions.len();
-        program
-            .instructions
-            .push(Instruction::simple(OpCode::Halt)); // placeholder
-        program.instructions.push(Instruction::simple(OpCode::Halt));
-
-        let body = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::ReturnValue),
-        ];
-        let layout = ClosureLayout::from_capture_types(
-            &[ConcreteType::I64],
-            &[CaptureKind::Shared],
-        );
-        let fid = register_closure_function(
-            &mut program,
-            1,
-            vec![true],
-            layout,
-            body,
-        );
-
-        program.instructions[makeclosure_idx] = Instruction::new(
-            OpCode::MakeClosure,
-            Some(Operand::Function(shape_value::FunctionId::new(fid))),
-        );
-        program.top_level_locals_count = 0;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap().clone();
-
-        let hv = result.as_heap_ref().expect("closure on stack");
-        assert!(matches!(hv, HeapValue::ClosureRaw(_)));
-        let handle = hv.as_closure_handle().expect("handle");
-        assert_eq!(handle.capture_as_value(0).as_i64(), Some(100));
-
-        // Acquire the SharedCell and write through it; read back via
-        // the handle.
-        let cell_ptr = handle
-            .capture_shared_cell_ptr(0)
-            .expect("Shared slot");
-        assert!(!cell_ptr.is_null());
-        unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            *cell.lock() = ValueWord::from_i64(999);
-        }
-        assert_eq!(handle.capture_as_value(0).as_i64(), Some(999));
-
-        drop(handle);
-        drop(result);
-        drop(vm);
-    }
+    // Track A.1C.2: the A.1B `a1b_make_closure_shared_allocates_arc_and_
+    // releases` test previously exercised op_make_closure's Shared
+    // branch by pushing an initial VALUE and expecting the branch to
+    // allocate a fresh Arc. A.1C.2 flipped the contract: the Shared
+    // branch now expects the stack bits to be a pre-existing
+    // `*const SharedCell` (produced by `AllocSharedLocal` at the
+    // closure-capture site) and performs `Arc::increment_strong_count`
+    // to give the closure its own strong-count share.
+    //
+    // End-to-end coverage for the new contract lives in
+    // `test_a1c_var_multi_closure_e2e_shared_observes_writes` (two
+    // closures capturing the same `var x` observe each other's writes
+    // via the Arc).
 }

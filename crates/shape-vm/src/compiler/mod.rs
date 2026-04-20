@@ -53,10 +53,10 @@ mod helpers_binding;
 mod helpers_reference;
 mod literals;
 mod loops;
+pub(crate) mod monomorphization;
 mod patterns;
 mod statements;
 pub mod string_interpolation;
-pub(crate) mod monomorphization;
 
 /// Loop compilation context
 pub(crate) struct LoopContext {
@@ -547,8 +547,7 @@ pub struct BytecodeCompiler {
     /// `ClosureRegistry::intern`'d all-`Immutable` shape). A missing entry
     /// (closure registered via the legacy path, e.g. test helpers) falls
     /// back to all-`Immutable`, matching the pre-A.1C layout.
-    pub(crate) closure_capture_kinds:
-        Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
+    pub(crate) closure_capture_kinds: Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
 
     /// Registry of `Function<A, R>` signatures (v2 closure specialization
     /// Phase F). `FunctionTypeId`s assigned here are written into
@@ -562,8 +561,7 @@ pub struct BytecodeCompiler {
     /// `closure_type_ids` when a closure literal is lowered. The JIT reads
     /// this to emit the per-`ClosureTypeId` direct-call signature and the
     /// polymorphic `CallFunctionIndirect` signature.
-    pub(crate) function_type_ids:
-        Vec<(u16, shape_value::v2::concrete_type::FunctionTypeId)>,
+    pub(crate) function_type_ids: Vec<(u16, shape_value::v2::concrete_type::FunctionTypeId)>,
 
     /// Phase F one-shot: if set, the next closure-literal emission uses
     /// `MakeClosureHeap` instead of the legacy `MakeClosure`. The flag is
@@ -786,8 +784,10 @@ pub struct BytecodeCompiler {
     /// expression to its key/value `ConcreteType` pair. Populated by the
     /// `let m: HashMap<K, V> = ...` annotation path AND by inference helpers
     /// (`infer_hashmap_kv_from_context`).
-    pub(crate) map_key_value_types:
-        HashMap<shape_ast::ast::Span, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
+    pub(crate) map_key_value_types: HashMap<
+        shape_ast::ast::Span,
+        (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType),
+    >,
 
     /// v2 Phase 3.2: per-local-slot side table for HashMap key/value pairs.
     pub(crate) local_map_key_value_types:
@@ -799,8 +799,7 @@ pub struct BytecodeCompiler {
 
     /// v2 Phase 3.2: per-AST-span array element type table — used by
     /// monomorphization helpers and methods that produce arrays from maps.
-    pub(crate) array_element_types:
-        HashMap<shape_ast::ast::Span, shape_value::v2::ConcreteType>,
+    pub(crate) array_element_types: HashMap<shape_ast::ast::Span, shape_value::v2::ConcreteType>,
 
     /// v2 Phase 3.2: per-local-slot array element type table.
     pub(crate) local_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
@@ -908,6 +907,15 @@ pub struct BytecodeCompiler {
     /// Only populated while compiling a closure body that has mutable captures.
     pub(crate) mutable_closure_captures: HashMap<String, u16>,
 
+    /// Track A.1C.2: subset of `mutable_closure_captures` whose source
+    /// binding classifies as `CaptureKind::Shared` (a `var` binding
+    /// mutably captured through a closure). Maps captured variable name
+    /// → capture index. When the identifier lookup finds a name in this
+    /// map, the closure body emits `LoadSharedCapture` /
+    /// `StoreSharedCapture` (A.1B) instead of the legacy `LoadClosure`
+    /// / `StoreClosure`. Populated while compiling a closure body.
+    pub(crate) shared_closure_captures: HashMap<String, u16>,
+
     /// Closure Spec Phase D — subset of `mutable_closure_captures` that the
     /// enclosing function's MIR storage plan classified as
     /// `BindingStorageClass::LocalMutablePtr`. Maps captured variable name →
@@ -925,6 +933,25 @@ pub struct BytecodeCompiler {
     /// of these variables (even immutably), it must use the SharedCell path
     /// so it shares the same mutable cell.
     pub(crate) boxed_locals: HashSet<String>,
+
+    /// Track A.1C.2: local slots that have been promoted to
+    /// `Arc<parking_lot::Mutex<ValueWord>>` via the `AllocSharedLocal`
+    /// opcode. After promotion, every outer-scope read/write of the slot
+    /// must go through `LoadSharedLocal` / `StoreSharedLocal` (never plain
+    /// `LoadLocal` / `StoreLocal`), and scope exit must emit
+    /// `DropSharedLocal` so the Arc strong count is released exactly once
+    /// per owning frame.
+    ///
+    /// Keyed by the binding *name* (mirroring `boxed_locals`). Populated
+    /// by `compile_expr_closure` when a `var` capture escapes into a
+    /// closure and gets classified as `CaptureKind::Shared`.
+    pub(crate) shared_locals: HashSet<String>,
+
+    /// Track A.1C.2: per-scope stack of slot indices that need a
+    /// `DropSharedLocal` opcode at scope exit, mirroring the
+    /// `ownership_drop_locals` discipline. Push in lockstep with
+    /// `push_drop_scope`; pop and emit in lockstep with `pop_drop_scope`.
+    pub(crate) shared_drop_locals: Vec<Vec<u16>>,
 
     /// Active permission set for capability checking.
     ///
