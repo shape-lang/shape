@@ -413,10 +413,12 @@ fn leaf_target(span: Span, has_doc: bool) -> DocTemplateTarget {
 }
 
 fn type_param_names(type_params: Option<&[TypeParam]>) -> Vec<String> {
+    // Works for both `TypeParam::Type` and `TypeParam::Const` via the
+    // shared `name()` accessor.
     type_params
         .unwrap_or(&[])
         .iter()
-        .map(|param| param.name.clone())
+        .map(|param| param.name().to_string())
         .collect()
 }
 

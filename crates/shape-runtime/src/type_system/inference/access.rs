@@ -242,7 +242,10 @@ impl TypeInferenceEngine {
         let mut bindings: HashMap<String, TypeAnnotation> = HashMap::new();
         for (tp, arg) in type_params.iter().zip(args.iter()) {
             if let Some(arg_ann) = arg.to_annotation() {
-                bindings.insert(tp.name.clone(), arg_ann);
+                // TODO(B.3): const generic params alias into this map under
+                // their name; B.3 will route const args through a separate
+                // value-level substitution pass.
+                bindings.insert(tp.name().to_string(), arg_ann);
             }
         }
         let resolved =

@@ -51,7 +51,7 @@ impl BytecodeCompiler {
         func_def
             .type_params
             .as_ref()
-            .map(|params| params.iter().map(|p| p.name.clone()).collect())
+            .map(|params| params.iter().map(|p| p.name().to_string()).collect())
             .unwrap_or_default()
     }
 

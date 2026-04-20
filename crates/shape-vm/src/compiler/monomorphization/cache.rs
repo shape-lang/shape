@@ -184,7 +184,7 @@ impl BytecodeCompiler {
         let declared_type_params: Vec<String> = original_def
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
             .unwrap_or_default();
 
         if declared_type_params.is_empty() {
@@ -336,7 +336,7 @@ impl BytecodeCompiler {
         let type_param_names: Vec<String> = original_def
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
             .unwrap_or_default();
 
         if type_param_names.len() != type_args.len() {
@@ -477,7 +477,7 @@ impl BytecodeCompiler {
         let declared_type_params: Vec<String> = original_def
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
             .unwrap_or_default();
 
         // If type args and declared params disagree, bail (falls back to

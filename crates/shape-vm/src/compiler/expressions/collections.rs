@@ -64,10 +64,11 @@ fn field_type_to_type_annotation(field_type: FieldType) -> Option<TypeAnnotation
 }
 
 fn default_type_annotation_for_param(param: &TypeParam) -> Option<TypeAnnotation> {
-    if let Some(default_type) = &param.default_type {
-        return Some(default_type.clone());
-    }
-    None
+    // `default_type()` returns `None` for `TypeParam::Const` — a const generic
+    // has a default *expression*, not a default *type annotation*.
+    // B.3/B.4 resolves const defaults at monomorphization; don't attempt to
+    // infer a type-level default from a const param here.
+    param.default_type().cloned()
 }
 
 fn type_annotations_equivalent(left: &TypeAnnotation, right: &TypeAnnotation) -> bool {
@@ -612,7 +613,7 @@ impl BytecodeCompiler {
             };
 
             if let Some(param_name) = expected_ann.as_type_name_str() {
-                if info.type_params.iter().any(|tp| tp.name == param_name) {
+                if info.type_params.iter().any(|tp| tp.name() == param_name) {
                     inferred_args
                         .entry(param_name.to_string())
                         .or_insert(inferred_ann);
@@ -622,7 +623,10 @@ impl BytecodeCompiler {
 
         let mut resolved_args = Vec::with_capacity(info.type_params.len());
         for tp in &info.type_params {
-            if let Some(inferred) = inferred_args.get(&tp.name) {
+            // TODO(B.3): const generics fall through here but have no type-
+            // level inference story yet. The `None` return below bails out of
+            // inference, which is the right conservative stub until B.3 lands.
+            if let Some(inferred) = inferred_args.get(tp.name()) {
                 resolved_args.push(inferred.clone());
                 continue;
             }
@@ -732,7 +736,7 @@ impl BytecodeCompiler {
                 let generic_param_names: std::collections::HashSet<&str> = self
                     .struct_generic_info
                     .get(type_name)
-                    .map(|info| info.type_params.iter().map(|tp| tp.name.as_str()).collect())
+                    .map(|info| info.type_params.iter().map(|tp| tp.name()).collect())
                     .unwrap_or_default();
                 if let Some(schema) = self.type_tracker.schema_registry().get(type_name) {
                     for (field_name, value_expr) in fields {

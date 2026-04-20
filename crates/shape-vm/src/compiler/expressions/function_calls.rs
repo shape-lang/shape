@@ -2547,7 +2547,7 @@ impl BytecodeCompiler {
             if tps.is_empty() {
                 return None;
             }
-            tps.iter().map(|tp| tp.name.clone()).collect()
+            tps.iter().map(|tp| tp.name().to_string()).collect()
         };
 
         // 2. Build combined arg_types: [receiver_concrete_type, arg1_ct, ...].
@@ -2636,7 +2636,7 @@ impl BytecodeCompiler {
             if tps.is_empty() {
                 return None;
             }
-            tps.iter().map(|tp| tp.name.clone()).collect()
+            tps.iter().map(|tp| tp.name().to_string()).collect()
         };
 
         // Per-arg concrete types (closure args collapse to an opaque

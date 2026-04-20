@@ -292,9 +292,9 @@ mod module_qualified_type_tests {
         let program = shape_ast::parser::parse_program(source).expect("parse");
         if let shape_ast::ast::Item::Function(func, _) = &program.items[0] {
             let tp = &func.type_params.as_ref().expect("type params")[0];
-            assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds.len(), 1);
-            assert_eq!(tp.trait_bounds[0].as_str(), "mod1::Comparable");
+            assert_eq!(tp.name(), "T");
+            assert_eq!(tp.trait_bounds().len(), 1);
+            assert_eq!(tp.trait_bounds()[0].as_str(), "mod1::Comparable");
         } else {
             panic!("Expected Function");
         }

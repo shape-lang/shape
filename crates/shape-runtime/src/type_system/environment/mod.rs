@@ -263,7 +263,7 @@ impl TypeEnvironment {
         let content_for_trait = TraitDef {
             name: "ContentFor".to_string(),
             doc_comment: None,
-            type_params: Some(vec![TypeParam {
+            type_params: Some(vec![TypeParam::Type {
                 name: "Adapter".to_string(),
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -342,7 +342,7 @@ impl TypeEnvironment {
         let into_trait = TraitDef {
             name: "Into".to_string(),
             doc_comment: None,
-            type_params: Some(vec![TypeParam {
+            type_params: Some(vec![TypeParam::Type {
                 name: "Target".to_string(),
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -374,7 +374,7 @@ impl TypeEnvironment {
         let try_into_trait = TraitDef {
             name: "TryInto".to_string(),
             doc_comment: None,
-            type_params: Some(vec![TypeParam {
+            type_params: Some(vec![TypeParam::Type {
                 name: "Target".to_string(),
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -412,7 +412,7 @@ impl TypeEnvironment {
         let iterable_trait = TraitDef {
             name: "Iterable".to_string(),
             doc_comment: None,
-            type_params: Some(vec![TypeParam {
+            type_params: Some(vec![TypeParam::Type {
                 name: "T".to_string(),
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -1620,7 +1620,7 @@ mod tests {
             "Iterable should have type params"
         );
         assert_eq!(trait_def.type_params.as_ref().unwrap().len(), 1);
-        assert_eq!(trait_def.type_params.as_ref().unwrap()[0].name, "T");
+        assert_eq!(trait_def.type_params.as_ref().unwrap()[0].name(), "T");
         assert_eq!(
             trait_def.members.len(),
             1,

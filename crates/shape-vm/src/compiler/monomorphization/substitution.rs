@@ -1808,7 +1808,7 @@ mod tests {
     }
 
     fn type_param(name: &str) -> TypeParam {
-        TypeParam {
+        TypeParam::Type {
             name: name.into(),
             span: Span::default(),
             doc_comment: None,

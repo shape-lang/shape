@@ -631,8 +631,8 @@ fn test_struct_type_def_with_generics() {
             assert_eq!(def.name, "DataVec");
             let params = def.type_params.as_ref().expect("expected type params");
             assert_eq!(params.len(), 2);
-            assert_eq!(params[0].name, "V");
-            assert_eq!(params[1].name, "K");
+            assert_eq!(params[0].name(), "V");
+            assert_eq!(params[1].name(), "K");
             assert_eq!(def.fields.len(), 2);
             assert_eq!(def.fields[0].name, "index");
             assert_eq!(def.fields[1].name, "data");
@@ -973,8 +973,8 @@ fn test_trait_bound_single() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec![crate::ast::type_path::TypePath::from("Comparable")]);
+            assert_eq!(tp.name(), "T");
+            assert_eq!(tp.trait_bounds(), &[crate::ast::type_path::TypePath::from("Comparable")]);
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -991,10 +991,10 @@ fn test_trait_bound_multiple() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
+            assert_eq!(tp.name(), "T");
             assert_eq!(
-                tp.trait_bounds,
-                vec![crate::ast::type_path::TypePath::from("Serializable"), crate::ast::type_path::TypePath::from("Display")]
+                tp.trait_bounds(),
+                &[crate::ast::type_path::TypePath::from("Serializable"), crate::ast::type_path::TypePath::from("Display")]
             );
         }
         other => panic!("Expected Function, got {:?}", other),
@@ -1012,8 +1012,8 @@ fn test_trait_bound_none_backward_compatible() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
-            assert!(tp.trait_bounds.is_empty(), "Expected empty trait bounds");
+            assert_eq!(tp.name(), "T");
+            assert!(tp.trait_bounds().is_empty(), "Expected empty trait bounds");
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -1030,10 +1030,10 @@ fn test_type_param_default_type_parses() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
-            assert!(tp.trait_bounds.is_empty(), "Expected no trait bounds");
+            assert_eq!(tp.name(), "T");
+            assert!(tp.trait_bounds().is_empty(), "Expected no trait bounds");
             assert_eq!(
-                tp.default_type,
+                tp.default_type().cloned(),
                 Some(crate::ast::TypeAnnotation::Basic("int".to_string()))
             );
         }
@@ -1052,10 +1052,10 @@ fn test_type_param_bounds_with_default_type_parses() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec![crate::ast::type_path::TypePath::from("Numeric")]);
+            assert_eq!(tp.name(), "T");
+            assert_eq!(tp.trait_bounds(), &[crate::ast::type_path::TypePath::from("Numeric")]);
             assert_eq!(
-                tp.default_type,
+                tp.default_type().cloned(),
                 Some(crate::ast::TypeAnnotation::Basic("int".to_string()))
             );
         }
@@ -1064,7 +1064,7 @@ fn test_type_param_bounds_with_default_type_parses() {
 }
 
 // ---------------------------------------------------------------
-// Const generic parameters (B.1 — surface syntax only)
+// Const generic parameters (B.1 surface syntax, B.2 full AST wiring)
 // ---------------------------------------------------------------
 
 #[test]
@@ -1077,11 +1077,26 @@ fn test_const_type_param_on_function_parses() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            // B.1 stub: only the name is preserved; the const-ness and the
-            // declared type are lost until B.2 promotes TypeParam to an enum.
-            assert_eq!(tp.name, "N");
-            assert!(tp.trait_bounds.is_empty(), "const params carry no trait bounds");
-            assert!(tp.default_type.is_none(), "B.1 stub drops default");
+            // B.2: the parser now emits `TypeParam::Const` with the declared
+            // type captured verbatim. No default expression in this test.
+            match tp {
+                crate::ast::TypeParam::Const { name, ty, default, .. } => {
+                    assert_eq!(name, "N");
+                    assert_eq!(*ty, crate::ast::TypeAnnotation::Basic("int".to_string()));
+                    assert!(
+                        default.is_none(),
+                        "no `= ...` default given in this test",
+                    );
+                }
+                crate::ast::TypeParam::Type { .. } => {
+                    panic!("expected Const variant for `const N: int`, got Type")
+                }
+            }
+            // Accessor methods should also reflect the right name / bounds.
+            assert_eq!(tp.name(), "N");
+            assert!(tp.trait_bounds().is_empty(), "const params carry no trait bounds");
+            assert!(tp.default_type().is_none(), "const params have no default *type*");
+            assert!(tp.is_const());
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -1099,7 +1114,28 @@ fn test_const_type_param_with_default_parses() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "N");
+            // B.2: the default expression (`= 4`) must round-trip into the AST.
+            match tp {
+                crate::ast::TypeParam::Const { name, ty, default, .. } => {
+                    assert_eq!(name, "N");
+                    assert_eq!(*ty, crate::ast::TypeAnnotation::Basic("int".to_string()));
+                    match default.as_ref().expect("default `= 4` was dropped") {
+                        crate::ast::Expr::Literal(
+                            crate::ast::Literal::Int(n),
+                            _,
+                        ) => {
+                            assert_eq!(*n, 4, "expected literal 4 as default");
+                        }
+                        other => panic!(
+                            "expected literal integer default, got {:?}",
+                            other
+                        ),
+                    }
+                }
+                crate::ast::TypeParam::Type { .. } => {
+                    panic!("expected Const variant for `const N: int = 4`")
+                }
+            }
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -1108,7 +1144,8 @@ fn test_const_type_param_with_default_parses() {
 #[test]
 fn test_regular_type_param_still_parses_regression() {
     // Regression: the new `const_type_param` branch must not shadow the
-    // classic `<T>` / `<T: Bound>` / `<T = Default>` parses.
+    // classic `<T>` / `<T: Bound>` / `<T = Default>` parses. After B.2
+    // they come through as `TypeParam::Type`.
     let content = r#"
         fn id<T>(x: T) -> T { return x }
     "#;
@@ -1116,9 +1153,11 @@ fn test_regular_type_param_still_parses_regression() {
     match &items[0] {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
-            assert_eq!(tp.name, "T");
-            assert!(tp.trait_bounds.is_empty());
-            assert!(tp.default_type.is_none());
+            assert!(matches!(tp, crate::ast::TypeParam::Type { .. }));
+            assert_eq!(tp.name(), "T");
+            assert!(tp.trait_bounds().is_empty());
+            assert!(tp.default_type().is_none());
+            assert!(!tp.is_const());
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -1126,9 +1165,8 @@ fn test_regular_type_param_still_parses_regression() {
 
 #[test]
 fn test_const_type_params_on_type_def_parses() {
-    // Const generics on a struct type definition. The AST stub drops
-    // type/default info; we only verify the parse reaches two params
-    // named R and C.
+    // Const generics on a struct type definition. B.2 captures the full
+    // (name, ty, default) data in each param.
     let content = r#"
         type Matrix<const R: int, const C: int> { rows: int, cols: int }
     "#;
@@ -1138,8 +1176,10 @@ fn test_const_type_params_on_type_def_parses() {
         crate::ast::Item::StructType(def, _) => {
             let params = def.type_params.as_ref().expect("expected type params");
             assert_eq!(params.len(), 2);
-            assert_eq!(params[0].name, "R");
-            assert_eq!(params[1].name, "C");
+            assert_eq!(params[0].name(), "R");
+            assert_eq!(params[1].name(), "C");
+            assert!(params[0].is_const());
+            assert!(params[1].is_const());
         }
         other => panic!("Expected StructType, got {:?}", other),
     }
@@ -1158,8 +1198,10 @@ fn test_mixed_type_and_const_params_parses() {
         crate::ast::Item::Function(func, _) => {
             let params = func.type_params.as_ref().expect("expected type params");
             assert_eq!(params.len(), 2);
-            assert_eq!(params[0].name, "T");
-            assert_eq!(params[1].name, "N");
+            assert!(matches!(&params[0], crate::ast::TypeParam::Type { .. }));
+            assert!(matches!(&params[1], crate::ast::TypeParam::Const { .. }));
+            assert_eq!(params[0].name(), "T");
+            assert_eq!(params[1].name(), "N");
         }
         other => panic!("Expected Function, got {:?}", other),
     }

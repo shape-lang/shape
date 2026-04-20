@@ -1522,7 +1522,7 @@ impl BytecodeCompiler {
                         if name.len() == 1
                             && name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) =>
                     {
-                        Some(shape_ast::ast::TypeParam {
+                        Some(shape_ast::ast::TypeParam::Type {
                             name: name.clone(),
                             span: Span::DUMMY,
                             doc_comment: None,
@@ -1636,7 +1636,7 @@ impl BytecodeCompiler {
         let is_dual_param_generic = matches!(type_base, "HashMap" | "Map");
 
         if is_single_param_generic {
-            let type_params = vec![shape_ast::ast::TypeParam {
+            let type_params = vec![shape_ast::ast::TypeParam::Type {
                 name: "T".to_string(),
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -1650,14 +1650,14 @@ impl BytecodeCompiler {
             (type_params, Some(receiver_ann))
         } else if is_dual_param_generic {
             let type_params = vec![
-                shape_ast::ast::TypeParam {
+                shape_ast::ast::TypeParam::Type {
                     name: "K".to_string(),
                     span: Span::DUMMY,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
                 },
-                shape_ast::ast::TypeParam {
+                shape_ast::ast::TypeParam::Type {
                     name: "V".to_string(),
                     span: Span::DUMMY,
                     doc_comment: None,

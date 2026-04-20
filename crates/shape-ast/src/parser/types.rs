@@ -333,11 +333,11 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
 
             // Const generic parameter: `const N: int [= expr]`.
             //
-            // B.1 only accepts the surface syntax; it does not yet model
-            // const-ness in the AST. We stub a regular `TypeParam` that
-            // carries just the name, so downstream consumers continue to
-            // build. B.2 promotes `TypeParam` to an enum with a `Const`
-            // variant and populates `ty` / default expression here.
+            // B.2 promotes `TypeParam` to an enum and lands the real
+            // `Const { name, ty, default }` variant. Resolver / inference
+            // / monomorphization still largely treat the variant as a
+            // stub — B.3 binds const args at call sites, B.4 substitutes
+            // them into specialized bodies.
             if first.as_rule() == Rule::const_type_param {
                 let mut const_inner = first.into_inner();
                 let name_pair =
@@ -346,16 +346,23 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
                         location: Some(pair_loc.clone()),
                     })?;
                 let name = name_pair.as_str().to_string();
-                // Drain the rest of the pairs (type_annotation, optional
-                // expression) so any grammar changes don't silently break —
-                // and so the lexer span range is fully consumed.
-                for _ in const_inner {}
-                params.push(crate::ast::TypeParam {
+                let ty_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {
+                    message: "expected const generic parameter type annotation".to_string(),
+                    location: Some(pair_loc.clone()),
+                })?;
+                let ty = parse_type_annotation(ty_pair)?;
+                let mut default = None;
+                for remaining in const_inner {
+                    if remaining.as_rule() == Rule::expression {
+                        default = Some(crate::parser::expressions::parse_expression(remaining)?);
+                    }
+                }
+                params.push(crate::ast::TypeParam::Const {
                     name,
                     span: param_span,
                     doc_comment,
-                    default_type: None,
-                    trait_bounds: Vec::new(),
+                    ty,
+                    default,
                 });
                 continue;
             }
@@ -378,7 +385,7 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
                     _ => {}
                 }
             }
-            params.push(crate::ast::TypeParam {
+            params.push(crate::ast::TypeParam::Type {
                 name,
                 span: param_span,
                 doc_comment,

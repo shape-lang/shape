@@ -663,9 +663,11 @@ fn doc_text(comment: &DocComment) -> String {
 }
 
 fn format_type_params(type_params: &Option<Vec<shape_ast::ast::TypeParam>>) -> Vec<String> {
+    // TODO(B.3): render `const N: int` style for const generics in docs;
+    // B.2 just surfaces the name, matching the stub behaviour.
     type_params
         .as_ref()
-        .map(|params| params.iter().map(|tp| tp.name.clone()).collect())
+        .map(|params| params.iter().map(|tp| tp.name().to_string()).collect())
         .unwrap_or_default()
 }
 

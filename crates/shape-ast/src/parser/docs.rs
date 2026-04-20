@@ -641,11 +641,14 @@ impl DocCollector {
 
     fn collect_type_params(&mut self, parent_path: &str, type_params: Option<&[TypeParam]>) {
         for type_param in type_params.unwrap_or(&[]) {
+            // Works uniformly for `TypeParam::Type` and `TypeParam::Const` via
+            // the accessor methods: both variants carry a name, span, and
+            // optional doc comment.
             self.attach_comment(
                 DocTargetKind::TypeParam,
-                join_type_param_path(parent_path, &type_param.name),
-                type_param.span,
-                type_param.doc_comment.as_ref(),
+                join_type_param_path(parent_path, type_param.name()),
+                *type_param.span(),
+                type_param.doc_comment(),
             );
         }
     }

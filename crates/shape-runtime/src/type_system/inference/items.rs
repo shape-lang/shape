@@ -291,11 +291,15 @@ impl TypeInferenceEngine {
         let mut type_param_vars = Vec::new();
         if let Some(type_params) = &func.type_params {
             for tp in type_params {
-                let var = TypeVar::new(tp.name.clone());
+                // TODO(B.3): `TypeParam::Const` currently falls through here and
+                // is treated like a plain type variable; monomorphization (B.3)
+                // will bind const args to value expressions at call sites and
+                // B.4 substitutes them into specialized bodies.
+                let var = TypeVar::new(tp.name().to_string());
                 type_param_vars.push(var.clone());
                 // Define type param in scope so it can be referenced in param/return types
                 self.env
-                    .define(&tp.name, TypeScheme::mono(Type::Variable(var)));
+                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
             }
         }
 
@@ -669,7 +673,7 @@ impl TypeInferenceEngine {
         let method_type_params: Vec<String> = method
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
             .unwrap_or_default();
 
         let is_generic = has_receiver_params || !method_type_params.is_empty();
@@ -791,7 +795,7 @@ impl TypeInferenceEngine {
             let method_type_params: Vec<String> = method
                 .type_params
                 .as_ref()
-                .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+                .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
                 .unwrap_or_default();
 
             let is_generic = has_receiver_params || !method_type_params.is_empty();
@@ -1066,21 +1070,30 @@ impl TypeInferenceEngine {
     /// and where clause predicates
     fn make_function_scheme(&self, func: &FunctionDef, func_type: Type) -> TypeScheme {
         if let Some(type_params) = &func.type_params {
+            // TODO(B.3): const generic params currently flow through the same
+            // `TypeVar` machinery as type params. The name is still unique,
+            // so quantification is sound; monomorphization will specialise
+            // the const values when binding concrete args.
             let quantified: Vec<_> = type_params
                 .iter()
-                .map(|tp| TypeVar::new(tp.name.clone()))
+                .map(|tp| TypeVar::new(tp.name().to_string()))
                 .collect();
 
             let mut bounds = std::collections::HashMap::new();
             let mut defaults = std::collections::HashMap::new();
 
-            // Collect inline bounds from type params: <T: Comparable>
+            // Collect inline bounds from type params: <T: Comparable>.
+            // Const generics have no trait bounds or default *type* — only a
+            // declared type and an optional default expression, which are
+            // consumed later (B.3/B.4).
             for tp in type_params {
-                if !tp.trait_bounds.is_empty() {
-                    let mut expanded: Vec<String> = tp.trait_bounds.iter().map(|t| t.to_string()).collect();
+                let trait_bounds = tp.trait_bounds();
+                if !trait_bounds.is_empty() {
+                    let mut expanded: Vec<String> =
+                        trait_bounds.iter().map(|t| t.to_string()).collect();
                     // Transitively include supertrait bounds:
                     // If T: Foo and trait Foo: Bar + Baz, also add Bar and Baz.
-                    for trait_name in &tp.trait_bounds {
+                    for trait_name in trait_bounds {
                         let supers = self.env.get_transitive_supertrait_names(trait_name.as_str());
                         for st in supers {
                             if !expanded.contains(&st) {
@@ -1088,10 +1101,13 @@ impl TypeInferenceEngine {
                             }
                         }
                     }
-                    bounds.insert(tp.name.clone(), expanded);
+                    bounds.insert(tp.name().to_string(), expanded);
                 }
-                if let Some(default_ann) = &tp.default_type {
-                    defaults.insert(tp.name.clone(), self.resolve_type_annotation(default_ann));
+                if let Some(default_ann) = tp.default_type() {
+                    defaults.insert(
+                        tp.name().to_string(),
+                        self.resolve_type_annotation(default_ann),
+                    );
                 }
             }
 
@@ -1560,8 +1576,11 @@ mod tests {
         let program = parse_program(code).expect("Failed to parse trait bound syntax");
         if let shape_ast::ast::Item::Function(func, _) = &program.items[0] {
             let tp = &func.type_params.as_ref().unwrap()[0];
-            assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec![shape_ast::ast::type_path::TypePath::from("Comparable")]);
+            assert_eq!(tp.name(), "T");
+            assert_eq!(
+                tp.trait_bounds(),
+                &[shape_ast::ast::type_path::TypePath::from("Comparable")],
+            );
         } else {
             panic!("Expected function item");
         }
@@ -1580,10 +1599,10 @@ mod tests {
         let program = parse_program(code).expect("Failed to parse multiple trait bounds");
         if let shape_ast::ast::Item::Function(func, _) = &program.items[0] {
             let tp = &func.type_params.as_ref().unwrap()[0];
-            assert_eq!(tp.name, "T");
+            assert_eq!(tp.name(), "T");
             assert_eq!(
-                tp.trait_bounds,
-                vec![shape_ast::ast::type_path::TypePath::from("Comparable"), shape_ast::ast::type_path::TypePath::from("Displayable")]
+                tp.trait_bounds(),
+                &[shape_ast::ast::type_path::TypePath::from("Comparable"), shape_ast::ast::type_path::TypePath::from("Displayable")],
             );
         } else {
             panic!("Expected function item");

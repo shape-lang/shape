@@ -696,14 +696,16 @@ pub fn resolve_struct_field_type(
             if !type_params.is_empty() {
                 let mut bindings: HashMap<String, String> = HashMap::new();
                 for (idx, param) in type_params.iter().enumerate() {
+                    // `default_type()` returns `None` for const generics
+                    // (their default is an expression, not a type). B.3
+                    // will route const defaults through a value-level path.
                     let bound = generic_args.get(idx).cloned().or_else(|| {
                         param
-                            .default_type
-                            .as_ref()
+                            .default_type()
                             .and_then(type_annotation_to_string)
                     });
                     if let Some(bound) = bound {
-                        bindings.insert(param.name.clone(), bound);
+                        bindings.insert(param.name().to_string(), bound);
                     }
                 }
                 field_type = substitute_type_params_in_field_type(&field_type, &bindings);

@@ -1111,14 +1111,23 @@ fn get_type_param_hover(text: &str, word: &str, position: Position) -> Option<Ho
 
         if let Some(params) = type_params {
             for tp in params {
-                if tp.name == word && !tp.trait_bounds.is_empty() {
-                    let bounds_str = tp.trait_bounds.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ");
+                // Const generics have no trait bounds; `trait_bounds()`
+                // returns an empty slice for `TypeParam::Const`, so this
+                // conditional simply skips them. B.3 will add dedicated
+                // hover copy for const generics.
+                let bounds = tp.trait_bounds();
+                if tp.name() == word && !bounds.is_empty() {
+                    let bounds_str = bounds
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + ");
                     let content = format!(
                         "**Type Parameter**: `{}`\n\n**Bounds:** `{}: {}`\n\nMust implement: {}",
                         word,
                         word,
                         bounds_str,
-                        tp.trait_bounds
+                        bounds
                             .iter()
                             .map(|b| format!("`{}`", b))
                             .collect::<Vec<_>>()

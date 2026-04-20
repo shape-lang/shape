@@ -982,7 +982,7 @@ impl TypeInferenceEngine {
 
         let mut resolved_args: Vec<Type> = Vec::with_capacity(type_params.len());
         for tp in &type_params {
-            let candidates = param_bindings.remove(&tp.name).unwrap_or_default();
+            let candidates = param_bindings.remove(tp.name()).unwrap_or_default();
             let resolved = self.resolve_struct_type_param_arg(tp, candidates)?;
             resolved_args.push(resolved);
         }
@@ -1027,7 +1027,7 @@ impl TypeInferenceEngine {
         type_params: &[shape_ast::ast::TypeParam],
         bindings: &mut std::collections::HashMap<String, Vec<Type>>,
     ) {
-        let is_type_param = |name: &str| type_params.iter().any(|tp| tp.name == name);
+        let is_type_param = |name: &str| type_params.iter().any(|tp| tp.name() == name);
 
         match annotation {
             ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))
@@ -1090,7 +1090,7 @@ impl TypeInferenceEngine {
             return Err(TypeError::GenericTypeError {
                 message: format!(
                     "Could not infer type argument '{}' for generic struct",
-                    tp.name
+                    tp.name()
                 ),
                 symbol: None,
             });
@@ -1104,7 +1104,9 @@ impl TypeInferenceEngine {
     }
 
     fn default_type_for_type_param(&self, tp: &shape_ast::ast::TypeParam) -> Option<Type> {
-        if let Some(default_ann) = &tp.default_type {
+        // Const generics carry a default *expression*, not a default *type* —
+        // B.3/B.4 will resolve that to a value. Treat as "no default type".
+        if let Some(default_ann) = tp.default_type() {
             return Some(Type::Concrete(default_ann.clone()));
         }
         None

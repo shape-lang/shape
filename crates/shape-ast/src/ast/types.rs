@@ -185,18 +185,112 @@ pub struct FunctionParam {
     pub type_annotation: TypeAnnotation,
 }
 
+/// A generic parameter on a function, type, trait or impl header.
+///
+/// Two variants:
+/// - [`TypeParam::Type`] — the classic type-level parameter (`<T>`,
+///   `<T: Bound>`, `<T = DefaultType>`).
+/// - [`TypeParam::Const`] — a value-level const generic parameter
+///   (`<const N: int>`, `<const N: int = 4>`). Added in B.2 of the
+///   const-generics track; B.3 binds const args at monomorphization
+///   and B.4 substitutes them into specialized bodies. Until then
+///   most consumers treat const params as a placeholder — the AST
+///   captures the name, declared type, and optional default expression
+///   so later phases can wire them end-to-end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypeParam {
-    pub name: String,
-    #[serde(default)]
-    pub span: Span,
-    #[serde(default)]
-    pub doc_comment: Option<DocComment>,
-    /// Default type argument: `T = int`
-    pub default_type: Option<TypeAnnotation>,
-    /// Trait bounds: `T: Comparable + Displayable`
-    #[serde(default)]
-    pub trait_bounds: Vec<TypePath>,
+pub enum TypeParam {
+    /// A type parameter: `T`, `T: Bound`, `T = DefaultType`.
+    Type {
+        name: String,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
+        /// Default type argument: `T = int`
+        default_type: Option<TypeAnnotation>,
+        /// Trait bounds: `T: Comparable + Displayable`
+        #[serde(default)]
+        trait_bounds: Vec<TypePath>,
+    },
+    /// A const generic parameter: `const N: int`, `const N: int = 4`.
+    ///
+    /// Parsed in B.1/B.2. Monomorphization (B.3) and body substitution
+    /// (B.4) are not yet implemented — most compiler passes currently
+    /// treat this variant as a stub / placeholder.
+    Const {
+        name: String,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
+        /// Declared type: `const N: int`.
+        ty: TypeAnnotation,
+        /// Optional default value expression: `= 4`.
+        default: Option<super::expressions::Expr>,
+    },
+}
+
+impl TypeParam {
+    /// The parameter's declared name (`T` or `N`), common to both variants.
+    pub fn name(&self) -> &str {
+        match self {
+            TypeParam::Type { name, .. } | TypeParam::Const { name, .. } => name,
+        }
+    }
+
+    /// The parameter's source span, common to both variants.
+    pub fn span(&self) -> &Span {
+        match self {
+            TypeParam::Type { span, .. } | TypeParam::Const { span, .. } => span,
+        }
+    }
+
+    /// The parameter's attached doc comment, common to both variants.
+    pub fn doc_comment(&self) -> Option<&DocComment> {
+        match self {
+            TypeParam::Type { doc_comment, .. } | TypeParam::Const { doc_comment, .. } => {
+                doc_comment.as_ref()
+            }
+        }
+    }
+
+    /// Trait bounds, only present on the `Type` variant.
+    ///
+    /// Returns an empty slice for const generics (they have no bounds).
+    pub fn trait_bounds(&self) -> &[TypePath] {
+        match self {
+            TypeParam::Type { trait_bounds, .. } => trait_bounds.as_slice(),
+            // TODO(B.3): const generics may eventually grow predicates
+            // (e.g. `where N > 0`), but not in this phase.
+            TypeParam::Const { .. } => &[],
+        }
+    }
+
+    /// Default type argument, only meaningful for the `Type` variant.
+    pub fn default_type(&self) -> Option<&TypeAnnotation> {
+        match self {
+            TypeParam::Type { default_type, .. } => default_type.as_ref(),
+            TypeParam::Const { .. } => None,
+        }
+    }
+
+    /// True iff this is a const generic parameter.
+    pub fn is_const(&self) -> bool {
+        matches!(self, TypeParam::Const { .. })
+    }
+
+    /// Convenience constructor for a plain type parameter with no bounds
+    /// or default — the shape that stdlib bootstrap / method desugaring
+    /// most often needs.
+    pub fn simple(name: impl Into<String>) -> Self {
+        TypeParam::Type {
+            name: name.into(),
+            span: Span::DUMMY,
+            doc_comment: None,
+            default_type: None,
+            trait_bounds: Vec::new(),
+        }
+    }
 }
 
 /// A predicate in a where clause: `T: Comparable + Display`
@@ -208,10 +302,41 @@ pub struct WherePredicate {
 
 impl PartialEq for TypeParam {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.doc_comment == other.doc_comment
-            && self.default_type == other.default_type
-            && self.trait_bounds == other.trait_bounds
+        match (self, other) {
+            (
+                TypeParam::Type {
+                    name: ln,
+                    doc_comment: ld,
+                    default_type: ldt,
+                    trait_bounds: ltb,
+                    ..
+                },
+                TypeParam::Type {
+                    name: rn,
+                    doc_comment: rd,
+                    default_type: rdt,
+                    trait_bounds: rtb,
+                    ..
+                },
+            ) => ln == rn && ld == rd && ldt == rdt && ltb == rtb,
+            (
+                TypeParam::Const {
+                    name: ln,
+                    doc_comment: ld,
+                    ty: lty,
+                    default: ldef,
+                    ..
+                },
+                TypeParam::Const {
+                    name: rn,
+                    doc_comment: rd,
+                    ty: rty,
+                    default: rdef,
+                    ..
+                },
+            ) => ln == rn && ld == rd && lty == rty && ldef == rdef,
+            _ => false,
+        }
     }
 }
 

@@ -1262,7 +1262,11 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
         if let Item::Function(func, span) = item {
             if let Some(type_params) = &func.type_params {
                 for tp in type_params {
-                    for bound in &tp.trait_bounds {
+                    // Const generics have no trait bounds (`trait_bounds()`
+                    // returns an empty slice for the Const variant); this
+                    // loop simply skips them until B.3 gives const generics
+                    // their own predicate story.
+                    for bound in tp.trait_bounds() {
                         if !trait_methods.contains_key(bound.as_str()) {
                             let range = span_to_range(source, span);
                             diagnostics.push(Diagnostic {
@@ -1273,7 +1277,7 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
                                 source: Some("shape".to_string()),
                                 message: format!(
                                     "Trait bound '{}' on type parameter '{}' refers to an undefined trait.",
-                                    bound, tp.name
+                                    bound, tp.name()
                                 ),
                                 related_information: None,
                                 tags: None,

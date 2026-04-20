@@ -528,8 +528,8 @@ fn push_type_params(
             out,
             DocTargetKind::TypeParam,
             module_prefix,
-            join_type_param_path(&owner_path, &type_param.name),
-            type_param.span,
+            join_type_param_path(&owner_path, type_param.name()),
+            *type_param.span(),
         );
     }
 }
@@ -816,10 +816,11 @@ fn type_owner(_kind: DocTargetKind, type_params: Option<&[TypeParam]>) -> DocOwn
 }
 
 pub fn type_param_names(type_params: Option<&[TypeParam]>) -> Vec<String> {
+    // Shared accessor `name()` works across Type and Const variants.
     type_params
         .unwrap_or(&[])
         .iter()
-        .map(|param| param.name.clone())
+        .map(|param| param.name().to_string())
         .collect()
 }
 
