@@ -535,12 +535,24 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // A.1E lands the Shared lowering. Until then, any function that
     // contains one of these opcodes must fall back to the interpreter to
     // avoid the JIT silently mislowering the raw-pointer capture slot.
+    //
+    // Track A.1C.1: the four outer-scope `var` Shared-cell lifecycle
+    // opcodes (AllocSharedLocal / LoadSharedLocal / StoreSharedLocal /
+    // DropSharedLocal) are the declaring-frame counterpart of A.1B's
+    // capture-side ops. Same JIT status: interpreter-only until
+    // A.1D/A.1E lift the gate on the wider Shared-cell machinery.
     match opcode {
         OpCode::LoadOwnedMutableCapture
         | OpCode::StoreOwnedMutableCapture
         | OpCode::LoadSharedCapture
         | OpCode::StoreSharedCapture => {
             Some("A.1B mutable-cell capture opcode; Cranelift lowering pending in A.1D/A.1E")
+        }
+        OpCode::AllocSharedLocal
+        | OpCode::LoadSharedLocal
+        | OpCode::StoreSharedLocal
+        | OpCode::DropSharedLocal => {
+            Some("A.1C.1 outer-scope Shared-cell opcode; Cranelift lowering pending in A.1D/A.1E")
         }
         _ => None,
     }

@@ -823,6 +823,79 @@ define_opcodes! {
     /// the write only. Operand: Local(idx). Pops the value to write.
     StoreSharedCapture = 0x135, Variable, pops: 1, pushes: 0;
 
+    // ===== Track A.1C.1: Shared outer-scope (`var`) cell opcodes =====
+    //
+    // These are the *outer-scope* counterpart to A.1B's capture-side
+    // `LoadSharedCapture` / `StoreSharedCapture`. A.1B handles reads and
+    // writes seen from *inside* a nested closure. A.1C handles the
+    // owning-frame side of the same `Arc<parking_lot::Mutex<ValueWord>>`
+    // cell: allocating it when the `var` binding is introduced, reading
+    // and writing it from code executing in the declaring frame, and
+    // releasing the Arc strong share at scope exit.
+    //
+    // Operand layout: `Local(u16)` — indexes the declaring frame's
+    // **stack slots** (not a capture-array index), i.e. the same
+    // addressing mode as `LoadLocal` / `StoreLocal`. After
+    // `AllocSharedLocal`, slot `slot` holds raw `*const SharedCell`
+    // pointer bits (NOT a NaN-tagged ValueWord). Neither `LoadLocal` nor
+    // `StoreLocal` may be used on such a slot — only the four opcodes
+    // below. The compiler in A.1C.2 is responsible for emitting the
+    // right opcode per reference after a `var` binding is promoted to
+    // Shared storage.
+    //
+    // Lifecycle:
+    //   1. `AllocSharedLocal { slot }` — sole allocator. Pops the
+    //      initial value, boxes it in an `Arc<SharedCell>`, writes the
+    //      `Arc::into_raw`-produced pointer bits into `slot`. The slot
+    //      now owns one strong-count share.
+    //   2. `LoadSharedLocal { slot }` / `StoreSharedLocal { slot }` —
+    //      ordinary read/write through the mutex. The slot's pointer
+    //      bits are never modified by these opcodes. Concurrency is
+    //      mediated by the parking_lot mutex; the slot is the sole
+    //      legal entry point for data access after Alloc.
+    //   3. `DropSharedLocal { slot }` — sole releaser. Reads pointer
+    //      bits, reconstructs `Arc::from_raw`, drops it (one atomic
+    //      strong-count decrement), then overwrites the slot with
+    //      `NONE_BITS` to mark it spent. The compiler emits this at
+    //      scope exit for every `var` binding that was promoted.
+    //
+    // SAFETY invariants (enforced by the compiler A.1C.2 — these
+    // opcodes trust the emitter):
+    //   * `AllocSharedLocal` is emitted exactly once per `var` slot.
+    //   * `LoadSharedLocal` / `StoreSharedLocal` only fire on a slot
+    //     whose bits were installed by `AllocSharedLocal` and not yet
+    //     consumed by `DropSharedLocal`.
+    //   * `DropSharedLocal` is emitted exactly once per `var` slot on
+    //     every path that leaves the owning scope (normal, break,
+    //     return, panic-via-unwind — handled by scope-exit bytecode).
+    //
+    // A.1D / A.1E will lower these into Cranelift IR. Until then, the
+    // JIT preflight gate (see `vm_only_opcode_reason` in
+    // `crates/shape-jit/src/compiler/accessors.rs`) rejects functions
+    // containing any of these four opcodes so they run on the
+    // interpreter.
+
+    /// Pop the top-of-stack `ValueWord` as the initial value, allocate a
+    /// fresh `Arc<parking_lot::Mutex<ValueWord>>`, and store the
+    /// `Arc::into_raw` pointer bits into local slot `slot`. Operand:
+    /// Local(idx). Sole allocator for Shared locals.
+    AllocSharedLocal = 0x136, Variable, pops: 1, pushes: 0;
+    /// Read the SharedCell pointer bits from local slot `slot`, take
+    /// the parking_lot mutex for a read, clone the inner ValueWord bits,
+    /// drop the guard, push onto the stack. Operand: Local(idx).
+    LoadSharedLocal = 0x137, Variable, pops: 0, pushes: 1;
+    /// Pop a ValueWord from the stack, read the SharedCell pointer bits
+    /// from local slot `slot`, take the parking_lot mutex for a write,
+    /// overwrite the inner ValueWord bits, drop the guard. The slot's
+    /// pointer bits are NOT modified. Operand: Local(idx).
+    StoreSharedLocal = 0x138, Variable, pops: 1, pushes: 0;
+    /// Read the SharedCell pointer bits from local slot `slot`,
+    /// reconstruct `Arc::from_raw`, drop the Arc (one atomic
+    /// strong-count decrement), and overwrite the slot with NONE_BITS
+    /// to mark it spent. Operand: Local(idx). Sole releaser for Shared
+    /// locals — emitted by the compiler at scope exit.
+    DropSharedLocal = 0x139, Variable, pops: 0, pushes: 0;
+
     // ===== Closure Spec Phase F: escape-fallback dispatch =====
     //
     // These opcodes implement the v2 escape-fallback ABI (see

@@ -520,6 +520,20 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::StoreOwnedMutableCapture
             | OpCode::LoadSharedCapture
             | OpCode::StoreSharedCapture
+            // Track A.1C.1 outer-scope Shared-cell ops. AllocSharedLocal
+            // does allocate (single `Arc::new` for a `parking_lot::Mutex`
+            // wrapper); that allocation is an ordinary refcounted heap
+            // object and does not enter the GC safepoint poll path, so
+            // treating it as non-allocation-sensitive is consistent with
+            // the A.1B Shared-capture ops above. LoadSharedLocal /
+            // StoreSharedLocal are pure mutex-guarded reads/writes;
+            // DropSharedLocal decrements a single Arc strong count. All
+            // four bail to the interpreter outside of hot loops via the
+            // JIT preflight gate.
+            | OpCode::AllocSharedLocal
+            | OpCode::LoadSharedLocal
+            | OpCode::StoreSharedLocal
+            | OpCode::DropSharedLocal
             // Type casting (inline, no allocation)
             | OpCode::CastWidth
             // Control flow (inline jumps/branches)

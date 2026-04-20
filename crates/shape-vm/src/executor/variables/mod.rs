@@ -378,6 +378,10 @@ impl VirtualMachine {
             StoreOwnedMutableCapture => self.op_store_owned_mutable_capture(instruction)?,
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
+            AllocSharedLocal => self.op_alloc_shared_local(instruction)?,
+            LoadSharedLocal => self.op_load_shared_local(instruction)?,
+            StoreSharedLocal => self.op_store_shared_local(instruction)?,
+            DropSharedLocal => self.op_drop_shared_local(instruction)?,
             _ => unreachable!(
                 "exec_variables called with non-variable opcode: {:?}",
                 instruction.opcode
@@ -889,6 +893,277 @@ impl VirtualMachine {
             let mut guard = cell.lock();
             *guard = new_bits;
             drop(guard);
+        }
+        Ok(())
+    }
+
+    // ── Track A.1C.1: outer-scope `var` Shared-cell lifecycle ──────────
+    //
+    // `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
+    // `DropSharedLocal` are the outer-scope counterparts of A.1B's
+    // `LoadSharedCapture` / `StoreSharedCapture`. A.1B operates on the
+    // raw `*const SharedCell` pointer bits held in a **closure's upvalue
+    // slot**. A.1C.1 operates on the raw `*const SharedCell` pointer
+    // bits held in the declaring frame's **local stack slot**.
+    //
+    // Shared contract with A.1B: both sides treat the raw u64 in the
+    // slot as an `Arc::into_raw`-produced pointer. `AllocSharedLocal`
+    // produces exactly one strong-count share and parks it in the local
+    // slot; `DropSharedLocal` releases exactly that share via
+    // `Arc::from_raw`. Additional strong shares (one per capturing
+    // closure) are minted by the closure-build path (A.1B
+    // `op_make_closure`) via `Arc::increment_strong_count` — those are
+    // reclaimed by `release_typed_closure` on closure drop, completely
+    // independent of the outer-scope lifecycle handled here.
+    //
+    // SAFETY invariants for every handler below:
+    //
+    // - The compiler (A.1C.2, still pending) emits these opcodes only
+    //   on slots whose `BindingStorageClass` is `Shared`. Until that
+    //   lands, only unit tests and hand-assembled bytecode exercise
+    //   these opcodes.
+    // - The slot's raw u64 is produced exclusively by
+    //   `AllocSharedLocal`. It is the sole allocator. Any other writer
+    //   (e.g. `StoreLocal` targeting the same slot) violates the
+    //   Shared contract — the compiler must never emit that mix.
+    // - The pointer is released exactly once by `DropSharedLocal`.
+    //   After Drop, the slot is overwritten with `NONE_BITS` to mark
+    //   it spent; re-reading the slot via `LoadSharedLocal` /
+    //   `StoreSharedLocal` after Drop is a compiler bug (reports a
+    //   null-pointer runtime error at the interpreter level).
+    // - Concurrent access across closures is permitted: each closure
+    //   holds its own `Arc` strong share and takes the parking_lot
+    //   mutex for lock-gated read/write. The mutex is the sole legal
+    //   read/write path — interpreter code never dereferences the
+    //   pointer without first taking the lock.
+
+    /// `AllocSharedLocal { slot }`: pop the initial value, allocate a
+    /// fresh `Arc<SharedCell>`, write the `Arc::into_raw` pointer bits
+    /// into local slot `slot`.
+    ///
+    /// # Safety
+    ///
+    /// This is the sole allocator for a Shared local slot. The produced
+    /// `*const SharedCell` pointer is:
+    ///   * 8-byte aligned (Rust global allocator + `parking_lot::Mutex`'s
+    ///     alignment).
+    ///   * Non-null (Rust's `Arc::new` never returns null).
+    ///   * Owned by slot `slot` — exactly one strong-count share is
+    ///     parked in the slot.
+    ///
+    /// The slot is treated as opaque raw pointer bits; it MUST NOT be
+    /// read via `LoadLocal` / `StoreLocal` until after `DropSharedLocal`
+    /// overwrites it with `NONE_BITS`. Any previous occupant of the
+    /// slot is silently overwritten — the compiler guarantees the slot
+    /// is freshly introduced (not reused) when this opcode is emitted.
+    fn op_alloc_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        use std::sync::Arc as StdArc;
+
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop the initial ValueWord bits from the stack — these become
+        // the inner payload of the new mutex.
+        let initial_bits = self.pop_raw_u64()?;
+
+        // Allocate the Arc<Mutex<ValueWord>> and convert into a raw
+        // pointer. `Arc::into_raw` keeps one strong-count share alive;
+        // `DropSharedLocal` is responsible for reclaiming it later.
+        let arc: StdArc<SharedCell> = StdArc::new(parking_lot::Mutex::new(initial_bits));
+        let cell_ptr: *const SharedCell = StdArc::into_raw(arc);
+
+        // Compute the absolute stack index for the requested local slot.
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+
+        // Park the raw pointer bits in the slot. We intentionally do NOT
+        // route this write through `stack_write_raw` — that helper
+        // interprets the old slot bits as a `ValueWord` and drops them
+        // (which would double-free if the slot previously held a
+        // Shared-cell pointer). The compiler contract is: the slot is
+        // freshly introduced, so the old bits are `NONE_BITS` (or
+        // uninitialised — still inline, no Drop glue).
+        record_heap_write();
+        self.stack[slot] = cell_ptr as u64;
+        Ok(())
+    }
+
+    /// `LoadSharedLocal { slot }`: read the `*const SharedCell` bits
+    /// from local slot `slot`, acquire the mutex for a read, clone the
+    /// inner ValueWord bits, drop the guard, push the value onto the
+    /// stack.
+    ///
+    /// # Safety
+    ///
+    /// The slot at `slot` must hold non-null `*const SharedCell` bits
+    /// that were produced by a prior `AllocSharedLocal` on the same
+    /// slot and not yet consumed by `DropSharedLocal`. The reborrow
+    /// via `&*cell_ptr` is scoped to this handler invocation; the Arc
+    /// strong-count share stays with the slot (this handler does not
+    /// retain/release). The mutex is the sole legal read path — no
+    /// reader bypasses the lock.
+    fn op_load_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            return Err(VMError::RuntimeError(format!(
+                "LoadSharedLocal: slot {} out of bounds (stack len {})",
+                idx,
+                self.stack.len()
+            )));
+        }
+        let bits = self.stack[slot];
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "LoadSharedLocal: Shared local pointer is null (not initialised or already dropped)"
+                    .to_string(),
+            ));
+        }
+        // SAFETY: `cell_ptr` was produced by `Arc::into_raw(Arc::new(...))`
+        // in `op_alloc_shared_local` and the Arc strong share owned by
+        // this slot keeps the allocation alive. We reborrow via
+        // `&*cell_ptr` for the duration of this handler only; the
+        // reference does not escape. The mutex mediates concurrency
+        // with any capturing closure's `LoadSharedCapture` /
+        // `StoreSharedCapture` as well as any other
+        // `LoadSharedLocal` / `StoreSharedLocal` on this slot.
+        let value_bits = unsafe {
+            let cell: &SharedCell = &*cell_ptr;
+            let guard = cell.lock();
+            let bits = *guard;
+            drop(guard);
+            bits
+        };
+        self.push_raw_u64(value_bits)
+    }
+
+    /// `StoreSharedLocal { slot }`: pop a ValueWord, read the
+    /// `*const SharedCell` bits from local slot `slot`, acquire the
+    /// mutex for a write, overwrite the inner ValueWord bits, drop the
+    /// guard. The slot's pointer bits are NOT modified.
+    ///
+    /// # Safety
+    ///
+    /// Same invariants as `op_load_shared_local`. The mutex serialises
+    /// concurrent writers from other closures / the declaring frame.
+    /// The Arc strong-count share owned by the slot is untouched.
+    fn op_store_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            return Err(VMError::RuntimeError(format!(
+                "StoreSharedLocal: slot {} out of bounds (stack len {})",
+                idx,
+                self.stack.len()
+            )));
+        }
+        let bits = self.stack[slot];
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "StoreSharedLocal: Shared local pointer is null (not initialised or already dropped)"
+                    .to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: same invariants as `op_load_shared_local`. We take
+        // the mutex for exclusive access, overwrite the 8-byte
+        // ValueWord payload, then drop the guard. The slot's pointer
+        // bits stay exactly as `op_alloc_shared_local` installed them —
+        // this write only touches the interior of the mutex.
+        unsafe {
+            let cell: &SharedCell = &*cell_ptr;
+            let mut guard = cell.lock();
+            *guard = new_bits;
+            drop(guard);
+        }
+        Ok(())
+    }
+
+    /// `DropSharedLocal { slot }`: read the `*const SharedCell` bits
+    /// from local slot `slot`, reconstruct `Arc::from_raw`, drop the
+    /// Arc (one atomic strong-count decrement), then overwrite the slot
+    /// with the null pointer (`0u64`) to mark it spent.
+    ///
+    /// # Safety
+    ///
+    /// This is the sole releaser for the outer-scope Arc strong share
+    /// allocated by `AllocSharedLocal`. The pointer at slot `slot` must
+    /// have been installed by a prior `AllocSharedLocal` on the same
+    /// slot and not yet consumed. Double-drop is a compiler bug and
+    /// would be a use-after-free on the second call — the null-pointer
+    /// guard at least prevents segfaulting; it does not recover
+    /// correctness.
+    ///
+    /// The slot is rewritten to `0u64` (a genuine null pointer — NOT a
+    /// NaN-tagged ValueWord) so any subsequent `LoadSharedLocal` /
+    /// `StoreSharedLocal` on this slot reports a null-pointer runtime
+    /// error rather than silently dereferencing freed memory. The VM's
+    /// top-level `Drop` invokes `ValueWord::from_raw_bits(0).drop()`,
+    /// which is a no-op (bit pattern `0` decodes as a heap-tagged
+    /// pointer whose payload is null; the ValueWord drop glue checks
+    /// for null before any refcount traffic — see
+    /// `shape_value::value_word`).
+    fn op_drop_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        use std::sync::Arc as StdArc;
+
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            return Err(VMError::RuntimeError(format!(
+                "DropSharedLocal: slot {} out of bounds (stack len {})",
+                idx,
+                self.stack.len()
+            )));
+        }
+        let bits = self.stack[slot];
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "DropSharedLocal: Shared local pointer is null (not initialised or already dropped)"
+                    .to_string(),
+            ));
+        }
+        // Mark the slot spent BEFORE reclaiming the Arc so any
+        // reentrant access on this slot sees a genuine null pointer
+        // rather than dangling bits. We use `0u64` (not `NONE_BITS`)
+        // because the Load/Store/Drop handlers perform a raw
+        // `cell_ptr.is_null()` check — `NONE_BITS` is a non-zero
+        // NaN-tagged sentinel and would bypass that check and lead to
+        // a spurious dereference. The VM's top-level `Drop` treats
+        // bits=0 as a heap-tagged-null ValueWord whose drop is a no-op.
+        self.stack[slot] = 0u64;
+        // SAFETY: `cell_ptr` was produced by
+        // `Arc::into_raw(Arc::new(...))` in `op_alloc_shared_local` and
+        // this call site is the unique drop point for that share.
+        // `Arc::from_raw` transfers ownership back into the Arc handle,
+        // and the `drop` call decrements the strong count. Any
+        // additional closures holding capture-side shares retain their
+        // own independent strong counts, so the underlying
+        // `SharedCell` stays alive as long as at least one strong
+        // share exists.
+        unsafe {
+            drop(StdArc::from_raw(cell_ptr));
         }
         Ok(())
     }
@@ -2878,6 +3153,310 @@ mod tests {
             other => panic!("expected RuntimeError, got {:?}", other),
         }
 
+        vm.call_stack.pop();
+    }
+
+    // ── Track A.1C.1: outer-scope `var` Shared-cell lifecycle tests ───
+    //
+    // These tests exercise `AllocSharedLocal` / `LoadSharedLocal` /
+    // `StoreSharedLocal` / `DropSharedLocal` directly on a synthetic
+    // call frame that owns a handful of local slots. Unlike the A.1B
+    // capture-side tests above, the pointer bits land in the **stack
+    // slot** (`stack[base_pointer + idx]`) rather than in an upvalue.
+    // The helper below reserves `num_locals` stack slots behind the
+    // frame's `base_pointer` so that Local(idx) addressing for
+    // idx < num_locals is in-bounds.
+    //
+    // After each test we `DropSharedLocal` every slot we allocated, so
+    // the Arcs are reclaimed cleanly — the harness does not run
+    // scope-exit bytecode automatically, so leak-free teardown is the
+    // test's responsibility.
+
+    /// Push a synthetic call frame that owns `num_locals` stack slots.
+    /// Slots are pre-filled with `NONE_BITS` so `AllocSharedLocal` can
+    /// overwrite them without tripping the "old occupant" drop path.
+    fn push_synthetic_frame_with_locals(vm: &mut VirtualMachine, num_locals: usize) {
+        let base_pointer = vm.sp;
+        for _ in 0..num_locals {
+            // Keep `sp` and `stack.len()` in sync so
+            // `current_locals_base()` plus Local(idx) addresses are
+            // within `self.stack`.
+            vm.push_raw_u64(VirtualMachine::NONE_BITS).unwrap();
+        }
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer,
+            locals_count: num_locals,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+        });
+    }
+
+    #[test]
+    fn a1c1_alloc_load_shared_local_roundtrip() {
+        // AllocSharedLocal installs a SharedCell in slot 0 initialised
+        // from the top-of-stack ValueWord; LoadSharedLocal reads the
+        // same cell back.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_locals(&mut vm, 1);
+
+        // Push the initial value, then AllocSharedLocal { slot: 0 }.
+        vm.push_raw_u64(ValueWord::from_i64(42).into_raw_bits())
+            .unwrap();
+        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
+        vm.op_alloc_shared_local(&alloc_instr).unwrap();
+
+        // Verify that slot 0 now holds a non-null raw pointer.
+        let bp = vm.current_locals_base();
+        let slot_bits = vm.stack[bp];
+        assert_ne!(slot_bits, 0, "slot 0 should hold a non-null SharedCell pointer");
+
+        // LoadSharedLocal { slot: 0 } → 42.
+        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
+        vm.op_load_shared_local(&load_instr).unwrap();
+        let out = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(42));
+
+        // Teardown: drop the Shared cell so the Arc is reclaimed.
+        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
+        vm.op_drop_shared_local(&drop_instr).unwrap();
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1c1_store_load_shared_local_roundtrip() {
+        // After Alloc, StoreSharedLocal overwrites the mutex contents;
+        // a subsequent LoadSharedLocal observes the new value.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_locals(&mut vm, 1);
+
+        vm.push_raw_u64(ValueWord::from_i64(1).into_raw_bits())
+            .unwrap();
+        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
+        vm.op_alloc_shared_local(&alloc_instr).unwrap();
+
+        // Store 100.
+        vm.push_raw_u64(ValueWord::from_i64(100).into_raw_bits())
+            .unwrap();
+        let store_instr = Instruction::new(OpCode::StoreSharedLocal, Some(Operand::Local(0)));
+        vm.op_store_shared_local(&store_instr).unwrap();
+
+        // Load → 100.
+        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
+        vm.op_load_shared_local(&load_instr).unwrap();
+        let out = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(100));
+
+        // Teardown.
+        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
+        vm.op_drop_shared_local(&drop_instr).unwrap();
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1c1_drop_shared_local_releases_arc() {
+        // Allocate a Shared cell via AllocSharedLocal, mint an
+        // independent external Arc share observing the same underlying
+        // cell, then DropSharedLocal — the external Arc's strong count
+        // must drop by exactly 1.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_locals(&mut vm, 1);
+
+        vm.push_raw_u64(ValueWord::from_i64(7).into_raw_bits())
+            .unwrap();
+        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
+        vm.op_alloc_shared_local(&alloc_instr).unwrap();
+
+        // Read the raw pointer that AllocSharedLocal parked in slot 0.
+        let bp = vm.current_locals_base();
+        let cell_ptr = vm.stack[bp] as *const SharedCell;
+        assert!(!cell_ptr.is_null());
+
+        // Mint an external Arc share without removing the slot's share.
+        // `Arc::increment_strong_count` bumps the count by 1; then
+        // `Arc::from_raw` reconstructs an owning handle consuming the
+        // bumped share (see the idiom documented in `Arc::from_raw`).
+        let external: StdArc<SharedCell> = unsafe {
+            StdArc::increment_strong_count(cell_ptr);
+            StdArc::from_raw(cell_ptr)
+        };
+        // Strong count: 1 (slot) + 1 (external) = 2.
+        assert_eq!(StdArc::strong_count(&external), 2);
+
+        // DropSharedLocal must release the slot's share.
+        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
+        vm.op_drop_shared_local(&drop_instr).unwrap();
+
+        // Only the external share remains.
+        assert_eq!(StdArc::strong_count(&external), 1);
+
+        // The spent slot holds null pointer bits (`0u64`), NOT
+        // `NONE_BITS` — this is intentional so the null-guard in
+        // `op_load_shared_local` / `op_store_shared_local` catches
+        // accidental reuse. See the safety note on
+        // `op_drop_shared_local`.
+        assert_eq!(vm.stack[bp], 0u64);
+
+        // Subsequent Load on the spent slot returns a runtime error
+        // rather than segfaulting.
+        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
+        let err = vm.op_load_shared_local(&load_instr).unwrap_err();
+        match err {
+            shape_value::VMError::RuntimeError(msg) => {
+                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
+            }
+            other => panic!("expected RuntimeError, got {:?}", other),
+        }
+
+        drop(external);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1c1_shared_local_lock_is_parking_lot() {
+        // Smoke test that the parking_lot mutex correctly serialises
+        // concurrent readers/writers without deadlocking. This is NOT a
+        // loom test — it just exercises the read/write path enough to
+        // catch an obvious contention bug (e.g. using a non-reentrant
+        // std::sync::RwLock incorrectly).
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_locals(&mut vm, 1);
+
+        vm.push_raw_u64(ValueWord::from_i64(0).into_raw_bits())
+            .unwrap();
+        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
+        vm.op_alloc_shared_local(&alloc_instr).unwrap();
+
+        // Grab a raw share for a side thread.
+        let bp = vm.current_locals_base();
+        let cell_ptr = vm.stack[bp] as *const SharedCell;
+        let external_arc: StdArc<SharedCell> = unsafe {
+            StdArc::increment_strong_count(cell_ptr);
+            StdArc::from_raw(cell_ptr)
+        };
+
+        // The worker writes through its own Arc handle while the main
+        // thread interleaves reads and writes through the VM opcodes.
+        // We only care that the loop terminates — no deadlock.
+        let writer_arc = StdArc::clone(&external_arc);
+        let worker = std::thread::spawn(move || {
+            for i in 0..100 {
+                let mut guard = writer_arc.lock();
+                *guard = ValueWord::from_i64(i as i64).into_raw_bits();
+                drop(guard);
+            }
+        });
+
+        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
+        let store_instr = Instruction::new(OpCode::StoreSharedLocal, Some(Operand::Local(0)));
+        for i in 0..100 {
+            vm.push_raw_u64(ValueWord::from_i64(i as i64 * 2).into_raw_bits())
+                .unwrap();
+            vm.op_store_shared_local(&store_instr).unwrap();
+            vm.op_load_shared_local(&load_instr).unwrap();
+            // Drain the pushed value so the stack doesn't grow unbounded.
+            let _ = vm.pop_raw_u64().unwrap();
+        }
+
+        worker.join().unwrap();
+
+        // Final read to confirm the cell is still live and lockable.
+        vm.op_load_shared_local(&load_instr).unwrap();
+        let final_bits = vm.pop_raw_u64().unwrap();
+        // The final value could come from either the main thread or
+        // the worker — both wrote `i64`-encoded ValueWords, so the
+        // decode must succeed.
+        assert!(ValueWord::from_raw_bits(final_bits).as_i64().is_some());
+
+        // Teardown.
+        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
+        vm.op_drop_shared_local(&drop_instr).unwrap();
+        drop(external_arc);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1c1_multiple_slots_independent() {
+        // Two slots, each holding its own Shared cell. Writes to one
+        // slot must NOT observably affect the other.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_locals(&mut vm, 2);
+
+        // Slot 0 ← 11, Slot 1 ← 22.
+        vm.push_raw_u64(ValueWord::from_i64(11).into_raw_bits())
+            .unwrap();
+        vm.op_alloc_shared_local(&Instruction::new(
+            OpCode::AllocSharedLocal,
+            Some(Operand::Local(0)),
+        ))
+        .unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(22).into_raw_bits())
+            .unwrap();
+        vm.op_alloc_shared_local(&Instruction::new(
+            OpCode::AllocSharedLocal,
+            Some(Operand::Local(1)),
+        ))
+        .unwrap();
+
+        // The two slots must hold distinct pointers.
+        let bp = vm.current_locals_base();
+        assert_ne!(vm.stack[bp], vm.stack[bp + 1]);
+
+        // Write 111 to slot 0, observe slot 1 is still 22.
+        vm.push_raw_u64(ValueWord::from_i64(111).into_raw_bits())
+            .unwrap();
+        vm.op_store_shared_local(&Instruction::new(
+            OpCode::StoreSharedLocal,
+            Some(Operand::Local(0)),
+        ))
+        .unwrap();
+        vm.op_load_shared_local(&Instruction::new(
+            OpCode::LoadSharedLocal,
+            Some(Operand::Local(1)),
+        ))
+        .unwrap();
+        let slot1 = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(slot1).as_i64(), Some(22));
+
+        // Write 222 to slot 1, observe slot 0 is 111.
+        vm.push_raw_u64(ValueWord::from_i64(222).into_raw_bits())
+            .unwrap();
+        vm.op_store_shared_local(&Instruction::new(
+            OpCode::StoreSharedLocal,
+            Some(Operand::Local(1)),
+        ))
+        .unwrap();
+        vm.op_load_shared_local(&Instruction::new(
+            OpCode::LoadSharedLocal,
+            Some(Operand::Local(0)),
+        ))
+        .unwrap();
+        let slot0 = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(slot0).as_i64(), Some(111));
+
+        // Final values check.
+        vm.op_load_shared_local(&Instruction::new(
+            OpCode::LoadSharedLocal,
+            Some(Operand::Local(1)),
+        ))
+        .unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(222)
+        );
+
+        // Teardown: drop both cells.
+        vm.op_drop_shared_local(&Instruction::new(
+            OpCode::DropSharedLocal,
+            Some(Operand::Local(0)),
+        ))
+        .unwrap();
+        vm.op_drop_shared_local(&Instruction::new(
+            OpCode::DropSharedLocal,
+            Some(Operand::Local(1)),
+        ))
+        .unwrap();
         vm.call_stack.pop();
     }
 }

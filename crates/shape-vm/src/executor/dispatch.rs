@@ -523,7 +523,11 @@ impl VirtualMachine {
             | LoadOwnedMutableCapture
             | StoreOwnedMutableCapture
             | LoadSharedCapture
-            | StoreSharedCapture => {
+            | StoreSharedCapture
+            | AllocSharedLocal
+            | LoadSharedLocal
+            | StoreSharedLocal
+            | DropSharedLocal => {
                 return self.exec_variables(instruction);
             }
 
