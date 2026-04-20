@@ -195,6 +195,60 @@ impl BytecodeCompiler {
         self.function_type_ids
             .push((func_idx as u16, function_type_id));
 
+        // Track A.1C — derive the `CaptureKind` for each capture based on
+        // the source binding's declared form AND whether the closure body
+        // actually mutates the capture.
+        //
+        // Binding form (when mutated inside the closure) → CaptureKind:
+        //   `let mut x = ...`   (OwnedMutable source)   → CaptureKind::OwnedMutable
+        //   `var x = ...`       (Flexible source)       → CaptureKind::Shared
+        //
+        // Everything else (including read-only captures of `let mut` /
+        // `var` bindings, and all captures of `let` / function parameters)
+        // → `CaptureKind::Immutable`. A read-only capture is semantically
+        // a by-value snapshot and does not require cell indirection.
+        //
+        // Note (A.1C partial): this metadata rides on the layout's
+        // `capture_kinds` field only. The mutable-mask bits on the layout
+        // remain zero in this commit — see the design note on
+        // `build_closure_function_layouts`. The interpreter's
+        // `op_make_closure` still routes mutable-capture closures through
+        // the legacy `HeapValue::Closure` + SharedCell path because the
+        // compiler has not yet been rewired to emit the A.1B
+        // `Load/StoreOwnedMutableCapture` / `Load/StoreSharedCapture`
+        // opcodes in closure bodies, and outer-scope reads of promoted
+        // `let mut` / `var` bindings still flow through `LoadClosure` +
+        // `HeapValue::SharedCell` auto-deref. Full routing is the A.1C
+        // residual.
+        use crate::type_tracking::BindingOwnershipClass;
+        use shape_value::v2::closure_layout::CaptureKind;
+        let capture_kinds: Vec<CaptureKind> = captured_vars
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                // Only mutated captures need cell indirection. Read-only
+                // captures are snapshot-by-value and stay Immutable
+                // regardless of the source binding's ownership class —
+                // this keeps function-parameter captures (default
+                // `OwnedMutable` per `binding_semantics_for_param`) on
+                // the Immutable path when the closure doesn't write
+                // through them.
+                if !mutable_flags.get(i).copied().unwrap_or(false) {
+                    return CaptureKind::Immutable;
+                }
+                let ownership = self
+                    .binding_semantics_for_name(name)
+                    .map(|(_, _, sem)| sem.ownership_class);
+                match ownership {
+                    Some(BindingOwnershipClass::OwnedMutable) => CaptureKind::OwnedMutable,
+                    Some(BindingOwnershipClass::Flexible) => CaptureKind::Shared,
+                    _ => CaptureKind::Immutable,
+                }
+            })
+            .collect();
+        self.closure_capture_kinds
+            .push((func_idx as u16, capture_kinds));
+
         // Phase D / H4 — classify each mutable capture as LocalMutablePtr vs legacy.
         //
         // For a capture to qualify for `LocalMutablePtr`:
@@ -2302,5 +2356,244 @@ mod tests {
         }
         // The escape path still produces `MakeClosure` with escapes=true.
         assert!(any_escaping_make_closure(&program));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Track A.1C — CaptureKind propagation into closure_function_layouts
+    //
+    // The compiler derives a per-capture `CaptureKind` from the source
+    // binding form and routes it through `closure_capture_kinds`. When
+    // building `program.closure_function_layouts` (see
+    // `compiler_impl_reference_model::build_closure_function_layouts`), the
+    // per-closure layout's `capture_kinds` field carries those kinds —
+    // while the mask bits stay zero to preserve the current `op_make_closure`
+    // Raw-path guard behaviour (the legacy `HeapValue::Closure` fallback
+    // still runs for mutable captures until the outer-scope SharedCell
+    // lifecycle is refactored). Full deletion of the fallback is the
+    // A.1C residual.
+    // ──────────────────────────────────────────────────────────────────────
+
+    use shape_value::v2::closure_layout::CaptureKind;
+
+    #[test]
+    fn test_a1c_let_capture_layout_records_immutable_kind() {
+        // Immutable `let` capture: CaptureKind::Immutable.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let n: int = 7\n\
+                 let f = |x: int| { n + x }\n\
+                 f(35)\n\
+             }\n\
+             main()",
+        );
+        let layouts: Vec<_> = program
+            .closure_function_layouts
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .filter(|l| l.capture_count() == 1)
+            .collect();
+        assert!(
+            !layouts.is_empty(),
+            "expected at least one layout with one capture"
+        );
+        for layout in layouts {
+            assert_eq!(
+                layout.capture_kinds[0],
+                CaptureKind::Immutable,
+                "`let` capture must be Immutable"
+            );
+            // A.1C (partial): masks remain zero; capture_kinds carries
+            // the metadata independently. See
+            // `compiler_impl_reference_model::build_closure_function_layouts`.
+            assert_eq!(layout.owned_mutable_capture_mask, 0);
+            assert_eq!(layout.shared_capture_mask, 0);
+        }
+    }
+
+    #[test]
+    fn test_a1c_let_mut_capture_layout_records_owned_mutable_kind() {
+        // `let mut` capture mutated from a closure: CaptureKind::OwnedMutable.
+        // The mask stays at zero — see the design note on
+        // `build_closure_function_layouts` for why. `capture_kinds[i]`
+        // is the authoritative source.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let mut n: int = 0\n\
+                 let f = |x: int| { n = n + x }\n\
+                 f(5)\n\
+                 n\n\
+             }\n\
+             main()",
+        );
+        let layouts: Vec<_> = program
+            .closure_function_layouts
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .filter(|l| l.capture_count() == 1)
+            .collect();
+        assert!(
+            !layouts.is_empty(),
+            "expected at least one layout with one capture"
+        );
+        let mut saw_owned_mutable = false;
+        for layout in layouts {
+            if layout.capture_kinds[0] == CaptureKind::OwnedMutable {
+                saw_owned_mutable = true;
+            }
+        }
+        assert!(
+            saw_owned_mutable,
+            "`let mut` capture mutated from the closure must be OwnedMutable in capture_kinds"
+        );
+    }
+
+    #[test]
+    fn test_a1c_var_capture_layout_records_shared_kind() {
+        // `var` capture mutated from a closure: CaptureKind::Shared.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 var n: int = 0\n\
+                 let f = |x: int| { n = n + x }\n\
+                 f(3)\n\
+                 n\n\
+             }\n\
+             main()",
+        );
+        let layouts: Vec<_> = program
+            .closure_function_layouts
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .filter(|l| l.capture_count() == 1)
+            .collect();
+        assert!(
+            !layouts.is_empty(),
+            "expected at least one layout with one capture"
+        );
+        let mut saw_shared = false;
+        for layout in layouts {
+            if layout.capture_kinds[0] == CaptureKind::Shared {
+                saw_shared = true;
+            }
+        }
+        assert!(
+            saw_shared,
+            "`var` capture mutated from the closure must be Shared in capture_kinds"
+        );
+    }
+
+    #[test]
+    fn test_a1c_readonly_let_mut_capture_stays_immutable() {
+        // A closure that only READS a `let mut` binding captures it by
+        // value. CaptureKind must be Immutable — cell indirection is only
+        // needed for write-through.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let mut n: int = 7\n\
+                 let f = |x: int| { n + x }\n\
+                 let r = f(35)\n\
+                 r\n\
+             }\n\
+             main()",
+        );
+        let layouts: Vec<_> = program
+            .closure_function_layouts
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .filter(|l| l.capture_count() == 1)
+            .collect();
+        assert!(!layouts.is_empty());
+        for layout in layouts {
+            assert_eq!(
+                layout.capture_kinds[0],
+                CaptureKind::Immutable,
+                "read-only capture of `let mut` must remain Immutable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a1c_let_mut_closure_e2e_propagates_writes() {
+        // End-to-end: a `let mut` capture mutated from inside the closure
+        // propagates writes to the outer scope. This flows through the
+        // legacy `BoxLocal` + `HeapValue::Closure` + `SharedCell` path —
+        // A.1C's layout metadata does not alter runtime semantics. A
+        // regression here would indicate the mask-bit invariant on
+        // `build_closure_function_layouts` has been broken.
+        let val = run_program_top_level(
+            "fn main() -> int {\n\
+                 let mut x: int = 0\n\
+                 let inc = || { x = x + 1 }\n\
+                 inc()\n\
+                 inc()\n\
+                 x\n\
+             }\n\
+             main()",
+        );
+        assert_eq!(
+            val.as_i64(),
+            Some(2),
+            "let mut closure writes must propagate"
+        );
+    }
+
+    #[test]
+    fn test_a1c_var_multi_closure_e2e_shared_observes_writes() {
+        // Two closures capturing the same `var` binding must observe each
+        // other's writes. Legacy SharedCell semantics; A.1C does not
+        // change runtime behaviour.
+        let val = run_program_top_level(
+            "fn main() -> int {\n\
+                 var x: int = 0\n\
+                 let inc = || { x = x + 1 }\n\
+                 let dec = || { x = x - 1 }\n\
+                 inc()\n\
+                 dec()\n\
+                 inc()\n\
+                 x\n\
+             }\n\
+             main()",
+        );
+        assert_eq!(
+            val.as_i64(),
+            Some(1),
+            "var captures shared across closures must observe each other's writes"
+        );
+    }
+
+    #[test]
+    fn test_a1c_mixed_let_let_mut_var_layout_records_each_kind() {
+        // Closure captures one `let`, one `let mut`, and one `var`.
+        // The layout's `capture_kinds` must reflect each binding form.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let a: int = 1\n\
+                 let mut b: int = 10\n\
+                 var c: int = 100\n\
+                 let f = |x: int| { b = b + x; c = c + x; a + b + c }\n\
+                 f(2)\n\
+             }\n\
+             main()",
+        );
+        // Find the layout with three captures — that's our closure.
+        let target = program
+            .closure_function_layouts
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .find(|l| l.capture_count() == 3);
+        let layout = target.expect("closure with three captures must have a layout");
+
+        // Captures are collected in sorted order of names (see
+        // `compile_expr_closure` — `captured_vars.sort()`): a, b, c.
+        assert_eq!(layout.capture_kinds[0], CaptureKind::Immutable, "`a` is let");
+        assert_eq!(
+            layout.capture_kinds[1],
+            CaptureKind::OwnedMutable,
+            "`b` is let mut"
+        );
+        assert_eq!(layout.capture_kinds[2], CaptureKind::Shared, "`c` is var");
+        // Masks stay zero by design (A.1C partial). See the design note
+        // on `build_closure_function_layouts`.
+        assert_eq!(layout.owned_mutable_capture_mask, 0);
+        assert_eq!(layout.shared_capture_mask, 0);
     }
 }

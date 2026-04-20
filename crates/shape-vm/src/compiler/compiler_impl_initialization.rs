@@ -28,6 +28,7 @@ impl BytecodeCompiler {
             closure_function_ids: Vec::new(),
             closure_registry: shape_value::v2::closure_layout::ClosureRegistry::new(),
             closure_type_ids: Vec::new(),
+            closure_capture_kinds: Vec::new(),
             function_type_registry:
                 shape_value::v2::function_type_registry::FunctionTypeRegistry::new(),
             function_type_ids: Vec::new(),

@@ -523,11 +523,27 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::MakeTableFromRows,
 ];
 
-fn vm_only_opcode_reason(_opcode: OpCode) -> Option<&'static str> {
+fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // All opcodes are now compiled by the JIT translator — either natively
     // or via FFI trampoline calls to the VM runtime.  No interpreter
     // fallback is required.
-    None
+    //
+    // Track A.1C: the four A.1B mutable-cell capture opcodes
+    // (LoadOwnedMutableCapture / StoreOwnedMutableCapture /
+    // LoadSharedCapture / StoreSharedCapture) have interpreter handlers
+    // but NO Cranelift lowering yet. A.1D lands the OwnedMutable lowering;
+    // A.1E lands the Shared lowering. Until then, any function that
+    // contains one of these opcodes must fall back to the interpreter to
+    // avoid the JIT silently mislowering the raw-pointer capture slot.
+    match opcode {
+        OpCode::LoadOwnedMutableCapture
+        | OpCode::StoreOwnedMutableCapture
+        | OpCode::LoadSharedCapture
+        | OpCode::StoreSharedCapture => {
+            Some("A.1B mutable-cell capture opcode; Cranelift lowering pending in A.1D/A.1E")
+        }
+        _ => None,
+    }
 }
 
 fn is_supported_builtin(_builtin: BuiltinFunction) -> bool {
@@ -849,5 +865,100 @@ mod tests {
                 builtin
             );
         }
+    }
+
+    // Track A.1C — JIT gate for the four A.1B mutable-cell capture opcodes.
+    //
+    // Until A.1D (OwnedMutable) and A.1E (Shared) land their Cranelift
+    // lowerings, any function containing one of these opcodes must fall
+    // back to the interpreter rather than silently miscompile the raw-
+    // pointer slot. These tests pin the gate.
+
+    #[test]
+    fn a1c_preflight_rejects_load_owned_mutable_capture() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::LoadOwnedMutableCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(!report.can_jit());
+        assert!(
+            report
+                .vm_only_opcodes
+                .contains(&OpCode::LoadOwnedMutableCapture),
+            "LoadOwnedMutableCapture must appear in vm_only_opcodes until A.1D"
+        );
+    }
+
+    #[test]
+    fn a1c_preflight_rejects_store_owned_mutable_capture() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::StoreOwnedMutableCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(!report.can_jit());
+        assert!(
+            report
+                .vm_only_opcodes
+                .contains(&OpCode::StoreOwnedMutableCapture),
+            "StoreOwnedMutableCapture must appear in vm_only_opcodes until A.1D"
+        );
+    }
+
+    #[test]
+    fn a1c_preflight_rejects_load_shared_capture() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(!report.can_jit());
+        assert!(
+            report.vm_only_opcodes.contains(&OpCode::LoadSharedCapture),
+            "LoadSharedCapture must appear in vm_only_opcodes until A.1E"
+        );
+    }
+
+    #[test]
+    fn a1c_preflight_rejects_store_shared_capture() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(!report.can_jit());
+        assert!(
+            report.vm_only_opcodes.contains(&OpCode::StoreSharedCapture),
+            "StoreSharedCapture must appear in vm_only_opcodes until A.1E"
+        );
+    }
+
+    #[test]
+    fn a1c_preflight_immutable_closure_body_still_jits() {
+        // Closure bodies that DON'T contain the A.1B mutable-cell opcodes
+        // should still JIT-compile — the A.1C gate is narrow.
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::simple(OpCode::PushConst),
+                Instruction::simple(OpCode::AddDynamic),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let report = preflight_jit_compatibility(&program);
+        assert!(report.can_jit());
     }
 }

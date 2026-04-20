@@ -539,6 +539,17 @@ pub struct BytecodeCompiler {
     /// lowered. Phase C reads this to key monomorphization on the closure type.
     pub(crate) closure_type_ids: Vec<(u16, shape_value::v2::concrete_type::ClosureTypeId)>,
 
+    /// Track A.1C — per-closure `CaptureKind` vector, one entry per capture
+    /// in declaration order. Populated alongside `closure_type_ids` so that
+    /// `compiler_impl_reference_model::build_closure_function_layouts` can
+    /// construct the per-function `ClosureLayout` with the correct
+    /// `CaptureKind` per capture (rather than defaulting to the
+    /// `ClosureRegistry::intern`'d all-`Immutable` shape). A missing entry
+    /// (closure registered via the legacy path, e.g. test helpers) falls
+    /// back to all-`Immutable`, matching the pre-A.1C layout.
+    pub(crate) closure_capture_kinds:
+        Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
+
     /// Registry of `Function<A, R>` signatures (v2 closure specialization
     /// Phase F). `FunctionTypeId`s assigned here are written into
     /// `TypedClosureHeader.type_id` in the JIT path and consumed by

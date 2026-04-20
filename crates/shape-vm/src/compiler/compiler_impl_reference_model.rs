@@ -1313,15 +1313,65 @@ impl BytecodeCompiler {
         // ABOVE `build_content_addressed_program` so the layouts propagate
         // through the `ContentAddressedProgram` → `LinkedProgram` →
         // `BytecodeProgram` path into the VM's producer.
+        //
+        // Track A.1C (partial): the compiler records per-capture
+        // `CaptureKind`s in `closure_capture_kinds` based on the source
+        // binding form (see `compile_expr_closure`). The `capture_kinds`
+        // field on the emitted `ClosureLayout` reflects those kinds so
+        // downstream consumers (A.1D/A.1E JIT lowering; diagnostics; the
+        // layout-aware Drop glue in `release_typed_closure`) see the
+        // correct classification.
+        //
+        // IMPORTANT — Raw-path guard interaction: the bitmask fields
+        // (`owned_mutable_capture_mask`, `shared_capture_mask`) are
+        // DELIBERATELY kept at their registry-default values (all zero)
+        // in this commit. The interpreter's `op_make_closure`
+        // (`executor/control_flow/mod.rs`) uses those masks to decide
+        // whether to take the A.1B raw allocation path
+        // (`Box::into_raw` / `Arc::into_raw`) vs. the legacy
+        // `HeapValue::Closure { upvalues }` fallback. The legacy fallback
+        // is still correct today because the compiler continues to emit
+        // `BoxLocal` / `BoxModuleBinding` for mutable captures, and the
+        // inner closure body reads/writes through `LoadClosure` +
+        // `SharedCell` auto-deref. Flipping the mask bits here without
+        // rerouting the compiler's read/write emission (and the outer-
+        // scope's SharedCell lifecycle) would cause the Raw path to wrap
+        // the already-boxed SharedCell ValueWord in a *fresh*
+        // `Box<ValueWord>` / `Arc<SharedCell>`, breaking cross-scope
+        // observability. A.1D/A.1E and the outer-scope refactor will
+        // lift the mask bits once the read/write opcodes are rerouted.
         {
+            use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
             let total_fns = self.program.functions.len();
-            let mut layouts: Vec<Option<std::sync::Arc<
-                shape_value::v2::closure_layout::ClosureLayout,
-            >>> = vec![None; total_fns];
+            let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> =
+                vec![None; total_fns];
+            // Map function index → per-capture CaptureKind vector.
+            let kinds_by_fn: std::collections::HashMap<u16, &Vec<CaptureKind>> = self
+                .closure_capture_kinds
+                .iter()
+                .map(|(fid, kinds)| (*fid, kinds))
+                .collect();
             for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
-                if let Some(layout) = self.closure_registry.get(type_id) {
+                if let Some(registry_layout) = self.closure_registry.get(type_id) {
                     if (fn_idx as usize) < total_fns {
-                        layouts[fn_idx as usize] = Some(std::sync::Arc::new(layout.clone()));
+                        let layout_arc = match kinds_by_fn.get(&fn_idx) {
+                            Some(kinds)
+                                if kinds.len() == registry_layout.capture_types.len()
+                                    && kinds.iter().any(|k| !matches!(k, CaptureKind::Immutable)) =>
+                            {
+                                // Carry the compiler's CaptureKind metadata
+                                // on the layout WITHOUT touching the mask
+                                // bits that drive the Raw allocation path.
+                                // `capture_kinds` becomes the authoritative
+                                // source for A.1D/A.1E JIT lowering and
+                                // for the eventual outer-scope refactor.
+                                let mut rebuilt = registry_layout.clone();
+                                rebuilt.capture_kinds = (*kinds).clone();
+                                std::sync::Arc::new(rebuilt)
+                            }
+                            _ => std::sync::Arc::new(registry_layout.clone()),
+                        };
+                        layouts[fn_idx as usize] = Some(layout_arc);
                     }
                 }
             }
