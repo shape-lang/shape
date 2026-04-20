@@ -2160,7 +2160,7 @@ mod tests {
     #[test]
     fn test_h6_5_closure_raw_snapshot_roundtrip() {
         use shape_value::heap_value::HeapValue;
-        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
         use shape_value::v2::closure_raw::{
             OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
         };
@@ -2171,11 +2171,14 @@ mod tests {
 
         // Build a ClosureRaw value directly (bypassing the compiler —
         // we're testing the serialize path, not the producer).
-        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[
-            ConcreteType::I64,
-            ConcreteType::F64,
-            ConcreteType::Bool,
-        ]));
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::I64, ConcreteType::F64, ConcreteType::Bool],
+            &[
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+            ],
+        ));
         let original_nb = unsafe {
             let ptr = alloc_typed_closure(91, 0, &layout);
             write_capture_typed(ptr, &layout, 0, ValueWord::from_i64(-5).into_raw_bits());

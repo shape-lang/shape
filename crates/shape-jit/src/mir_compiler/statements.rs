@@ -892,13 +892,13 @@ mod phase_e_tests {
     fn layout_agrees_with_runtime_closure_layout_for_f64() {
         // Cross-check against shape_value::v2::ClosureLayout for the
         // all-F64 signature. Both must agree on offsets and total size.
-        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
         use shape_value::v2::concrete_type::ConcreteType;
 
-        let runtime_layout = ClosureLayout::from_capture_types(&[
-            ConcreteType::F64,
-            ConcreteType::F64,
-        ]);
+        let runtime_layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::F64, ConcreteType::F64],
+            &[CaptureKind::Immutable, CaptureKind::Immutable],
+        );
         let (offsets, total, _) = phase_e_layout(&[cl_types::F64, cl_types::F64]);
         assert_eq!(total, runtime_layout.total_stack_size());
         assert_eq!(offsets[0] as usize, runtime_layout.stack_capture_offset(0));
@@ -921,11 +921,17 @@ mod phase_h1_tests {
     //! See `docs/v2-closure-specialization.md` §13 H1.
     use super::*;
     use shape_value::v2::closure_layout::{
-        ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, STACK_CLOSURE_HEADER_SIZE,
+        CaptureKind, ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, STACK_CLOSURE_HEADER_SIZE,
     };
     use shape_value::v2::concrete_type::ConcreteType;
     use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_CLOSURE};
     use shape_value::v2::struct_layout::FieldKind;
+
+    // Test-local helper: immutable-only layout.
+    fn immutable_layout(types: &[ConcreteType]) -> ClosureLayout {
+        let kinds = vec![CaptureKind::Immutable; types.len()];
+        ClosureLayout::from_capture_types(types, &kinds)
+    }
 
     #[test]
     fn heap_kind_v2_closure_constant_is_84() {
@@ -946,7 +952,7 @@ mod phase_h1_tests {
     fn empty_captures_heap_block_is_16_bytes() {
         // `TypedClosureHeader` alone — no captures — is HeapHeader(8) +
         // function_id(4) + type_id(4) = 16 bytes.
-        let layout = ClosureLayout::from_capture_types(&[]);
+        let layout = immutable_layout(&[]);
         assert_eq!(layout.total_heap_size(), HEAP_CLOSURE_HEADER_SIZE);
         assert_eq!(layout.total_heap_size(), 16);
         assert_eq!(layout.heap_capture_mask, 0);
@@ -955,7 +961,7 @@ mod phase_h1_tests {
     #[test]
     fn single_i64_capture_heap_layout() {
         // Capture at offset 16 (HEAP_CLOSURE_HEADER_SIZE), total 24 bytes.
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64]);
+        let layout = immutable_layout(&[ConcreteType::I64]);
         assert_eq!(layout.heap_capture_offset(0), 16);
         assert_eq!(layout.total_heap_size(), 24);
         assert_eq!(layout.heap_capture_mask, 0);
@@ -966,7 +972,7 @@ mod phase_h1_tests {
     fn multi_capture_heap_layout_matches_plan_example() {
         // Plan §13 H1 test 2: `|x| x + a + b + s` with s: string.
         // Expected: one atomic retain for s (Ptr), none for a (I64) or b (F64).
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::I64,
             ConcreteType::F64,
             ConcreteType::String,
@@ -994,7 +1000,7 @@ mod phase_h1_tests {
         // emit_heap_closure uses `heap_capture_offset(i)` directly as the
         // absolute byte offset from the allocation base. Cross-check
         // against `capture_offset` + `HEAP_CLOSURE_HEADER_SIZE`.
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::F64,
             ConcreteType::I32,
             ConcreteType::String,
@@ -1011,7 +1017,7 @@ mod phase_h1_tests {
     fn heap_and_stack_capture_offsets_differ_by_header_size_delta() {
         // A closure literal without captures has heap size 16 but stack
         // size 8 — the 8-byte delta is the `HeapHeader`.
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::I64,
             ConcreteType::Bool,
         ]);
@@ -1049,7 +1055,7 @@ mod phase_h1_tests {
         // must retain it. Plan §13 H1 test 5 (array of closures) relies
         // on this mask bit being set.
         let arr = ConcreteType::Array(Box::new(ConcreteType::I64));
-        let layout = ClosureLayout::from_capture_types(&[arr]);
+        let layout = immutable_layout(&[arr]);
         assert_eq!(layout.heap_capture_mask, 0b1);
         assert!(layout.is_heap_capture(0));
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
@@ -1061,7 +1067,7 @@ mod phase_h1_tests {
         // order — the same order `heap_capture_offset(i)` is computed in.
         // Plan §13 H1 test 3 relies on drop (and by extension retain)
         // iterating captures in `heap_capture_mask` order.
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::String,
             ConcreteType::F64,
             ConcreteType::String,
@@ -1086,7 +1092,7 @@ mod phase_h1_tests {
         // (guarding against malformed layouts). The size must fit a u32
         // for the Cranelift iconst(I32, total) path used in the allocator
         // call. For any realistic closure this is trivially true.
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64]);
+        let layout = immutable_layout(&[ConcreteType::I64]);
         assert!(layout.total_heap_size() <= u32::MAX as usize);
     }
 
@@ -1104,7 +1110,7 @@ mod phase_h1_tests {
         // check to `register_object_symbols` + `declare_v2_functions`
         // invariants. This test documents the dependency for future
         // reviewers.
-        let layout = ClosureLayout::from_capture_types(&[]);
+        let layout = immutable_layout(&[]);
         assert!(layout.total_heap_size() <= u32::MAX as usize);
         // The kind passed at the FFI boundary is HEAP_KIND_V2_CLOSURE; the
         // allocator writes it via HeapHeader::new. Verify the constant is

@@ -5590,6 +5590,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "chrono-tz",
+ "parking_lot",
  "rust_decimal",
  "serde",
  "serde_json",

@@ -1658,14 +1658,15 @@ mod tests {
     #[test]
     fn test_h6_5_closure_raw_wire_roundtrip() {
         use shape_value::heap_value::HeapValue;
-        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
         use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
         use shape_value::v2::concrete_type::ConcreteType;
         use shape_value::value_word::ValueWordExt;
 
-        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[
-            ConcreteType::I64,
-        ]));
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::Immutable],
+        ));
         let raw_nb = unsafe {
             let ptr = alloc_typed_closure(3, 0, &layout);
             let owned =

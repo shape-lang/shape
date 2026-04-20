@@ -40,6 +40,51 @@ use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use std::collections::HashMap;
 
+/// Interior-mutable cell backing a `CaptureKind::Shared` capture.
+///
+/// A `Shared` capture slot stores `*const SharedCell` — a raw pointer
+/// obtained via `Arc::into_raw` on an `Arc<SharedCell>`. Each live slot
+/// holds exactly one strong-count share; closure Drop reclaims it with
+/// `Arc::from_raw(ptr).drop()`.
+///
+/// `parking_lot::Mutex` is used instead of `std::sync::Mutex` so the
+/// uncontended-fast-path is a single atomic compare-exchange — important
+/// for the JIT's inline lock/unlock lowering in A.1E.
+pub type SharedCell = parking_lot::Mutex<crate::ValueWord>;
+
+/// Storage discipline for a closure capture.
+///
+/// Each capture index i has exactly one `CaptureKind`. The three kinds
+/// are mutually exclusive and map to three mutually-exclusive bitmasks
+/// on `ClosureLayout` (`heap_capture_mask`, `owned_mutable_capture_mask`,
+/// `shared_capture_mask`).
+///
+/// - **`Immutable`** — `let` by-move/copy captures. The slot's width
+///   follows `capture_types[i]` via [`FieldKind`]; reads and writes go
+///   through [`super::closure_raw::read_capture_as_value_bits`] and
+///   [`super::closure_raw::write_capture_typed`] as today. If the
+///   underlying field kind is `Ptr`, the slot owns one heap-refcount
+///   share (participates in `heap_capture_mask`).
+/// - **`OwnedMutable`** — `let mut` by-move captures. The 8-byte slot
+///   holds `*mut ValueWord` obtained from `Box::into_raw(Box::new(...))`.
+///   Exactly one closure owns the box; Drop reclaims it with
+///   `Box::from_raw`. The interior `ValueWord` can itself carry heap
+///   refcount shares — those must be dropped before the box is freed.
+/// - **`Shared`** — `var` captures shared across nested closures. The
+///   8-byte slot holds `*const SharedCell` obtained from
+///   `Arc::into_raw(Arc::new(Mutex::new(...)))`. Each slot counts as one
+///   `Arc` strong share; reads/writes take the parking_lot mutex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureKind {
+    /// `let` binding: value in slot, width per `FieldKind`.
+    Immutable,
+    /// `let mut` binding: Ptr slot holds `*mut ValueWord` (Box cell).
+    OwnedMutable,
+    /// `var` binding: Ptr slot holds `*const SharedCell`
+    /// (`Arc<parking_lot::Mutex<ValueWord>>` via `Arc::into_raw`).
+    Shared,
+}
+
 /// Byte size of the heap closure header: `HeapHeader (8) + function_id (4) + type_id (4)`.
 pub const HEAP_CLOSURE_HEADER_SIZE: usize = 16;
 
@@ -87,9 +132,24 @@ pub struct ClosureLayout {
     pub capture_types: Vec<ConcreteType>,
     /// Per-capture field info. `offset` is relative to the captures area start.
     pub captures: Vec<FieldInfo>,
-    /// Bitmap: bit N = capture N is a heap-refcounted pointer (`Ptr`).
-    /// Used by Drop glue to know which captures to release.
+    /// Per-capture storage discipline. `capture_kinds[i]` corresponds to
+    /// `captures[i]` and determines which of the three mutually-exclusive
+    /// masks below (if any) has bit `i` set.
+    pub capture_kinds: Vec<CaptureKind>,
+    /// Bitmap: bit N = capture N is a heap-refcounted pointer (`Ptr`) held
+    /// directly in the slot (i.e. `CaptureKind::Immutable` over a `Ptr`
+    /// field kind). Used by Drop glue to call `release_raw_value_bits` on
+    /// the slot contents.
     pub heap_capture_mask: u64,
+    /// Bitmap: bit N = capture N is `CaptureKind::OwnedMutable`. The slot
+    /// holds `*mut ValueWord` (from `Box::into_raw`); Drop reclaims via
+    /// `Box::from_raw`, which also releases any heap refcount share held
+    /// inside the boxed `ValueWord`.
+    pub owned_mutable_capture_mask: u64,
+    /// Bitmap: bit N = capture N is `CaptureKind::Shared`. The slot holds
+    /// `*const SharedCell` (from `Arc::into_raw`); Drop reclaims via
+    /// `Arc::from_raw`, which decrements the strong count by one.
+    pub shared_capture_mask: u64,
     /// Size in bytes of the captures area (rounded up to 8-byte alignment).
     /// Does NOT include the header.
     pub captures_size: usize,
@@ -98,15 +158,42 @@ pub struct ClosureLayout {
 }
 
 impl ClosureLayout {
-    /// Build a layout from an ordered list of capture types.
+    /// Build a layout from parallel lists of capture types and storage
+    /// kinds.
     ///
     /// Captures are laid out in declaration order with natural alignment
     /// padding, starting from offset 0 of the captures area. The total size
     /// is rounded up to 8 bytes so the whole closure object is 8-aligned.
-    pub fn from_capture_types(capture_types: &[ConcreteType]) -> Self {
+    ///
+    /// For `CaptureKind::OwnedMutable` / `CaptureKind::Shared` the slot is
+    /// always emitted as a `FieldKind::Ptr` (8-byte pointer), regardless of
+    /// the underlying `ConcreteType` — the slot holds the raw
+    /// `*mut ValueWord` (Box) or `*const SharedCell` (Arc), not the value
+    /// directly. Only `CaptureKind::Immutable` honours the natural width of
+    /// `capture_types[i]`.
+    ///
+    /// # Invariants on the emitted masks
+    ///
+    /// The three per-index masks are **mutually exclusive**: for any index
+    /// `i`, at most one of `heap_capture_mask`, `owned_mutable_capture_mask`,
+    /// `shared_capture_mask` has bit `i` set. `release_typed_closure`
+    /// relies on this to avoid double-releases.
+    ///
+    /// # Panics
+    ///
+    /// - If `capture_types.len() != kinds.len()`.
+    /// - If `capture_types.len() > 64` (mask-width limit).
+    pub fn from_capture_types(capture_types: &[ConcreteType], kinds: &[CaptureKind]) -> Self {
+        assert_eq!(
+            capture_types.len(),
+            kinds.len(),
+            "from_capture_types: capture_types ({}) and kinds ({}) must have equal length",
+            capture_types.len(),
+            kinds.len()
+        );
         if capture_types.len() > 64 {
             panic!(
-                "closure has {} captures; heap_capture_mask is limited to 64 captures",
+                "closure has {} captures; capture masks are limited to 64 captures",
                 capture_types.len()
             );
         }
@@ -114,10 +201,18 @@ impl ClosureLayout {
         let mut current_offset: usize = 0;
         let mut captures = Vec::with_capacity(capture_types.len());
         let mut heap_mask: u64 = 0;
+        let mut owned_mutable_mask: u64 = 0;
+        let mut shared_mask: u64 = 0;
         let mut max_align: usize = 1;
 
-        for (i, ty) in capture_types.iter().enumerate() {
-            let kind = ty.to_field_kind();
+        for (i, (ty, capture_kind)) in capture_types.iter().zip(kinds.iter()).enumerate() {
+            // Field kind emission: OwnedMutable and Shared are ALWAYS Ptr
+            // slots regardless of the declared type — the slot stores a
+            // raw pointer (Box cell or Arc cell), not the value.
+            let kind = match capture_kind {
+                CaptureKind::Immutable => ty.to_field_kind(),
+                CaptureKind::OwnedMutable | CaptureKind::Shared => FieldKind::Ptr,
+            };
             let align = kind.alignment();
             let size = kind.size();
             current_offset = (current_offset + align - 1) & !(align - 1);
@@ -127,8 +222,18 @@ impl ClosureLayout {
                 offset: current_offset,
                 size,
             });
-            if kind == FieldKind::Ptr {
-                heap_mask |= 1u64 << i;
+            match capture_kind {
+                CaptureKind::Immutable => {
+                    if kind == FieldKind::Ptr {
+                        heap_mask |= 1u64 << i;
+                    }
+                }
+                CaptureKind::OwnedMutable => {
+                    owned_mutable_mask |= 1u64 << i;
+                }
+                CaptureKind::Shared => {
+                    shared_mask |= 1u64 << i;
+                }
             }
             if align > max_align {
                 max_align = align;
@@ -136,13 +241,36 @@ impl ClosureLayout {
             current_offset += size;
         }
 
-        let captures_align = if capture_types.is_empty() { 8 } else { max_align.max(8) };
+        // SAFETY of the three masks: by construction each index is assigned
+        // to exactly one `CaptureKind` branch above, so the three mask bits
+        // at any index `i` are mutually exclusive. `release_typed_closure`
+        // relies on this invariant for correctness.
+        debug_assert_eq!(
+            heap_mask & owned_mutable_mask,
+            0,
+            "heap/owned_mutable masks overlap"
+        );
+        debug_assert_eq!(heap_mask & shared_mask, 0, "heap/shared masks overlap");
+        debug_assert_eq!(
+            owned_mutable_mask & shared_mask,
+            0,
+            "owned_mutable/shared masks overlap"
+        );
+
+        let captures_align = if capture_types.is_empty() {
+            8
+        } else {
+            max_align.max(8)
+        };
         let captures_size = (current_offset + captures_align - 1) & !(captures_align - 1);
 
         ClosureLayout {
             capture_types: capture_types.to_vec(),
             captures,
+            capture_kinds: kinds.to_vec(),
             heap_capture_mask: heap_mask,
+            owned_mutable_capture_mask: owned_mutable_mask,
+            shared_capture_mask: shared_mask,
             captures_size,
             captures_align,
         }
@@ -195,10 +323,31 @@ impl ClosureLayout {
         STACK_CLOSURE_HEADER_SIZE + self.captures_size
     }
 
-    /// Whether capture `i` is a heap-refcounted pointer.
+    /// Whether capture `i` is a heap-refcounted pointer (slot-owned Arc
+    /// share on an immutable `Ptr` capture).
     #[inline]
     pub fn is_heap_capture(&self, i: usize) -> bool {
         self.heap_capture_mask & (1u64 << i) != 0
+    }
+
+    /// Whether capture `i` is `CaptureKind::OwnedMutable` — slot holds
+    /// `*mut ValueWord` and must be `Box::from_raw`'d on drop.
+    #[inline]
+    pub fn is_owned_mutable_capture(&self, i: usize) -> bool {
+        self.owned_mutable_capture_mask & (1u64 << i) != 0
+    }
+
+    /// Whether capture `i` is `CaptureKind::Shared` — slot holds
+    /// `*const SharedCell` and must be `Arc::from_raw`'d on drop.
+    #[inline]
+    pub fn is_shared_capture(&self, i: usize) -> bool {
+        self.shared_capture_mask & (1u64 << i) != 0
+    }
+
+    /// Storage discipline for capture `i`.
+    #[inline]
+    pub fn capture_storage_kind(&self, i: usize) -> CaptureKind {
+        self.capture_kinds[i]
     }
 }
 
@@ -222,12 +371,19 @@ impl ClosureRegistry {
     /// Intern a capture signature and return its `ClosureTypeId`. If the
     /// signature has been seen before, returns the existing id; otherwise
     /// allocates a fresh one and records the layout.
+    ///
+    /// Registered layouts default every capture to `CaptureKind::Immutable`
+    /// — the registry key is purely type-level. Closures with mutable
+    /// captures use a distinct layout constructed directly via
+    /// [`ClosureLayout::from_capture_types`] and are not shared through
+    /// this intern table.
     pub fn intern(&mut self, capture_types: Vec<ConcreteType>) -> ClosureTypeId {
         if let Some(&id) = self.signature_to_id.get(&capture_types) {
             return id;
         }
         let id = ClosureTypeId(self.layouts.len() as u32);
-        let layout = ClosureLayout::from_capture_types(&capture_types);
+        let kinds = vec![CaptureKind::Immutable; capture_types.len()];
+        let layout = ClosureLayout::from_capture_types(&capture_types, &kinds);
         self.layouts.push(layout);
         self.signature_to_id.insert(capture_types, id);
         id
@@ -268,11 +424,19 @@ mod tests {
     use super::*;
     use crate::v2::concrete_type::{ConcreteType, StructLayoutId};
 
+    // Test-local helper: constructs a layout with every capture marked
+    // `Immutable`. Mirrors the pre-A.1A constructor signature so the
+    // existing layout-geometry tests stay concise.
+    fn immutable_layout(types: &[ConcreteType]) -> ClosureLayout {
+        let kinds = vec![CaptureKind::Immutable; types.len()];
+        ClosureLayout::from_capture_types(types, &kinds)
+    }
+
     // ---- ClosureLayout layout tests ----
 
     #[test]
     fn test_empty_captures() {
-        let layout = ClosureLayout::from_capture_types(&[]);
+        let layout = immutable_layout(&[]);
         assert_eq!(layout.capture_count(), 0);
         assert_eq!(layout.captures_size, 0);
         assert_eq!(layout.captures_align, 8);
@@ -283,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_single_f64_capture() {
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::F64]);
+        let layout = immutable_layout(&[ConcreteType::F64]);
         assert_eq!(layout.capture_count(), 1);
         assert_eq!(layout.capture_offset(0), 0);
         assert_eq!(layout.capture_kind(0), FieldKind::F64);
@@ -297,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_two_f64_captures() {
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::F64, ConcreteType::F64]);
+        let layout = immutable_layout(&[ConcreteType::F64, ConcreteType::F64]);
         assert_eq!(layout.capture_count(), 2);
         assert_eq!(layout.capture_offset(0), 0);
         assert_eq!(layout.capture_offset(1), 8);
@@ -309,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_single_i64_capture() {
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64]);
+        let layout = immutable_layout(&[ConcreteType::I64]);
         assert_eq!(layout.capture_offset(0), 0);
         assert_eq!(layout.capture_kind(0), FieldKind::I64);
         assert_eq!(layout.captures_size, 8);
@@ -324,11 +488,8 @@ mod tests {
         // i32 @ 8  (size 4)
         // ptr @ 16 (needs 8-align from offset 12, pad to 16; size 8)
         // captures_size = 24
-        let layout = ClosureLayout::from_capture_types(&[
-            ConcreteType::F64,
-            ConcreteType::I32,
-            ConcreteType::String,
-        ]);
+        let layout =
+            immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::String]);
         assert_eq!(layout.capture_count(), 3);
         assert_eq!(layout.capture_offset(0), 0);
         assert_eq!(layout.capture_offset(1), 8);
@@ -348,7 +509,7 @@ mod tests {
     #[test]
     fn test_single_heap_typed_capture_string() {
         // Single String (Ptr) capture: captures area = 8 bytes, mask bit 0 set.
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String]);
+        let layout = immutable_layout(&[ConcreteType::String]);
         assert_eq!(layout.capture_offset(0), 0);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
         assert_eq!(layout.captures_size, 8);
@@ -362,7 +523,7 @@ mod tests {
     fn test_array_capture_is_heap() {
         // Array<int> is a heap-typed pointer.
         let arr = ConcreteType::Array(Box::new(ConcreteType::I64));
-        let layout = ClosureLayout::from_capture_types(&[arr]);
+        let layout = immutable_layout(&[arr]);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
         assert_eq!(layout.heap_capture_mask, 0b1);
     }
@@ -370,7 +531,7 @@ mod tests {
     #[test]
     fn test_struct_capture_is_heap() {
         let s = ConcreteType::Struct(StructLayoutId(42));
-        let layout = ClosureLayout::from_capture_types(&[s]);
+        let layout = immutable_layout(&[s]);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
         assert_eq!(layout.heap_capture_mask, 0b1);
     }
@@ -383,7 +544,7 @@ mod tests {
         // i16  @ 2 (size 2)  — 2 is already 2-aligned
         // i32  @ 4 (size 4)  — 4 is 4-aligned
         // captures_size = 8 (rounded up to 8)
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::Bool,
             ConcreteType::I8,
             ConcreteType::I16,
@@ -401,7 +562,7 @@ mod tests {
     fn test_heap_mask_positions() {
         // (I32, String, F64, Array<F64>) → Ptr at positions 1 and 3.
         let arr = ConcreteType::Array(Box::new(ConcreteType::F64));
-        let layout = ClosureLayout::from_capture_types(&[
+        let layout = immutable_layout(&[
             ConcreteType::I32,
             ConcreteType::String,
             ConcreteType::F64,
@@ -416,11 +577,8 @@ mod tests {
 
     #[test]
     fn test_offsets_relative_and_absolute_agree() {
-        let layout = ClosureLayout::from_capture_types(&[
-            ConcreteType::F64,
-            ConcreteType::I64,
-            ConcreteType::String,
-        ]);
+        let layout =
+            immutable_layout(&[ConcreteType::F64, ConcreteType::I64, ConcreteType::String]);
         for i in 0..layout.capture_count() {
             assert_eq!(layout.heap_capture_offset(i), 16 + layout.capture_offset(i));
             assert_eq!(layout.stack_capture_offset(i), 8 + layout.capture_offset(i));
@@ -430,7 +588,7 @@ mod tests {
     #[test]
     fn test_size_rounded_up_for_trailing_small_field() {
         // Single Bool: 1 byte, rounded up to 8.
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::Bool]);
+        let layout = immutable_layout(&[ConcreteType::Bool]);
         assert_eq!(layout.captures_size, 8);
         assert_eq!(layout.total_heap_size(), 24);
         assert_eq!(layout.total_stack_size(), 16);

@@ -253,9 +253,7 @@ mod tests {
     use super::*;
     use crate::heap_value::HeapValue;
     use crate::v2::closure_layout::ClosureLayout;
-    use crate::v2::closure_raw::{
-        alloc_typed_closure, release_typed_closure, write_capture_typed,
-    };
+    use crate::v2::closure_raw::{alloc_typed_closure, release_typed_closure, write_capture_typed};
     use crate::v2::concrete_type::ConcreteType;
     use crate::value_word::{ValueWord, ValueWordExt};
 
@@ -346,7 +344,9 @@ mod tests {
         // The ValueWord accessor delegates through the HeapValue path.
         let hv = legacy_closure(99, vec![ValueWord::from_i64(7)]);
         let vw = ValueWord::from_heap_value(hv);
-        let handle = vw.as_closure_handle().expect("closure handle via ValueWord");
+        let handle = vw
+            .as_closure_handle()
+            .expect("closure handle via ValueWord");
         assert_eq!(handle.function_id(), 99);
         assert_eq!(handle.capture_count(), 1);
         assert_eq!(handle.capture_as_value(0).as_i64(), Some(7));
@@ -362,13 +362,13 @@ mod tests {
 
     #[test]
     fn test_raw_function_id_read() {
-        let layout = ClosureLayout::from_capture_types(&[]);
+        use crate::v2::closure_layout::CaptureKind;
+        let layout = ClosureLayout::from_capture_types(&[], &[] as &[CaptureKind]);
         // SAFETY: alloc_typed_closure returns a live block; release_typed_closure
         // frees it once at the end of the test.
         unsafe {
             let ptr = alloc_typed_closure(123, 55, &layout);
-            let handle =
-                VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
             assert_eq!(handle.function_id(), 123);
             assert_eq!(handle.type_id(), 55);
             assert_eq!(handle.capture_count(), 0);
@@ -381,13 +381,17 @@ mod tests {
 
     #[test]
     fn test_raw_capture_as_value_typed() {
+        use crate::v2::closure_layout::CaptureKind;
         // Mixed F64 + I64 + Bool captures, exercising the typed-width
         // read path in read_capture_as_value_bits.
-        let layout = ClosureLayout::from_capture_types(&[
-            ConcreteType::F64,
-            ConcreteType::I64,
-            ConcreteType::Bool,
-        ]);
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::F64, ConcreteType::I64, ConcreteType::Bool],
+            &[
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+            ],
+        );
         // SAFETY: alloc + writes + reads all go through the well-formed
         // layout; release_typed_closure reclaims the block.
         unsafe {
@@ -396,8 +400,7 @@ mod tests {
             write_capture_typed(ptr, &layout, 1, ValueWord::from_i64(-17).into_raw_bits());
             write_capture_typed(ptr, &layout, 2, ValueWord::from_bool(true).into_raw_bits());
 
-            let handle =
-                VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
             assert_eq!(handle.function_id(), 1);
             assert_eq!(handle.type_id(), 2);
             assert_eq!(handle.capture_count(), 3);

@@ -21,6 +21,7 @@ shape-gc = { workspace = true, optional = true }
 thiserror = { workspace = true }
 ahash = { workspace = true }
 smallvec = "1"
+parking_lot = { workspace = true }
 
 [features]
 default = []

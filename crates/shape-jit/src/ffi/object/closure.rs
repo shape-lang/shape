@@ -193,12 +193,19 @@ mod phase_h2_finalizer_tests {
     use super::*;
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::{
-        ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, TypedClosureHeader,
+        CaptureKind, ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, TypedClosureHeader,
     };
     use shape_value::v2::concrete_type::ConcreteType;
     use shape_value::v2::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
     use shape_value::{ValueWord, ValueWordExt};
     use std::sync::Arc;
+
+    // Test-local helper: immutable-only layout (all captures tagged
+    // `CaptureKind::Immutable`). Matches the pre-A.1A signature.
+    fn immutable_layout(types: &[ConcreteType]) -> ClosureLayout {
+        let kinds = vec![CaptureKind::Immutable; types.len()];
+        ClosureLayout::from_capture_types(types, &kinds)
+    }
 
     /// Allocate a TypedClosureHeader block with the given layout and return a
     /// zero-initialized raw pointer (HeapHeader fields are written, captures
@@ -249,7 +256,7 @@ mod phase_h2_finalizer_tests {
     #[test]
     fn finalizer_empty_captures() {
         // Zero-capture closure: header only, captures area is empty.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[]));
+        let layout = Arc::new(immutable_layout(&[]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 42, 0) };
         let bits = unsafe {
             jit_finalize_heap_closure(ptr, 42, 0, Arc::as_ptr(&layout))
@@ -269,7 +276,7 @@ mod phase_h2_finalizer_tests {
     #[test]
     fn finalizer_single_i64_capture() {
         // Single I64 capture written at offset 16 (HEAP_CLOSURE_HEADER_SIZE).
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::I64]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::I64]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 7, 0) };
         // Write the capture value at the typed offset.
         unsafe {
@@ -297,7 +304,7 @@ mod phase_h2_finalizer_tests {
 
     #[test]
     fn finalizer_single_f64_capture() {
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::F64]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::F64]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 9, 0) };
         unsafe {
             let off = layout.heap_capture_offset(0);
@@ -320,7 +327,7 @@ mod phase_h2_finalizer_tests {
 
     #[test]
     fn finalizer_bool_capture() {
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::Bool]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::Bool]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 1, 0) };
         unsafe {
             let off = layout.heap_capture_offset(0);
@@ -340,7 +347,7 @@ mod phase_h2_finalizer_tests {
 
     #[test]
     fn finalizer_i32_capture_zero_extended() {
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::I32]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::I32]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 2, 0) };
         unsafe {
             let off = layout.heap_capture_offset(0);
@@ -361,7 +368,7 @@ mod phase_h2_finalizer_tests {
     #[test]
     fn finalizer_mixed_f64_i32_captures() {
         // Two typed captures at distinct offsets.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[
+        let layout = Arc::new(immutable_layout(&[
             ConcreteType::F64,
             ConcreteType::I32,
         ]));
@@ -395,7 +402,7 @@ mod phase_h2_finalizer_tests {
         // retained share stays with the block — `OwnedClosureBlock::Drop`
         // releases it when the ClosureRaw value's refcount hits zero via
         // `release_typed_closure`'s heap_capture_mask walk.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::String]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::String]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 55, 0) };
         // Allocate a string ValueWord (refcount = 1 initially).
         let s = ValueWord::from_string(Arc::new("hello".to_string()));
@@ -441,7 +448,7 @@ mod phase_h2_finalizer_tests {
     fn finalizer_multi_capture_layout_offsets() {
         // Exercise the plan's multi-capture example: (I64, F64, String).
         // Expected offsets: 16, 24, 32.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[
+        let layout = Arc::new(immutable_layout(&[
             ConcreteType::I64,
             ConcreteType::F64,
             ConcreteType::String,
@@ -456,7 +463,7 @@ mod phase_h2_finalizer_tests {
     fn finalizer_preserves_function_id_from_header() {
         // The authoritative function_id is the one stored IN the header — the
         // FFI argument is ignored in favour of the in-block value.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[]));
+        let layout = Arc::new(immutable_layout(&[]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 777, 0) };
         // Pass a different function_id via the FFI argument; finalizer must
         // still return a closure with function_id = 777.
@@ -476,7 +483,7 @@ mod phase_h2_finalizer_tests {
     fn finalizer_null_header_returns_none_tag() {
         // A null header is a codegen bug; finalizer returns TAG_NONE (as a
         // safety valve) rather than dereferencing null.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[]));
+        let layout = Arc::new(immutable_layout(&[]));
         let bits = unsafe {
             jit_finalize_heap_closure(
                 std::ptr::null_mut(),
@@ -492,7 +499,7 @@ mod phase_h2_finalizer_tests {
 
     #[test]
     fn finalizer_null_layout_returns_none_tag() {
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[]));
+        let layout = Arc::new(immutable_layout(&[]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 0, 0) };
         let bits = unsafe {
             jit_finalize_heap_closure(ptr, 0, 0, std::ptr::null())
@@ -521,7 +528,7 @@ mod phase_h2_finalizer_tests {
             vec![ConcreteType::F64, ConcreteType::I32],
             vec![ConcreteType::String, ConcreteType::F64, ConcreteType::Bool],
         ] {
-            let layout = ClosureLayout::from_capture_types(&types);
+            let layout = immutable_layout(&types);
             assert!(layout.total_heap_size() >= 16);
             assert_eq!(layout.total_heap_size() % 8, 0);
         }
@@ -535,7 +542,7 @@ mod phase_h2_finalizer_tests {
         // reads both backings through the same `VmClosureHandle` shim —
         // this is a structural regression test verifying the finalizer's
         // output is `ClosureRaw` and is readable via the shim.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::I64]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::I64]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 3, 0) };
         unsafe {
             let off = layout.heap_capture_offset(0);
@@ -582,7 +589,7 @@ mod phase_h2_finalizer_tests {
         // unrelated to the shared-heap retain protocol. Track the
         // outer count by pulling a dedicated ValueWord share
         // alongside the capture slot.
-        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::String]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::String]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 71, 0) };
 
         // Build a unique (non-interned) outer Arc<HeapValue::String> by
