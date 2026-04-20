@@ -26,6 +26,7 @@ pub mod heap_value;
 pub mod ids;
 pub mod method_id;
 pub mod scalar;
+pub mod value_bits;
 pub mod value_word;
 /// Backward-compatibility alias for the renamed module.
 pub mod nanboxed {
