@@ -6,6 +6,16 @@
 //! (part of the v2 spec alignment) pruned the dead weight so only the
 //! v2-native entry points remain.
 //!
+//! R7.1 deleted 11 `generic_*` dispatch-fallback fields (48 → 37).
+//! R7.2 consolidated 4 typed-array push helpers into 1 (37 → 34).
+//! R7.3 audited every remaining field: all 34 have ≥1 live caller in the
+//! MIR lowering path (see `mir_compiler/{statements,terminators,v2_array,
+//! v2_typed_map}.rs`). No further trimming is justified without
+//! consolidating caller-side dispatch, which is out of scope for R7.
+//!
+//! Steady-state FuncRef count: 34. Further reduction would require FFI
+//! consolidation work beyond the R7 audit's mandate.
+//!
 //! New FFI helpers should be registered here AND in
 //! `crates/shape-jit/src/ffi_symbols/` (declare + register), and then the
 //! `FFIFuncRefs` builder in `crates/shape-jit/src/compiler/ffi_builder.rs`
