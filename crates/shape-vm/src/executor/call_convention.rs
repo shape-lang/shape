@@ -435,11 +435,16 @@ impl VirtualMachine {
             // `VmClosureHandle`. The Legacy backing still yields an
             // `&[Upvalue]` via `upvalues_legacy()` (cloned to preserve
             // SharedCell-backed mutable-capture identity); the Raw
-            // backing widens its typed captures through
-            // `captures_as_values()` — raw-backed closures never carry
-            // SharedCells (the VM producer guards on
-            // `any_mutable_capture`), so fresh `Upvalue::new` around
-            // each widened value is semantically correct.
+            // backing widens its captures through
+            // `capture_execution_bits()` — for Immutable captures this
+            // returns the ValueWord bits identical to the pre-A.1B
+            // `captures_as_values()` path, and for Track A.1B's
+            // `OwnedMutable` / `Shared` captures it returns the raw
+            // `*mut ValueWord` / `*const SharedCell` pointer bits. The
+            // `LoadOwnedMutableCapture` / `LoadSharedCapture` opcodes
+            // later recover the pointer by reading the upvalue's raw
+            // bits (bypassing `Upvalue::get`'s SharedCell auto-deref,
+            // which is a legacy-only code path).
             // cold-path: as_heap_ref retained — multi-variant callee dispatch
             TAG_HEAP => {
                 let heap_ref = callee.as_heap_ref(); // cold-path
@@ -449,11 +454,12 @@ impl VirtualMachine {
                         if let Some(slice) = handle.upvalues_legacy() {
                             slice.to_vec()
                         } else {
-                            handle
-                                .captures_as_values()
-                                .into_iter()
-                                .map(Upvalue::new)
-                                .collect()
+                            let n = handle.capture_count();
+                            let mut out: Vec<Upvalue> = Vec::with_capacity(n);
+                            for i in 0..n {
+                                out.push(Upvalue::new(handle.capture_execution_bits(i)));
+                            }
+                            out
                         };
                     self.call_closure_with_nb_args(fid, upvalues, args)?;
                 } else if let Some(shape_value::HeapValue::HostClosure(callable)) = heap_ref {

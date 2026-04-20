@@ -35,7 +35,7 @@
 //!   producer and, today, by tests that exercise the raw allocator
 //!   directly.
 
-use crate::v2::closure_layout::{ClosureLayout, TypedClosureHeader};
+use crate::v2::closure_layout::{CaptureKind, ClosureLayout, SharedCell, TypedClosureHeader};
 use crate::v2::closure_raw::{
     read_capture_as_value_bits, typed_closure_function_id, typed_closure_refcount,
     typed_closure_type_id,
@@ -163,6 +163,22 @@ impl<'a> VmClosureHandle<'a> {
     /// widened to a `ValueWord` bit pattern via
     /// [`read_capture_as_value_bits`].
     ///
+    /// # Track A.1B — CaptureKind dispatch
+    ///
+    /// When the Raw backing's layout marks capture `i` as
+    /// [`CaptureKind::OwnedMutable`], the slot stores `*mut ValueWord` —
+    /// this method dereferences the box and returns the inner value.
+    /// When the layout marks it [`CaptureKind::Shared`], the slot stores
+    /// `*const SharedCell` (an `Arc<parking_lot::Mutex<ValueWord>>`) —
+    /// this method acquires the mutex only to read the inner bits, then
+    /// drops the guard before returning.
+    ///
+    /// This widening is correct for debug/print/equality/wire paths that
+    /// want the *current value* of a mutable-cell capture. Execution-path
+    /// readers (the A.1B MIR opcodes) go through
+    /// [`capture_owned_mutable_ptr`] / [`capture_shared_cell_ptr`] so
+    /// writes propagate to the underlying cell.
+    ///
     /// # Panics
     ///
     /// Panics if `i >= self.capture_count()`.
@@ -171,12 +187,146 @@ impl<'a> VmClosureHandle<'a> {
         match self.backing {
             ClosureBacking::Legacy { upvalues, .. } => upvalues[i].get(),
             ClosureBacking::Raw { ptr, layout } => {
-                // SAFETY: the Raw constructor guarantees `ptr` + `layout`
-                // match and that the block is live. `i < capture_count`
-                // is upheld by the caller (panics on overflow above).
-                let bits = unsafe { read_capture_as_value_bits(ptr as *const u8, layout, i) };
-                ValueWord::from_raw_bits(bits)
+                match layout.capture_storage_kind(i) {
+                    CaptureKind::Immutable => {
+                        // SAFETY: the Raw constructor guarantees `ptr` +
+                        // `layout` match and that the block is live.
+                        // `i < capture_count` is upheld by the caller
+                        // (panics on overflow at the layout accessor).
+                        let bits = unsafe {
+                            read_capture_as_value_bits(ptr as *const u8, layout, i)
+                        };
+                        ValueWord::from_raw_bits(bits)
+                    }
+                    CaptureKind::OwnedMutable => {
+                        let cell = unsafe { owned_mutable_cell_ptr(ptr, layout, i) };
+                        // SAFETY: `cell` is a live `*mut ValueWord` from
+                        // `Box::into_raw` (see A.1B `op_make_closure`).
+                        // Reading 8 bytes is in-bounds and aligned. The
+                        // box is not mutated concurrently — OwnedMutable
+                        // has no sharing semantics.
+                        unsafe { std::ptr::read(cell) }
+                    }
+                    CaptureKind::Shared => {
+                        let cell_ptr = unsafe { shared_cell_ptr(ptr, layout, i) };
+                        // SAFETY: `cell_ptr` is a live `*const SharedCell`
+                        // from `Arc::into_raw`. Reborrowing it for the
+                        // duration of the lock is safe because the
+                        // closure's block holds the strong-count share
+                        // and is alive for the lifetime of this handle.
+                        // The mutex is held only for the clone.
+                        unsafe {
+                            let cell: &SharedCell = &*cell_ptr;
+                            let guard = cell.lock();
+                            let bits = *guard;
+                            drop(guard);
+                            bits
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Track A.1B: raw 8-byte bits for capture `i` **as stored in the
+    /// closure's slot**, without running SharedCell or OwnedMutable
+    /// auto-deref.
+    ///
+    /// For [`CaptureKind::Immutable`] captures this returns the ValueWord
+    /// bit pattern (identical to [`capture_as_value`]'s result).
+    ///
+    /// For [`CaptureKind::OwnedMutable`] captures this returns the raw
+    /// `*mut ValueWord` pointer bits (cast to `u64`).
+    ///
+    /// For [`CaptureKind::Shared`] captures this returns the raw
+    /// `*const SharedCell` pointer bits (cast to `u64`).
+    ///
+    /// The Legacy backing returns `Upvalue::get()`'s widened value — it
+    /// has no mutable-cell pointer semantics.
+    ///
+    /// Used by the closure-call plumbing to populate `frame.upvalues` so
+    /// the A.1B MIR opcodes
+    /// (`LoadOwnedMutableCapture` / `LoadSharedCapture` etc.) can
+    /// recover the underlying cell pointer via
+    /// `Upvalue::clone_inner_bits_for_raw_pointer_access`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= self.capture_count()`.
+    #[inline]
+    pub fn capture_execution_bits(&self, i: usize) -> u64 {
+        match self.backing {
+            ClosureBacking::Legacy { upvalues, .. } => upvalues[i].get(),
+            ClosureBacking::Raw { ptr, layout } => {
+                match layout.capture_storage_kind(i) {
+                    CaptureKind::Immutable => {
+                        // SAFETY: see `capture_as_value` — Raw constructor
+                        // + layout + in-bounds index upheld.
+                        unsafe { read_capture_as_value_bits(ptr as *const u8, layout, i) }
+                    }
+                    CaptureKind::OwnedMutable => {
+                        // SAFETY: same invariants as
+                        // `capture_owned_mutable_ptr`; reinterpreting the
+                        // `*mut ValueWord` as `u64` is a lossless cast.
+                        unsafe { owned_mutable_cell_ptr(ptr, layout, i) as u64 }
+                    }
+                    CaptureKind::Shared => {
+                        // SAFETY: same invariants as
+                        // `capture_shared_cell_ptr`; reinterpreting the
+                        // `*const SharedCell` as `u64` is a lossless cast.
+                        unsafe { shared_cell_ptr(ptr, layout, i) as u64 }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Track A.1B: raw pointer to the `*mut ValueWord` box cell for an
+    /// `OwnedMutable` capture.
+    ///
+    /// Returns `None` on the Legacy backing or when capture `i` is not
+    /// [`CaptureKind::OwnedMutable`].
+    ///
+    /// # Safety
+    ///
+    /// Callers must dereference the returned pointer only for the
+    /// lifetime of the borrowing handle `'a` — the closure block's
+    /// refcount keeps the `Box<ValueWord>` allocation alive. Writing
+    /// through the pointer replaces the cell's value in place; no retain
+    /// or release is needed.
+    #[inline]
+    pub fn capture_owned_mutable_ptr(&self, i: usize) -> Option<*mut ValueWord> {
+        match self.backing {
+            ClosureBacking::Raw { ptr, layout } => match layout.capture_storage_kind(i) {
+                CaptureKind::OwnedMutable => Some(unsafe { owned_mutable_cell_ptr(ptr, layout, i) }),
+                _ => None,
+            },
+            ClosureBacking::Legacy { .. } => None,
+        }
+    }
+
+    /// Track A.1B: raw pointer to the `*const SharedCell` (
+    /// `Arc<parking_lot::Mutex<ValueWord>>`) for a `Shared` capture.
+    ///
+    /// Returns `None` on the Legacy backing or when capture `i` is not
+    /// [`CaptureKind::Shared`].
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is derived from `Arc::into_raw` in A.1B's
+    /// `op_make_closure`. Reborrowing it as `&SharedCell` for the
+    /// lifetime of a `lock()` guard is sound while the handle's `'a`
+    /// lives. Callers MUST acquire the mutex before reading or writing
+    /// the inner `ValueWord` (the cell is shared across nested closures,
+    /// possibly on different threads).
+    #[inline]
+    pub fn capture_shared_cell_ptr(&self, i: usize) -> Option<*const SharedCell> {
+        match self.backing {
+            ClosureBacking::Raw { ptr, layout } => match layout.capture_storage_kind(i) {
+                CaptureKind::Shared => Some(unsafe { shared_cell_ptr(ptr, layout, i) }),
+                _ => None,
+            },
+            ClosureBacking::Legacy { .. } => None,
         }
     }
 
@@ -246,6 +396,47 @@ impl<'a> VmClosureHandle<'a> {
             ClosureBacking::Raw { .. } => None,
         }
     }
+}
+
+// ── Track A.1B helpers: raw pointer accessors for mutable-cell captures ──
+
+/// Read the 8-byte pointer slot for an `OwnedMutable` capture.
+///
+/// # Safety
+///
+/// Caller must have verified via `layout.capture_storage_kind(i) ==
+/// CaptureKind::OwnedMutable` that the slot holds `*mut ValueWord` bits.
+/// `ptr` must be a live `TypedClosureHeader` allocation from
+/// `alloc_typed_closure(&layout)`.
+#[inline]
+unsafe fn owned_mutable_cell_ptr(
+    ptr: *const TypedClosureHeader,
+    layout: &ClosureLayout,
+    i: usize,
+) -> *mut ValueWord {
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: the `Ptr` slot is 8-byte aligned and in-bounds per the
+    // layout invariants (verified by `ClosureLayout::from_capture_types`).
+    unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *mut ValueWord) }
+}
+
+/// Read the 8-byte pointer slot for a `Shared` capture.
+///
+/// # Safety
+///
+/// Caller must have verified via `layout.capture_storage_kind(i) ==
+/// CaptureKind::Shared` that the slot holds `*const SharedCell` bits.
+/// `ptr` must be a live `TypedClosureHeader` allocation from
+/// `alloc_typed_closure(&layout)`.
+#[inline]
+unsafe fn shared_cell_ptr(
+    ptr: *const TypedClosureHeader,
+    layout: &ClosureLayout,
+    i: usize,
+) -> *const SharedCell {
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: see `owned_mutable_cell_ptr` above.
+    unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *const SharedCell) }
 }
 
 #[cfg(test)]
@@ -417,6 +608,232 @@ mod tests {
 
             drop(handle);
             release_typed_closure(ptr, &layout);
+        }
+    }
+
+    // ── Track A.1B: OwnedMutable / Shared handle API ─────────────────
+
+    /// Build a Raw-backed handle over a closure block whose layout marks
+    /// capture 0 as `OwnedMutable`. Caller installs a `Box::into_raw`
+    /// pointer + asserts both `capture_as_value` (deref) and
+    /// `capture_execution_bits` (raw pointer bits) return the right
+    /// things.
+    #[test]
+    fn a1b_handle_owned_mutable_capture_as_value_derefs_box() {
+        use crate::v2::closure_layout::CaptureKind;
+        use crate::v2::closure_raw::alloc_typed_closure;
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::OwnedMutable],
+        );
+        // SAFETY: alloc + write + release all go through well-formed layout.
+        unsafe {
+            let ptr = alloc_typed_closure(1, 0, &layout);
+            // Install a Box<ValueWord> at the capture 0 slot.
+            let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(31415)));
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut ValueWord, cell);
+
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            // capture_as_value dereffs the box — returns the inner value.
+            let v = handle.capture_as_value(0);
+            assert_eq!(v.as_i64(), Some(31415));
+            // capture_execution_bits returns the raw pointer bits.
+            let raw_bits = handle.capture_execution_bits(0);
+            assert_eq!(raw_bits, cell as u64);
+            // capture_owned_mutable_ptr returns the same pointer.
+            assert_eq!(handle.capture_owned_mutable_ptr(0), Some(cell));
+            // capture_shared_cell_ptr returns None for a non-Shared slot.
+            assert!(handle.capture_shared_cell_ptr(0).is_none());
+
+            drop(handle);
+            // release_typed_closure reclaims the Box.
+            release_typed_closure(ptr, &layout);
+        }
+    }
+
+    #[test]
+    fn a1b_handle_shared_capture_as_value_locks_and_clones() {
+        use crate::v2::closure_layout::{CaptureKind, SharedCell};
+        use crate::v2::closure_raw::alloc_typed_closure;
+        use std::sync::Arc;
+        let layout =
+            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::Shared]);
+        unsafe {
+            let ptr = alloc_typed_closure(7, 0, &layout);
+            let external: Arc<SharedCell> =
+                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(271828)));
+            let closure_share: Arc<SharedCell> = Arc::clone(&external);
+            let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
+
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            // capture_as_value acquires the mutex and returns the inner.
+            let v = handle.capture_as_value(0);
+            assert_eq!(v.as_i64(), Some(271828));
+            // capture_execution_bits returns the raw pointer bits.
+            let raw_bits = handle.capture_execution_bits(0);
+            assert_eq!(raw_bits, cell_ptr as u64);
+            // capture_shared_cell_ptr returns the same pointer.
+            assert_eq!(handle.capture_shared_cell_ptr(0), Some(cell_ptr));
+            // capture_owned_mutable_ptr returns None for a non-OwnedMutable slot.
+            assert!(handle.capture_owned_mutable_ptr(0).is_none());
+
+            drop(handle);
+            // Strong count before release: 2 (external + closure_share).
+            assert_eq!(Arc::strong_count(&external), 2);
+            release_typed_closure(ptr, &layout);
+            assert_eq!(Arc::strong_count(&external), 1);
+            // external is dropped at end of scope.
+        }
+    }
+
+    #[test]
+    fn a1b_handle_mixed_kinds_execution_bits_and_as_value() {
+        // [Immutable(F64), OwnedMutable, Shared, Immutable(I64)] — the
+        // mandatory "mixed kinds" regression scenario from A.1B brief.
+        use crate::v2::closure_layout::{CaptureKind, SharedCell};
+        use crate::v2::closure_raw::{alloc_typed_closure, write_capture_typed};
+        use std::sync::Arc;
+        let layout = ClosureLayout::from_capture_types(
+            &[
+                ConcreteType::F64,
+                ConcreteType::I64,
+                ConcreteType::I64,
+                ConcreteType::I64,
+            ],
+            &[
+                CaptureKind::Immutable,
+                CaptureKind::OwnedMutable,
+                CaptureKind::Shared,
+                CaptureKind::Immutable,
+            ],
+        );
+        unsafe {
+            let ptr = alloc_typed_closure(13, 0, &layout);
+            // Immutable F64 at slot 0.
+            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(1.75).into_raw_bits());
+            // OwnedMutable at slot 1.
+            let box_cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(200)));
+            let off1 = layout.heap_capture_offset(1);
+            std::ptr::write(ptr.add(off1) as *mut *mut ValueWord, box_cell);
+            // Shared at slot 2.
+            let external: Arc<SharedCell> =
+                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(300)));
+            let arc_share: Arc<SharedCell> = Arc::clone(&external);
+            let arc_raw: *const SharedCell = Arc::into_raw(arc_share);
+            let off2 = layout.heap_capture_offset(2);
+            std::ptr::write(ptr.add(off2) as *mut *const SharedCell, arc_raw);
+            // Immutable I64 at slot 3.
+            write_capture_typed(ptr, &layout, 3, ValueWord::from_i64(400).into_raw_bits());
+
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+
+            // capture_as_value: all four return the underlying value.
+            assert_eq!(handle.capture_as_value(0).as_f64(), Some(1.75));
+            assert_eq!(handle.capture_as_value(1).as_i64(), Some(200));
+            assert_eq!(handle.capture_as_value(2).as_i64(), Some(300));
+            assert_eq!(handle.capture_as_value(3).as_i64(), Some(400));
+
+            // capture_execution_bits: Immutable = value bits, mutable/shared
+            // = raw pointer bits.
+            assert_eq!(
+                handle.capture_execution_bits(0),
+                ValueWord::from_f64(1.75).into_raw_bits()
+            );
+            assert_eq!(handle.capture_execution_bits(1), box_cell as u64);
+            assert_eq!(handle.capture_execution_bits(2), arc_raw as u64);
+            assert_eq!(
+                handle.capture_execution_bits(3),
+                ValueWord::from_i64(400).into_raw_bits()
+            );
+
+            // Pointer accessors match.
+            assert_eq!(handle.capture_owned_mutable_ptr(1), Some(box_cell));
+            assert_eq!(handle.capture_shared_cell_ptr(2), Some(arc_raw));
+            // Non-matching slots return None.
+            assert!(handle.capture_owned_mutable_ptr(0).is_none());
+            assert!(handle.capture_owned_mutable_ptr(2).is_none());
+            assert!(handle.capture_owned_mutable_ptr(3).is_none());
+            assert!(handle.capture_shared_cell_ptr(0).is_none());
+            assert!(handle.capture_shared_cell_ptr(1).is_none());
+            assert!(handle.capture_shared_cell_ptr(3).is_none());
+
+            drop(handle);
+            assert_eq!(Arc::strong_count(&external), 2);
+            release_typed_closure(ptr, &layout);
+            assert_eq!(Arc::strong_count(&external), 1);
+        }
+    }
+
+    #[test]
+    fn a1b_handle_owned_mutable_write_through_ptr_observable_via_capture_as_value() {
+        // Write-through via `capture_owned_mutable_ptr` — subsequent reads
+        // via `capture_as_value` observe the new value. Exercises the
+        // mutable-cell write-back semantic through the handle API.
+        use crate::v2::closure_layout::CaptureKind;
+        use crate::v2::closure_raw::alloc_typed_closure;
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::OwnedMutable],
+        );
+        unsafe {
+            let ptr = alloc_typed_closure(1, 0, &layout);
+            let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(1)));
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut ValueWord, cell);
+
+            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            assert_eq!(handle.capture_as_value(0).as_i64(), Some(1));
+
+            // Write through the raw pointer.
+            let cell_ptr = handle.capture_owned_mutable_ptr(0).unwrap();
+            std::ptr::write(cell_ptr, ValueWord::from_i64(999));
+            // Observable via capture_as_value on the same handle.
+            assert_eq!(handle.capture_as_value(0).as_i64(), Some(999));
+
+            drop(handle);
+            release_typed_closure(ptr, &layout);
+        }
+    }
+
+    #[test]
+    fn a1b_handle_shared_write_through_ptr_observable_by_second_handle() {
+        // Two handles over the SAME closure block — write through the
+        // first handle's SharedCell pointer, read via the second's
+        // capture_as_value. Covers the "closures share a var" scenario
+        // at the handle-API level.
+        use crate::v2::closure_layout::{CaptureKind, SharedCell};
+        use crate::v2::closure_raw::alloc_typed_closure;
+        use std::sync::Arc;
+        let layout =
+            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::Shared]);
+        unsafe {
+            let ptr = alloc_typed_closure(1, 0, &layout);
+            let external: Arc<SharedCell> =
+                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+            let share_for_closure: Arc<SharedCell> = Arc::clone(&external);
+            let cell_ptr: *const SharedCell = Arc::into_raw(share_for_closure);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
+
+            let handle_a = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+            let handle_b = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
+
+            let cell_a = handle_a.capture_shared_cell_ptr(0).unwrap();
+            let cell: &SharedCell = &*cell_a;
+            *cell.lock() = ValueWord::from_i64(42);
+
+            // Observed from handle_b.
+            assert_eq!(handle_b.capture_as_value(0).as_i64(), Some(42));
+            // Observed from the external Arc — same cell.
+            assert_eq!(external.lock().as_i64(), Some(42));
+
+            drop(handle_a);
+            drop(handle_b);
+            release_typed_closure(ptr, &layout);
+            assert_eq!(Arc::strong_count(&external), 1);
         }
     }
 }

@@ -768,6 +768,61 @@ define_opcodes! {
     /// Store heap pointer through a mutable capture pointer. Operand: Local(idx).
     StoreCaptureMutPtrPtr = 0x121, Variable, pops: 1, pushes: 0;
 
+    // ===== Track A.1B: CaptureKind::OwnedMutable / CaptureKind::Shared =====
+    //
+    // These opcodes implement Track A's three-way CaptureKind split (see
+    // `crates/shape-value/src/v2/closure_layout.rs` — `CaptureKind`):
+    //
+    // - `OwnedMutable`: `let mut` by-move captures. The closure's capture
+    //   slot holds `*mut ValueWord` from `Box::into_raw(Box::new(initial))`.
+    //   Exactly one closure owns the box; no sharing, no lock. Released by
+    //   `release_typed_closure` via `Box::from_raw`.
+    // - `Shared`: `var` captures shared across nested closures. The slot
+    //   holds `*const SharedCell` from
+    //   `Arc::into_raw(Arc::new(parking_lot::Mutex::new(initial)))`. Each
+    //   reader/writer acquires the parking_lot mutex; refcount released by
+    //   `Arc::from_raw` on closure Drop.
+    //
+    // A.1B's interpreter binds the raw pointer bits into
+    // `frame.upvalues[i]` (bypassing `Upvalue::get`/`set`'s SharedCell
+    // auto-deref — those are for the retired-in-A.1C legacy variant). The
+    // new opcodes below read the raw bits directly and dereference the
+    // pointer. Operand width: `Local(u16)` like every other capture op.
+    //
+    // SAFETY invariants (enforced per-opcode via `ClosureLayout`
+    // `owned_mutable_capture_mask` / `shared_capture_mask` at compile
+    // time):
+    //   * `LoadOwnedMutableCapture{i}` / `StoreOwnedMutableCapture{i}` are
+    //     only emitted when the current function's capture `i` has
+    //     `CaptureKind::OwnedMutable` in its layout. The upvalue at index
+    //     `i` MUST contain raw `*mut ValueWord` bits (see A.1B
+    //     `op_make_closure` allocation path + A.1B
+    //     `call_closure_with_nb_args` upvalue plumbing).
+    //   * Likewise for `LoadSharedCapture` / `StoreSharedCapture` — the
+    //     upvalue holds `*const SharedCell` bits and reads/writes take
+    //     the parking_lot mutex.
+    //
+    // A.1D and A.1E add Cranelift lowerings; until then the JIT bails to
+    // the interpreter for any function that contains these opcodes.
+    //
+    // See `docs/v2-closure-specialization.md` §14.7 for the landed Track A
+    // plan.
+
+    /// Load a ValueWord through an `OwnedMutable` capture's `*mut ValueWord`
+    /// cell. Operand: Local(idx). Pushes the dereferenced value.
+    LoadOwnedMutableCapture = 0x132, Variable, pops: 0, pushes: 1;
+    /// Store a ValueWord through an `OwnedMutable` capture's `*mut ValueWord`
+    /// cell. Operand: Local(idx). Pops the value to write.
+    StoreOwnedMutableCapture = 0x133, Variable, pops: 1, pushes: 0;
+    /// Load a ValueWord through a `Shared` capture's
+    /// `*const parking_lot::Mutex<ValueWord>` cell — takes the mutex for
+    /// the read only. Operand: Local(idx). Pushes the inner value.
+    LoadSharedCapture = 0x134, Variable, pops: 0, pushes: 1;
+    /// Store a ValueWord through a `Shared` capture's
+    /// `*const parking_lot::Mutex<ValueWord>` cell — takes the mutex for
+    /// the write only. Operand: Local(idx). Pops the value to write.
+    StoreSharedCapture = 0x135, Variable, pops: 1, pushes: 0;
+
     // ===== Closure Spec Phase F: escape-fallback dispatch =====
     //
     // These opcodes implement the v2 escape-fallback ABI (see

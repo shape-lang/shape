@@ -679,29 +679,47 @@ impl VirtualMachine {
             // legacy `HeapValue::Closure` variant. H6.6 deletes this
             // fallback once layout registration becomes universal.
             //
-            // Mutable-capture guard: when any capture bit is set in
-            // `mutable_captures` the enclosing scope has boxed the
-            // underlying binding into a `HeapValue::SharedCell`. Writing
-            // that ValueWord through `write_capture_typed` at a typed
-            // width (e.g. `FieldKind::Bool`) would strip the SharedCell
-            // pointer, breaking auto-deref semantics. Fall back to the
-            // legacy `Vec<Upvalue>` variant for those closures — the
-            // ClosureRaw path stays for purely-immutable captures, which
-            // is the common §10-benchmark hot loop shape (`arr.map(|x|
-            // x + n)` etc.).
-            let any_mutable_capture = mutable_captures.iter().any(|b| *b);
-            let layout_opt = if any_mutable_capture {
-                None
-            } else {
+            // Mutable-capture guard (pre-A.1B): when any capture bit is
+            // set in `mutable_captures` and the registered layout marks
+            // every capture as `CaptureKind::Immutable`, the enclosing
+            // scope has boxed the underlying binding into a
+            // `HeapValue::SharedCell`. Writing that ValueWord through
+            // `write_capture_typed` at a typed width would strip the
+            // SharedCell pointer, breaking auto-deref semantics — fall
+            // back to the legacy `Vec<Upvalue>` variant for those
+            // closures.
+            //
+            // Track A.1B refinement: when the registered layout marks any
+            // capture as `CaptureKind::OwnedMutable` or
+            // `CaptureKind::Shared` (the kinds A.1C's compiler will emit
+            // for `let mut` / `var` captures), the Raw path ALREADY knows
+            // how to allocate and release `Box<ValueWord>` /
+            // `Arc<SharedCell>`; the SharedCell legacy shim is not
+            // involved, so the `mutable_captures` guard does not apply.
+            // This distinguishes "today's compiler producing an Immutable
+            // layout + SharedCell stack slot" (legacy fallback) from
+            // "A.1C's compiler producing an OwnedMutable/Shared layout +
+            // raw initial value" (new Raw path).
+            let layout_opt: Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>> =
                 self.program
                     .closure_function_layouts
                     .get(func_id.index())
                     .and_then(|l| l.as_ref())
-                    .cloned()
+                    .cloned();
+            let layout_has_mutable_cell_kinds = layout_opt
+                .as_ref()
+                .map(|l| l.owned_mutable_capture_mask != 0 || l.shared_capture_mask != 0)
+                .unwrap_or(false);
+            let any_mutable_capture = mutable_captures.iter().any(|b| *b);
+            let layout_opt = if any_mutable_capture && !layout_has_mutable_cell_kinds {
+                None
+            } else {
+                layout_opt
             };
 
             if let Some(layout) = layout_opt {
                 if upvalues.len() == layout.capture_count() {
+                    use shape_value::v2::closure_layout::{CaptureKind, SharedCell};
                     use shape_value::v2::closure_raw::{
                         OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
                     };
@@ -709,18 +727,105 @@ impl VirtualMachine {
                     // allocated block with refcount=1; we write the
                     // captures at their typed offsets in-bounds, then
                     // transfer ownership to the `OwnedClosureBlock` below.
+                    //
+                    // Track A.1B: per-capture `CaptureKind` now selects
+                    // the allocation discipline:
+                    //   * Immutable: write the capture bits at the typed
+                    //     offset via `write_capture_typed` (unchanged).
+                    //   * OwnedMutable: allocate `Box::new(ValueWord)`,
+                    //     write `Box::into_raw` into the 8-byte Ptr slot.
+                    //     Released by `release_typed_closure` via
+                    //     `Box::from_raw` on the closure's last refcount
+                    //     release (see `release_typed_closure` +
+                    //     `owned_mutable_capture_mask`).
+                    //   * Shared: allocate
+                    //     `Arc::new(parking_lot::Mutex::new(ValueWord))`,
+                    //     write `Arc::into_raw` into the Ptr slot.
+                    //     Released via `Arc::from_raw` on the closure's
+                    //     last refcount release. For A.1B we construct a
+                    //     fresh Arc per capture; A.1C refines the
+                    //     compiler so multi-closure var-captures reuse
+                    //     an existing `Arc<SharedCell>` (`Arc::clone` at
+                    //     this site).
                     unsafe {
                         let ptr = alloc_typed_closure(func_id.0, 0, &layout);
                         for (i, bits) in upvalues.iter().enumerate() {
-                            // Heap-typed captures: retain one share for the
-                            // block. The source stack slot keeps its own
-                            // share (the capture ValueWord came from the
-                            // stack via `pop_raw_u64` which did NOT drop).
-                            if layout.is_heap_capture(i) {
-                                let _dup = ValueWord::clone_from_bits(*bits);
-                                std::mem::forget(_dup);
+                            match layout.capture_storage_kind(i) {
+                                CaptureKind::Immutable => {
+                                    // Heap-typed captures: retain one
+                                    // share for the block. The source
+                                    // stack slot keeps its own share
+                                    // (the capture ValueWord came from
+                                    // the stack via `pop_raw_u64` which
+                                    // did NOT drop).
+                                    if layout.is_heap_capture(i) {
+                                        let _dup = ValueWord::clone_from_bits(*bits);
+                                        std::mem::forget(_dup);
+                                    }
+                                    write_capture_typed(ptr, &layout, i, *bits);
+                                }
+                                CaptureKind::OwnedMutable => {
+                                    // A.1B assumption: the capture
+                                    // ValueWord on the stack is the
+                                    // initial value of a `let mut`
+                                    // binding being moved into the
+                                    // closure. We own it by allocating
+                                    // a fresh Box<ValueWord>. If the
+                                    // initial value carried a heap
+                                    // refcount share, that share moves
+                                    // into the box (no extra retain
+                                    // needed — the stack slot's share
+                                    // is what fills the box).
+                                    //
+                                    // SAFETY: Box::into_raw yields a
+                                    // non-null 8-aligned `*mut ValueWord`
+                                    // owned by this closure for its
+                                    // refcount lifetime. The Ptr slot
+                                    // at `heap_capture_offset(i)` is
+                                    // 8-byte aligned and in-bounds per
+                                    // layout invariants.
+                                    let cell_ptr: *mut ValueWord =
+                                        Box::into_raw(Box::new(*bits));
+                                    let off = layout.heap_capture_offset(i);
+                                    std::ptr::write(
+                                        (ptr as *mut u8).add(off) as *mut *mut ValueWord,
+                                        cell_ptr,
+                                    );
+                                }
+                                CaptureKind::Shared => {
+                                    // A.1B assumption: each `var`
+                                    // capture gets a fresh `Arc<SharedCell>`
+                                    // initialised to the ValueWord on
+                                    // the stack. Multi-closure sharing
+                                    // of the SAME var (where closure A
+                                    // writes and closure B observes) is
+                                    // refined in A.1C — the compiler
+                                    // will arrange `Arc::clone` of a
+                                    // pre-existing cell at that point,
+                                    // so two closures capture distinct
+                                    // `*const SharedCell` bit patterns
+                                    // that point at the same allocation.
+                                    // For A.1B we construct fresh cells
+                                    // and rely on A.1C for sharing
+                                    // semantics.
+                                    //
+                                    // SAFETY: Arc::into_raw yields a
+                                    // non-null 8-aligned
+                                    // `*const SharedCell` with one
+                                    // strong-count share owned by this
+                                    // closure. Released via
+                                    // Arc::from_raw in
+                                    // `release_typed_closure`.
+                                    let arc: std::sync::Arc<SharedCell> =
+                                        std::sync::Arc::new(parking_lot::Mutex::new(*bits));
+                                    let cell_ptr: *const SharedCell = std::sync::Arc::into_raw(arc);
+                                    let off = layout.heap_capture_offset(i);
+                                    std::ptr::write(
+                                        (ptr as *mut u8).add(off) as *mut *const SharedCell,
+                                        cell_ptr,
+                                    );
+                                }
                             }
-                            write_capture_typed(ptr, &layout, i, *bits);
                         }
                         let owned = OwnedClosureBlock::from_raw(ptr as *const u8, layout);
                         self.push_raw_u64(ValueWord::from_heap_value(
@@ -1112,5 +1217,216 @@ mod h6_5_tests {
              main()",
         );
         assert_eq!(val.as_i64(), Some(6));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track A.1B: op_make_closure allocation for CaptureKind::OwnedMutable /
+// CaptureKind::Shared. Exercises the extended Raw path in
+// `op_make_closure` that allocates `Box::into_raw` / `Arc::into_raw`
+// cells when the registered `ClosureLayout` marks captures with the new
+// kinds.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod a1b_make_closure_tests {
+    use crate::bytecode::{
+        BytecodeProgram, Constant, Function, Instruction, OpCode, Operand,
+    };
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::heap_value::HeapValue;
+    use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout, SharedCell};
+    use shape_value::v2::concrete_type::ConcreteType;
+    use shape_value::{ValueWord, ValueWordExt};
+    use std::sync::Arc;
+
+    /// Register a closure function and a matching ClosureLayout in the
+    /// program's tables. Returns the function id.
+    fn register_closure_function(
+        program: &mut BytecodeProgram,
+        captures_count: u16,
+        mutable_captures: Vec<bool>,
+        layout: ClosureLayout,
+        body: Vec<Instruction>,
+    ) -> u16 {
+        let fid = program.functions.len() as u16;
+        // Entry point is the current end of the top-level instruction
+        // stream — we append the body after the top-level code that has
+        // already been written (tests write top-level first, then call
+        // this).
+        let entry_point = program.instructions.len();
+        let body_length = body.len();
+        program.instructions.extend(body);
+        program.functions.push(Function {
+            name: format!("a1b_test_{}", fid),
+            arity: 0,
+            param_names: vec![],
+            locals_count: captures_count,
+            entry_point,
+            body_length,
+            is_closure: true,
+            captures_count,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures,
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        });
+        // Pad layouts with None up to fid.
+        while program.closure_function_layouts.len() < fid as usize + 1 {
+            program.closure_function_layouts.push(None);
+        }
+        program.closure_function_layouts[fid as usize] = Some(Arc::new(layout));
+        fid
+    }
+
+    #[test]
+    fn a1b_make_closure_owned_mutable_allocates_box_and_releases() {
+        // Set up a program with:
+        //   - top-level instructions: PushConst 42; MakeClosure(F); Halt.
+        //   - a closure function F (never called) whose layout marks
+        //     capture 0 as OwnedMutable (single I64).
+        // The MakeClosure handler must allocate Box::new(ValueWord(42)),
+        // write the raw pointer into the ClosureRaw slot, and leave a
+        // live ClosureRaw on the stack. Inspect the resulting closure
+        // via VmClosureHandle to verify the capture reads back as 42.
+        // When the VM / stack drops, release_typed_closure reclaims the
+        // Box.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(42));
+
+        // Top-level first (IP starts at 0 — the executor runs from the
+        // first instruction until Halt).
+        program.instructions.push(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(c0)),
+        ));
+        // MakeClosure with Function operand carrying fid — we need the
+        // fid before we emit this. Do it in two steps.
+        let makeclosure_placeholder_idx = program.instructions.len();
+        program
+            .instructions
+            .push(Instruction::simple(OpCode::Halt)); // placeholder
+        program.instructions.push(Instruction::simple(OpCode::Halt));
+
+        let body = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::OwnedMutable],
+        );
+        let fid = register_closure_function(
+            &mut program,
+            1,
+            vec![true], // mutable_captures[0] = true — matches A.1C's expected shape
+            layout,
+            body,
+        );
+
+        // Patch in the MakeClosure instruction with the resolved fid.
+        program.instructions[makeclosure_placeholder_idx] = Instruction::new(
+            OpCode::MakeClosure,
+            Some(Operand::Function(shape_value::FunctionId::new(fid))),
+        );
+        // makeclosure_placeholder_idx + 1 stays as Halt.
+        program.top_level_locals_count = 0;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+
+        // Result is a ClosureRaw.
+        let hv = result.as_heap_ref().expect("closure on stack");
+        assert!(
+            matches!(hv, HeapValue::ClosureRaw(_)),
+            "A.1B expects OwnedMutable-capturing closure to be ClosureRaw, got {}",
+            hv.type_name()
+        );
+        // Capture 0 reads back as 42 through the handle (deref's the
+        // Box via A.1B's `capture_as_value` CaptureKind dispatch).
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.capture_count(), 1);
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(42));
+        // capture_owned_mutable_ptr returns a non-null pointer.
+        let cell_ptr = handle
+            .capture_owned_mutable_ptr(0)
+            .expect("OwnedMutable slot");
+        assert!(!cell_ptr.is_null());
+
+        // Drop the result and VM — release_typed_closure will reclaim
+        // the Box. If the reclaim is wrong (leaked or double-freed),
+        // miri / address sanitiser catches it; without those, the test
+        // at least confirms no panic on drop.
+        drop(result);
+        drop(vm);
+    }
+
+    #[test]
+    fn a1b_make_closure_shared_allocates_arc_and_releases() {
+        // Same shape as the OwnedMutable test but with Shared. Inspect
+        // the allocated SharedCell via the handle, write through it,
+        // observe the new value on re-read.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(100));
+
+        program.instructions.push(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(c0)),
+        ));
+        let makeclosure_idx = program.instructions.len();
+        program
+            .instructions
+            .push(Instruction::simple(OpCode::Halt)); // placeholder
+        program.instructions.push(Instruction::simple(OpCode::Halt));
+
+        let body = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::Shared],
+        );
+        let fid = register_closure_function(
+            &mut program,
+            1,
+            vec![true],
+            layout,
+            body,
+        );
+
+        program.instructions[makeclosure_idx] = Instruction::new(
+            OpCode::MakeClosure,
+            Some(Operand::Function(shape_value::FunctionId::new(fid))),
+        );
+        program.top_level_locals_count = 0;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+
+        let hv = result.as_heap_ref().expect("closure on stack");
+        assert!(matches!(hv, HeapValue::ClosureRaw(_)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(100));
+
+        // Acquire the SharedCell and write through it; read back via
+        // the handle.
+        let cell_ptr = handle
+            .capture_shared_cell_ptr(0)
+            .expect("Shared slot");
+        assert!(!cell_ptr.is_null());
+        unsafe {
+            let cell: &SharedCell = &*cell_ptr;
+            *cell.lock() = ValueWord::from_i64(999);
+        }
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(999));
+
+        drop(handle);
+        drop(result);
+        drop(vm);
     }
 }

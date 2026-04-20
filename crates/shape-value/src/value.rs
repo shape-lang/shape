@@ -87,6 +87,28 @@ impl Upvalue {
         }
         self.0 = value;
     }
+
+    /// Track A.1B: return the raw inner bits of the upvalue's `ValueWord`
+    /// **without** running `SharedCell` auto-deref.
+    ///
+    /// The regular `Upvalue::get()` auto-dereffs through a
+    /// `HeapValue::SharedCell` when present — appropriate for the
+    /// retired-in-A.1C legacy mutable-capture fallback, but wrong for
+    /// A.1B's `CaptureKind::OwnedMutable` / `CaptureKind::Shared` upvalues
+    /// whose inner bits are a raw `*mut ValueWord` / `*const SharedCell`
+    /// pointer (not a NaN-tagged heap pointer; auto-deref would either
+    /// no-op on non-tagged bits or read garbage on a collision). The new
+    /// A.1B MIR opcodes
+    /// (`LoadOwnedMutableCapture` / `StoreOwnedMutableCapture` /
+    /// `LoadSharedCapture` / `StoreSharedCapture`) call this accessor to
+    /// recover the raw pointer bits from the upvalue slot.
+    ///
+    /// Safe to call: returning the u64 is a bit-copy of the `ValueWord`
+    /// alias, no pointer dereferences involved.
+    #[inline]
+    pub fn clone_inner_bits_for_raw_pointer_access(&self) -> u64 {
+        self.0
+    }
 }
 
 

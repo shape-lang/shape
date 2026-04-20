@@ -508,6 +508,18 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::StoreCaptureMutPtrI32
             | OpCode::StoreCaptureMutPtrBool
             | OpCode::StoreCaptureMutPtrPtr
+            // Track A.1B mutable-cell capture ops. OwnedMutable is a
+            // single Box-pointer deref (no allocation). Shared takes the
+            // parking_lot mutex, which does not allocate — the uncontended
+            // fast path is a single atomic compare-exchange. Neither op
+            // enters the GC safepoint poll path. A.1D / A.1E provide the
+            // Cranelift lowering; until then these opcodes bail to the
+            // interpreter outside hot loops, but they are semantically
+            // non-allocating so they belong on the whitelist.
+            | OpCode::LoadOwnedMutableCapture
+            | OpCode::StoreOwnedMutableCapture
+            | OpCode::LoadSharedCapture
+            | OpCode::StoreSharedCapture
             // Type casting (inline, no allocation)
             | OpCode::CastWidth
             // Control flow (inline jumps/branches)

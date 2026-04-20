@@ -374,6 +374,10 @@ impl VirtualMachine {
             StoreCaptureMutPtrI32 => self.op_store_capture_mut_ptr_i32(instruction)?,
             StoreCaptureMutPtrBool => self.op_store_capture_mut_ptr_bool(instruction)?,
             StoreCaptureMutPtrPtr => self.op_store_capture_mut_ptr_ptr(instruction)?,
+            LoadOwnedMutableCapture => self.op_load_owned_mutable_capture(instruction)?,
+            StoreOwnedMutableCapture => self.op_store_owned_mutable_capture(instruction)?,
+            LoadSharedCapture => self.op_load_shared_capture(instruction)?,
+            StoreSharedCapture => self.op_store_shared_capture(instruction)?,
             _ => unreachable!(
                 "exec_variables called with non-variable opcode: {:?}",
                 instruction.opcode
@@ -669,6 +673,224 @@ impl VirtualMachine {
         let raw = self.pop_raw_u64()?;
         let value = ValueWord::from_raw_bits(raw);
         self.write_capture_mut_cell(idx, value)
+    }
+
+    // ── Track A.1B: CaptureKind::OwnedMutable / Shared interpreter path ──
+    //
+    // The upvalue slot for A.1B's mutable/shared captures holds *raw
+    // pointer bits* (not a ValueWord payload the way `Upvalue::get/set`
+    // expect). We therefore read the slot's raw u64 directly and bypass
+    // `Upvalue::get()` — the auto-deref on `HeapValue::SharedCell` is
+    // specific to the retired-in-A.1C legacy mutable-capture fallback and
+    // MUST NOT run on an `OwnedMutable` / `Shared` upvalue (whose bits
+    // are not a NaN-tagged heap pointer in the first place).
+    //
+    // SAFETY invariants for every handler below:
+    //
+    // - The compiler (A.1C) emits these opcodes only for captures whose
+    //   `ClosureLayout::capture_storage_kind(i)` is the matching variant.
+    //   `op_make_closure` (A.1B) and the closure call plumbing preserve
+    //   the raw pointer bits through `frame.upvalues[i]`.
+    // - The upvalue's raw u64 is either `Box::into_raw(Box::new(ValueWord))`
+    //   (for OwnedMutable) or `Arc::into_raw(Arc::new(SharedCell))` (for
+    //   Shared). Both are 8-aligned allocations produced from Rust's
+    //   global allocator and live for the closure's refcounted lifetime.
+    // - The pointer is released exactly once by `release_typed_closure`
+    //   via `Box::from_raw` / `Arc::from_raw` when the closure's refcount
+    //   hits zero; interpreter reads/writes do NOT consume a reference
+    //   count and do NOT transfer ownership.
+
+    /// Read the raw pointer bits stored behind upvalue `upvalue_idx`.
+    /// Bypasses `Upvalue::get()` so `HeapValue::SharedCell` auto-deref
+    /// does NOT run on bits that encode a raw `*mut ValueWord` /
+    /// `*const SharedCell`. Used only by
+    /// `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture` /
+    /// `LoadSharedCapture` / `StoreSharedCapture`.
+    #[inline]
+    fn read_capture_raw_pointer_bits(&self, upvalue_idx: u16) -> Result<u64, VMError> {
+        let frame = self.call_stack.last().ok_or_else(|| {
+            VMError::RuntimeError(
+                "mutable/shared capture access outside a call frame".to_string(),
+            )
+        })?;
+        let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
+            VMError::RuntimeError(
+                "mutable/shared capture access in a frame without upvalues".to_string(),
+            )
+        })?;
+        let upvalue = upvalues.get(upvalue_idx as usize).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "capture index {} not found in closure",
+                upvalue_idx
+            ))
+        })?;
+        // NOTE: intentionally not calling `Upvalue::get()` — see module
+        // header above. We want the raw bits (a pointer), not a
+        // SharedCell-auto-dereffed ValueWord.
+        //
+        // Upvalue's inner ValueWord is a `u64` alias (see
+        // `shape_value::value_word`), so cloning & decoding bits is
+        // zero-cost. We read via clone() → raw_bits() because Upvalue's
+        // only public accessor for the inner is `.get()` (which
+        // auto-dereffs). Workaround: take the inner by Clone. The clone
+        // of Upvalue clones the inner u64 bits without invoking
+        // SharedCell semantics — Upvalue::new(value) just stashes the
+        // value.
+        Ok(upvalue.clone_inner_bits_for_raw_pointer_access())
+    }
+
+    /// `LoadOwnedMutableCapture { idx }`: read the ValueWord held in the
+    /// `*mut ValueWord` box cell behind capture `idx`. Pushes the inner
+    /// value onto the stack as raw bits.
+    ///
+    /// # Safety
+    ///
+    /// The capture at `idx` must have `CaptureKind::OwnedMutable`. The
+    /// upvalue slot must contain a non-null pointer obtained from
+    /// `Box::into_raw(Box::new(ValueWord))`. The pointer is valid for the
+    /// closure's refcounted lifetime; it is released exactly once by
+    /// `release_typed_closure` via `Box::from_raw`.
+    fn op_load_owned_mutable_capture(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut ValueWord;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: `cell_ptr` was produced by `Box::into_raw(Box::new(vw))`
+        // (see `op_make_closure` A.1B allocation path). It is 8-aligned
+        // (Box alignment for `u64`), non-null (checked above), and
+        // exclusively owned by this closure's refcounted block — no
+        // aliasing or sharing semantics apply to OwnedMutable. Reading 8
+        // bytes through it produces a valid `ValueWord` u64. The lifetime
+        // is bounded by the surrounding closure call frame's upvalues
+        // vec, which keeps the ClosureRaw block alive (and therefore the
+        // box alive) for the duration of this call.
+        let value = unsafe { std::ptr::read(cell_ptr) };
+        self.push_raw_u64(value)
+    }
+
+    /// `StoreOwnedMutableCapture { idx }`: pop a ValueWord and write it
+    /// through the `*mut ValueWord` box cell behind capture `idx`.
+    ///
+    /// # Safety
+    ///
+    /// Same invariants as `op_load_owned_mutable_capture`. The old cell
+    /// contents are overwritten in place — if the old contents were a
+    /// heap-tagged ValueWord share, the caller is responsible for
+    /// ensuring the write does not leak (typical case: integer/float
+    /// capture, inline bits have no Drop glue).
+    fn op_store_owned_mutable_capture(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut ValueWord;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: same invariants as `op_load_owned_mutable_capture`. The
+        // 8-byte write at `cell_ptr` replaces the previous ValueWord bit
+        // pattern in-place. Alignment and provenance are upheld by the
+        // Box allocator. `new_bits` is a valid ValueWord u64 produced by
+        // the executor.
+        unsafe {
+            std::ptr::write(cell_ptr, new_bits);
+        }
+        Ok(())
+    }
+
+    /// `LoadSharedCapture { idx }`: acquire the parking_lot mutex behind
+    /// capture `idx`, clone the inner ValueWord bits, drop the guard, and
+    /// push the value onto the stack.
+    ///
+    /// # Safety
+    ///
+    /// The capture at `idx` must have `CaptureKind::Shared`. The upvalue
+    /// slot must contain a non-null `*const SharedCell` obtained from
+    /// `Arc::into_raw(Arc::new(parking_lot::Mutex::new(ValueWord)))`. The
+    /// strong-count share is held by the closure (the block owns the
+    /// `Arc::into_raw`-produced share); this handler only reborrows the
+    /// underlying allocation via `&*cell_ptr` — the reference's lifetime
+    /// is bounded by this handler invocation. No retain/release traffic.
+    fn op_load_shared_capture(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: `cell_ptr` was produced by `Arc::into_raw(Arc::new(...))`
+        // (see A.1B `op_make_closure` allocation path). It is 8-aligned,
+        // non-null, and represents a live Arc strong-count share owned by
+        // the surrounding ClosureRaw block (kept alive for the duration
+        // of this call frame). Reborrowing via `&*cell_ptr` is sound as
+        // long as we don't outlive the Arc — we drop the reference at
+        // the end of this function, well before `release_typed_closure`
+        // runs.
+        let value_bits = unsafe {
+            let cell: &SharedCell = &*cell_ptr;
+            let guard = cell.lock();
+            let bits = *guard;
+            drop(guard);
+            bits
+        };
+        self.push_raw_u64(value_bits)
+    }
+
+    /// `StoreSharedCapture { idx }`: pop a ValueWord, acquire the
+    /// parking_lot mutex behind capture `idx`, overwrite the inner
+    /// ValueWord bits, and drop the guard.
+    ///
+    /// # Safety
+    ///
+    /// Same invariants as `op_load_shared_capture`. The mutex serialises
+    /// concurrent writers; the Arc strong-count is not modified by this
+    /// handler.
+    fn op_store_shared_capture(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: same invariants as `op_load_shared_capture`. We take
+        // the mutex for exclusive access, overwrite the 8-byte ValueWord
+        // payload, then drop the guard. The Arc strong-count share owned
+        // by the closure remains intact.
+        unsafe {
+            let cell: &SharedCell = &*cell_ptr;
+            let mut guard = cell.lock();
+            *guard = new_bits;
+            drop(guard);
+        }
+        Ok(())
     }
 
     /// Load value from a local variable slot (register window on the unified stack).
@@ -2300,5 +2522,362 @@ mod tests {
             result.as_str().map(|s| s.to_string()),
             Some("owned_test".to_string()),
         );
+    }
+
+    // ── Track A.1B: interpreter handlers for OwnedMutable / Shared ─────
+    //
+    // These tests synthesise a tiny program consisting of exactly the new
+    // opcode(s) under test, then prime a synthetic call frame whose
+    // `upvalues` hold **raw pointer bits** produced by
+    // `Box::into_raw` / `Arc::into_raw`. The opcode handler recovers the
+    // pointer via `Upvalue::clone_inner_bits_for_raw_pointer_access` and
+    // dereferences the cell. We drop the Box / Arc explicitly at end of
+    // the test — `release_typed_closure` is NOT invoked because there is
+    // no real closure block in this low-level harness.
+
+    use crate::executor::CallFrame;
+    use shape_value::Upvalue;
+    use shape_value::v2::closure_layout::SharedCell;
+    use std::sync::Arc as StdArc;
+
+    /// Build a minimal `BytecodeProgram` whose top-level code is just
+    /// `Halt` — the program is used to construct a VM, but we immediately
+    /// replace the current IP / call stack to execute a short instruction
+    /// sequence stored elsewhere.
+    fn fresh_vm_for_capture_opcode_test() -> VirtualMachine {
+        let mut program = BytecodeProgram::default();
+        program.instructions = vec![Instruction::simple(OpCode::Halt)];
+        program.top_level_locals_count = 0;
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        vm
+    }
+
+    /// Push a synthetic call frame with the given upvalues onto the VM
+    /// call stack. The frame returns to ip=0 (Halt) on ReturnValue.
+    fn push_synthetic_frame_with_upvalues(vm: &mut VirtualMachine, upvalues: Vec<Upvalue>) {
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: vm.sp,
+            locals_count: 0,
+            function_id: None,
+            upvalues: Some(upvalues),
+            blob_hash: None,
+        });
+    }
+
+    #[test]
+    fn a1b_load_owned_mutable_capture_derefs_box_cell() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        // Allocate a Box<ValueWord> — its raw pointer goes into the
+        // synthetic upvalue slot. We reclaim the Box at the end of the
+        // test.
+        let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(42)));
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
+
+        let instr = Instruction::new(
+            OpCode::LoadOwnedMutableCapture,
+            Some(Operand::Local(0)),
+        );
+        vm.op_load_owned_mutable_capture(&instr).unwrap();
+
+        let out = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(42));
+
+        // Reclaim the cell manually — no release_typed_closure in this
+        // harness.
+        // SAFETY: `cell` came from Box::into_raw; we reclaim it exactly
+        // once.
+        unsafe {
+            drop(Box::from_raw(cell));
+        }
+        // Pop the synthetic frame so the VM's own Drop doesn't trip on
+        // the synthetic upvalue holding pointer bits.
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_store_owned_mutable_capture_writes_through_box_cell() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(1)));
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
+
+        // Push new value 999 onto the stack and StoreOwnedMutableCapture.
+        vm.push_raw_u64(ValueWord::from_i64(999).into_raw_bits())
+            .unwrap();
+        let instr = Instruction::new(
+            OpCode::StoreOwnedMutableCapture,
+            Some(Operand::Local(0)),
+        );
+        vm.op_store_owned_mutable_capture(&instr).unwrap();
+
+        // SAFETY: cell is still live. Read the cell back to confirm the
+        // write landed.
+        unsafe {
+            assert_eq!((*cell).as_i64(), Some(999));
+            drop(Box::from_raw(cell));
+        }
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_owned_mutable_roundtrip_load_store_load() {
+        // Full roundtrip: load initial value, store a new value, load
+        // it back.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(10)));
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
+
+        let load_instr = Instruction::new(
+            OpCode::LoadOwnedMutableCapture,
+            Some(Operand::Local(0)),
+        );
+        let store_instr = Instruction::new(
+            OpCode::StoreOwnedMutableCapture,
+            Some(Operand::Local(0)),
+        );
+
+        // Load1 → 10
+        vm.op_load_owned_mutable_capture(&load_instr).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(10)
+        );
+
+        // Store 55
+        vm.push_raw_u64(ValueWord::from_i64(55).into_raw_bits())
+            .unwrap();
+        vm.op_store_owned_mutable_capture(&store_instr).unwrap();
+
+        // Load2 → 55
+        vm.op_load_owned_mutable_capture(&load_instr).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(55)
+        );
+
+        // SAFETY: reclaim.
+        unsafe {
+            drop(Box::from_raw(cell));
+        }
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_load_shared_capture_locks_and_returns_inner() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let external: StdArc<SharedCell> =
+            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(77)));
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        let instr = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
+        vm.op_load_shared_capture(&instr).unwrap();
+
+        let out = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(77));
+
+        // Reclaim the Arc share for the synthetic upvalue.
+        // SAFETY: cell_ptr came from Arc::into_raw — one strong share.
+        unsafe {
+            drop(StdArc::from_raw(cell_ptr));
+        }
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_store_shared_capture_writes_through_mutex() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let external: StdArc<SharedCell> =
+            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        // Push value 31415 and StoreSharedCapture.
+        vm.push_raw_u64(ValueWord::from_i64(31415).into_raw_bits())
+            .unwrap();
+        let instr = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0)));
+        vm.op_store_shared_capture(&instr).unwrap();
+
+        // External Arc observes the write.
+        assert_eq!(external.lock().as_i64(), Some(31415));
+
+        // SAFETY: reclaim.
+        unsafe {
+            drop(StdArc::from_raw(cell_ptr));
+        }
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_two_closures_share_var_observe_writes_across_handles() {
+        // Mandatory test #3 (A.1B brief): two closures capturing the
+        // SAME Arc<SharedCell>. Write through closure A's upvalue,
+        // observe via closure B's upvalue.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let external: StdArc<SharedCell> =
+            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+
+        // Two raw-ptr shares — one per "closure".
+        let share_a: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
+        let share_b: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
+        // Both raw pointers refer to the same underlying SharedCell —
+        // Arc::into_raw on cloned Arcs yields identical `*const` values.
+        assert_eq!(share_a, share_b);
+
+        // Closure A's upvalues[0] is share_a. Closure B's is share_b.
+        // Write through A, read through B.
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(share_a as u64)]);
+        vm.push_raw_u64(ValueWord::from_i64(100).into_raw_bits())
+            .unwrap();
+        let store_instr = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0)));
+        vm.op_store_shared_capture(&store_instr).unwrap();
+        vm.call_stack.pop();
+
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(share_b as u64)]);
+        let load_instr = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
+        vm.op_load_shared_capture(&load_instr).unwrap();
+        let out = vm.pop_raw_u64().unwrap();
+        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(100));
+        vm.call_stack.pop();
+
+        // Strong count before reclaim: 3 (external + share_a + share_b).
+        assert_eq!(StdArc::strong_count(&external), 3);
+        // SAFETY: reclaim both raw pointer shares.
+        unsafe {
+            drop(StdArc::from_raw(share_a));
+            drop(StdArc::from_raw(share_b));
+        }
+        assert_eq!(StdArc::strong_count(&external), 1);
+    }
+
+    #[test]
+    fn a1b_mixed_kinds_interleaved_load_store_roundtrip() {
+        // Mandatory test #4 (A.1B brief): frame with upvalues
+        // [Immutable(F64), OwnedMutable, Shared, Immutable(I64)] and
+        // round-trip reads/writes on all four through the appropriate
+        // opcodes. Immutable slots use LoadClosure/StoreClosure; the
+        // other two use A.1B's new opcodes.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let box_cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(200)));
+        let external: StdArc<SharedCell> =
+            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(300)));
+        let arc_raw: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![
+                Upvalue::new(ValueWord::from_f64(1.5).into_raw_bits()),
+                Upvalue::new(box_cell as u64),
+                Upvalue::new(arc_raw as u64),
+                Upvalue::new(ValueWord::from_i64(400).into_raw_bits()),
+            ],
+        );
+
+        // Immutable slot 0: LoadClosure.
+        let load_imm_0 = Instruction::new(OpCode::LoadClosure, Some(Operand::Local(0)));
+        vm.op_load_closure(&load_imm_0).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_f64(),
+            Some(1.5)
+        );
+
+        // Immutable slot 3: LoadClosure.
+        let load_imm_3 = Instruction::new(OpCode::LoadClosure, Some(Operand::Local(3)));
+        vm.op_load_closure(&load_imm_3).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(400)
+        );
+
+        // OwnedMutable slot 1: Load → 200, Store 250, Load → 250.
+        let load_om = Instruction::new(
+            OpCode::LoadOwnedMutableCapture,
+            Some(Operand::Local(1)),
+        );
+        let store_om = Instruction::new(
+            OpCode::StoreOwnedMutableCapture,
+            Some(Operand::Local(1)),
+        );
+        vm.op_load_owned_mutable_capture(&load_om).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(200)
+        );
+        vm.push_raw_u64(ValueWord::from_i64(250).into_raw_bits())
+            .unwrap();
+        vm.op_store_owned_mutable_capture(&store_om).unwrap();
+        vm.op_load_owned_mutable_capture(&load_om).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(250)
+        );
+
+        // Shared slot 2: Load → 300, Store 350, Load → 350.
+        let load_sh = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(2)));
+        let store_sh = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(2)));
+        vm.op_load_shared_capture(&load_sh).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(300)
+        );
+        vm.push_raw_u64(ValueWord::from_i64(350).into_raw_bits())
+            .unwrap();
+        vm.op_store_shared_capture(&store_sh).unwrap();
+        vm.op_load_shared_capture(&load_sh).unwrap();
+        assert_eq!(
+            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
+            Some(350)
+        );
+        // External Arc reads the new value.
+        assert_eq!(external.lock().as_i64(), Some(350));
+
+        // SAFETY: reclaim Box + Arc share.
+        unsafe {
+            drop(Box::from_raw(box_cell));
+            drop(StdArc::from_raw(arc_raw));
+        }
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn a1b_null_pointer_errors_cleanly() {
+        // A null pointer in the upvalue slot (should never happen in
+        // production — the A.1B make_closure path guarantees non-null
+        // allocations) returns a runtime error instead of segfaulting.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(0)]);
+
+        let load_om = Instruction::new(
+            OpCode::LoadOwnedMutableCapture,
+            Some(Operand::Local(0)),
+        );
+        let err = vm.op_load_owned_mutable_capture(&load_om).unwrap_err();
+        match err {
+            shape_value::VMError::RuntimeError(msg) => {
+                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
+            }
+            other => panic!("expected RuntimeError, got {:?}", other),
+        }
+
+        let load_sh = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
+        let err = vm.op_load_shared_capture(&load_sh).unwrap_err();
+        match err {
+            shape_value::VMError::RuntimeError(msg) => {
+                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
+            }
+            other => panic!("expected RuntimeError, got {:?}", other),
+        }
+
+        vm.call_stack.pop();
     }
 }

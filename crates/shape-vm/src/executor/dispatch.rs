@@ -519,7 +519,11 @@ impl VirtualMachine {
             | StoreCaptureMutPtrI64
             | StoreCaptureMutPtrI32
             | StoreCaptureMutPtrBool
-            | StoreCaptureMutPtrPtr => {
+            | StoreCaptureMutPtrPtr
+            | LoadOwnedMutableCapture
+            | StoreOwnedMutableCapture
+            | LoadSharedCapture
+            | StoreSharedCapture => {
                 return self.exec_variables(instruction);
             }
 

@@ -602,6 +602,14 @@ pub fn drop_raw_bits(bits: u64) {
 /// retain their pointer identity — the auto-deref in `Upvalue::get()` /
 /// `set()` only preserves shared mutation semantics when the SharedCell
 /// `ValueWord` itself is the stored capture, not the cell's inner value.
+///
+/// Track A.1B: for the Raw backing, captures are widened through
+/// `capture_execution_bits()` instead of `captures_as_values()` so that
+/// `CaptureKind::OwnedMutable` / `CaptureKind::Shared` captures carry
+/// their raw `*mut ValueWord` / `*const SharedCell` pointer bits (rather
+/// than the dereferenced value) into the call frame's `upvalues` —
+/// required for the new `LoadOwnedMutableCapture` / `LoadSharedCapture`
+/// opcodes to recover the cell pointer.
 #[inline]
 pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>)> {
     unsafe {
@@ -611,19 +619,20 @@ pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>
         // Legacy backing: preserve the `Upvalue` values verbatim so
         // SharedCell-backed captures keep their identity. The Raw backing
         // has no `Upvalue` slice — its captures are raw typed bytes — so
-        // fall through to `captures_as_values` + fresh `Upvalue::new` for
-        // it. Raw-backed closures can only carry SharedCell-free captures
-        // in practice (the VM producer guards on `any_mutable_capture`),
-        // so widening through `captures_as_values` is correct there.
+        // fall through to `capture_execution_bits` + fresh `Upvalue::new`
+        // for it. For `CaptureKind::OwnedMutable` / `CaptureKind::Shared`
+        // captures, `capture_execution_bits` returns the raw pointer bits
+        // so the new A.1B opcodes can recover the cell.
         let upvalues: Vec<shape_value::Upvalue> =
             if let Some(slice) = handle.upvalues_legacy() {
                 slice.to_vec()
             } else {
-                handle
-                    .captures_as_values()
-                    .into_iter()
-                    .map(shape_value::Upvalue::new)
-                    .collect()
+                let n = handle.capture_count();
+                let mut out: Vec<shape_value::Upvalue> = Vec::with_capacity(n);
+                for i in 0..n {
+                    out.push(shape_value::Upvalue::new(handle.capture_execution_bits(i)));
+                }
+                out
             };
         Some((fid, upvalues))
     }
