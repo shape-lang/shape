@@ -276,8 +276,8 @@ mod phase_h2_finalizer_tests {
             let off = layout.heap_capture_offset(0);
             assert_eq!(off, HEAP_CLOSURE_HEADER_SIZE);
             // Store the raw bits of from_i64(123) as u64 — this is what the
-            // JIT's coerce_for_capture_store would do for an I64 capture (it
-            // NaN-boxes via ensure_nanboxed).
+            // JIT's coerce_for_capture_store would do for an I64 capture
+            // (widen to I64 with the ValueWord bit pattern).
             let raw = ValueWord::from_i64(123).into_raw_bits();
             std::ptr::write(ptr.add(off) as *mut u64, raw);
         }

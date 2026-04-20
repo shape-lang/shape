@@ -68,7 +68,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Explicit clone: get the value and retain.
                 //
                 // R4.2D: `jit_arc_retain` takes a plain `u64` bit-pattern
-                // (implicitly ValueWord-encoded), so no `ensure_nanboxed`
+                // (implicitly ValueWord-encoded), so no width-extension
                 // wrap is needed. Clones are only emitted for heap types,
                 // which already live in I64 slots at this site.
                 let val = self.compile_operand_raw(operand)?;
@@ -375,7 +375,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a binary operation using generic FFI calls for unknown types.
     ///
     /// R4.2A: The `generic_*` FFI signatures take plain `u64` bit-patterns
-    /// (implicitly ValueWord-encoded), so no `ensure_nanboxed` wrap is needed
+    /// (implicitly ValueWord-encoded), so no width-extension wrap is needed
     /// at the call site — operands are expected to be I64 already. Native
     /// F64/I32/I8 values should reach this path only via the inline fast
     /// paths above; the generic fallback is for already-dynamic (I64) slots.

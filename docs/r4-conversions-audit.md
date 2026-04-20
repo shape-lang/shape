@@ -295,3 +295,14 @@ Commit: `mir: delete NaN-box conversion helpers (R4.3)`.
   reference cell. If R4.2 surfaces one (e.g. a raw pointer passed to a
   new FFI), flag it here before merging so R4.3's grep-zero gate
   remains valid.
+
+## R4.3 closeout
+
+Landed on branch `jit-v2-phase1`. Grep returns 0. `conversions.rs`
+shrunk to native-only widen/narrow helpers (`slot_kind_of` +
+`ensure_kind` — the latter inlines the former box/unbox branches as
+a direct Cranelift `bitcast`/`sextend`/`uextend`/`ireduce` table, with
+no ValueWord tag manipulation). All three NaN-box helpers retired;
+`infer_kind_from_value`, `is_native_slot` method, and
+`convert_between` retired with them. Track D (R4) closed; R6 and R7
+can proceed.

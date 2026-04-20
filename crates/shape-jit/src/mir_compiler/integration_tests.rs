@@ -1702,7 +1702,7 @@ f()
 // R4.2E — narrow-to-I64 widening at VM-stack push sites
 //
 // These tests pin the inline sextend/uextend/bitcast/ireduce logic that
-// replaced ensure_nanboxed/unbox_from_nanboxed at the six call sites:
+// replaced the former NaN-box wrap/unwrap helpers at the six call sites:
 //   - terminators.rs method-dispatch args           (site 1)
 //   - terminators.rs direct-call native args        (site 2)
 //   - terminators.rs indirect-call callee push      (site 3)

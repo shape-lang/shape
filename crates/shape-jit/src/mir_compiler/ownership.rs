@@ -64,9 +64,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a MIR constant to a Cranelift value.
     ///
     /// Returns native types when possible (F64 for floats, I64 for ints, I8 for bools).
-    /// Consumers that need NaN-boxed I64 (FFI calls) use `ensure_nanboxed()`.
+    /// Consumers that need an I64 slot (e.g. for a dynamic local) rely on
+    /// `ensure_kind` in `conversions.rs` to do the width extension.
     /// v2-boundary: Int, None, StringId, Str, Function, Method, ClosurePlaceholder
-    /// all produce NaN-boxed I64 because the VM stack and FFI boundaries expect it.
+    /// all produce I64 (ValueWord bit-pattern) because the VM stack and FFI
+    /// boundaries expect the uniform 8-byte slot.
     pub(crate) fn compile_constant(&mut self, constant: &MirConstant) -> Result<Value, String> {
         match constant {
             MirConstant::Int(n) => {
