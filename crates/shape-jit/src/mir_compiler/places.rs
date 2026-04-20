@@ -314,10 +314,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(())
             }
             Place::Deref(inner) => {
+                // R4.2F: ref cells are native-width — store at the value's
+                // natural Cranelift type. Width is inferred from `val`'s
+                // type, which matches the cell shape created in
+                // `Rvalue::Borrow`. No NaN-box wrap needed.
                 let ref_addr = self.read_place(inner)?;
-                // v2-boundary: borrow stack slots store NaN-boxed I64
-                let boxed_val = self.ensure_nanboxed(val);
-                self.builder.ins().store(MemFlags::new(), boxed_val, ref_addr, 0);
+                self.builder.ins().store(MemFlags::new(), val, ref_addr, 0);
                 Ok(())
             }
         }
@@ -606,5 +608,147 @@ mod tests {
             crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE,
             "TYPED_OBJ_HEADER must match TYPED_OBJECT_HEADER_SIZE"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R4.2F — borrow stack cell round-trip tests
+    //
+    // Mirrors the `Rvalue::Borrow` + `reload_referenced_locals` pattern at
+    // the Cranelift level: a native-sized StackSlot is allocated, the input
+    // value is `stack_store`d at offset 0, and the same type is read back
+    // via `stack_load`. The round-trip must preserve the exact value for
+    // every native slot width touched by the borrow path (I8 bool, I32 int,
+    // F64 number, I64 fallback). Regressions here would indicate the
+    // size/alignment computation in `Rvalue::Borrow` drifted.
+    // -----------------------------------------------------------------------
+
+    /// Compile `fn(v: T) -> T { let slot: T; stack_store v, slot; stack_load T, slot }`
+    /// and return the resulting native function pointer wrapped in a u64-carrier
+    /// closure. Size/align_shift are derived from `cl_ty` exactly as
+    /// `Rvalue::Borrow` does.
+    fn build_roundtrip_fn(
+        module: &mut JITModule,
+        ctx: &mut cranelift::codegen::Context,
+        fb_ctx: &mut FunctionBuilderContext,
+        name: &str,
+        cl_ty: Type,
+    ) -> *const u8 {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(cl_ty));
+        sig.returns.push(AbiParam::new(cl_ty));
+
+        let func_id = module
+            .declare_function(name, cranelift_module::Linkage::Local, &sig)
+            .unwrap();
+
+        ctx.func.signature = sig;
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, fb_ctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            let v = builder.block_params(entry)[0];
+
+            // Exact mirror of the R4.2F Rvalue::Borrow sizing logic.
+            let size = cl_ty.bytes();
+            let align_shift = size.trailing_zeros() as u8;
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                size,
+                align_shift,
+            ));
+
+            builder.ins().stack_store(v, slot, 0);
+            let reloaded = builder.ins().stack_load(cl_ty, slot, 0);
+            builder.ins().return_(&[reloaded]);
+            builder.finalize();
+        }
+
+        module.define_function(func_id, ctx).unwrap();
+        module.clear_context(ctx);
+        module.finalize_definitions().unwrap();
+        module.get_finalized_function(func_id)
+    }
+
+    #[test]
+    fn r4_2f_borrow_cell_roundtrip_bool_i8() {
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+        let code = build_roundtrip_fn(
+            &mut module,
+            &mut ctx,
+            &mut fb_ctx,
+            "rt_bool",
+            types::I8,
+        );
+        unsafe {
+            let f: unsafe fn(u8) -> u8 = std::mem::transmute(code);
+            assert_eq!(f(1), 1, "I8 borrow cell must preserve `true`");
+            assert_eq!(f(0), 0, "I8 borrow cell must preserve `false`");
+            assert_eq!(f(0xAA), 0xAA, "I8 borrow cell must preserve all 8 bits");
+        }
+    }
+
+    #[test]
+    fn r4_2f_borrow_cell_roundtrip_int_i32() {
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+        let code = build_roundtrip_fn(
+            &mut module,
+            &mut ctx,
+            &mut fb_ctx,
+            "rt_i32",
+            types::I32,
+        );
+        unsafe {
+            let f: unsafe fn(i32) -> i32 = std::mem::transmute(code);
+            assert_eq!(f(0), 0);
+            assert_eq!(f(42), 42);
+            assert_eq!(f(-1), -1, "I32 borrow cell must preserve sign bit");
+            assert_eq!(f(i32::MIN), i32::MIN);
+            assert_eq!(f(i32::MAX), i32::MAX);
+        }
+    }
+
+    #[test]
+    fn r4_2f_borrow_cell_roundtrip_number_f64() {
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+        let code = build_roundtrip_fn(
+            &mut module,
+            &mut ctx,
+            &mut fb_ctx,
+            "rt_f64",
+            types::F64,
+        );
+        unsafe {
+            let f: unsafe fn(f64) -> f64 = std::mem::transmute(code);
+            assert_eq!(f(1.5), 1.5, "F64 borrow cell must preserve fraction bits");
+            assert_eq!(f(-0.0).to_bits(), (-0.0f64).to_bits(),
+                "F64 borrow cell must preserve sign of zero");
+            let nan = f64::from_bits(0x7FF8_0000_0000_0001);
+            assert_eq!(f(nan).to_bits(), nan.to_bits(),
+                "F64 borrow cell must preserve NaN payload");
+        }
+    }
+
+    #[test]
+    fn r4_2f_borrow_cell_roundtrip_fallback_i64() {
+        // Non-native slot kinds (heap / string / unknown) → I64 cell.
+        // This is the legacy 8-byte path and must remain byte-accurate.
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+        let code = build_roundtrip_fn(
+            &mut module,
+            &mut ctx,
+            &mut fb_ctx,
+            "rt_i64",
+            types::I64,
+        );
+        unsafe {
+            let f: unsafe fn(u64) -> u64 = std::mem::transmute(code);
+            assert_eq!(f(0), 0);
+            assert_eq!(f(u64::MAX), u64::MAX);
+            assert_eq!(f(0xFFF8_0000_0000_0001), 0xFFF8_0000_0000_0001,
+                "I64 borrow cell must preserve NaN-boxed tag patterns");
+        }
     }
 }

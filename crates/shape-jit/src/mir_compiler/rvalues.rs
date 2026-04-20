@@ -77,23 +77,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             Rvalue::Borrow(_kind, place) => {
-                // StackSlot-based references (ported from BytecodeToIR):
-                // 1. Read the current value from the place (box for stack slot)
+                // R4.2F: allocate a native-sized/aligned stack cell that
+                // matches the root local's Cranelift type. References are
+                // strictly per-function — they never cross Cranelift call
+                // boundaries — so picking a native width here is safe and
+                // removes the width-extension wrap/unwrap pair.
+                //
+                // For non-native slot kinds (heap / string / unknown),
+                // `cranelift_type_for_slot` returns I64, collapsing to the
+                // legacy 8-byte cell with no behavioural change.
                 let raw_val = self.read_place(place)?;
-                // v2-boundary: borrow stack slots store NaN-boxed I64
-                let val = self.ensure_nanboxed(raw_val);
-                // 2. Allocate an 8-byte stack slot to hold the referenced value
+                let root = place.root_local();
+                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0);
+                let cl_ty = super::types::cranelift_type_for_slot(kind);
+                let size = cl_ty.bytes();
+                // `create_sized_stack_slot` takes the log2 of the alignment;
+                // `trailing_zeros` of a power-of-two size is exactly that.
+                let align_shift = size.trailing_zeros() as u8;
                 let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    8,
-                    3, // align = 8 (2^3)
+                    size,
+                    align_shift,
                 ));
-                // 3. Store the value into the stack slot
-                self.builder.ins().stack_store(val, slot, 0);
-                // 4. Track the root local for reload-after-call
-                let root = place.root_local();
-                self.ref_stack_slots.insert(root, slot);
-                // 5. Return the stack slot address as the reference value
+                // Store the value at its native width — no NaN-box wrap.
+                self.builder.ins().stack_store(raw_val, slot, 0);
+                // Track root local + native type for reload-after-call.
+                self.ref_stack_slots.insert(root, (slot, cl_ty));
+                // Return the stack slot address as the reference value.
                 Ok(self.builder.ins().stack_addr(types::I64, slot, 0))
             }
 

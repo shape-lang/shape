@@ -112,9 +112,15 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) user_func_arities: HashMap<u16, u16>,
 
     // ── Borrow support ──────────────────────────────────────────────
-    /// MIR SlotId → Cranelift StackSlot for references created by Rvalue::Borrow.
-    /// After calls, all referenced locals are reloaded from their stack slots.
-    pub(crate) ref_stack_slots: HashMap<SlotId, StackSlot>,
+    /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
+    /// created by `Rvalue::Borrow`. After calls, all referenced locals are
+    /// reloaded from their stack slots using the recorded native type.
+    ///
+    /// R4.2F: the type is tracked so `reload_referenced_locals` can issue a
+    /// native-width `stack_load` that matches both the `stack_store` width
+    /// and the declared variable type. Non-native slot kinds map to I64 via
+    /// `cranelift_type_for_slot`, collapsing to the legacy 8-byte cell.
+    pub(crate) ref_stack_slots: HashMap<SlotId, (StackSlot, Type)>,
     /// Mapping from field name to byte offset within a TypedObject.
     pub(crate) field_byte_offsets: HashMap<String, u16>,
 
@@ -399,19 +405,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// After a function call, the callee may have mutated values through
     /// shared references. We conservatively reload all referenced locals
     /// from their StackSlots to keep Cranelift variables in sync.
+    ///
+    /// R4.2F: stack cells are now native-sized/aligned (matching the root
+    /// local's Cranelift type), so `stack_load` directly produces a value
+    /// of the declared variable's type — no NaN-box unboxing needed.
     pub(crate) fn reload_referenced_locals(&mut self) {
         let refs: Vec<_> = self
             .ref_stack_slots
             .iter()
-            .map(|(&slot_id, &stack_slot)| (slot_id, stack_slot))
+            .map(|(&slot_id, &(stack_slot, cl_ty))| (slot_id, stack_slot, cl_ty))
             .collect();
-        for (slot_id, stack_slot) in refs {
-            let reloaded = self.builder.ins().stack_load(cranelift::prelude::types::I64, stack_slot, 0);
+        for (slot_id, stack_slot, cl_ty) in refs {
+            let reloaded = self.builder.ins().stack_load(cl_ty, stack_slot, 0);
             if let Some(&var) = self.locals.get(&slot_id) {
-                // v2-boundary: borrow stack slots store NaN-boxed I64; convert to native if needed
-                let kind = types::slot_kind_for_local(&self.slot_kinds, slot_id.0);
-                let converted = self.unbox_from_nanboxed(reloaded, kind);
-                self.builder.def_var(var, converted);
+                self.builder.def_var(var, reloaded);
             }
         }
     }

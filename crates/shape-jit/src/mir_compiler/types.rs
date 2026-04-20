@@ -362,4 +362,69 @@ mod tests {
         assert_eq!(cranelift_type_for_slot(SlotKind::Int64), types::I64);
         assert_eq!(cranelift_type_for_slot(SlotKind::String), types::I64);
     }
+
+    // -----------------------------------------------------------------------
+    // R4.2F: borrow StackSlot sizing invariants
+    //
+    // `Rvalue::Borrow` creates a stack cell with
+    //     size = cranelift_type_for_slot(kind).bytes()
+    //     align = log2(size)
+    // These tests pin the native widths across all slot kinds that flow into
+    // borrow cells. Non-native kinds must collapse to 8 bytes / align=3 so the
+    // widening is a no-op for the legacy heap/unknown path.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn r4_2f_borrow_cell_sizes() {
+        // Native-typed slots get their natural width.
+        assert_eq!(cranelift_type_for_slot(SlotKind::Float64).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Int64).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Int32).bytes(), 4);
+        assert_eq!(cranelift_type_for_slot(SlotKind::UInt32).bytes(), 4);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Int16).bytes(), 2);
+        assert_eq!(cranelift_type_for_slot(SlotKind::UInt16).bytes(), 2);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Int8).bytes(), 1);
+        assert_eq!(cranelift_type_for_slot(SlotKind::UInt8).bytes(), 1);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Bool).bytes(), 1);
+        // Non-native slots collapse to 8 bytes (legacy behaviour).
+        assert_eq!(cranelift_type_for_slot(SlotKind::Unknown).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(SlotKind::String).bytes(), 8);
+    }
+
+    #[test]
+    fn r4_2f_borrow_cell_alignment_shifts() {
+        // `align_shift = size.trailing_zeros()` — must match log2(size) for
+        // every power-of-two native width. If this ever breaks, the
+        // `StackSlotData::new` call in `Rvalue::Borrow` will assert.
+        for kind in [
+            SlotKind::Float64,
+            SlotKind::Int64,
+            SlotKind::Int32,
+            SlotKind::UInt32,
+            SlotKind::Int16,
+            SlotKind::UInt16,
+            SlotKind::Int8,
+            SlotKind::UInt8,
+            SlotKind::Bool,
+            SlotKind::Unknown,
+            SlotKind::String,
+        ] {
+            let size = cranelift_type_for_slot(kind).bytes();
+            assert!(
+                size.is_power_of_two(),
+                "slot kind {:?} has non-power-of-two size {}",
+                kind,
+                size
+            );
+            let shift = size.trailing_zeros() as u8;
+            assert_eq!(
+                1u32 << shift,
+                size,
+                "slot kind {:?}: shift {} does not reconstruct size {}",
+                kind,
+                shift,
+                size
+            );
+        }
+    }
 }
