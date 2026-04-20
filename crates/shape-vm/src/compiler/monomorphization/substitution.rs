@@ -390,15 +390,11 @@ fn strip_fn_name_prefix<'a>(fn_name: &str, mono_key: &'a str) -> &'a str {
 /// Type annotations are NOT walked here — they were already handled in the
 /// preceding type-substitution pass. This pass only touches expression nodes.
 ///
-/// **Surface scope**: this walker currently handles `Return`, `Expression`,
-/// and `VariableDecl` directly. Every other statement shape passes through
-/// untouched — that's enough to cover the const-generic body shapes the
-/// substitution path needs today (the grammar doesn't expose const generic
-/// uses anywhere else yet). When the grammar adds richer surface, expand the
-/// match arms here to walk `For`, `While`, `If`, `Match`, etc.
-///
-/// TODO(grammar-const-generics): expand statement coverage as the grammar
-/// adds more surface for const-generic identifier uses.
+/// **Coverage**: exhaustive across every `Statement` variant. The compiler's
+/// exhaustive-match rule (see CLAUDE.md) ensures any future variant addition
+/// forces a corresponding arm here. Leaf statements (`Break`, `Continue`,
+/// `RemoveTarget`) are returned unchanged; every statement that holds an
+/// `Expr` or nested `Statement` recurses into its sub-AST.
 fn substitute_const_in_statement(
     stmt: &Statement,
     const_subs: &HashMap<String, ComptimeConstValue>,
@@ -408,12 +404,13 @@ fn substitute_const_in_statement(
     }
     match stmt {
         Statement::Return(expr, span) => Statement::Return(
-            expr.as_ref().map(|e| substitute_const_in_expr(e, const_subs)),
+            expr.as_ref()
+                .map(|e| substitute_const_in_expr(e, const_subs)),
             *span,
         ),
-        Statement::Expression(expr, span) => {
-            Statement::Expression(substitute_const_in_expr(expr, const_subs), *span)
-        }
+        Statement::Break(span) => Statement::Break(*span),
+        Statement::Continue(span) => Statement::Continue(*span),
+
         Statement::VariableDecl(decl, span) => {
             let mut new_decl = decl.clone();
             new_decl.value = decl
@@ -422,14 +419,160 @@ fn substitute_const_in_statement(
                 .map(|e| substitute_const_in_expr(e, const_subs));
             Statement::VariableDecl(new_decl, *span)
         }
-        // Pass-through for shapes we don't yet walk — see TODO above.
-        other => other.clone(),
+
+        Statement::Assignment(assign, span) => {
+            let mut new_assign = assign.clone();
+            new_assign.value = substitute_const_in_expr(&assign.value, const_subs);
+            Statement::Assignment(new_assign, *span)
+        }
+
+        Statement::Expression(expr, span) => {
+            Statement::Expression(substitute_const_in_expr(expr, const_subs), *span)
+        }
+
+        Statement::For(for_loop, span) => {
+            let mut new_loop = for_loop.clone();
+            new_loop.init = match &for_loop.init {
+                ForInit::ForIn { pattern, iter } => ForInit::ForIn {
+                    pattern: pattern.clone(),
+                    iter: substitute_const_in_expr(iter, const_subs),
+                },
+                ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => ForInit::ForC {
+                    init: Box::new(substitute_const_in_statement(init, const_subs)),
+                    condition: substitute_const_in_expr(condition, const_subs),
+                    update: substitute_const_in_expr(update, const_subs),
+                },
+            };
+            new_loop.body = for_loop
+                .body
+                .iter()
+                .map(|s| substitute_const_in_statement(s, const_subs))
+                .collect();
+            Statement::For(new_loop, *span)
+        }
+
+        Statement::While(while_loop, span) => Statement::While(
+            WhileLoop {
+                condition: substitute_const_in_expr(&while_loop.condition, const_subs),
+                body: while_loop
+                    .body
+                    .iter()
+                    .map(|s| substitute_const_in_statement(s, const_subs))
+                    .collect(),
+            },
+            *span,
+        ),
+
+        Statement::If(if_stmt, span) => Statement::If(
+            IfStatement {
+                condition: substitute_const_in_expr(&if_stmt.condition, const_subs),
+                then_body: if_stmt
+                    .then_body
+                    .iter()
+                    .map(|s| substitute_const_in_statement(s, const_subs))
+                    .collect(),
+                else_body: if_stmt.else_body.as_ref().map(|body| {
+                    body.iter()
+                        .map(|s| substitute_const_in_statement(s, const_subs))
+                        .collect()
+                }),
+            },
+            *span,
+        ),
+
+        // `extend` blocks hold method defs whose bodies could reference a
+        // const generic param in scope. Walk each method body.
+        Statement::Extend(ext, span) => {
+            let mut new_ext = ext.clone();
+            new_ext.methods = ext
+                .methods
+                .iter()
+                .map(|m| {
+                    let mut cm = m.clone();
+                    cm.body = m
+                        .body
+                        .iter()
+                        .map(|s| substitute_const_in_statement(s, const_subs))
+                        .collect();
+                    cm.when_clause = m
+                        .when_clause
+                        .as_ref()
+                        .map(|e| Box::new(substitute_const_in_expr(e, const_subs)));
+                    cm
+                })
+                .collect();
+            Statement::Extend(new_ext, *span)
+        }
+
+        Statement::RemoveTarget(span) => Statement::RemoveTarget(*span),
+
+        // SetParamType / SetReturnType carry only a TypeAnnotation — the
+        // type-subst pass handled it; nothing expression-shaped to rewrite.
+        Statement::SetParamType {
+            param_name,
+            type_annotation,
+            span,
+        } => Statement::SetParamType {
+            param_name: param_name.clone(),
+            type_annotation: type_annotation.clone(),
+            span: *span,
+        },
+
+        Statement::SetParamValue {
+            param_name,
+            expression,
+            span,
+        } => Statement::SetParamValue {
+            param_name: param_name.clone(),
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
+
+        Statement::SetReturnType {
+            type_annotation,
+            span,
+        } => Statement::SetReturnType {
+            type_annotation: type_annotation.clone(),
+            span: *span,
+        },
+
+        Statement::SetReturnExpr { expression, span } => Statement::SetReturnExpr {
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
+
+        Statement::ReplaceBody { body, span } => Statement::ReplaceBody {
+            body: body
+                .iter()
+                .map(|s| substitute_const_in_statement(s, const_subs))
+                .collect(),
+            span: *span,
+        },
+
+        Statement::ReplaceBodyExpr { expression, span } => Statement::ReplaceBodyExpr {
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
+
+        Statement::ReplaceModuleExpr { expression, span } => Statement::ReplaceModuleExpr {
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
     }
 }
 
 /// Recursively rewrite identifier expressions to literals when they bind to
-/// a const generic parameter. Other expression shapes are walked structurally
-/// so that an identifier embedded in (say) a binary op gets replaced.
+/// a const generic parameter. Walks every `Expr` variant structurally so an
+/// identifier embedded anywhere (method-call arg, match arm body, closure
+/// body, etc.) gets replaced.
+///
+/// The exhaustive match mirrors [`substitute_expr`] — adding a new `Expr`
+/// variant to the AST forces a compile error here, driving the CLAUDE.md
+/// "Exhaustive Match Rule" guarantee.
 fn substitute_const_in_expr(
     expr: &Expr,
     const_subs: &HashMap<String, ComptimeConstValue>,
@@ -446,28 +589,594 @@ fn substitute_const_in_expr(
             }
             expr.clone()
         }
-        // Numeric / boolean / string literal positions never reference const
-        // generics — pass through.
-        Expr::Literal(_, _) => expr.clone(),
-        // Binary / unary ops: walk children.
-        Expr::BinaryOp { left, op, right, span } => Expr::BinaryOp {
+
+        // Leaves with no sub-expressions.
+        Expr::Literal(_, _)
+        | Expr::DataRef(_, _)
+        | Expr::DataDateTimeRef(_, _)
+        | Expr::TimeRef(_, _)
+        | Expr::DateTime(_, _)
+        | Expr::PatternRef(_, _)
+        | Expr::Duration(_, _)
+        | Expr::Continue(_)
+        | Expr::Unit(_)
+        | Expr::TableRows(_, _) => expr.clone(),
+
+        Expr::DataRelativeAccess {
+            reference,
+            index,
+            span,
+        } => Expr::DataRelativeAccess {
+            reference: Box::new(substitute_const_in_expr(reference, const_subs)),
+            index: index.clone(),
+            span: *span,
+        },
+
+        Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            span,
+        } => Expr::PropertyAccess {
+            object: Box::new(substitute_const_in_expr(object, const_subs)),
+            property: property.clone(),
+            optional: *optional,
+            span: *span,
+        },
+
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            span,
+        } => Expr::IndexAccess {
+            object: Box::new(substitute_const_in_expr(object, const_subs)),
+            index: Box::new(substitute_const_in_expr(index, const_subs)),
+            end_index: end_index
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            span: *span,
+        },
+
+        Expr::BinaryOp {
+            left,
+            op,
+            right,
+            span,
+        } => Expr::BinaryOp {
             left: Box::new(substitute_const_in_expr(left, const_subs)),
-            op: *op,
+            op: op.clone(),
             right: Box::new(substitute_const_in_expr(right, const_subs)),
             span: *span,
         },
+
+        Expr::FuzzyComparison {
+            left,
+            op,
+            right,
+            tolerance,
+            span,
+        } => Expr::FuzzyComparison {
+            left: Box::new(substitute_const_in_expr(left, const_subs)),
+            op: op.clone(),
+            right: Box::new(substitute_const_in_expr(right, const_subs)),
+            tolerance: tolerance.clone(),
+            span: *span,
+        },
+
         Expr::UnaryOp { op, operand, span } => Expr::UnaryOp {
-            op: *op,
+            op: op.clone(),
             operand: Box::new(substitute_const_in_expr(operand, const_subs)),
             span: *span,
         },
-        Expr::Array(items, span) => Expr::Array(
-            items.iter().map(|e| substitute_const_in_expr(e, const_subs)).collect(),
+
+        Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            span,
+        } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_const_in_expr(a, const_subs))
+                .collect(),
+            named_args: named_args
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                .collect(),
+            span: *span,
+        },
+
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            args,
+            named_args,
+            span,
+        } => Expr::QualifiedFunctionCall {
+            namespace: namespace.clone(),
+            function: function.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_const_in_expr(a, const_subs))
+                .collect(),
+            named_args: named_args
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                .collect(),
+            span: *span,
+        },
+
+        Expr::EnumConstructor {
+            enum_name,
+            variant,
+            payload,
+            span,
+        } => Expr::EnumConstructor {
+            enum_name: enum_name.clone(),
+            variant: variant.clone(),
+            payload: match payload {
+                EnumConstructorPayload::Unit => EnumConstructorPayload::Unit,
+                EnumConstructorPayload::Tuple(args) => EnumConstructorPayload::Tuple(
+                    args.iter()
+                        .map(|a| substitute_const_in_expr(a, const_subs))
+                        .collect(),
+                ),
+                EnumConstructorPayload::Struct(fields) => EnumConstructorPayload::Struct(
+                    fields
+                        .iter()
+                        .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                        .collect(),
+                ),
+            },
+            span: *span,
+        },
+
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            span,
+        } => Expr::Conditional {
+            condition: Box::new(substitute_const_in_expr(condition, const_subs)),
+            then_expr: Box::new(substitute_const_in_expr(then_expr, const_subs)),
+            else_expr: else_expr
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            span: *span,
+        },
+
+        Expr::Object(entries, span) => Expr::Object(
+            entries
+                .iter()
+                .map(|e| match e {
+                    ObjectEntry::Field {
+                        key,
+                        value,
+                        type_annotation,
+                    } => ObjectEntry::Field {
+                        key: key.clone(),
+                        value: substitute_const_in_expr(value, const_subs),
+                        type_annotation: type_annotation.clone(),
+                    },
+                    ObjectEntry::Spread(inner) => {
+                        ObjectEntry::Spread(substitute_const_in_expr(inner, const_subs))
+                    }
+                })
+                .collect(),
             *span,
         ),
-        // Catch-all: pass through structurally. Phase-5 follow-up should
-        // expand this walker as the grammar surfaces more const-generic uses.
-        other => other.clone(),
+
+        Expr::Array(items, span) => Expr::Array(
+            items
+                .iter()
+                .map(|i| substitute_const_in_expr(i, const_subs))
+                .collect(),
+            *span,
+        ),
+
+        Expr::ListComprehension(comp, span) => Expr::ListComprehension(
+            Box::new(ListComprehension {
+                element: Box::new(substitute_const_in_expr(&comp.element, const_subs)),
+                clauses: comp
+                    .clauses
+                    .iter()
+                    .map(|c| ComprehensionClause {
+                        pattern: c.pattern.clone(),
+                        iterable: Box::new(substitute_const_in_expr(&c.iterable, const_subs)),
+                        filter: c
+                            .filter
+                            .as_ref()
+                            .map(|f| Box::new(substitute_const_in_expr(f, const_subs))),
+                    })
+                    .collect(),
+            }),
+            *span,
+        ),
+
+        Expr::Block(block, span) => {
+            let new_items = block
+                .items
+                .iter()
+                .map(|item| match item {
+                    BlockItem::VariableDecl(decl) => {
+                        let mut new_decl = decl.clone();
+                        new_decl.value = decl
+                            .value
+                            .as_ref()
+                            .map(|e| substitute_const_in_expr(e, const_subs));
+                        BlockItem::VariableDecl(new_decl)
+                    }
+                    BlockItem::Assignment(assign) => {
+                        let mut new_assign = assign.clone();
+                        new_assign.value = substitute_const_in_expr(&assign.value, const_subs);
+                        BlockItem::Assignment(new_assign)
+                    }
+                    BlockItem::Statement(s) => {
+                        BlockItem::Statement(substitute_const_in_statement(s, const_subs))
+                    }
+                    BlockItem::Expression(e) => {
+                        BlockItem::Expression(substitute_const_in_expr(e, const_subs))
+                    }
+                })
+                .collect();
+            Expr::Block(BlockExpr { items: new_items }, *span)
+        }
+
+        Expr::TypeAssertion {
+            expr,
+            type_annotation,
+            meta_param_overrides,
+            span,
+        } => Expr::TypeAssertion {
+            expr: Box::new(substitute_const_in_expr(expr, const_subs)),
+            type_annotation: type_annotation.clone(),
+            meta_param_overrides: meta_param_overrides.clone(),
+            span: *span,
+        },
+
+        Expr::InstanceOf {
+            expr,
+            type_annotation,
+            span,
+        } => Expr::InstanceOf {
+            expr: Box::new(substitute_const_in_expr(expr, const_subs)),
+            type_annotation: type_annotation.clone(),
+            span: *span,
+        },
+
+        Expr::FunctionExpr {
+            params,
+            return_type,
+            body,
+            span,
+        } => Expr::FunctionExpr {
+            // Closure params may have default-value exprs that reference
+            // const generics; walk those but leave patterns/annotations alone.
+            params: params
+                .iter()
+                .map(|p| {
+                    let mut np = p.clone();
+                    np.default_value = p
+                        .default_value
+                        .as_ref()
+                        .map(|e| substitute_const_in_expr(e, const_subs));
+                    np
+                })
+                .collect(),
+            return_type: return_type.clone(),
+            body: body
+                .iter()
+                .map(|s| substitute_const_in_statement(s, const_subs))
+                .collect(),
+            span: *span,
+        },
+
+        Expr::Spread(inner, span) => {
+            Expr::Spread(Box::new(substitute_const_in_expr(inner, const_subs)), *span)
+        }
+
+        Expr::If(if_expr, span) => Expr::If(
+            Box::new(IfExpr {
+                condition: Box::new(substitute_const_in_expr(&if_expr.condition, const_subs)),
+                then_branch: Box::new(substitute_const_in_expr(&if_expr.then_branch, const_subs)),
+                else_branch: if_expr
+                    .else_branch
+                    .as_ref()
+                    .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            }),
+            *span,
+        ),
+
+        Expr::While(while_expr, span) => Expr::While(
+            Box::new(WhileExpr {
+                condition: Box::new(substitute_const_in_expr(&while_expr.condition, const_subs)),
+                body: Box::new(substitute_const_in_expr(&while_expr.body, const_subs)),
+            }),
+            *span,
+        ),
+
+        Expr::For(for_expr, span) => Expr::For(
+            Box::new(ForExpr {
+                pattern: for_expr.pattern.clone(),
+                iterable: Box::new(substitute_const_in_expr(&for_expr.iterable, const_subs)),
+                body: Box::new(substitute_const_in_expr(&for_expr.body, const_subs)),
+                is_async: for_expr.is_async,
+            }),
+            *span,
+        ),
+
+        Expr::Loop(loop_expr, span) => Expr::Loop(
+            Box::new(LoopExpr {
+                body: Box::new(substitute_const_in_expr(&loop_expr.body, const_subs)),
+            }),
+            *span,
+        ),
+
+        Expr::Let(let_expr, span) => Expr::Let(
+            Box::new(LetExpr {
+                pattern: let_expr.pattern.clone(),
+                type_annotation: let_expr.type_annotation.clone(),
+                value: let_expr
+                    .value
+                    .as_ref()
+                    .map(|v| Box::new(substitute_const_in_expr(v, const_subs))),
+                body: Box::new(substitute_const_in_expr(&let_expr.body, const_subs)),
+            }),
+            *span,
+        ),
+
+        Expr::Assign(assign_expr, span) => Expr::Assign(
+            Box::new(AssignExpr {
+                target: Box::new(substitute_const_in_expr(&assign_expr.target, const_subs)),
+                value: Box::new(substitute_const_in_expr(&assign_expr.value, const_subs)),
+            }),
+            *span,
+        ),
+
+        Expr::Break(value, span) => Expr::Break(
+            value
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            *span,
+        ),
+
+        Expr::Return(value, span) => Expr::Return(
+            value
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            *span,
+        ),
+
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            named_args,
+            optional,
+            span,
+        } => Expr::MethodCall {
+            receiver: Box::new(substitute_const_in_expr(receiver, const_subs)),
+            method: method.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_const_in_expr(a, const_subs))
+                .collect(),
+            named_args: named_args
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                .collect(),
+            optional: *optional,
+            span: *span,
+        },
+
+        Expr::Match(match_expr, span) => Expr::Match(
+            Box::new(MatchExpr {
+                scrutinee: Box::new(substitute_const_in_expr(&match_expr.scrutinee, const_subs)),
+                arms: match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| MatchArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| Box::new(substitute_const_in_expr(g, const_subs))),
+                        body: Box::new(substitute_const_in_expr(&arm.body, const_subs)),
+                        pattern_span: arm.pattern_span,
+                    })
+                    .collect(),
+            }),
+            *span,
+        ),
+
+        Expr::Range {
+            start,
+            end,
+            kind,
+            span,
+        } => Expr::Range {
+            start: start
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            end: end
+                .as_ref()
+                .map(|e| Box::new(substitute_const_in_expr(e, const_subs))),
+            kind: *kind,
+            span: *span,
+        },
+
+        Expr::TimeframeContext {
+            timeframe,
+            expr,
+            span,
+        } => Expr::TimeframeContext {
+            timeframe: timeframe.clone(),
+            expr: Box::new(substitute_const_in_expr(expr, const_subs)),
+            span: *span,
+        },
+
+        Expr::TryOperator(inner, span) => {
+            Expr::TryOperator(Box::new(substitute_const_in_expr(inner, const_subs)), *span)
+        }
+
+        Expr::UsingImpl {
+            expr,
+            impl_name,
+            span,
+        } => Expr::UsingImpl {
+            expr: Box::new(substitute_const_in_expr(expr, const_subs)),
+            impl_name: impl_name.clone(),
+            span: *span,
+        },
+
+        Expr::SimulationCall { name, params, span } => Expr::SimulationCall {
+            name: name.clone(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                .collect(),
+            span: *span,
+        },
+
+        // WindowExpr is dense; its internal exprs are not part of the
+        // const-generic call surface. Match substitute_expr's treatment.
+        Expr::WindowExpr(w, span) => Expr::WindowExpr(w.clone(), *span),
+
+        Expr::FromQuery(q, span) => Expr::FromQuery(
+            Box::new(FromQueryExpr {
+                variable: q.variable.clone(),
+                source: Box::new(substitute_const_in_expr(&q.source, const_subs)),
+                clauses: q
+                    .clauses
+                    .iter()
+                    .map(|clause| match clause {
+                        QueryClause::Where(e) => {
+                            QueryClause::Where(Box::new(substitute_const_in_expr(e, const_subs)))
+                        }
+                        QueryClause::OrderBy(specs) => QueryClause::OrderBy(specs.clone()),
+                        QueryClause::GroupBy {
+                            element,
+                            key,
+                            into_var,
+                        } => QueryClause::GroupBy {
+                            element: Box::new(substitute_const_in_expr(element, const_subs)),
+                            key: Box::new(substitute_const_in_expr(key, const_subs)),
+                            into_var: into_var.clone(),
+                        },
+                        QueryClause::Join {
+                            variable,
+                            source,
+                            left_key,
+                            right_key,
+                            into_var,
+                        } => QueryClause::Join {
+                            variable: variable.clone(),
+                            source: Box::new(substitute_const_in_expr(source, const_subs)),
+                            left_key: Box::new(substitute_const_in_expr(left_key, const_subs)),
+                            right_key: Box::new(substitute_const_in_expr(right_key, const_subs)),
+                            into_var: into_var.clone(),
+                        },
+                        QueryClause::Let { variable, value } => QueryClause::Let {
+                            variable: variable.clone(),
+                            value: Box::new(substitute_const_in_expr(value, const_subs)),
+                        },
+                    })
+                    .collect(),
+                select: Box::new(substitute_const_in_expr(&q.select, const_subs)),
+            }),
+            *span,
+        ),
+
+        Expr::StructLiteral {
+            type_name,
+            fields,
+            span,
+        } => Expr::StructLiteral {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_const_in_expr(v, const_subs)))
+                .collect(),
+            span: *span,
+        },
+
+        Expr::Await(inner, span) => {
+            Expr::Await(Box::new(substitute_const_in_expr(inner, const_subs)), *span)
+        }
+
+        Expr::Join(join, span) => Expr::Join(
+            Box::new(JoinExpr {
+                kind: join.kind,
+                branches: join
+                    .branches
+                    .iter()
+                    .map(|b| JoinBranch {
+                        label: b.label.clone(),
+                        expr: substitute_const_in_expr(&b.expr, const_subs),
+                        annotations: b.annotations.clone(),
+                    })
+                    .collect(),
+                span: join.span,
+            }),
+            *span,
+        ),
+
+        Expr::Annotated {
+            annotation,
+            target,
+            span,
+        } => Expr::Annotated {
+            annotation: annotation.clone(),
+            target: Box::new(substitute_const_in_expr(target, const_subs)),
+            span: *span,
+        },
+
+        Expr::AsyncLet(async_let, span) => Expr::AsyncLet(
+            Box::new(AsyncLetExpr {
+                name: async_let.name.clone(),
+                expr: Box::new(substitute_const_in_expr(&async_let.expr, const_subs)),
+                span: async_let.span,
+            }),
+            *span,
+        ),
+
+        Expr::AsyncScope(inner, span) => Expr::AsyncScope(
+            Box::new(substitute_const_in_expr(inner, const_subs)),
+            *span,
+        ),
+
+        Expr::Comptime(stmts, span) => Expr::Comptime(
+            stmts
+                .iter()
+                .map(|s| substitute_const_in_statement(s, const_subs))
+                .collect(),
+            *span,
+        ),
+
+        Expr::ComptimeFor(comp_for, span) => Expr::ComptimeFor(
+            Box::new(ComptimeForExpr {
+                variable: comp_for.variable.clone(),
+                iterable: Box::new(substitute_const_in_expr(&comp_for.iterable, const_subs)),
+                body: comp_for
+                    .body
+                    .iter()
+                    .map(|s| substitute_const_in_statement(s, const_subs))
+                    .collect(),
+            }),
+            *span,
+        ),
+
+        Expr::Reference {
+            expr,
+            is_mutable,
+            span,
+        } => Expr::Reference {
+            expr: Box::new(substitute_const_in_expr(expr, const_subs)),
+            is_mutable: *is_mutable,
+            span: *span,
+        },
     }
 }
 
@@ -2525,6 +3234,419 @@ mod tests {
                 assert_eq!(name, "println");
             }
             other => panic!("expected FunctionCall(println) unchanged, got {:?}", other),
+        }
+    }
+
+    // =====================================================================
+    // B.4 — broad-coverage const substitution tests
+    //
+    // These pin behaviour for statement / expression variants that prior to
+    // B.4 passed through unchanged. Each test constructs a minimal body
+    // containing `__const_0` (or `__const_1`) in a specific AST position,
+    // and asserts the post-substitution body no longer contains the
+    // identifier.
+    // =====================================================================
+
+    /// Helper: build a function whose body is `body`, no type params, no
+    /// return type, no params. Enough for subst-path tests that don't need
+    /// type checking downstream.
+    fn const_body_fn(body: Vec<Statement>) -> FunctionDef {
+        FunctionDef {
+            name: "harness".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![],
+            return_type: None,
+            where_clause: None,
+            body,
+            annotations: vec![],
+            is_async: false,
+            is_comptime: false,
+        }
+    }
+
+    fn const_subs_int_0(v: i64) -> HashMap<String, ComptimeConstValue> {
+        let mut m: HashMap<String, ComptimeConstValue> = HashMap::new();
+        m.insert("__const_0".into(), ComptimeConstValue::Int(v));
+        m
+    }
+
+    /// Walk an entire function body and assert NO `Expr::Identifier("__const_0", _)`
+    /// survives anywhere. Used as the invariant for each new test.
+    fn assert_no_const_id_in_stmt(stmt: &Statement) {
+        match stmt {
+            Statement::Return(expr, _) => {
+                if let Some(e) = expr {
+                    assert_no_const_id_in_expr(e);
+                }
+            }
+            Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => {}
+            Statement::VariableDecl(decl, _) => {
+                if let Some(v) = &decl.value {
+                    assert_no_const_id_in_expr(v);
+                }
+            }
+            Statement::Assignment(a, _) => assert_no_const_id_in_expr(&a.value),
+            Statement::Expression(e, _) => assert_no_const_id_in_expr(e),
+            Statement::For(fl, _) => {
+                match &fl.init {
+                    ForInit::ForIn { iter, .. } => assert_no_const_id_in_expr(iter),
+                    ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        assert_no_const_id_in_stmt(init);
+                        assert_no_const_id_in_expr(condition);
+                        assert_no_const_id_in_expr(update);
+                    }
+                }
+                for s in &fl.body {
+                    assert_no_const_id_in_stmt(s);
+                }
+            }
+            Statement::While(wl, _) => {
+                assert_no_const_id_in_expr(&wl.condition);
+                for s in &wl.body {
+                    assert_no_const_id_in_stmt(s);
+                }
+            }
+            Statement::If(is, _) => {
+                assert_no_const_id_in_expr(&is.condition);
+                for s in &is.then_body {
+                    assert_no_const_id_in_stmt(s);
+                }
+                if let Some(eb) = &is.else_body {
+                    for s in eb {
+                        assert_no_const_id_in_stmt(s);
+                    }
+                }
+            }
+            Statement::Extend(_, _) => {}
+            Statement::SetParamType { .. } | Statement::SetReturnType { .. } => {}
+            Statement::SetParamValue { expression, .. }
+            | Statement::SetReturnExpr { expression, .. }
+            | Statement::ReplaceBodyExpr { expression, .. }
+            | Statement::ReplaceModuleExpr { expression, .. } => {
+                assert_no_const_id_in_expr(expression)
+            }
+            Statement::ReplaceBody { body, .. } => {
+                for s in body {
+                    assert_no_const_id_in_stmt(s);
+                }
+            }
+        }
+    }
+
+    fn assert_no_const_id_in_expr(expr: &Expr) {
+        if let Expr::Identifier(name, _) = expr {
+            assert_ne!(
+                name, "__const_0",
+                "residual const identifier in expression: {:?}",
+                expr
+            );
+            return;
+        }
+        // For other expressions, recurse through a best-effort walker that
+        // mirrors substitute_const_in_expr's recursion surface. Any variant
+        // we don't explicitly walk here is a leaf for identifier purposes.
+        match expr {
+            Expr::BinaryOp { left, right, .. }
+            | Expr::FuzzyComparison { left, right, .. } => {
+                assert_no_const_id_in_expr(left);
+                assert_no_const_id_in_expr(right);
+            }
+            Expr::UnaryOp { operand, .. } => assert_no_const_id_in_expr(operand),
+            Expr::Array(items, _) => items.iter().for_each(assert_no_const_id_in_expr),
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                args.iter().for_each(assert_no_const_id_in_expr);
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                assert_no_const_id_in_expr(receiver);
+                args.iter().for_each(assert_no_const_id_in_expr);
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                assert_no_const_id_in_expr(object);
+                assert_no_const_id_in_expr(index);
+            }
+            Expr::PropertyAccess { object, .. } => assert_no_const_id_in_expr(object),
+            Expr::If(ie, _) => {
+                assert_no_const_id_in_expr(&ie.condition);
+                assert_no_const_id_in_expr(&ie.then_branch);
+                if let Some(eb) = &ie.else_branch {
+                    assert_no_const_id_in_expr(eb);
+                }
+            }
+            Expr::Match(me, _) => {
+                assert_no_const_id_in_expr(&me.scrutinee);
+                for arm in &me.arms {
+                    assert_no_const_id_in_expr(&arm.body);
+                }
+            }
+            Expr::Block(block, _) => {
+                for it in &block.items {
+                    match it {
+                        BlockItem::Expression(e) => assert_no_const_id_in_expr(e),
+                        BlockItem::VariableDecl(d) => {
+                            if let Some(v) = &d.value {
+                                assert_no_const_id_in_expr(v);
+                            }
+                        }
+                        BlockItem::Assignment(a) => assert_no_const_id_in_expr(&a.value),
+                        BlockItem::Statement(s) => assert_no_const_id_in_stmt(s),
+                    }
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for s in body {
+                    assert_no_const_id_in_stmt(s);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(s) = start {
+                    assert_no_const_id_in_expr(s);
+                }
+                if let Some(e) = end {
+                    assert_no_const_id_in_expr(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Identifier inside an `if` condition is substituted.
+    #[test]
+    fn b4_const_in_if_statement() {
+        let stmt = Statement::If(
+            IfStatement {
+                condition: Expr::BinaryOp {
+                    left: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                    op: shape_ast::ast::BinaryOp::Equal,
+                    right: Box::new(Expr::Literal(
+                        shape_ast::ast::Literal::Int(1),
+                        Span::default(),
+                    )),
+                    span: Span::default(),
+                },
+                then_body: vec![Statement::Return(
+                    Some(Expr::Identifier("__const_0".into(), Span::default())),
+                    Span::default(),
+                )],
+                else_body: Some(vec![Statement::Expression(
+                    Expr::Identifier("__const_0".into(), Span::default()),
+                    Span::default(),
+                )]),
+            },
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(7),
+            "harness::int_7",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside a `while` loop condition and body is substituted.
+    #[test]
+    fn b4_const_in_while_statement() {
+        let stmt = Statement::While(
+            WhileLoop {
+                condition: Expr::Identifier("__const_0".into(), Span::default()),
+                body: vec![Statement::Return(
+                    Some(Expr::Identifier("__const_0".into(), Span::default())),
+                    Span::default(),
+                )],
+            },
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(2),
+            "harness::int_2",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside a `for` loop body (for-in shape) is substituted.
+    #[test]
+    fn b4_const_in_for_statement() {
+        use shape_ast::ast::statements::ForLoop;
+        let stmt = Statement::For(
+            ForLoop {
+                init: ForInit::ForIn {
+                    pattern: DestructurePattern::Identifier("i".into(), Span::default()),
+                    iter: Expr::Identifier("__const_0".into(), Span::default()),
+                },
+                body: vec![Statement::Expression(
+                    Expr::Identifier("__const_0".into(), Span::default()),
+                    Span::default(),
+                )],
+                is_async: false,
+            },
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(4),
+            "harness::int_4",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside an assignment RHS is substituted.
+    #[test]
+    fn b4_const_in_assignment_rhs() {
+        use shape_ast::ast::program::Assignment;
+        let stmt = Statement::Assignment(
+            Assignment {
+                pattern: DestructurePattern::Identifier("x".into(), Span::default()),
+                value: Expr::Identifier("__const_0".into(), Span::default()),
+            },
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(11),
+            "harness::int_11",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside a method call receiver / args is substituted.
+    #[test]
+    fn b4_const_in_method_call() {
+        let stmt = Statement::Expression(
+            Expr::MethodCall {
+                receiver: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                method: "to_string".into(),
+                args: vec![Expr::Identifier("__const_0".into(), Span::default())],
+                named_args: vec![],
+                optional: false,
+                span: Span::default(),
+            },
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(9),
+            "harness::int_9",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside a closure body (Expr::FunctionExpr) is substituted.
+    /// This is the optional plan test — closures substitute transparently.
+    #[test]
+    fn b4_const_in_closure_body() {
+        let closure = Expr::FunctionExpr {
+            params: vec![ident_param("x", ref_t("int"))],
+            return_type: None,
+            body: vec![Statement::Return(
+                Some(Expr::BinaryOp {
+                    left: Box::new(Expr::Identifier("x".into(), Span::default())),
+                    op: shape_ast::ast::BinaryOp::Mul,
+                    right: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                    span: Span::default(),
+                }),
+                Span::default(),
+            )],
+            span: Span::default(),
+        };
+        let stmt = Statement::Expression(closure, Span::default());
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(5),
+            "harness::int_5",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Identifier inside a match arm body / guard is substituted.
+    #[test]
+    fn b4_const_in_match_arm() {
+        use shape_ast::ast::expr_helpers::{MatchArm, MatchExpr};
+        use shape_ast::ast::patterns::Pattern;
+        let stmt = Statement::Expression(
+            Expr::Match(
+                Box::new(MatchExpr {
+                    scrutinee: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                    arms: vec![MatchArm {
+                        pattern: Pattern::Wildcard,
+                        guard: Some(Box::new(Expr::Identifier(
+                            "__const_0".into(),
+                            Span::default(),
+                        ))),
+                        body: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                        pattern_span: Some(Span::default()),
+                    }],
+                }),
+                Span::default(),
+            ),
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &const_subs_int_0(3),
+            "harness::int_3",
+        );
+        assert_no_const_id_in_stmt(&mono.body[0]);
+    }
+
+    /// Multiple const params (e.g. Matrix<R, C>) — each binds to its own value.
+    #[test]
+    fn b4_multi_const_params_substitute_distinctly() {
+        let stmt = Statement::Return(
+            Some(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier("__const_0".into(), Span::default())),
+                op: shape_ast::ast::BinaryOp::Mul,
+                right: Box::new(Expr::Identifier("__const_1".into(), Span::default())),
+                span: Span::default(),
+            }),
+            Span::default(),
+        );
+        let func = const_body_fn(vec![stmt]);
+
+        let mut subs: HashMap<String, ComptimeConstValue> = HashMap::new();
+        subs.insert("__const_0".into(), ComptimeConstValue::Int(4));
+        subs.insert("__const_1".into(), ComptimeConstValue::Int(3));
+
+        let mono = substitute_function_def_with_consts(
+            &func,
+            &HashMap::new(),
+            &subs,
+            "harness::int_4_int_3",
+        );
+
+        // Body should be `return 4 * 3` — both identifiers rewritten.
+        match &mono.body[0] {
+            Statement::Return(Some(Expr::BinaryOp { left, right, .. }), _) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    Expr::Literal(shape_ast::ast::Literal::Int(4), _)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expr::Literal(shape_ast::ast::Literal::Int(3), _)
+                ));
+            }
+            other => panic!("expected `return 4 * 3`, got {:?}", other),
         }
     }
 }
