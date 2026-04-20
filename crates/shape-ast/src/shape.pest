@@ -170,7 +170,15 @@ documented_type_param_name = {
 }
 
 type_param_name = {
-    ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?
+    const_type_param
+    | ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?
+}
+
+// Const generic parameter: `const N: int` or `const N: int = 4`.
+// Surface syntax only in B.1; AST variant and resolver/monomorphization
+// wiring come in B.2+.
+const_type_param = {
+    "const" ~ ident ~ ":" ~ type_annotation ~ ("=" ~ expression)?
 }
 
 trait_bound_list = {

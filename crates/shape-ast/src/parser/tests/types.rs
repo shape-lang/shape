@@ -1064,6 +1064,108 @@ fn test_type_param_bounds_with_default_type_parses() {
 }
 
 // ---------------------------------------------------------------
+// Const generic parameters (B.1 — surface syntax only)
+// ---------------------------------------------------------------
+
+#[test]
+fn test_const_type_param_on_function_parses() {
+    let content = r#"
+        fn zeros<const N: int>(cols: int) -> Matrix { return cols }
+    "#;
+    let items = parse_program_helper(content)
+        .expect("const generic parameter on function should parse");
+    match &items[0] {
+        crate::ast::Item::Function(func, _) => {
+            let tp = &func.type_params.as_ref().expect("expected type params")[0];
+            // B.1 stub: only the name is preserved; the const-ness and the
+            // declared type are lost until B.2 promotes TypeParam to an enum.
+            assert_eq!(tp.name, "N");
+            assert!(tp.trait_bounds.is_empty(), "const params carry no trait bounds");
+            assert!(tp.default_type.is_none(), "B.1 stub drops default");
+        }
+        other => panic!("Expected Function, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_const_type_param_with_default_parses() {
+    let content = r#"
+        fn zeros<const N: int = 4>(cols: int) -> Matrix {
+            return cols
+        }
+    "#;
+    let items = parse_program_helper(content)
+        .expect("const generic parameter with default should parse");
+    match &items[0] {
+        crate::ast::Item::Function(func, _) => {
+            let tp = &func.type_params.as_ref().expect("expected type params")[0];
+            assert_eq!(tp.name, "N");
+        }
+        other => panic!("Expected Function, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_regular_type_param_still_parses_regression() {
+    // Regression: the new `const_type_param` branch must not shadow the
+    // classic `<T>` / `<T: Bound>` / `<T = Default>` parses.
+    let content = r#"
+        fn id<T>(x: T) -> T { return x }
+    "#;
+    let items = parse_program_helper(content).expect("plain generic should still parse");
+    match &items[0] {
+        crate::ast::Item::Function(func, _) => {
+            let tp = &func.type_params.as_ref().expect("expected type params")[0];
+            assert_eq!(tp.name, "T");
+            assert!(tp.trait_bounds.is_empty());
+            assert!(tp.default_type.is_none());
+        }
+        other => panic!("Expected Function, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_const_type_params_on_type_def_parses() {
+    // Const generics on a struct type definition. The AST stub drops
+    // type/default info; we only verify the parse reaches two params
+    // named R and C.
+    let content = r#"
+        type Matrix<const R: int, const C: int> { rows: int, cols: int }
+    "#;
+    let items = parse_program_helper(content)
+        .expect("const generics on type definition should parse");
+    match &items[0] {
+        crate::ast::Item::StructType(def, _) => {
+            let params = def.type_params.as_ref().expect("expected type params");
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "R");
+            assert_eq!(params[1].name, "C");
+        }
+        other => panic!("Expected StructType, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_mixed_type_and_const_params_parses() {
+    // A type parameter followed by a const generic — shape-specific style
+    // that Rust allows as well.
+    let content = r#"
+        fn make<T, const N: int>(x: T) -> T { return x }
+    "#;
+    let items = parse_program_helper(content)
+        .expect("mixed type + const generic params should parse");
+    match &items[0] {
+        crate::ast::Item::Function(func, _) => {
+            let params = func.type_params.as_ref().expect("expected type params");
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "T");
+            assert_eq!(params[1].name, "N");
+        }
+        other => panic!("Expected Function, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------
 // Associated types in traits
 // ---------------------------------------------------------------
 

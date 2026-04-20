@@ -326,11 +326,41 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
             )?;
             let param_span = pair_span(&param_pair);
             let mut param_inner = param_pair.into_inner();
-            let name_pair = param_inner.next().ok_or_else(|| ShapeError::ParseError {
+            let first = param_inner.next().ok_or_else(|| ShapeError::ParseError {
                 message: "expected type parameter name".to_string(),
                 location: Some(pair_loc.clone()),
             })?;
-            let name = name_pair.as_str().to_string();
+
+            // Const generic parameter: `const N: int [= expr]`.
+            //
+            // B.1 only accepts the surface syntax; it does not yet model
+            // const-ness in the AST. We stub a regular `TypeParam` that
+            // carries just the name, so downstream consumers continue to
+            // build. B.2 promotes `TypeParam` to an enum with a `Const`
+            // variant and populates `ty` / default expression here.
+            if first.as_rule() == Rule::const_type_param {
+                let mut const_inner = first.into_inner();
+                let name_pair =
+                    const_inner.next().ok_or_else(|| ShapeError::ParseError {
+                        message: "expected const generic parameter name".to_string(),
+                        location: Some(pair_loc.clone()),
+                    })?;
+                let name = name_pair.as_str().to_string();
+                // Drain the rest of the pairs (type_annotation, optional
+                // expression) so any grammar changes don't silently break —
+                // and so the lexer span range is fully consumed.
+                for _ in const_inner {}
+                params.push(crate::ast::TypeParam {
+                    name,
+                    span: param_span,
+                    doc_comment,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                });
+                continue;
+            }
+
+            let name = first.as_str().to_string();
             let mut default_type = None;
             let mut trait_bounds = Vec::new();
             for remaining in param_inner {
