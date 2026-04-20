@@ -1214,4 +1214,281 @@ mod tests {
             msg
         );
     }
+
+    // =====================================================================
+    // B.5 — Track B close-out: end-to-end coverage for const generics via
+    // the default-value grammar route.
+    //
+    // Turbofish call-site syntax (`fn_name::<3>(...)`) is a separate grammar
+    // extension outside Track B's scope; the `const_generic_repeat_n_3_end_to_end`
+    // placeholder in `type_resolution.rs` tracks that follow-up work.
+    //
+    // These tests drive the full pipeline parser → AST → cache key →
+    // substituted body, using real Shape source text through
+    // `parse_program` and the `BytecodeCompiler::ensure_monomorphic_function`
+    // entry point. They do NOT reach runtime value assertions (top-level
+    // generic function calls are not yet wired into monomorphization — see
+    // the `test_user_defined_generic_function` ignore in
+    // `integration_tests.rs`). Instead, each test asserts:
+    //
+    //   (a) the parser accepts `fn f<const N: int = V>(...) { body }`,
+    //   (b) the function registers and the compiler caches the expected
+    //       specialization under `f::int_V`,
+    //   (c) the substituted function body has every `Identifier(N)`
+    //       position rewritten to the bound literal.
+    // =====================================================================
+
+    /// Extract the `FunctionDef` for `name` from a freshly-parsed program.
+    fn b5_function_def_from_source(source: &str, name: &str) -> FunctionDef {
+        let program = shape_ast::parser::parse_program(source)
+            .unwrap_or_else(|e| panic!("parse failed for source `{}`: {:?}", source, e));
+        for item in &program.items {
+            if let shape_ast::ast::Item::Function(def, _) = item {
+                if def.name == name {
+                    return def.clone();
+                }
+            }
+        }
+        panic!("function `{}` not found in parsed program", name);
+    }
+
+    /// Register the parsed function in a fresh compiler and drive it through
+    /// the type-only `ensure_monomorphic_function` entry point. Returns the
+    /// produced function index.
+    fn b5_register_and_monomorphize(
+        compiler: &mut BytecodeCompiler,
+        def: FunctionDef,
+    ) -> Result<u16> {
+        let fn_name = def.name.clone();
+        compiler.register_function(&def)?;
+        compiler.ensure_monomorphic_function(&fn_name, &[])
+    }
+
+    /// Count how many `Identifier("<name>", ...)` nodes survive anywhere in
+    /// the function def (body, params, type annotations). Uses the debug
+    /// representation so it doesn't have to keep up with AST variant changes —
+    /// B.4's exhaustive-match substitution is already tested directly in
+    /// `substitution.rs`; here we just want a cheap "no N leaked through"
+    /// smoke check on the post-substitution FunctionDef.
+    fn b5_count_surviving_identifier(def: &FunctionDef, name: &str) -> usize {
+        let dbg = format!("{:?}", def);
+        let needle = format!("Identifier(\"{}\"", name);
+        dbg.matches(&needle).count()
+    }
+
+    #[test]
+    fn b5_parser_to_cache_single_const_default() {
+        // Flow: parse `fn add_n<const N: int = 4>(x: int) -> int { x + N }`,
+        // register, then call `ensure_monomorphic_function("add_n", &[])`.
+        // The const default auto-binds N = 4 and the specialization lands in
+        // the cache under `add_n::int_4`.
+        let src = r#"
+            fn add_n<const N: int = 4>(x: int) -> int {
+                return x + N
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "add_n");
+        let mut compiler = BytecodeCompiler::new();
+        let idx = b5_register_and_monomorphize(&mut compiler, def)
+            .expect("add_n<const N = 4> should monomorphize");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("add_n::int_4"),
+            Some(idx),
+            "expected cache entry keyed on N's bound value"
+        );
+    }
+
+    #[test]
+    fn b5_two_defaults_produce_distinct_specializations() {
+        // Two wrapper functions with different const defaults → TWO cache
+        // entries with distinct keys. This exercises the load-bearing B.3
+        // distinctness guarantee end-to-end through the parser.
+        let src = r#"
+            fn add_4<const N: int = 4>(x: int) -> int { return x + N }
+            fn add_8<const N: int = 8>(x: int) -> int { return x + N }
+        "#;
+        let def_4 = b5_function_def_from_source(src, "add_4");
+        let def_8 = b5_function_def_from_source(src, "add_8");
+        let mut compiler = BytecodeCompiler::new();
+
+        let idx_4 = b5_register_and_monomorphize(&mut compiler, def_4).unwrap();
+        let idx_8 = b5_register_and_monomorphize(&mut compiler, def_8).unwrap();
+
+        assert_eq!(compiler.monomorphization_cache.lookup("add_4::int_4"), Some(idx_4));
+        assert_eq!(compiler.monomorphization_cache.lookup("add_8::int_8"), Some(idx_8));
+        assert_ne!(idx_4, idx_8, "distinct defaults must produce distinct specializations");
+    }
+
+    #[test]
+    fn b5_multi_const_param_mono_key_carries_both_values() {
+        // `fn rect<const R: int = 3, const C: int = 5>() -> int { R * C }`
+        // should monomorphize to `rect::int_3_int_5`.
+        let src = r#"
+            fn rect<const R: int = 3, const C: int = 5>(x: int) -> int {
+                return x + R * C
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "rect");
+        let mut compiler = BytecodeCompiler::new();
+        let idx = b5_register_and_monomorphize(&mut compiler, def).unwrap();
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("rect::int_3_int_5"),
+            Some(idx),
+            "multi-const mono key must interleave in declaration order"
+        );
+    }
+
+    #[test]
+    fn b5_const_in_if_branch_is_substituted() {
+        // Verify B.4's body substitution walks through `if` branches: no
+        // `Identifier("N")` should survive in the specialized body.
+        let src = r#"
+            fn clamp_n<const N: int = 10>(x: int) -> int {
+                if x > N {
+                    return N
+                }
+                return x
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "clamp_n");
+        let mut compiler = BytecodeCompiler::new();
+        b5_register_and_monomorphize(&mut compiler, def).unwrap();
+        let specialized = compiler
+            .function_defs
+            .get("clamp_n::int_10")
+            .expect("specialization should be recorded by name");
+        assert_eq!(
+            b5_count_surviving_identifier(specialized, "N"),
+            0,
+            "bound const param N must not survive substitution inside `if`",
+        );
+    }
+
+    #[test]
+    fn b5_const_in_while_and_for_is_substituted() {
+        // Verify substitution walks through `while` and `for in` loop bodies.
+        let src = r#"
+            fn sum_upto<const N: int = 5>(x: int) -> int {
+                let mut acc = x
+                let mut i = 0
+                while i < N {
+                    acc = acc + i
+                    i = i + 1
+                }
+                for j in 0..N {
+                    acc = acc + j
+                }
+                return acc
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "sum_upto");
+        let mut compiler = BytecodeCompiler::new();
+        b5_register_and_monomorphize(&mut compiler, def).unwrap();
+        let specialized = compiler
+            .function_defs
+            .get("sum_upto::int_5")
+            .expect("specialization should be recorded by name");
+        assert_eq!(
+            b5_count_surviving_identifier(specialized, "N"),
+            0,
+            "bound const param N must not survive in while/for",
+        );
+    }
+
+    #[test]
+    fn b5_const_in_closure_body_is_substituted() {
+        // A closure literal inside the specialized body must also have its
+        // `Identifier(N)` references rewritten — B.4 recurses into
+        // `FunctionExpr` bodies.
+        let src = r#"
+            fn offset_by<const N: int = 7>(x: int) -> int {
+                let adder = |y| y + N
+                return adder(x)
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "offset_by");
+        let mut compiler = BytecodeCompiler::new();
+        b5_register_and_monomorphize(&mut compiler, def).unwrap();
+        let specialized = compiler
+            .function_defs
+            .get("offset_by::int_7")
+            .expect("specialization should be recorded by name");
+        assert_eq!(
+            b5_count_surviving_identifier(specialized, "N"),
+            0,
+            "bound const param N must not survive inside closure body",
+        );
+    }
+
+    #[test]
+    fn b5_const_in_match_arm_body_is_substituted() {
+        // Match arm bodies are walked by B.4's substitution — no `N` should
+        // survive.
+        let src = r#"
+            fn tagged<const N: int = 2>(flag: int) -> int {
+                let result = match flag {
+                    0 => N,
+                    _ => N + 1,
+                }
+                return result
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "tagged");
+        let mut compiler = BytecodeCompiler::new();
+        b5_register_and_monomorphize(&mut compiler, def).unwrap();
+        let specialized = compiler
+            .function_defs
+            .get("tagged::int_2")
+            .expect("specialization should be recorded by name");
+        assert_eq!(
+            b5_count_surviving_identifier(specialized, "N"),
+            0,
+            "bound const param N must not survive inside match arm",
+        );
+    }
+
+    #[test]
+    fn b5_missing_const_default_surfaces_b3_diagnostic_through_parser() {
+        // End-to-end: parse a const-generic function with NO default, then
+        // trigger the type-only entry point. Since turbofish syntax isn't
+        // wired yet, the only way to bind `N` is a default — so this must
+        // produce the B.3 "must be a compile-time constant" diagnostic.
+        let src = r#"
+            fn id_n<const N: int>(x: int) -> int { return x + N }
+        "#;
+        let def = b5_function_def_from_source(src, "id_n");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.register_function(&def).unwrap();
+        let result = compiler.ensure_monomorphic_function("id_n", &[]);
+        assert!(
+            result.is_err(),
+            "const-generic fn with no default must not auto-bind successfully"
+        );
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            msg.contains("const generic arg must be a compile-time constant"),
+            "expected B.3 diagnostic, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn b5_same_default_twice_collapses_to_single_cache_entry() {
+        // Calling the const-aware entry point twice with the same resolved
+        // default must hit the cache on the second try — proof that the
+        // monomorphization pipeline is idempotent per (fn_name, const values).
+        let src = r#"
+            fn pin_n<const N: int = 11>(x: int) -> int { return x + N }
+        "#;
+        let def = b5_function_def_from_source(src, "pin_n");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.register_function(&def).unwrap();
+        let a = compiler.ensure_monomorphic_function("pin_n", &[]).unwrap();
+        let b = compiler.ensure_monomorphic_function("pin_n", &[]).unwrap();
+        assert_eq!(a, b, "second call must hit the cache");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("pin_n::int_11"),
+            Some(a)
+        );
+    }
 }

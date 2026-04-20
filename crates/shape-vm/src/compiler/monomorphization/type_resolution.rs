@@ -1926,24 +1926,32 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on grammar support for const generics — see TODO"]
+    #[ignore = "blocked on turbofish `::<N>` call-site grammar — default-value route \
+                is covered end-to-end by `b5_*` tests in cache.rs"]
     fn const_generic_repeat_n_3_end_to_end() {
-        // The eventual test body, once the grammar supports it:
+        // Turbofish-specific test body, once the grammar adds `fn_name::<3>(...)`:
         //
         //   let source = r#"
-        //       fn repeat<const N: int>(x: number) -> Array<number> {
-        //           // ...
-        //       }
-        //       repeat<3>(1.0)
+        //       fn repeat<const N: int>(x: number) -> Array<number> { ... }
+        //       repeat::<3>(1.0)
         //   "#;
         //   let (compiler, _) = compile_and_inspect(source);
         //   assert!(compiler.monomorphization_cache.lookup("repeat::int_3").is_some());
         //
-        // For now this test is a placeholder. The end-to-end machinery exists
-        // (`build_mono_key_with_consts`, `ensure_monomorphic_function_with_consts`,
-        // `substitute_function_def_with_consts`) — what's missing is the
-        // grammar / AST surface and a call-site detector for `<3>`-style
-        // type-arg lists.
-        unreachable!("placeholder for grammar-supported const generics");
+        // B.5 status (Track B close-out): the default-value route
+        // (`fn f<const N: int = 4>(...)`) is covered end-to-end by
+        // `b5_const_generic_*` tests in `cache.rs` — they parse real Shape
+        // source, register the FunctionDef via `register_function`, and
+        // drive monomorphization through `ensure_monomorphic_function`.
+        //
+        // What remains for a turbofish-style end-to-end test:
+        //   1. Extend `generic_type` in `shape.pest` (or a new
+        //      `call_site_turbofish` rule) to allow `::<3>` after an ident.
+        //   2. Wire `try_monomorphize_call_site` in
+        //      `expressions/function_calls.rs` to also extract const arg
+        //      values via `comptime_const_value_from_literal_expr` and call
+        //      `ensure_monomorphic_function_with_consts`.
+        //   3. Replace this placeholder with a real assertion.
+        unreachable!("placeholder for turbofish-supported const generics");
     }
 }
