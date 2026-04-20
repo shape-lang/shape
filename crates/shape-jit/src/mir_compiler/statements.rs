@@ -285,10 +285,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     sp_offset,
                 );
 
-                // v2-boundary: closure captures pushed as NaN-boxed to ctx.stack
+                // R4.2E: legacy ClosureCapture path pushes captures to
+                // ctx.stack as raw I64 bit-patterns. Widen narrow Cranelift
+                // types inline (sextend / uextend / bitcast) — no NaN-box
+                // tagging.
                 for (i, op) in operands.iter().enumerate() {
                     let raw = self.compile_operand(op)?;
-                    let val = self.ensure_nanboxed(raw);
+                    let raw_ty = self.builder.func.dfg.value_type(raw);
+                    let val = if raw_ty == cranelift::prelude::types::I64 {
+                        raw
+                    } else if raw_ty == cranelift::prelude::types::F64 {
+                        self.builder
+                            .ins()
+                            .bitcast(cranelift::prelude::types::I64, MemFlags::new(), raw)
+                    } else if raw_ty == cranelift::prelude::types::I32 {
+                        self.builder.ins().sextend(cranelift::prelude::types::I64, raw)
+                    } else if raw_ty == cranelift::prelude::types::I8 {
+                        self.builder.ins().uextend(cranelift::prelude::types::I64, raw)
+                    } else if raw_ty == cranelift::prelude::types::I16 {
+                        self.builder.ins().sextend(cranelift::prelude::types::I64, raw)
+                    } else {
+                        raw
+                    };
                     let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
                     let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
                     let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base as i64);

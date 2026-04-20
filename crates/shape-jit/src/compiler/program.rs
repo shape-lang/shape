@@ -406,7 +406,11 @@ impl JITCompiler {
                 // MIR param_slots includes capture slots followed by user param slots.
                 // Entry block params: [ctx_ptr, capture0..N, param0..M]
                 // param_slots aligns 1:1 with captures+params, so native_idx = param_idx + 1.
-                // Entry params are I64 (NaN-boxed); convert to native type if needed.
+                //
+                // R4.2E: callee ABI delivers params as uniform I64 bit-patterns.
+                // When the MIR slot is a native narrow type, reduce I64 → narrow
+                // inline (bitcast for F64, ireduce for I32/I16/I8). No NaN-box
+                // tag stripping — raw bit-patterns only.
                 for (param_idx, &mir_slot) in param_slots.iter().enumerate() {
                     let native_idx = param_idx + 1; // +1 for ctx_ptr
                     if native_idx < entry_params.len() {
@@ -416,8 +420,26 @@ impl JITCompiler {
                                 mir_slot.0,
                             );
                             let param_val = entry_params[native_idx];
-                            let converted =
-                                mir_compiler.unbox_from_nanboxed(param_val, kind);
+                            let converted = match kind {
+                                shape_vm::type_tracking::SlotKind::Float64 => mir_compiler
+                                    .builder
+                                    .ins()
+                                    .bitcast(types::F64, MemFlags::new(), param_val),
+                                shape_vm::type_tracking::SlotKind::Int32
+                                | shape_vm::type_tracking::SlotKind::UInt32 => {
+                                    mir_compiler.builder.ins().ireduce(types::I32, param_val)
+                                }
+                                shape_vm::type_tracking::SlotKind::Bool
+                                | shape_vm::type_tracking::SlotKind::Int8
+                                | shape_vm::type_tracking::SlotKind::UInt8 => {
+                                    mir_compiler.builder.ins().ireduce(types::I8, param_val)
+                                }
+                                shape_vm::type_tracking::SlotKind::Int16
+                                | shape_vm::type_tracking::SlotKind::UInt16 => {
+                                    mir_compiler.builder.ins().ireduce(types::I16, param_val)
+                                }
+                                _ => param_val,
+                            };
                             mir_compiler.builder.def_var(var, converted);
                         }
                     }

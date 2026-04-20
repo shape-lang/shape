@@ -1697,3 +1697,70 @@ f()
         42,
     );
 }
+
+// ===========================================================================
+// R4.2E — narrow-to-I64 widening at VM-stack push sites
+//
+// These tests pin the inline sextend/uextend/bitcast/ireduce logic that
+// replaced ensure_nanboxed/unbox_from_nanboxed at the six call sites:
+//   - terminators.rs method-dispatch args           (site 1)
+//   - terminators.rs direct-call native args        (site 2)
+//   - terminators.rs indirect-call callee push      (site 3)
+//   - terminators.rs indirect-call args push        (site 4)
+//   - statements.rs  legacy ClosureCapture push     (site 5)
+//   - program.rs     user-fn callee entry reduction (site 6)
+//
+// Assertions use `jit_expect_number` because the engine's wire layer reports
+// user-function return values as Number regardless of declared type on this
+// branch (same style as the pre-existing `recursive_factorial` tests above).
+// What we're pinning is that the *bit value* survives the inline extend /
+// reduce path.
+//
+// NOTE: Tests scoped down to the paths that work end-to-end on this branch.
+// Some narrow-arg flows (closure capture of bool, method dispatch with bool
+// element in filter) hit the pre-existing heap-corruption / wire-decode bugs
+// documented at the integration_tests module gate above.
+// ===========================================================================
+
+#[test]
+fn r4_2e_bool_direct_witness_false() {
+    // Site 2 (direct-call arg widening: I8 → I64 via uextend) and
+    // site 6 (callee entry reduction: I64 → I8 via ireduce).
+    // False case pins uextend(0) → ireduce(0) correctness unambiguously.
+    jit_expect_number(
+        r#"
+function bool_witness(b: bool) -> int {
+    if b { return 1 }
+    return 0
+}
+bool_witness(false)
+"#,
+        0.0,
+    );
+}
+
+#[test]
+fn r4_2e_int_direct_add_one() {
+    // Sites 2 and 6 with int param. `int` is I64 on this branch, so this
+    // pins the I64 no-op branch of the inline widening logic.
+    jit_expect_number(
+        r#"
+function int_direct(x: int) -> int { return x + 1 }
+int_direct(41)
+"#,
+        42.0,
+    );
+}
+
+#[test]
+fn r4_2e_int_direct_large_value() {
+    // Sites 2 and 6 with a large int value that exercises the full 64-bit
+    // path through the I64 no-op branch (rather than just a tiny value).
+    jit_expect_number(
+        r#"
+function int_passthrough(x: int) -> int { return x }
+int_passthrough(1000000)
+"#,
+        1000000.0,
+    );
+}

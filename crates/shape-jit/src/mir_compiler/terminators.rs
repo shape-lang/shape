@@ -185,10 +185,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     );
 
                     // args[0] = receiver, args[1..] = actual method arguments
-                    // v2-boundary: method dispatch via trampoline VM needs NaN-boxed stack
+                    // R4.2E: VM-stack slots are 8-byte-wide I64 bit-patterns.
+                    // Widen narrow Cranelift types inline (sextend/uextend/
+                    // bitcast) so the method-dispatch trampoline reads a
+                    // uniform u64 from ctx.stack[sp+i]. No NaN-boxing tagging
+                    // is applied — raw bit-patterns only.
                     for (i, arg) in args.iter().enumerate() {
                         let val = self.compile_operand(arg)?;
-                        let boxed = self.ensure_nanboxed(val);
+                        let val_ty = self.builder.func.dfg.value_type(val);
+                        let boxed = if val_ty == types::I64 {
+                            val
+                        } else if val_ty == types::F64 {
+                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else if val_ty == types::I32 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else if val_ty == types::I8 {
+                            self.builder.ins().uextend(types::I64, val)
+                        } else if val_ty == types::I16 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else {
+                            val
+                        };
                         let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
                         let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
                         let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
@@ -334,12 +351,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Compile args as SSA values and pass as native Cranelift params.
                     // ABI: fn(ctx_ptr, arg0, arg1, ..., argN) -> i32
                     // The callee stores its return value to ctx.stack[0].
-                    // v2-boundary: callee ABI uses uniform I64 params (NaN-boxed)
+                    // R4.2E: callee ABI uses uniform I64 params. Widen narrow
+                    // Cranelift types inline to I64 bit-patterns (sextend /
+                    // uextend / bitcast) — NOT NaN-boxing tagging.
                     let mut arg_vals = Vec::with_capacity(args.len() + 1);
                     arg_vals.push(self.ctx_ptr);
                     for arg in args.iter() {
                         let val = self.compile_operand(arg)?;
-                        let boxed = self.ensure_nanboxed(val);
+                        let val_ty = self.builder.func.dfg.value_type(val);
+                        let boxed = if val_ty == types::I64 {
+                            val
+                        } else if val_ty == types::F64 {
+                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else if val_ty == types::I32 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else if val_ty == types::I8 {
+                            self.builder.ins().uextend(types::I64, val)
+                        } else if val_ty == types::I16 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else {
+                            val
+                        };
                         arg_vals.push(boxed);
                     }
 
@@ -386,19 +418,49 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         sp_offset,
                     );
 
-                    // v2-boundary: indirect call pushes NaN-boxed callee to ctx.stack
+                    // R4.2E: indirect-call callee pushed to ctx.stack as raw
+                    // I64 bit-pattern. Widen narrow types inline — closures
+                    // are already I64 in practice but the code path is type-
+                    // agnostic.
                     let callee_val = self.compile_operand(func)?;
-                    let callee_boxed = self.ensure_nanboxed(callee_val);
+                    let callee_ty = self.builder.func.dfg.value_type(callee_val);
+                    let callee_boxed = if callee_ty == types::I64 {
+                        callee_val
+                    } else if callee_ty == types::F64 {
+                        self.builder.ins().bitcast(types::I64, MemFlags::new(), callee_val)
+                    } else if callee_ty == types::I32 {
+                        self.builder.ins().sextend(types::I64, callee_val)
+                    } else if callee_ty == types::I8 {
+                        self.builder.ins().uextend(types::I64, callee_val)
+                    } else if callee_ty == types::I16 {
+                        self.builder.ins().sextend(types::I64, callee_val)
+                    } else {
+                        callee_val
+                    };
                     let callee_slot_idx = old_sp;
                     let callee_byte_off = self.builder.ins().ishl_imm(callee_slot_idx, 3);
                     let callee_abs_off = self.builder.ins().iadd_imm(callee_byte_off, stack_base_offset as i64);
                     let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
                     self.builder.ins().store(MemFlags::new(), callee_boxed, callee_addr, 0);
 
-                    // v2-boundary: indirect call args pushed as NaN-boxed to ctx.stack
+                    // R4.2E: indirect-call args pushed to ctx.stack as raw
+                    // I64 bit-patterns. Widen narrow Cranelift types inline.
                     for (i, arg) in args.iter().enumerate() {
                         let val = self.compile_operand(arg)?;
-                        let boxed = self.ensure_nanboxed(val);
+                        let val_ty = self.builder.func.dfg.value_type(val);
+                        let boxed = if val_ty == types::I64 {
+                            val
+                        } else if val_ty == types::F64 {
+                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else if val_ty == types::I32 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else if val_ty == types::I8 {
+                            self.builder.ins().uextend(types::I64, val)
+                        } else if val_ty == types::I16 {
+                            self.builder.ins().sextend(types::I64, val)
+                        } else {
+                            val
+                        };
                         let slot_idx = self.builder.ins().iadd_imm(old_sp, (i + 1) as i64);
                         let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
                         let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
