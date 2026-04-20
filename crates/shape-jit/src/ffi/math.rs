@@ -1,13 +1,3 @@
-// Heap allocation audit (PR-9 V8 Gap Closure):
-//   Category A (NaN-boxed returns): 7 sites
-//     jit_box(HK_TIME, ...) — generic_add (Time+Duration, Duration+Time),
-//       generic_sub (Time-Duration)
-//     jit_box(HK_DURATION, ...) — generic_add (Duration+Duration),
-//       generic_sub (Time-Time)
-//     jit_box(HK_STRING, ...) — generic_add (String+String)
-//   Category B (intermediate/consumed): 0 sites
-//   Category C (heap islands): 0 sites
-//!
 //! Math FFI Functions for JIT
 //!
 //! Trigonometric and mathematical functions for JIT-compiled code.
@@ -16,10 +6,16 @@
 //!
 //! Series arithmetic (+, -, *, /) uses SIMD-accelerated operations from
 //! shape-runtime for high performance vectorized computation.
+//!
+//! ## R7.1 cleanup
+//!
+//! The 11 dispatch-fallback trampolines (`jit_generic_add`/`sub`/`mul`/
+//! `div`/`mod`, `jit_generic_eq`/`neq`, `jit_generic_lt`/`le`/`gt`/`ge`)
+//! were removed here after R5 retargeted the dynamic arithmetic /
+//! comparison paths to typed opcodes + `CallMethod`; the only remaining
+//! callers in MIR (`compile_binop`) were deleted in the same commit.
 
-use super::jit_kinds::*;
 use super::value_ffi::*;
-use shape_value::ValueWordExt;
 
 // SIMD threshold - use SIMD for arrays >= this size
 #[allow(dead_code)]
@@ -138,187 +134,17 @@ pub extern "C" fn jit_pow(base_bits: u64, exp_bits: u64) -> u64 {
 }
 
 // ============================================================================
-// Generic Binary Operations (for non-numeric types)
+// Generic Binary Operations (REMOVED — R7.1)
 // ============================================================================
-
-fn is_nanboxed_int(bits: u64) -> bool { shape_value::tags::is_tagged(bits) && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT }
-fn unbox_nanboxed_int(bits: u64) -> i64 { shape_value::tags::sign_extend_i48(shape_value::tags::get_payload(bits)) }
-fn box_nanboxed_int(val: i64) -> u64 { shape_value::ValueWord::from_i64(val).raw_bits() }
-fn as_numeric_f64(bits: u64) -> Option<f64> { if is_number(bits) { Some(unbox_number(bits)) } else if is_nanboxed_int(bits) { Some(unbox_nanboxed_int(bits) as f64) } else { None } }
-
-/// Generic add that handles int+int, Time + Duration, Duration + Duration, etc.
-pub extern "C" fn jit_generic_add(a_bits: u64, b_bits: u64) -> u64 {
-    use super::super::context::JITDuration;
-    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) + unbox_number(b_bits)); }
-    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_add(unbox_nanboxed_int(b_bits))); }
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a + b); }
-
-    let a_kind = heap_kind(a_bits);
-    let b_kind = heap_kind(b_bits);
-
-    // Time + Duration or Duration + Time
-    if a_kind == Some(HK_TIME) && b_kind == Some(HK_DURATION) {
-        let timestamp = *unsafe { unified_unbox::<i64>(a_bits) };
-        let dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
-        let seconds = duration_to_seconds(dur);
-        let new_timestamp = timestamp + seconds as i64;
-        return unified_box(HK_TIME, new_timestamp);
-    }
-
-    if a_kind == Some(HK_DURATION) && b_kind == Some(HK_TIME) {
-        let timestamp = *unsafe { unified_unbox::<i64>(b_bits) };
-        let dur = unsafe { unified_unbox::<JITDuration>(a_bits) };
-        let seconds = duration_to_seconds(dur);
-        let new_timestamp = timestamp + seconds as i64;
-        return unified_box(HK_TIME, new_timestamp);
-    }
-
-    // Duration + Duration
-    if a_kind == Some(HK_DURATION) && b_kind == Some(HK_DURATION) {
-        let a_dur = unsafe { unified_unbox::<JITDuration>(a_bits) };
-        let b_dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
-        let a_secs = duration_to_seconds(a_dur);
-        let b_secs = duration_to_seconds(b_dur);
-        let total_secs = a_secs + b_secs;
-        return unified_box(
-            HK_DURATION,
-            JITDuration {
-                value: total_secs,
-                unit: 0,
-            },
-        );
-    }
-
-    // String concatenation
-    if a_kind == Some(HK_STRING) && b_kind == Some(HK_STRING) {
-        let a_str = unsafe { unbox_string(a_bits) };
-        let b_str = unsafe { unbox_string(b_bits) };
-        let result = format!("{}{}", a_str, b_str);
-        return box_string(result);
-    }
-
-    // Fallback for numbers (one might be boxed differently)
-    if is_number(a_bits) || is_number(b_bits) {
-        let a_num = if is_number(a_bits) {
-            unbox_number(a_bits)
-        } else {
-            0.0
-        };
-        let b_num = if is_number(b_bits) {
-            unbox_number(b_bits)
-        } else {
-            0.0
-        };
-        return box_number(a_num + b_num);
-    }
-
-    TAG_NULL
-}
-
-/// Generic subtract that handles int-int, Time - Duration, Duration - Duration, etc.
-pub extern "C" fn jit_generic_sub(a_bits: u64, b_bits: u64) -> u64 {
-    use super::super::context::JITDuration;
-    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) - unbox_number(b_bits)); }
-    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_sub(unbox_nanboxed_int(b_bits))); }
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a - b); }
-
-    let a_kind = heap_kind(a_bits);
-    let b_kind = heap_kind(b_bits);
-
-    // Time - Duration
-    if a_kind == Some(HK_TIME) && b_kind == Some(HK_DURATION) {
-        let timestamp = *unsafe { unified_unbox::<i64>(a_bits) };
-        let dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
-        let seconds = duration_to_seconds(dur);
-        let new_timestamp = timestamp - seconds as i64;
-        return unified_box(HK_TIME, new_timestamp);
-    }
-
-    // Time - Time = Duration (in seconds)
-    if a_kind == Some(HK_TIME) && b_kind == Some(HK_TIME) {
-        let a_ts = *unsafe { unified_unbox::<i64>(a_bits) };
-        let b_ts = *unsafe { unified_unbox::<i64>(b_bits) };
-        let diff_secs = (a_ts - b_ts) as f64;
-        return unified_box(
-            HK_DURATION,
-            JITDuration {
-                value: diff_secs,
-                unit: 0,
-            },
-        );
-    }
-
-    // Fallback for numbers
-    if is_number(a_bits) || is_number(b_bits) {
-        let a_num = if is_number(a_bits) {
-            unbox_number(a_bits)
-        } else {
-            0.0
-        };
-        let b_num = if is_number(b_bits) {
-            unbox_number(b_bits)
-        } else {
-            0.0
-        };
-        return box_number(a_num - b_num);
-    }
-
-    TAG_NULL
-}
-
-/// Generic multiplication for JIT
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_generic_mul(a_bits: u64, b_bits: u64) -> u64 {
-    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) * unbox_number(b_bits)); }
-    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_mul(unbox_nanboxed_int(b_bits))); }
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a * b); }
-
-    // Fallback for numbers
-    if is_number(a_bits) || is_number(b_bits) {
-        let a_num = if is_number(a_bits) {
-            unbox_number(a_bits)
-        } else {
-            1.0
-        };
-        let b_num = if is_number(b_bits) {
-            unbox_number(b_bits)
-        } else {
-            1.0
-        };
-        return box_number(a_num * b_num);
-    }
-
-    TAG_NULL
-}
-
-/// Generic division for JIT
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_generic_div(a_bits: u64, b_bits: u64) -> u64 {
-    if is_number(a_bits) && is_number(b_bits) { let b = unbox_number(b_bits); return box_number(if b == 0.0 { f64::NAN } else { unbox_number(a_bits) / b }); }
-    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { let a = unbox_nanboxed_int(a_bits); let b = unbox_nanboxed_int(b_bits); if b == 0 { return box_number(f64::NAN); } return box_nanboxed_int(a / b); }
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(if b == 0.0 { f64::NAN } else { a / b }); }
-
-    // Fallback for numbers
-    if is_number(a_bits) || is_number(b_bits) {
-        let a_num = if is_number(a_bits) {
-            unbox_number(a_bits)
-        } else {
-            0.0
-        };
-        let b_num = if is_number(b_bits) {
-            unbox_number(b_bits)
-        } else {
-            1.0
-        };
-        return box_number(if b_num == 0.0 {
-            f64::NAN
-        } else {
-            a_num / b_num
-        });
-    }
-
-    TAG_NULL
-}
+// The `jit_generic_add` / `sub` / `mul` / `div` / `mod` / `eq` / `neq` /
+// `lt` / `le` / `gt` / `ge` trampolines that used to live here were the
+// last thing pinning the matching `FFIFuncRefs` fields alive. After
+// R5.1–R5.6 retargeted every dynamic-arithmetic / comparison path
+// (typed bitwise, user operator traits, DateTime, Matrix/Vec, string +
+// scalar), MIR no longer emits a fully dynamic binop and
+// `compile_binop` surfaces an error if one ever reaches it. The 11
+// Rust FFI bodies, their Cranelift signatures, and the matching
+// symbol registrations were deleted in the same commit.
 
 /// SIMD-accelerated Series addition
 #[allow(dead_code)]
@@ -420,159 +246,16 @@ where
     TAG_BOOL_FALSE
 }
 
-/// Generic less-than comparison that handles numbers, NaN-boxed ints, and mixed types.
-pub extern "C" fn jit_generic_lt(a_bits: u64, b_bits: u64) -> u64 {
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
-        return if a < b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
-    }
-    TAG_BOOL_FALSE
-}
+// (R7.1) `jit_generic_lt` / `le` / `gt` / `ge` / `mod` / `eq` / `neq` were
+// deleted together with the add/sub/mul/div trampolines above. They had
+// no callers outside `compile_binop`, which now surfaces an error for
+// any dynamic arithmetic / comparison op that reaches it after R5.
 
-/// Generic less-than-or-equal comparison that handles numbers, NaN-boxed ints, and mixed types.
-pub extern "C" fn jit_generic_le(a_bits: u64, b_bits: u64) -> u64 {
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
-        return if a <= b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
-    }
-    TAG_BOOL_FALSE
-}
+// `duration_to_seconds` (the last private helper in this file) went
+// away with the Time/Duration branches in `jit_generic_add` / `sub`
+// as part of the R7.1 deletion above.
 
-/// Generic greater-than comparison that handles numbers, NaN-boxed ints, and mixed types.
-pub extern "C" fn jit_generic_gt(a_bits: u64, b_bits: u64) -> u64 {
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
-        return if a > b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
-    }
-    TAG_BOOL_FALSE
-}
-
-/// Generic greater-than-or-equal comparison that handles numbers, NaN-boxed ints, and mixed types.
-pub extern "C" fn jit_generic_ge(a_bits: u64, b_bits: u64) -> u64 {
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
-        return if a >= b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
-    }
-    TAG_BOOL_FALSE
-}
-
-/// Generic modulo that handles numbers and NaN-boxed ints.
-pub extern "C" fn jit_generic_mod(a_bits: u64, b_bits: u64) -> u64 {
-    if is_number(a_bits) && is_number(b_bits) {
-        let a = unbox_number(a_bits);
-        let b = unbox_number(b_bits);
-        if b == 0.0 { return box_number(f64::NAN); }
-        return box_number(a - (a / b).floor() * b);
-    }
-    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) {
-        let a = unbox_nanboxed_int(a_bits);
-        let b = unbox_nanboxed_int(b_bits);
-        if b == 0 { return box_number(f64::NAN); }
-        return box_nanboxed_int(a % b);
-    }
-    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
-        if b == 0.0 { return box_number(f64::NAN); }
-        return box_number(a - (a / b).floor() * b);
-    }
-    TAG_NULL
-}
-
-/// Generic equality that handles strings, booleans, and other non-numeric types.
-/// Compares string contents (not pointer identity), numbers by value, booleans by tag.
-pub extern "C" fn jit_generic_eq(a_bits: u64, b_bits: u64) -> u64 {
-    // Both numbers - fast path
-    if is_number(a_bits) && is_number(b_bits) {
-        return if unbox_number(a_bits) == unbox_number(b_bits) {
-            TAG_BOOL_TRUE
-        } else {
-            TAG_BOOL_FALSE
-        };
-    }
-
-    // Identical tags (bools, null, unit)
-    if a_bits == b_bits {
-        return TAG_BOOL_TRUE;
-    }
-
-    // Both heap values
-    let a_kind = heap_kind(a_bits);
-    let b_kind = heap_kind(b_bits);
-
-    if a_kind == Some(HK_STRING) && b_kind == Some(HK_STRING) {
-        let a_str = unsafe { unbox_string(a_bits) };
-        let b_str = unsafe { unbox_string(b_bits) };
-        return if a_str == b_str {
-            TAG_BOOL_TRUE
-        } else {
-            TAG_BOOL_FALSE
-        };
-    }
-
-    TAG_BOOL_FALSE
-}
-
-/// Generic inequality — inverse of jit_generic_eq.
-pub extern "C" fn jit_generic_neq(a_bits: u64, b_bits: u64) -> u64 {
-    if jit_generic_eq(a_bits, b_bits) == TAG_BOOL_TRUE {
-        TAG_BOOL_FALSE
-    } else {
-        TAG_BOOL_TRUE
-    }
-}
-
-/// Helper: convert JITDuration to seconds
-fn duration_to_seconds(dur: &super::super::context::JITDuration) -> f64 {
-    match dur.unit {
-        0 => dur.value,              // seconds
-        1 => dur.value * 60.0,       // minutes
-        2 => dur.value * 3600.0,     // hours
-        3 => dur.value * 86400.0,    // days
-        4 => dur.value * 604800.0,   // weeks
-        5 => dur.value * 2592000.0,  // months (30 days)
-        6 => dur.value * 31536000.0, // years (365 days)
-        _ => dur.value,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_scalar_add() {
-        let a = box_number(10.0);
-        let b = box_number(32.0);
-        let result = jit_generic_add(a, b);
-        assert_eq!(unbox_number(result), 42.0);
-    }
-
-    #[test]
-    fn test_scalar_sub() {
-        let a = box_number(100.0);
-        let b = box_number(58.0);
-        let result = jit_generic_sub(a, b);
-        assert_eq!(unbox_number(result), 42.0);
-    }
-
-    #[test]
-    fn test_scalar_mul() {
-        let a = box_number(6.0);
-        let b = box_number(7.0);
-        let result = jit_generic_mul(a, b);
-        assert_eq!(unbox_number(result), 42.0);
-    }
-
-    #[test]
-    fn test_scalar_div() {
-        let a = box_number(84.0);
-        let b = box_number(2.0);
-        let result = jit_generic_div(a, b);
-        assert_eq!(unbox_number(result), 42.0);
-    }
-
-    #[test]
-    fn test_scalar_div_by_zero() {
-        let a = box_number(42.0);
-        let b = box_number(0.0);
-        let result = jit_generic_div(a, b);
-        // Division by zero should return infinity or NaN
-        let val = unbox_number(result);
-        assert!(val.is_infinite() || val.is_nan());
-    }
-}
+// Tests for the former `jit_generic_add` / `sub` / `mul` / `div`
+// trampolines were removed alongside the functions themselves in R7.1:
+// those paths are unreachable from MIR after R5 and exercising them
+// directly only confirmed the deleted helper's behaviour.

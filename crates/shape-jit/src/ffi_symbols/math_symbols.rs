@@ -11,10 +11,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::math::{
-    jit_acos, jit_asin, jit_atan, jit_cos, jit_exp, jit_generic_add, jit_generic_div,
-    jit_generic_eq, jit_generic_ge, jit_generic_gt, jit_generic_le, jit_generic_lt,
-    jit_generic_mod, jit_generic_mul, jit_generic_neq, jit_generic_sub, jit_ln, jit_log, jit_pow,
-    jit_sin, jit_tan,
+    jit_acos, jit_asin, jit_atan, jit_cos, jit_exp, jit_ln, jit_log, jit_pow, jit_sin, jit_tan,
 };
 use super::intrinsics::{
     jit_intrinsic_correlation, jit_intrinsic_covariance, jit_intrinsic_max, jit_intrinsic_mean,
@@ -40,18 +37,10 @@ pub fn register_math_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_log", jit_log as *const u8);
     builder.symbol("jit_pow", jit_pow as *const u8);
 
-    // Generic arithmetic operations
-    builder.symbol("jit_generic_add", jit_generic_add as *const u8);
-    builder.symbol("jit_generic_sub", jit_generic_sub as *const u8);
-    builder.symbol("jit_generic_mul", jit_generic_mul as *const u8);
-    builder.symbol("jit_generic_div", jit_generic_div as *const u8);
-    builder.symbol("jit_generic_eq", jit_generic_eq as *const u8);
-    builder.symbol("jit_generic_neq", jit_generic_neq as *const u8);
-    builder.symbol("jit_generic_lt", jit_generic_lt as *const u8);
-    builder.symbol("jit_generic_le", jit_generic_le as *const u8);
-    builder.symbol("jit_generic_gt", jit_generic_gt as *const u8);
-    builder.symbol("jit_generic_ge", jit_generic_ge as *const u8);
-    builder.symbol("jit_generic_mod", jit_generic_mod as *const u8);
+    // R7.1: the 11 `jit_generic_*` dispatch-fallback trampolines were
+    // removed together with their `FFIFuncRefs` fields and Cranelift
+    // signatures after R5 retargeted every dynamic arithmetic /
+    // comparison path to typed opcodes or `CallMethod`.
 
     // Series comparison functions
     builder.symbol(
@@ -159,30 +148,10 @@ pub fn declare_math_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<St
         ffi_funcs.insert("jit_pow".to_string(), func_id);
     }
 
-    // Generic binary ops for non-numeric types (Time + Duration, Series ops, String concat/eq, etc.)
-    // jit_generic_add/sub/mul/div/eq/neq/lt/le/gt/ge(a_bits, b_bits) -> u64
-    for name in [
-        "jit_generic_add",
-        "jit_generic_sub",
-        "jit_generic_mul",
-        "jit_generic_div",
-        "jit_generic_eq",
-        "jit_generic_neq",
-        "jit_generic_lt",
-        "jit_generic_le",
-        "jit_generic_gt",
-        "jit_generic_ge",
-        "jit_generic_mod",
-    ] {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // a
-        sig.params.push(AbiParam::new(types::I64)); // b
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module
-            .declare_function(name, Linkage::Import, &sig)
-            .unwrap_or_else(|_| panic!("Failed to declare {}", name));
-        ffi_funcs.insert(name.to_string(), func_id);
-    }
+    // R7.1: Generic binary op declarations (11 `jit_generic_*` names) were
+    // removed here together with their Rust bodies and `FFIFuncRefs`
+    // fields. MIR no longer emits a fully dynamic arithmetic / comparison
+    // binop after R5.
 
     // Series comparison functions (a_bits: u64, b_bits: u64) -> u64
     for name in [

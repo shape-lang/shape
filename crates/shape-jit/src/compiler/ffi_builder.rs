@@ -42,20 +42,6 @@ impl JITCompiler {
             make_closure: r!("jit_make_closure"),
             finalize_heap_closure: r!("jit_finalize_heap_closure"),
 
-            // Generic arithmetic / comparison trampolines (minimal dynamic
-            // dispatch surface retained after the V3/V4 cleanup).
-            generic_add: r!("jit_generic_add"),
-            generic_sub: r!("jit_generic_sub"),
-            generic_mul: r!("jit_generic_mul"),
-            generic_div: r!("jit_generic_div"),
-            generic_mod: r!("jit_generic_mod"),
-            generic_eq: r!("jit_generic_eq"),
-            generic_neq: r!("jit_generic_neq"),
-            generic_lt: r!("jit_generic_lt"),
-            generic_le: r!("jit_generic_le"),
-            generic_gt: r!("jit_generic_gt"),
-            generic_ge: r!("jit_generic_ge"),
-
             // TypedObject allocation + field store
             typed_object_alloc: r!("jit_typed_object_alloc"),
             typed_object_set_field: r!("jit_typed_object_set_field"),

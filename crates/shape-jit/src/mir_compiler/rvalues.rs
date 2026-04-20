@@ -372,13 +372,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Compile a binary operation using generic FFI calls for unknown types.
+    /// Compile a binary operation on a dynamic (NaN-boxed) slot.
     ///
-    /// R4.2A: The `generic_*` FFI signatures take plain `u64` bit-patterns
-    /// (implicitly ValueWord-encoded), so no width-extension wrap is needed
-    /// at the call site — operands are expected to be I64 already. Native
-    /// F64/I32/I8 values should reach this path only via the inline fast
-    /// paths above; the generic fallback is for already-dynamic (I64) slots.
+    /// R7.1: After R5.1–R5.6 retargeted all dynamic arithmetic /
+    /// comparison fallbacks (typed bitwise, user operator traits,
+    /// DateTime, Matrix/Vec, string+scalar) to typed opcodes or
+    /// `CallMethod`, the JIT no longer receives fully dynamic
+    /// arithmetic / comparison binops from MIR. The `generic_*`
+    /// FFI trampolines (`generic_add`/`sub`/`mul`/`div`/`mod`,
+    /// `generic_eq`/`neq`, `generic_lt`/`le`/`gt`/`ge`) were the
+    /// last things pinning those FuncRefs alive and have been
+    /// removed in this commit.
+    ///
+    /// This helper remains for the `BinOp::And` / `BinOp::Or`
+    /// fallthroughs from `compile_binop_f64`, `compile_binop_int64`,
+    /// and `compile_binop_bool` where the logical op mixes with a
+    /// NaN-boxed bool encoding (TAG_BOOL_TRUE / TAG_BOOL_FALSE).
     fn compile_binop(
         &mut self,
         op: &BinOp,
@@ -388,17 +397,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let l = lhs;
         let r = rhs;
         match op {
-            BinOp::Add => { let inst = self.builder.ins().call(self.ffi.generic_add, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Sub => { let inst = self.builder.ins().call(self.ffi.generic_sub, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Mul => { let inst = self.builder.ins().call(self.ffi.generic_mul, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Div => { let inst = self.builder.ins().call(self.ffi.generic_div, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Mod => { let inst = self.builder.ins().call(self.ffi.generic_mod, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Eq => { let inst = self.builder.ins().call(self.ffi.generic_eq, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Ne => { let inst = self.builder.ins().call(self.ffi.generic_neq, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Lt => { let inst = self.builder.ins().call(self.ffi.generic_lt, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Le => { let inst = self.builder.ins().call(self.ffi.generic_le, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Gt => { let inst = self.builder.ins().call(self.ffi.generic_gt, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
-            BinOp::Ge => { let inst = self.builder.ins().call(self.ffi.generic_ge, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Mod
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge => Err(format!(
+                "JIT: dynamic arithmetic/comparison binop {:?} reached compile_binop; \
+                 MIR should emit a typed opcode or route through CallMethod after R5",
+                op
+            )),
 
             // v2-boundary: logical ops on NaN-boxed values use TAG_BOOL_TRUE/FALSE
             BinOp::And => {

@@ -36,20 +36,6 @@ pub struct FFIFuncRefs {
     pub(crate) make_closure: FuncRef,
     pub(crate) finalize_heap_closure: FuncRef,
 
-    // Generic (fallback) arithmetic / comparison trampolines — kept for the
-    // minimal dynamic-dispatch surface that remains after the V3/V4 cleanup.
-    pub(crate) generic_add: FuncRef,
-    pub(crate) generic_sub: FuncRef,
-    pub(crate) generic_mul: FuncRef,
-    pub(crate) generic_div: FuncRef,
-    pub(crate) generic_mod: FuncRef,
-    pub(crate) generic_eq: FuncRef,
-    pub(crate) generic_neq: FuncRef,
-    pub(crate) generic_lt: FuncRef,
-    pub(crate) generic_le: FuncRef,
-    pub(crate) generic_gt: FuncRef,
-    pub(crate) generic_ge: FuncRef,
-
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
