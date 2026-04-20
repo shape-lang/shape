@@ -44,10 +44,30 @@ pub extern "C" fn jit_v2_array_set_f64(arr: *mut TypedArray<f64>, index: i64, va
     }
 }
 
+/// Generic typed-array push dispatcher (R7.2).
+///
+/// Accepts an erased typed-array pointer, the element's bit pattern zero/sign-
+/// extended to 64 bits, and the element's byte size. Dispatches to the
+/// matching `TypedArray<T>::push` instantiation by `elem_size`.
+///
+/// `TypedArray<T>` has identical struct layout regardless of T (the `T` only
+/// appears behind a `*mut T`), and `Layout::array::<T>` is identical for types
+/// of the same size & alignment, so routing 8-byte pushes through
+/// `TypedArray<i64>` is byte-equivalent to going through `TypedArray<f64>`.
+///
+/// # Safety
+/// `arr` must point to a live `TypedArray<T>` whose element type has size
+/// `elem_size` (1, 4, or 8). `bits` must contain the value to store in the
+/// low `elem_size` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_push_f64(arr: *mut TypedArray<f64>, val: f64) {
+pub extern "C" fn jit_v2_array_push(arr: *mut HeapHeader, bits: u64, elem_size: u8) {
     unsafe {
-        TypedArray::push(arr, val);
+        match elem_size {
+            1 => TypedArray::<u8>::push(arr as *mut TypedArray<u8>, bits as u8),
+            4 => TypedArray::<i32>::push(arr as *mut TypedArray<i32>, bits as i32),
+            8 => TypedArray::<i64>::push(arr as *mut TypedArray<i64>, bits as i64),
+            _ => unreachable!("jit_v2_array_push: invalid elem_size {}", elem_size),
+        }
     }
 }
 
@@ -669,13 +689,6 @@ pub extern "C" fn jit_v2_array_set_i64(arr: *mut TypedArray<i64>, index: i64, va
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_push_i64(arr: *mut TypedArray<i64>, val: i64) {
-    unsafe {
-        TypedArray::push(arr, val);
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_len_i64(arr: *const TypedArray<i64>) -> u32 {
     unsafe { TypedArray::len(arr) }
 }
@@ -707,13 +720,6 @@ pub extern "C" fn jit_v2_array_get_i32(arr: *const TypedArray<i32>, index: i64) 
 pub extern "C" fn jit_v2_array_set_i32(arr: *mut TypedArray<i32>, index: i64, val: i32) {
     unsafe {
         TypedArray::set(arr, index as u32, val);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_push_i32(arr: *mut TypedArray<i32>, val: i32) {
-    unsafe {
-        TypedArray::push(arr, val);
     }
 }
 
@@ -755,13 +761,6 @@ pub extern "C" fn jit_v2_array_get_bool(arr: *const TypedArray<u8>, index: i64) 
 pub extern "C" fn jit_v2_array_set_bool(arr: *mut TypedArray<u8>, index: i64, val: u8) {
     unsafe {
         TypedArray::set(arr, index as u32, val);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_push_bool(arr: *mut TypedArray<u8>, val: u8) {
-    unsafe {
-        TypedArray::push(arr, val);
     }
 }
 
@@ -876,6 +875,29 @@ pub extern "C" fn jit_v2_alloc_struct(size: u32, kind: u16) -> *mut u8 {
 mod tests {
     use super::*;
     use shape_value::v2::heap_header::HEAP_KIND_V2_STRUCT;
+
+    // ── Test-only shims for the pre-R7.2 typed push helpers ──────────────
+    //
+    // R7.2 consolidated the four `jit_v2_array_push_{f64,i64,i32,bool}`
+    // entry points into a single `jit_v2_array_push(ptr, bits, elem_size)`
+    // dispatcher. These shims keep the tests below readable while exercising
+    // the same underlying push paths.
+
+    fn jit_v2_array_push_f64(arr: *mut TypedArray<f64>, val: f64) {
+        jit_v2_array_push(arr as *mut HeapHeader, val.to_bits(), 8);
+    }
+
+    fn jit_v2_array_push_i64(arr: *mut TypedArray<i64>, val: i64) {
+        jit_v2_array_push(arr as *mut HeapHeader, val as u64, 8);
+    }
+
+    fn jit_v2_array_push_i32(arr: *mut TypedArray<i32>, val: i32) {
+        jit_v2_array_push(arr as *mut HeapHeader, (val as u32) as u64, 4);
+    }
+
+    fn jit_v2_array_push_bool(arr: *mut TypedArray<u8>, val: u8) {
+        jit_v2_array_push(arr as *mut HeapHeader, val as u64, 1);
+    }
 
     // ── Phase C.3 SIMD sum tests ─────────────────────────────────────────
 

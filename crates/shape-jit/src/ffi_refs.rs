@@ -50,12 +50,12 @@ pub struct FFIFuncRefs {
     pub(crate) v2_array_new_i32: FuncRef,
     pub(crate) v2_array_new_bool: FuncRef,
 
-    // v2 typed-array element push (the rest — get/set/len — are inlined in
-    // Cranelift directly against the native buffer layout).
-    pub(crate) v2_array_push_f64: FuncRef,
-    pub(crate) v2_array_push_i64: FuncRef,
-    pub(crate) v2_array_push_i32: FuncRef,
-    pub(crate) v2_array_push_bool: FuncRef,
+    // v2 typed-array element push — single generic helper that dispatches
+    // on the `elem_size` byte immediate. Callers zero/sign-extend the native
+    // value to I64 before the call; the FFI body routes to the matching
+    // TypedArray::push instantiation. (Get/set/len remain inlined in
+    // Cranelift directly against the native buffer layout.)
+    pub(crate) v2_array_push: FuncRef,
 
     // v2 struct allocator.
     pub(crate) v2_alloc_struct: FuncRef,

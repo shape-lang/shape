@@ -56,11 +56,8 @@ impl JITCompiler {
             v2_array_new_i32: r!("jit_v2_array_new_i32"),
             v2_array_new_bool: r!("jit_v2_array_new_bool"),
 
-            // v2 typed-array push
-            v2_array_push_f64: r!("jit_v2_array_push_f64"),
-            v2_array_push_i64: r!("jit_v2_array_push_i64"),
-            v2_array_push_i32: r!("jit_v2_array_push_i32"),
-            v2_array_push_bool: r!("jit_v2_array_push_bool"),
+            // v2 typed-array push (generic dispatcher — see ffi_refs.rs)
+            v2_array_push: r!("jit_v2_array_push"),
 
             // v2 struct allocator
             v2_alloc_struct: r!("jit_v2_alloc_struct"),

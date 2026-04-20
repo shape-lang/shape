@@ -17,29 +17,28 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_new_f64", v2::jit_v2_array_new_f64 as *const u8);
     builder.symbol("jit_v2_array_get_f64", v2::jit_v2_array_get_f64 as *const u8);
     builder.symbol("jit_v2_array_set_f64", v2::jit_v2_array_set_f64 as *const u8);
-    builder.symbol("jit_v2_array_push_f64", v2::jit_v2_array_push_f64 as *const u8);
     builder.symbol("jit_v2_array_len_f64", v2::jit_v2_array_len_f64 as *const u8);
 
     // Array — i64
     builder.symbol("jit_v2_array_new_i64", v2::jit_v2_array_new_i64 as *const u8);
     builder.symbol("jit_v2_array_get_i64", v2::jit_v2_array_get_i64 as *const u8);
     builder.symbol("jit_v2_array_set_i64", v2::jit_v2_array_set_i64 as *const u8);
-    builder.symbol("jit_v2_array_push_i64", v2::jit_v2_array_push_i64 as *const u8);
     builder.symbol("jit_v2_array_len_i64", v2::jit_v2_array_len_i64 as *const u8);
 
     // Array — i32
     builder.symbol("jit_v2_array_new_i32", v2::jit_v2_array_new_i32 as *const u8);
     builder.symbol("jit_v2_array_get_i32", v2::jit_v2_array_get_i32 as *const u8);
     builder.symbol("jit_v2_array_set_i32", v2::jit_v2_array_set_i32 as *const u8);
-    builder.symbol("jit_v2_array_push_i32", v2::jit_v2_array_push_i32 as *const u8);
     builder.symbol("jit_v2_array_len_i32", v2::jit_v2_array_len_i32 as *const u8);
 
     // Array — bool (encoded as u8 internally)
     builder.symbol("jit_v2_array_new_bool", v2::jit_v2_array_new_bool as *const u8);
     builder.symbol("jit_v2_array_get_bool", v2::jit_v2_array_get_bool as *const u8);
     builder.symbol("jit_v2_array_set_bool", v2::jit_v2_array_set_bool as *const u8);
-    builder.symbol("jit_v2_array_push_bool", v2::jit_v2_array_push_bool as *const u8);
     builder.symbol("jit_v2_array_len_bool", v2::jit_v2_array_len_bool as *const u8);
+
+    // Generic typed-array push dispatcher (R7.2 consolidation)
+    builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
 
     // Struct field access
     builder.symbol("jit_v2_field_load_f64", v2::jit_v2_field_load_f64 as *const u8);
@@ -146,12 +145,17 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         declare(module, ffi_funcs, "jit_v2_array_set_f64", &sig);
     }
 
-    // jit_v2_array_push_f64(arr: ptr, val: f64) -> void
+    // jit_v2_array_push(arr: ptr, bits: i64, elem_size: i8) -> void
+    // Generic typed-array push dispatcher (R7.2 consolidation). Callers zero/
+    // sign-extend the element value to I64 before the call and pass the byte
+    // size as an I8 immediate; the FFI body routes to the matching
+    // `TypedArray::push` instantiation.
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
-        sig.params.push(AbiParam::new(types::F64)); // val NATIVE F64
-        declare(module, ffi_funcs, "jit_v2_array_push_f64", &sig);
+        sig.params.push(AbiParam::new(types::I64)); // elem bits
+        sig.params.push(AbiParam::new(types::I8));  // elem byte size
+        declare(module, ffi_funcs, "jit_v2_array_push", &sig);
     }
 
     // jit_v2_array_len_f64(arr: ptr) -> u32
@@ -192,14 +196,6 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         declare(module, ffi_funcs, "jit_v2_array_set_i64", &sig);
     }
 
-    // jit_v2_array_push_i64(arr: ptr, val: i64) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_array_push_i64", &sig);
-    }
-
     // jit_v2_array_len_i64(arr: ptr) -> u32
     {
         let mut sig = module.make_signature();
@@ -238,14 +234,6 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         declare(module, ffi_funcs, "jit_v2_array_set_i32", &sig);
     }
 
-    // jit_v2_array_push_i32(arr: ptr, val: i32) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I32)); // val NATIVE I32
-        declare(module, ffi_funcs, "jit_v2_array_push_i32", &sig);
-    }
-
     // jit_v2_array_len_i32(arr: ptr) -> u32
     {
         let mut sig = module.make_signature();
@@ -282,14 +270,6 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I8));
         declare(module, ffi_funcs, "jit_v2_array_set_bool", &sig);
-    }
-
-    // jit_v2_array_push_bool(arr: ptr, val: u8) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I8));
-        declare(module, ffi_funcs, "jit_v2_array_push_bool", &sig);
     }
 
     // jit_v2_array_len_bool(arr: ptr) -> u32

@@ -129,14 +129,60 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Return the FFI `FuncRef` for `jit_v2_array_push_<elem>`.
-    pub(crate) fn v2_array_push_func(&self, elem: SlotKind) -> Option<cranelift::codegen::ir::FuncRef> {
+    /// Return the element byte size for `SlotKind`s backed by the generic
+    /// `jit_v2_array_push` dispatcher, or `None` for unsupported kinds. The
+    /// caller uses the returned size as the `elem_size` I8 immediate passed
+    /// to the dispatcher.
+    pub(crate) fn v2_array_push_elem_size(&self, elem: SlotKind) -> Option<i64> {
         match elem {
-            SlotKind::Float64 => Some(self.ffi.v2_array_push_f64),
-            SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_push_i64),
-            SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_push_i32),
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(self.ffi.v2_array_push_bool),
+            SlotKind::Float64 => Some(8),
+            SlotKind::Int64 | SlotKind::UInt64 => Some(8),
+            SlotKind::Int32 | SlotKind::UInt32 => Some(4),
+            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(1),
             _ => None,
+        }
+    }
+
+    /// Emit a call to the generic `jit_v2_array_push` FFI dispatcher. `val`
+    /// is the element value Cranelift SSA value already coerced to the
+    /// native Cranelift type for `elem` (via `coerce_to_v2_elem`). This
+    /// helper zero/sign-extends or bitcasts the value to I64 and passes
+    /// `elem_size` as an I8 immediate.
+    pub(crate) fn emit_v2_array_push_call(
+        &mut self,
+        arr_ptr: Value,
+        val: Value,
+        elem: SlotKind,
+    ) -> Result<(), String> {
+        let elem_size = match self.v2_array_push_elem_size(elem) {
+            Some(s) => s,
+            None => return Err(format!("v2_array_push: unsupported elem kind {:?}", elem)),
+        };
+        let bits = self.widen_to_i64_bits(val);
+        let size_val = self.builder.ins().iconst(types::I8, elem_size);
+        self.builder
+            .ins()
+            .call(self.ffi.v2_array_push, &[arr_ptr, bits, size_val]);
+        Ok(())
+    }
+
+    /// Widen/bitcast an arbitrary Cranelift element value into an I64 bit
+    /// pattern suitable for the generic `jit_v2_array_push` dispatcher.
+    fn widen_to_i64_bits(&mut self, val: Value) -> Value {
+        let val_type = self.builder.func.dfg.value_type(val);
+        if val_type == types::F64 {
+            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        } else if val_type == types::I64 {
+            val
+        } else if val_type == types::I32
+            || val_type == types::I16
+            || val_type == types::I8
+        {
+            // Zero-extend: the dispatcher uses only the low `elem_size` bytes,
+            // so sign bits above that are ignored.
+            self.builder.ins().uextend(types::I64, val)
+        } else {
+            val
         }
     }
 
@@ -233,10 +279,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(f) => f,
             None => return Ok(None),
         };
-        let push_func = match self.v2_array_push_func(elem) {
-            Some(f) => f,
-            None => return Ok(None),
-        };
+        if self.v2_array_push_elem_size(elem).is_none() {
+            return Ok(None);
+        }
 
         let cap = self.builder.ins().iconst(types::I32, operands.len() as i64);
         let inst = self.builder.ins().call(alloc_func, &[cap]);
@@ -245,7 +290,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         for op in operands {
             let raw = self.compile_operand_raw(op)?;
             let val = self.coerce_to_v2_elem(raw, elem);
-            self.builder.ins().call(push_func, &[arr_ptr, val]);
+            self.emit_v2_array_push_call(arr_ptr, val, elem)?;
         }
 
         Ok(Some(arr_ptr))
@@ -273,14 +318,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
-                let push_func = match self.v2_array_push_func(elem) {
-                    Some(f) => f,
-                    None => return Ok(None),
-                };
+                if self.v2_array_push_elem_size(elem).is_none() {
+                    return Ok(None);
+                }
                 let arr_ptr = self.read_place(receiver)?;
                 let raw_arg = self.compile_operand_raw(&rest_args[0])?;
                 let val = self.coerce_to_v2_elem(raw_arg, elem);
-                self.builder.ins().call(push_func, &[arr_ptr, val]);
+                self.emit_v2_array_push_call(arr_ptr, val, elem)?;
                 let none_val = self.builder.ins().iconst(types::I64, 0i64);
                 self.release_old_value_if_heap(destination)?;
                 self.write_place(destination, none_val)?;
