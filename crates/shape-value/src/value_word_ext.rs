@@ -8,7 +8,7 @@
 //! arithmetic helpers that operate directly on bits.
 //!
 //! Free-function tag machinery (`make_tagged`, `get_tag`, `sign_extend_i48`, …)
-//! remains in `crate::value_word` and is imported here — this module depends on
+//! lives in `crate::tag_bits` and is imported here — this module depends on
 //! that bit-layout layer but does not own it.
 //!
 //! This module was extracted from `value_word.rs` in Phase R6.2 of the
@@ -23,15 +23,48 @@ use crate::heap_value::{
     RefProjection, SetData, TableViewData, TemporalData, TypedArrayData,
 };
 use crate::slot::ValueSlot;
+use crate::string_intern;
 use crate::value::{FilterNode, HostCallable, PrintResult, VMArray, VTable};
-use crate::value_word::{
-    ArrayView, ArrayViewMut, CANONICAL_NAN, HEAP_OWNED_BIT, HEAP_PTR_MASK, I48_MAX, I48_MIN,
-    PAYLOAD_MASK, RefTarget, TAG_BOOL, TAG_FUNCTION, TAG_HEAP, TAG_INT, TAG_MODULE_FN, TAG_NONE,
-    TAG_REF, TAG_UNIT, ValueWord, get_payload, get_tag, is_tagged, make_tagged,
-    nan_tag_is_truthy, nan_tag_type_name, sign_extend_i48, string_intern, vw_heap_box,
+use crate::tag_bits::{
+    CANONICAL_NAN, HEAP_OWNED_BIT, HEAP_PTR_MASK, I48_MAX, I48_MIN, PAYLOAD_MASK, TAG_BOOL,
+    TAG_FUNCTION, TAG_HEAP, TAG_INT, TAG_MODULE_FN, TAG_NONE, TAG_REF, TAG_UNIT, get_payload,
+    get_tag, is_tagged, make_tagged, sign_extend_i48,
 };
+use crate::value_word::{ArrayView, ArrayViewMut, RefTarget, ValueWord, vw_heap_box};
 #[cfg(not(feature = "gc"))]
 use crate::value_word::vw_heap_box_owned;
+
+/// Map a raw tag constant to its type name string.
+///
+/// Internal helper: external callers should use [`crate::ValueBits::tag_type_name`].
+#[inline]
+pub(crate) fn nan_tag_type_name(tag: u64) -> &'static str {
+    match tag {
+        TAG_INT => "int",
+        TAG_BOOL => "bool",
+        TAG_NONE => "option",
+        TAG_UNIT => "unit",
+        TAG_FUNCTION => "function",
+        TAG_MODULE_FN => "module_function",
+        TAG_REF => "reference",
+        _ => "unknown",
+    }
+}
+
+/// Evaluate truthiness for an inline tag value.
+///
+/// Internal helper: external callers should use [`crate::ValueBits::tag_is_truthy`].
+#[inline]
+pub(crate) fn nan_tag_is_truthy(tag: u64, payload: u64) -> bool {
+    match tag {
+        TAG_INT => sign_extend_i48(payload) != 0,
+        TAG_BOOL => payload != 0,
+        TAG_NONE => false,
+        TAG_UNIT => false,
+        TAG_FUNCTION | TAG_MODULE_FN | TAG_REF => true,
+        _ => true,
+    }
+}
 use chrono::{DateTime, FixedOffset, Utc};
 use shape_ast::ast::{DataDateTimeRef, DateTimeExpr, Duration, TimeReference, TypeAnnotation};
 use shape_ast::data::Timeframe;
@@ -1586,7 +1619,8 @@ impl ValueWordExt for u64 {
 mod tests {
     use super::*;
     use crate::heap_value::HeapValue;
-    use crate::value_word::{TAG_MODULE_FN, ValueWordDisplay};
+    use crate::tag_bits::TAG_MODULE_FN;
+    use crate::value_word::ValueWordDisplay;
     use std::sync::Arc;
 
     // ===== f64 round-trips =====
@@ -2352,7 +2386,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "gc"))]
     fn test_owned_heap_allocation() {
-        use crate::value_word::{is_heap_owned, is_heap_shared};
+        use crate::tag_bits::{is_heap_owned, is_heap_shared};
         let owned = vw_heap_box_owned(HeapValue::String(Arc::new("owned".to_string())));
         assert!(is_heap_owned(owned));
         assert!(!is_heap_shared(owned));
@@ -2391,7 +2425,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "gc"))]
     fn test_owned_heap_get_heap_ptr() {
-        use crate::value_word::get_heap_ptr;
+        use crate::tag_bits::get_heap_ptr;
         let owned = vw_heap_box_owned(HeapValue::String(Arc::new("test".to_string())));
         let ptr = get_heap_ptr(owned);
         assert!(!ptr.is_null());
@@ -2406,7 +2440,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "gc"))]
     fn test_owned_heap_as_heap_mut() {
-        use crate::value_word::is_heap_owned;
+        use crate::tag_bits::is_heap_owned;
         let mut owned = vw_heap_box_owned(HeapValue::BigInt(42));
         assert!(is_heap_owned(owned));
         // as_heap_mut on owned should give direct mutable access (no Arc clone-on-write)

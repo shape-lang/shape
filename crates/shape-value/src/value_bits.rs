@@ -13,11 +13,13 @@
 //! v2 residuals closeout (pure reorganization — zero behavior change).
 
 use crate::heap_value::HeapValue;
-use crate::value_word::{
-    ValueWord, ValueWordExt, get_heap_ptr, get_payload, get_tag, is_heap_owned, is_heap_shared,
-    is_number, is_tagged, is_unified_heap, make_tagged, make_unified_heap, nan_tag_is_truthy,
-    nan_tag_type_name, sign_extend_i48, unified_heap_kind, unified_heap_ptr, vw_heap_box_owned,
+use crate::tag_bits::{
+    get_heap_ptr, get_payload, get_tag, is_heap_owned, is_heap_shared, is_number, is_tagged,
+    is_unified_heap, make_tagged, make_unified_heap, sign_extend_i48, unified_heap_kind,
+    unified_heap_ptr,
 };
+use crate::value_word::{ValueWord, ValueWordExt, vw_heap_box_owned};
+use crate::value_word_ext::{nan_tag_is_truthy, nan_tag_type_name};
 
 // ═══════════════════════════════════════════════════════════════════════
 // ValueBits — method-style shim over the free-function NaN-box API.
@@ -311,7 +313,7 @@ impl std::fmt::Debug for ValueBits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value_word::{TAG_BOOL, TAG_FUNCTION, TAG_INT, TAG_MODULE_FN, TAG_NONE, TAG_REF, TAG_UNIT};
+    use crate::tag_bits::{TAG_BOOL, TAG_FUNCTION, TAG_INT, TAG_MODULE_FN, TAG_NONE, TAG_REF, TAG_UNIT};
     use std::sync::Arc;
 
     // ── ValueBits shim (V5.1) ───────────────────────────────────────────
