@@ -20,6 +20,35 @@ const UNIFIED_VALUE_DATA_OFFSET: i32 = 8;
 const TYPED_OBJ_HEADER: i32 = 8;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    // ── Track A.1D.2: OwnedMutable capture cell write widening ──────
+    //
+    // A cell stores a raw `ValueWord` u64 bit-pattern regardless of the
+    // narrow Cranelift type the compiler proved for the captured
+    // variable (int as native I32, bool as I8, etc.). This helper
+    // widens / bitcasts to I64 before `store.i64` through the cell
+    // pointer, matching the interpreter's `op_store_owned_mutable_capture`
+    // which writes a raw u64 via `std::ptr::write`. Uses `bitcast` for
+    // F64 (preserve bit pattern) and zero-extend for narrow ints (the
+    // cell only reads back the low `width` bytes via matching narrow
+    // loads — A.1D.2 always reads back with `load.i64` in `read_place`,
+    // so zero-extension is safe since the high bits get re-examined
+    // only by the MIR level's subsequent `ireduce` via `ensure_kind`).
+    fn coerce_value_to_i64_bits(&mut self, val: Value) -> Value {
+        let val_type = self.builder.func.dfg.value_type(val);
+        if val_type == types::F64 {
+            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        } else if val_type == types::I64 {
+            val
+        } else if val_type == types::I32
+            || val_type == types::I16
+            || val_type == types::I8
+        {
+            self.builder.ins().uextend(types::I64, val)
+        } else {
+            val
+        }
+    }
+
     // ── Inline array access helpers ──────────────────────────────────────
     // Ported from BytecodeToIR::inline_ops.rs for the MirToIR path.
     // These bypass FFI calls and emit direct Cranelift memory loads,
@@ -196,6 +225,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let var = self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
                 })?;
+                // Track A.1D.2: OwnedMutable capture slots hold the raw
+                // `*mut ValueWord` bits of a `Box::into_raw`'d cell
+                // (allocated by `jit_alloc_owned_mut_cell` in
+                // `emit_heap_closure`). The captured variable's current
+                // value lives inside the cell; reading the slot directly
+                // would yield pointer bits, not the value. Emit a
+                // pointer-deref load — observationally equivalent to the
+                // interpreter's `op_load_owned_mutable_capture` handler
+                // (`std::ptr::read(cell_ptr)`).
+                //
+                // SAFETY: the pointer is non-null and 8-aligned (Box
+                // alignment for u64), valid for the closure's refcounted
+                // lifetime — `jit_alloc_owned_mut_cell` created it via
+                // `Box::into_raw(Box::new(initial))`, and
+                // `release_typed_closure`'s `Box::from_raw` reclaim only
+                // runs after the closure's refcount hits zero (which
+                // happens strictly after every call using this cell
+                // returns).
+                if self.owned_mutable_capture_slots.contains(slot) {
+                    let cell_ptr = self.builder.use_var(*var);
+                    return Ok(self.builder.ins().load(
+                        types::I64,
+                        MemFlags::trusted(),
+                        cell_ptr,
+                        0,
+                    ));
+                }
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
@@ -263,6 +319,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Result<(), String> {
         match place {
             Place::Local(slot) => {
+                // Track A.1D.2: OwnedMutable capture slots redirect the
+                // write through the `*mut ValueWord` cell pointer held
+                // in the slot. `var` itself must keep the pointer bits
+                // for the whole frame — we never `def_var` over it.
+                //
+                // The value is widened to I64 (the cell's slot type) via
+                // `widen_to_i64`, because the cell stores a
+                // `ValueWord`-encoded bit pattern regardless of the
+                // compile-time narrow type of the captured variable.
+                // Matches the interpreter's `op_store_owned_mutable_capture`
+                // which writes a raw `u64` via `std::ptr::write`.
+                //
+                // SAFETY: see `read_place`. Writing 8 bytes in-place
+                // does not release the previous cell contents — mirrors
+                // the interpreter's comment: "The old cell contents are
+                // overwritten in place — if the old contents were a
+                // heap-tagged ValueWord share, the caller is responsible
+                // for ensuring the write does not leak". Typical `let
+                // mut` captures hold primitive (int/float/bool) values,
+                // which have no heap refcount; heap-typed captures
+                // would need MIR-level Drop insertion to balance retain
+                // counts (deferred — matches interpreter parity).
+                if self.owned_mutable_capture_slots.contains(slot) {
+                    let var = *self.locals.get(slot).ok_or_else(|| {
+                        format!("MirToIR: unknown local slot {}", slot)
+                    })?;
+                    let cell_ptr = self.builder.use_var(var);
+                    let bits = self.coerce_value_to_i64_bits(val);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), bits, cell_ptr, 0);
+                    return Ok(());
+                }
+
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
                 let var = *self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
@@ -330,6 +420,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Uses type-appropriate zero for native slots (0.0 for F64, 0 for I32, etc.)
     pub(crate) fn null_place(&mut self, place: &Place) -> Result<(), String> {
         let slot = place.root_local();
+        // Track A.1D.2: OwnedMutable capture slots permanently hold the
+        // raw `*mut ValueWord` bits of the cell for the duration of the
+        // frame. Zeroing the slot would zero the cell pointer —
+        // subsequent reads/writes would deref null, and
+        // `release_typed_closure`'s `Box::from_raw` (gated on the
+        // `owned_mutable_capture_mask`, A.1A) would see a null pointer.
+        // The interpreter's handlers never touch the upvalue slot on
+        // Move semantics either; this preserves parity.
+        if matches!(place, Place::Local(_))
+            && self.owned_mutable_capture_slots.contains(&slot)
+        {
+            return Ok(());
+        }
         // Only null the root local for simple locals.
         // Field/Index moves don't null the entire container.
         if matches!(place, Place::Local(_)) {

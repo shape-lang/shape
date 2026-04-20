@@ -154,6 +154,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
+        // Track A.1D.2: the OwnedMutable capture slot holds a raw
+        // `*mut ValueWord` cell pointer, not a NaN-boxed refcounted
+        // value. Reclaim is handled by `release_typed_closure`'s
+        // `Box::from_raw` (A.1A) when the closure itself is dropped;
+        // frame-exit `Drop` on the capture slot must be a no-op.
+        // `null_place` also early-returns for these slots (preserving
+        // the cell pointer for release_typed_closure), so we skip it
+        // here too.
+        if let Place::Local(slot_id) = place {
+            if self.owned_mutable_capture_slots.contains(slot_id) {
+                return Ok(());
+            }
+        }
+
         let slot = place.root_local();
         let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
@@ -196,6 +210,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // addresses, not refcounted heap pointers. Skip arc_release.
         if let Place::Local(slot_id) = place {
             if self.stack_closure_slots.contains_key(slot_id) {
+                return Ok(());
+            }
+        }
+
+        // Track A.1D.2: the "old value" of an OwnedMutable capture slot
+        // is the raw `*mut ValueWord` cell pointer bits — NOT a
+        // NaN-boxed heap handle. Calling `arc_release` on it would
+        // misinterpret the pointer as a refcounted value and crash /
+        // double-free. The cell's interior contents are reclaimed
+        // exactly once by `release_typed_closure`'s `Box::from_raw`
+        // loop (A.1A) when the closure's refcount hits zero; the
+        // interpreter's `op_store_owned_mutable_capture` likewise does
+        // not release the old inner value (see its SAFETY note), so
+        // skipping release here is parity-correct.
+        if let Place::Local(slot_id) = place {
+            if self.owned_mutable_capture_slots.contains(slot_id) {
                 return Ok(());
             }
         }

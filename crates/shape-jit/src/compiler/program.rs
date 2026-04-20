@@ -352,7 +352,6 @@ impl JITCompiler {
                 // the legacy NaN-boxed path on `None`. Wire-up will happen
                 // once Agent 1 lands the BytecodeProgram concrete-types vec.
                 let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
-                let _ = func_idx; // silence dead-binding warning until wire-up.
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program
@@ -388,6 +387,28 @@ impl JITCompiler {
                     user_func_arities.clone(),
                     closure_function_layouts,
                 );
+                // Track A.1D.2: flag the leading capture param slots whose
+                // `ClosureLayout` marks them as `OwnedMutable`. `read_place`
+                // / `write_place` then route through the cell pointer bits
+                // stored in those slots, matching the interpreter's
+                // `Load/StoreOwnedMutableCapture` handlers. The lookup is
+                // keyed on this function's own `func_idx`, which doubles as
+                // the closure body's `function_id` when it is a closure.
+                // Non-closure functions hit no entry in the layout map →
+                // the side-table stays empty, preserving pre-A.1D.2
+                // behaviour for ordinary functions.
+                if func.is_closure && func.captures_count > 0 {
+                    if let Some(layout) = program
+                        .closure_function_layouts
+                        .get(func_idx)
+                        .and_then(|o| o.as_ref())
+                    {
+                        mir_compiler.register_owned_mutable_capture_slots(
+                            func.captures_count,
+                            layout.as_ref(),
+                        );
+                    }
+                }
                 // Set up blocks and locals, then store function parameters.
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
@@ -537,31 +558,30 @@ impl JITCompiler {
             let mir_ok = func.mir_data.as_ref().is_some_and(|md| {
                 crate::mir_compiler::preflight(md).can_compile
             });
-            // Track A.1D: the A.1B/A.1C.1/A.1C.3 mutable-cell opcodes
-            // (`LoadOwnedMutableCapture`, `StoreOwnedMutableCapture`,
-            // `LoadSharedCapture`, `StoreSharedCapture`,
+            // Track A.1D / A.1D.2: the A.1B/A.1C.1/A.1C.3 mutable-cell
+            // opcodes carry runtime semantics the MIR layer cannot
+            // reconstruct from its slot-based model — MIR just sees
+            // `LoadLocal` / `StoreLocal`, erasing the pointer-deref
+            // semantics the cell opcodes encode.
+            //
+            // A.1D.2 closes the gap for `LoadOwnedMutableCapture` /
+            // `StoreOwnedMutableCapture` via a JIT-side side-table that
+            // patches `read_place` / `write_place` on flagged capture
+            // slots (see `MirToIR::register_owned_mutable_capture_slots`).
+            // Those two opcodes have been removed from
+            // `vm_only_opcode_reason`, so `bytecode_ok` is now `true`
+            // for functions whose only cell opcodes are OwnedMutable.
+            //
+            // A.1E still gates the Shared-cell opcodes
+            // (`LoadSharedCapture`, `StoreSharedCapture`,
             // `AllocSharedLocal`, `LoadSharedLocal`, `StoreSharedLocal`,
             // `DropSharedLocal`, `AllocSharedModuleBinding`,
-            // `LoadSharedModuleBinding`, `StoreSharedModuleBinding`)
-            // carry runtime semantics the MIR layer cannot reconstruct
-            // from its slot-based model — MIR just sees `LoadLocal` /
-            // `StoreLocal`, erasing the pointer-deref semantics the
-            // cell opcodes encode. Until A.1D/A.1E land full Cranelift
-            // lowerings (or teach MIR about mutable-cell captures), any
-            // function whose bytecode contains one of these opcodes
-            // MUST fall back to the interpreter even if its MIR passes
-            // preflight — the MIR path would silently misinterpret the
-            // capture slot's pointer bits as the captured value.
-            //
-            // `bytecode_ok` is false precisely when at least one of
-            // these opcodes appears (they're the only entries in
-            // `vm_only_opcode_reason` today), so we keep the original
-            // `bytecode_ok || mir_ok` disjunction but make `bytecode_ok`
-            // a hard requirement: a function must clear bytecode
-            // preflight to be JIT-eligible. MIR preflight still has to
-            // pass too (otherwise MirToIR will fail compilation
-            // anyway), but it is no longer an independent way to
-            // bypass the bytecode gate.
+            // `LoadSharedModuleBinding`, `StoreSharedModuleBinding`) —
+            // until that lands, any function containing one of these
+            // opcodes MUST fall back to the interpreter. Keeping
+            // `bytecode_ok` as a hard requirement preserves that
+            // invariant and continues to block the MIR disjunction
+            // bypass that A.1D closed.
             let _ = mir_ok;
             jit_compatible.push(bytecode_ok);
         }

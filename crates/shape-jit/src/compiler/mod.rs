@@ -13,6 +13,9 @@ mod program;
 mod setup;
 mod strategy;
 
+#[cfg(test)]
+mod a1d2_tests;
+
 // Re-export the main struct and public functions
 pub use accessors::{
     JitParityEntry, JitParityTarget, JitPreflightReport, build_full_builtin_parity_matrix,

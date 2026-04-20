@@ -149,6 +149,33 @@ pub struct MirToIR<'a, 'b> {
     /// the FFI path (e.g. when loading a cached program from disk, which
     /// doesn't carry layout metadata).
     pub(crate) closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
+
+    // ── Track A.1D.2: OwnedMutable capture side-table ──────────────
+    /// Local slots whose Cranelift variable holds the raw `*mut ValueWord`
+    /// bits of an `OwnedMutable` capture cell (allocated by
+    /// `jit_alloc_owned_mut_cell` in `emit_heap_closure`). For a closure
+    /// compiled under this `MirToIR`, the leading `N` entries of
+    /// `MirFunction::param_slots` correspond to captures in the same
+    /// order as `ClosureLayout::capture_kinds`; each slot whose
+    /// `capture_storage_kind(i) == OwnedMutable` is recorded here.
+    ///
+    /// Effects on the lowering pipeline:
+    /// - `read_place(Local(s))` emits `load.i64 [cell_ptr, 0]` (matches
+    ///   the interpreter's `op_load_owned_mutable_capture` fresh read).
+    /// - `write_place(Local(s), v)` emits `store.i64 v, [cell_ptr, 0]`
+    ///   (matches the interpreter's `op_store_owned_mutable_capture`
+    ///   fresh write — no old-value release, no retain).
+    /// - `null_place` / `release_old_value_if_heap` / `emit_drop` all
+    ///   early-return for these slots: the cell pointer bits must
+    ///   survive for the entire frame so every read/write finds the
+    ///   right box, and the box is reclaimed exactly once by
+    ///   `release_typed_closure`'s `Box::from_raw` loop (see
+    ///   `ClosureLayout::owned_mutable_capture_mask`, A.1A).
+    ///
+    /// Empty when the function being compiled is not a closure body,
+    /// or has no OwnedMutable captures — non-closure functions then
+    /// behave identically to pre-A.1D.2.
+    pub(crate) owned_mutable_capture_slots: HashSet<SlotId>,
 }
 
 /// Result of MIR preflight check.
@@ -341,6 +368,87 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
             closure_function_layouts,
+            owned_mutable_capture_slots: HashSet::new(),
+        }
+    }
+
+    /// Track A.1D.2: register the leading capture param slots that back
+    /// an `OwnedMutable` capture cell for the closure body currently being
+    /// compiled.
+    ///
+    /// `captures_count` is the number of leading entries in
+    /// `MirFunction::param_slots` that correspond to closure captures
+    /// (the caller ABI stores captures before user params: `[ctx_ptr,
+    /// capture_0..N, user_param_0..M]`). `layout` is the
+    /// `ClosureLayout` for this function's `function_id`, so
+    /// `layout.capture_storage_kind(i)` reports the per-capture
+    /// `CaptureKind`. Slots whose kind is `OwnedMutable` are flagged —
+    /// `read_place` and `write_place` then emit a pointer-deref load /
+    /// store through the raw `*mut ValueWord` bits, matching the A.1B
+    /// interpreter handlers.
+    ///
+    /// Also patches `self.slot_kinds` for each capture param slot using
+    /// the layout's `capture_types[i]`. Closure params are untyped at
+    /// the bytecode compiler level (see `compile_expr_closure` in
+    /// `expressions/closures.rs` — capture params are synthesised with
+    /// `type_annotation: None`), so MIR-level inference leaves them
+    /// `Unknown`. Without per-capture kinds the `Rvalue::BinaryOp`
+    /// lowering falls through to the dynamic-binop path, which
+    /// unconditionally errors out (see `compile_binop` at
+    /// `rvalues.rs::~411`). Patching the slot kind here lets the
+    /// typed binop pickers (`compile_binop_int64`, `compile_binop_f64`,
+    /// etc.) engage for `x + 1`-style closure-body arithmetic. For
+    /// OwnedMutable slots, `read_place` always emits `load.i64` through
+    /// the cell — the kind informs the binop picker about the inner
+    /// value's representation (NaN-boxed int, NaN-boxed float, etc.),
+    /// not the width of the slot itself.
+    ///
+    /// No-op for non-closure functions (`captures_count == 0`) and for
+    /// closures whose layout marks every capture as `Immutable` /
+    /// `Shared` — `Shared` still bails to the interpreter until A.1E.
+    pub fn register_owned_mutable_capture_slots(
+        &mut self,
+        captures_count: u16,
+        layout: &ClosureLayout,
+    ) {
+        use shape_value::v2::closure_layout::CaptureKind;
+        let captures_count = captures_count as usize;
+        if captures_count == 0 {
+            return;
+        }
+        // Defensive: the layout must have a capture_kinds entry per
+        // declared capture. A mismatch indicates a compiler bug upstream
+        // (e.g. the layout was minted against a different signature); we
+        // clamp to the smaller of the two so no out-of-bounds panics
+        // slip into release builds.
+        let len = captures_count.min(layout.capture_kinds.len());
+        for (i, &param_slot) in self
+            .mir
+            .param_slots
+            .iter()
+            .take(len)
+            .enumerate()
+        {
+            if layout.capture_storage_kind(i) == CaptureKind::OwnedMutable {
+                self.owned_mutable_capture_slots.insert(param_slot);
+                // Propagate the layout's known concrete type onto the
+                // slot kind vector so `Rvalue::BinaryOp` lowering can
+                // pick the typed arithmetic path. Only patch when the
+                // slot was previously `Unknown`; a non-Unknown kind
+                // from the bytecode frame descriptor wins.
+                if let Some(concrete) = layout.capture_types.get(i) {
+                    if let Some(kind) = types::elem_slot_kind_for_concrete(concrete) {
+                        let idx = param_slot.0 as usize;
+                        if idx < self.slot_kinds.len() {
+                            if self.slot_kinds[idx]
+                                == shape_vm::type_tracking::SlotKind::Unknown
+                            {
+                                self.slot_kinds[idx] = kind;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

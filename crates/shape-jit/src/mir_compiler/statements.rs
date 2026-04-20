@@ -213,7 +213,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // The slot is only safe when the closure is local — any
                 // escape (return, container store, task boundary, etc.)
                 // forces the legacy heap path below.
-                if self.non_escaping_closure_slots.contains(closure_slot) {
+                // Track A.1D.2: stack closures pack captures inline at
+                // their native width — there is no `Box::into_raw` cell
+                // and no `owned_mutable_capture_mask` driving a later
+                // reclaim. Capture kinds `OwnedMutable` / `Shared`
+                // require the heap path's FFI allocator
+                // (`jit_alloc_owned_mut_cell` in A.1D /
+                // `jit_alloc_shared_cell` in A.1E). Force the heap path
+                // whenever the layout declares any non-Immutable
+                // capture, even if the closure would otherwise qualify
+                // as non-escaping. The slot's captured-cell pointer is
+                // reclaimed by `release_typed_closure` at refcount-zero.
+                let layout_needs_heap = self
+                    .closure_function_layouts
+                    .get(&fid)
+                    .map(|l| {
+                        l.owned_mutable_capture_mask != 0
+                            || l.shared_capture_mask != 0
+                    })
+                    .unwrap_or(false);
+                if !layout_needs_heap
+                    && self.non_escaping_closure_slots.contains(closure_slot)
+                {
                     self.emit_stack_closure(fid, *closure_slot, operands)?;
                     return Ok(());
                 }
