@@ -1765,6 +1765,20 @@ impl BytecodeCompiler {
         None
     }
 
+    /// Track A.1C.3: is the module binding reachable as `name` from the
+    /// current scope already promoted to Shared (`AllocSharedModuleBinding`
+    /// emitted)? Mirrors `shared_locals.contains` but honours module-scope
+    /// name resolution.
+    pub(crate) fn shared_module_binding_contains(&self, name: &str) -> bool {
+        if self.shared_module_bindings.contains(name) {
+            return true;
+        }
+        if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+            return self.shared_module_bindings.contains(&scoped);
+        }
+        false
+    }
+
     pub(super) fn resolve_scoped_function_name(&self, name: &str) -> Option<String> {
         if self.program.functions.iter().any(|f| f.name == name) {
             return Some(name.to_string());

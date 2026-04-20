@@ -573,7 +573,6 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             let status = if data.is_open() { "open" } else { "closed" };
             WireValue::String(format!("<io_handle:{}:{}>", data.path, status))
         }
-        HeapValue::SharedCell(arc) => nb_to_wire(&arc.read().unwrap(), ctx),
         HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v)).collect())
         }

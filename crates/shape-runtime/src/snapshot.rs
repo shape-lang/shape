@@ -933,7 +933,6 @@ fn heap_value_to_serializable(
             let status = if data.is_open() { "open" } else { "closed" };
             SerializableVMValue::String(format!("<io_handle:{}:{}>", data.path, status))
         }
-        HeapValue::SharedCell(arc) => nanboxed_to_serializable(&arc.read().unwrap(), store)?,
         HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;

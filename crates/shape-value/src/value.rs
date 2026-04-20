@@ -21,90 +21,58 @@ pub type VMArray = Arc<VMArrayBuf>;
 
 /// Upvalue — a captured value held by a closure.
 ///
-/// Closure spec §13 H3: the legacy two-variant upvalue enum has been
-/// retired. The closure now holds a single `ValueWord` per capture. Shared
-/// mutability for captures whose source binding is boxed (legacy BoxLocal /
-/// BoxModuleBinding path, soon to be deleted by H4) is carried by a
-/// `HeapValue::SharedCell` encoded *inside* the `ValueWord`: reads and writes
-/// auto-deref through that cell when present, otherwise act on the slot
-/// directly.
+/// Track A.1C.3: `Upvalue` holds a single `ValueWord` per capture with
+/// no auto-deref. Mutable captures (both `CaptureKind::OwnedMutable`
+/// and `CaptureKind::Shared`) store raw pointer bits
+/// (`*mut ValueWord` from `Box::into_raw` for OwnedMutable,
+/// `*const SharedCell` from `Arc::into_raw` for Shared) in the
+/// upvalue slot; the A.1B capture opcodes
+/// (`Load/StoreOwnedMutableCapture`, `Load/StoreSharedCapture`) read
+/// those bits directly via `clone_inner_bits_for_raw_pointer_access`
+/// and dereference the pointer. Immutable captures carry the
+/// ValueWord payload verbatim and are read via `get()` / written via
+/// `set()` unchanged.
 ///
-/// Phase D's typed-pointer capture opcodes (`LoadCaptureMutPtr*` /
-/// `StoreCaptureMutPtr*`) now handle mutable captures of every binding class
-/// (local, module binding, async-scope-hosted), so the remaining fallback is
-/// strictly for untyped / unresolved capture paths while H4 retires the
-/// box-and-share opcodes. A future phase will also collapse the SharedCell
-/// fallback once all capture access is routed through the frame-pointer model.
+/// The retired-in-A.1C.3 legacy path (SharedCell-wrapped upvalue
+/// populated by `BoxLocal` / `BoxModuleBinding`) is gone. `get()` and
+/// `set()` no longer run any auto-deref.
 #[derive(Debug, Clone)]
 pub struct Upvalue(ValueWord);
 
 impl Upvalue {
-    /// Create a new upvalue carrying `value`. The caller is responsible for
-    /// arranging shared mutation semantics via a `HeapValue::SharedCell`
-    /// wrapper inside the ValueWord when the capture is mutable and shared
-    /// with the enclosing scope.
+    /// Create a new upvalue carrying `value`.
+    ///
+    /// Track A.1C.3: the caller is responsible for installing the
+    /// right capture form — raw pointer bits for
+    /// `CaptureKind::OwnedMutable` / `CaptureKind::Shared`, a plain
+    /// ValueWord for `CaptureKind::Immutable`. There is no longer a
+    /// `HeapValue::SharedCell` fallback; unrecognised forms read back
+    /// whatever bits were installed.
     #[inline]
     pub fn new(value: ValueWord) -> Self {
         Upvalue(value)
     }
 
-    /// Back-compat shim for call sites that historically minted a fresh
-    /// mutable upvalue with no external sharing (non-escaping local closure
-    /// captures that bypassed the BoxLocal path). H3 collapses this to
-    /// `Upvalue::new`: the closure's internal writes land on its own slot,
-    /// matching pre-H3 behaviour for the fresh-Arc case where the enclosing
-    /// scope never observed the write anyway.
-    #[inline]
-    pub fn new_mutable(value: ValueWord) -> Self {
-        Upvalue(value)
-    }
-
-    /// Read the captured value. If the inner `ValueWord` is a
-    /// `HeapValue::SharedCell`, auto-deref through the cell's RwLock so
-    /// callers observe the latest shared write.
+    /// Read the captured value. Returns the stored `ValueWord`
+    /// unchanged. For `OwnedMutable` / `Shared` captures this is the
+    /// raw pointer bits and callers must dereference via the A.1B
+    /// capture opcodes — plain `get()` is appropriate only for
+    /// `Immutable` captures.
     #[inline]
     pub fn get(&self) -> ValueWord {
-        use crate::heap_value::HeapValue;
-        // Best-effort auto-deref for the SharedCell-backed mutable capture
-        // fallback. The SharedCell itself is the value the stack hands the
-        // closure; reading *through* it preserves pre-H3 semantics where
-        // the legacy mutable variant dereferenced its inner cell.
-        if let Some(HeapValue::SharedCell(arc)) = self.0.as_heap_ref() {
-            return arc.read().unwrap().clone();
-        }
         self.0.clone()
     }
 
-    /// Write through the captured value. If the inner `ValueWord` is a
-    /// `HeapValue::SharedCell`, the write targets the cell's slot so the
-    /// enclosing scope observes the update. Otherwise it replaces the local
-    /// upvalue's ValueWord.
+    /// Write the captured ValueWord. Replaces the stored bits. For
+    /// `OwnedMutable` / `Shared` captures the A.1B capture opcodes
+    /// write through the pointer directly; they do not call `set()`.
     pub fn set(&mut self, value: ValueWord) {
-        use crate::heap_value::HeapValue;
-        if let Some(HeapValue::SharedCell(arc)) = self.0.as_heap_ref() {
-            *arc.write().unwrap() = value;
-            return;
-        }
         self.0 = value;
     }
 
-    /// Track A.1B: return the raw inner bits of the upvalue's `ValueWord`
-    /// **without** running `SharedCell` auto-deref.
-    ///
-    /// The regular `Upvalue::get()` auto-dereffs through a
-    /// `HeapValue::SharedCell` when present — appropriate for the
-    /// retired-in-A.1C legacy mutable-capture fallback, but wrong for
-    /// A.1B's `CaptureKind::OwnedMutable` / `CaptureKind::Shared` upvalues
-    /// whose inner bits are a raw `*mut ValueWord` / `*const SharedCell`
-    /// pointer (not a NaN-tagged heap pointer; auto-deref would either
-    /// no-op on non-tagged bits or read garbage on a collision). The new
-    /// A.1B MIR opcodes
-    /// (`LoadOwnedMutableCapture` / `StoreOwnedMutableCapture` /
-    /// `LoadSharedCapture` / `StoreSharedCapture`) call this accessor to
-    /// recover the raw pointer bits from the upvalue slot.
-    ///
-    /// Safe to call: returning the u64 is a bit-copy of the `ValueWord`
-    /// alias, no pointer dereferences involved.
+    /// Track A.1B: return the raw inner bits of the upvalue's
+    /// `ValueWord`. Used by the A.1B capture opcodes to recover the
+    /// raw pointer bits for `OwnedMutable` / `Shared` captures.
     #[inline]
     pub fn clone_inner_bits_for_raw_pointer_access(&self) -> u64 {
         self.0

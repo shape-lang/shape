@@ -26,6 +26,7 @@ impl VirtualMachine {
             stack: vec![ValueWord::none().into_raw_bits(); crate::constants::DEFAULT_STACK_CAPACITY],
             sp: 0,
             module_bindings: Vec::new(),
+            shared_module_bindings: std::collections::HashSet::new(),
             call_stack: Vec::with_capacity(crate::constants::DEFAULT_CALL_STACK_CAPACITY),
             loop_stack: Vec::new(),
             timeframe_stack: Vec::new(),

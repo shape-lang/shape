@@ -223,6 +223,15 @@ pub struct VirtualMachine {
     /// ModuleBinding variables (raw u64 bit patterns; see `stack` comment).
     pub(crate) module_bindings: Vec<u64>,
 
+    /// Track A.1C.3: indices of module-binding slots that were
+    /// promoted to `Arc<parking_lot::Mutex<ValueWord>>` via
+    /// `AllocSharedModuleBinding`. Each tracked slot holds raw
+    /// `Arc::into_raw(...)` pointer bits — NOT a NaN-tagged ValueWord —
+    /// and must be reclaimed via `Arc::from_raw` once at VM drop. The
+    /// top-level `Drop` impl on VM consults this set before iterating
+    /// `module_bindings`.
+    pub(crate) shared_module_bindings: std::collections::HashSet<usize>,
+
     /// Call stack
     call_stack: Vec<CallFrame>,
 
@@ -445,7 +454,35 @@ impl Drop for VirtualMachine {
             self.stack[i] = Self::NONE_BITS;
             drop(ValueWord::from_raw_bits(bits));
         }
-        // Drop all module binding values.
+        // Track A.1C.3: release Shared module-binding Arcs before
+        // draining the ValueWord-encoded bindings. These slots hold raw
+        // `Arc::into_raw(Arc::new(parking_lot::Mutex<ValueWord>))`
+        // pointer bits — they must be reclaimed via `Arc::from_raw`,
+        // not via ValueWord drop glue.
+        use shape_value::v2::closure_layout::SharedCell;
+        for &idx in &self.shared_module_bindings {
+            if idx >= self.module_bindings.len() {
+                continue;
+            }
+            let bits = self.module_bindings[idx];
+            self.module_bindings[idx] = 0u64;
+            let cell_ptr = bits as *const SharedCell;
+            if cell_ptr.is_null() {
+                continue;
+            }
+            // SAFETY: `cell_ptr` was produced by
+            // `Arc::into_raw(Arc::new(...))` in
+            // `op_alloc_shared_module_binding` and this is the unique
+            // release point for the strong share owned by the module-
+            // bindings slot. Capture-side Arc shares owned by still-
+            // live closures stay alive independently; the underlying
+            // SharedCell persists until every share is dropped.
+            unsafe {
+                drop(std::sync::Arc::from_raw(cell_ptr));
+            }
+        }
+        self.shared_module_bindings.clear();
+        // Drop all remaining module binding values.
         for i in 0..self.module_bindings.len() {
             let bits = self.module_bindings[i];
             self.module_bindings[i] = Self::NONE_BITS;

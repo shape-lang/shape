@@ -554,6 +554,11 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
         | OpCode::DropSharedLocal => {
             Some("A.1C.1 outer-scope Shared-cell opcode; Cranelift lowering pending in A.1D/A.1E")
         }
+        OpCode::AllocSharedModuleBinding
+        | OpCode::LoadSharedModuleBinding
+        | OpCode::StoreSharedModuleBinding => Some(
+            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending in A.1D/A.1E",
+        ),
         _ => None,
     }
 }

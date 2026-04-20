@@ -76,7 +76,7 @@ macro_rules! define_heap_types {
             Content,            // 42
             Instant,            // 43
             IoHandle,           // 44
-            SharedCell,         // 45
+            SharedCell,         // 45 (deprecated — retired in Track A.1C.3; ordinal reserved for ABI stability)
             NativeScalar,       // 46
             NativeView,         // 47
             IntArray,           // 48 (deprecated — use TypedArray)
@@ -240,8 +240,15 @@ macro_rules! define_heap_types {
                 name: String,
                 closure: Option<Box<$crate::value_word::ValueWord>>,
             },
-            // ===== Shared mutable cell for closure capture =====
-            SharedCell(std::sync::Arc<std::sync::RwLock<$crate::value_word::ValueWord>>),
+            // NOTE: The former `SharedCell` variant was retired in Track
+            // A.1C.3. The outer-scope shared-cell machinery for closure
+            // capture now lives in `v2::closure_layout::SharedCell`
+            // (`Arc<parking_lot::Mutex<ValueWord>>`) and is addressed
+            // via raw pointer bits in `module_bindings` / local stack
+            // slots, not via a `HeapValue` tag. `HeapKind::SharedCell`
+            // (ordinal 45) is reserved — existing serialised data with
+            // this discriminant must come from pre-A.1C.3 byte streams
+            // and is not supported.
             // NOTE: None and Unit unit variants — REMOVED.
             // These were shadow variants duplicating inline ValueWord tags.
             // HeapKind ordinals 37-38 are reserved (ABI stability).
@@ -291,8 +298,6 @@ macro_rules! define_heap_types {
                     HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
                     HeapValue::TraitObject { .. } => HeapKind::TraitObject,
                     HeapValue::FunctionRef { .. } => HeapKind::FunctionRef,
-                    // SharedCell
-                    HeapValue::SharedCell(..) => HeapKind::SharedCell,
                     // Consolidated
                     HeapValue::TypedArray(..) => HeapKind::TypedArray,
                     HeapValue::Temporal(..) => HeapKind::Temporal,
@@ -338,8 +343,6 @@ macro_rules! define_heap_types {
                     HeapValue::TaskGroup { .. } => true,
                     HeapValue::TraitObject { value, .. } => value.is_truthy(),
                     HeapValue::FunctionRef { .. } => true,
-                    // SharedCell
-                    HeapValue::SharedCell(arc) => arc.read().unwrap().is_truthy(),
                     // Consolidated — delegate to inner enum
                     HeapValue::TypedArray(ta) => ta.is_truthy(),
                     HeapValue::Temporal(td) => td.is_truthy(),
@@ -391,8 +394,6 @@ macro_rules! define_heap_types {
                     HeapValue::TaskGroup { .. } => "task_group",
                     HeapValue::TraitObject { .. } => "trait_object",
                     HeapValue::FunctionRef { .. } => "function",
-                    // SharedCell
-                    HeapValue::SharedCell(_) => "shared_cell",
                     // Consolidated — delegate to inner enum
                     HeapValue::TypedArray(ta) => ta.type_name(),
                     HeapValue::Temporal(td) => td.type_name(),

@@ -328,9 +328,6 @@ impl<'a> ValueFormatter<'a> {
                 let status = if data.is_open() { "open" } else { "closed" };
                 format!("<io_handle:{}:{}>", data.path, status)
             }
-            Some(HeapValue::SharedCell(arc)) => {
-                self.format_nb_with_depth(&arc.read().unwrap(), depth)
-            }
             Some(HeapValue::TypedArray(TypedArrayData::I64(a))) => {
                 let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))

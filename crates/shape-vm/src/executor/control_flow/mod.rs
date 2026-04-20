@@ -631,8 +631,6 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use shape_value::Upvalue;
-
         // Closure spec H5: `MakeClosure` accepts two operand shapes:
         //   - `Operand::Function(fid)`            — non-escaping closure.
         //   - `Operand::ClosureAlloc { fid, .. }` — compiler-tagged with
@@ -856,19 +854,26 @@ impl VirtualMachine {
                     }
                     return Ok(());
                 }
-                // Capture-count mismatch: layout is stale; fall through to
-                // legacy path rather than UB on a size mismatch.
+                // Capture-count mismatch: layout is stale. Prior to
+                // A.1C.3 this fell through to a `HeapValue::Closure {
+                // function_id, upvalues }` legacy producer. That
+                // producer is retired — mismatch is a compile-time /
+                // link-time bug, not a runtime-recoverable condition.
             }
 
-            let upvalues: Vec<Upvalue> = upvalues.into_iter().map(Upvalue::new).collect();
-
-            self.push_raw_u64(ValueWord::from_heap_value(
-                shape_value::heap_value::HeapValue::Closure {
-                    function_id: func_id.0,
-                    upvalues,
-                },
-            ))?;
-            Ok(())
+            // Track A.1C.3: the legacy `HeapValue::Closure { .. }`
+            // producer is retired. Every `op_make_closure` invocation
+            // now produces a `HeapValue::ClosureRaw` via the
+            // `ClosureLayout` path above. The `HeapValue::Closure`
+            // variant itself stays alive for the remaining three
+            // producers (vtable dispatch, snapshot replay, cross-node
+            // remote builtins) which are retired by follow-up Tracks
+            // A.2A / A.3 / A.4.
+            let _ = upvalues;
+            Err(VMError::RuntimeError(format!(
+                "internal error: MakeClosure for function {} has no registered ClosureLayout (A.1C.3 retired the legacy HeapValue::Closure fallback; layout registration is now mandatory)",
+                func_id.0
+            )))
         } else {
             Err(VMError::InvalidOperand)
         }

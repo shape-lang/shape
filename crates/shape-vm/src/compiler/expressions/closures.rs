@@ -235,47 +235,93 @@ impl BytecodeCompiler {
                 if !mutable_flags.get(i).copied().unwrap_or(false) {
                     return CaptureKind::Immutable;
                 }
-                // Track A.1C.2 gate: only classify as `Shared` for
-                // **local-slot** captures. Module-binding `var` captures
-                // stay on the legacy `HeapValue::Closure + SharedCell`
-                // path (retired by A.1C.3) and must present an
-                // Immutable-shaped layout so op_make_closure does not
-                // route them through the Raw Arc allocation path.
+                // Track A.1C.2 (locals) + A.1C.3 (module bindings): any
+                // mutable `var` capture routes through
+                // `CaptureKind::Shared`, whether the outer slot is a
+                // local or a module binding. Both paths allocate an
+                // `Arc<parking_lot::Mutex<ValueWord>>` and install its
+                // `Arc::into_raw` pointer into the closure's Ptr slot;
+                // `op_make_closure` bumps the strong count. The compiler
+                // emits different *outer-scope* opcodes for local vs
+                // module-binding promotion (`AllocSharedLocal` vs
+                // `AllocSharedModuleBinding`), but the closure-side
+                // machinery is the same.
                 let is_local_slot = self.resolve_local(name).is_some();
+                let is_module_binding_slot = !is_local_slot
+                    && (self.resolve_scoped_module_binding_name(name).is_some()
+                        || self.module_bindings.contains_key(name));
                 let ownership = self
                     .binding_semantics_for_name(name)
                     .map(|(_, _, sem)| sem.ownership_class);
                 match ownership {
                     // Track A.1C.2b: `let mut` captures whose outer slot
                     // is a local flow through the A.1B OwnedMutable
-                    // Raw path. If the source resolves to a module
-                    // binding instead (rare for `let mut`, but possible
-                    // at top-level eval where `let mut sum = 0` compiles
-                    // to a module binding), fall back to the legacy
-                    // BoxModuleBinding + SharedCell path and present
-                    // an Immutable-shaped layout so op_make_closure's
-                    // Raw allocator doesn't try to dereference the
-                    // SharedCell-bearing ValueWord as a `*mut ValueWord`.
+                    // Raw path. For module-binding `let mut` (top-level
+                    // `let mut sum = 0` in REPL-style eval compiles to
+                    // a module binding), there is no move-into-closure
+                    // semantics — the binding is program-lifetime. Fall
+                    // through to the Shared pipeline so mutations from
+                    // the closure propagate to the outer slot, matching
+                    // the pre-A.1C.3 legacy SharedCell semantics.
                     Some(BindingOwnershipClass::OwnedMutable) if is_local_slot => {
                         CaptureKind::OwnedMutable
                     }
-                    Some(BindingOwnershipClass::OwnedMutable) => CaptureKind::Immutable,
-                    Some(BindingOwnershipClass::Flexible) if is_local_slot => CaptureKind::Shared,
-                    Some(BindingOwnershipClass::Flexible) => {
-                        // Module-binding var: legacy SharedCell path.
-                        CaptureKind::Immutable
+                    Some(BindingOwnershipClass::OwnedMutable) if is_module_binding_slot => {
+                        CaptureKind::Shared
                     }
-                    // Track A.1C.2: semantics lookup can return `None` when
-                    // a prior closure's `compile_function` wiped the outer
-                    // function's type-tracker local semantics. Fall back
-                    // to the persistent `shared_locals` witness: if the
-                    // local was already promoted by a previous closure,
-                    // the capture classification is still `Shared`.
+                    Some(BindingOwnershipClass::OwnedMutable) => CaptureKind::Immutable,
+                    Some(BindingOwnershipClass::Flexible)
+                        if is_local_slot || is_module_binding_slot =>
+                    {
+                        CaptureKind::Shared
+                    }
+                    Some(BindingOwnershipClass::Flexible) => CaptureKind::Immutable,
+                    // Track A.1C.2 / A.1C.3: semantics lookup can return
+                    // `None` when a prior closure's `compile_function`
+                    // wiped the outer function's type-tracker local
+                    // semantics. Fall back to persistent witnesses
+                    // populated by the previous classification pass:
+                    //   - `shared_locals` / `shared_module_bindings`
+                    //     for `var` captures.
+                    //   - `owned_mutable_locals` for `let mut` local
+                    //     captures (A.1C.3: without this witness, a
+                    //     second closure capturing a different local
+                    //     would reclassify to `Immutable`, nulling the
+                    //     layout's OwnedMutable mask and tripping the
+                    //     `op_make_closure` layout-mismatch guard).
                     _ if is_local_slot && self.shared_locals.contains(name) => CaptureKind::Shared,
+                    _ if is_local_slot && self.owned_mutable_locals.contains(name) => {
+                        CaptureKind::OwnedMutable
+                    }
+                    _ if is_module_binding_slot
+                        && self.shared_module_binding_contains(name) =>
+                    {
+                        CaptureKind::Shared
+                    }
+                    // A.1C.3: module-binding captures with no resolved
+                    // ownership semantics (e.g. imported functions used
+                    // as callable values, top-level `let` without `mut`
+                    // — unreachable here since `mutable_flags[i]` is
+                    // true) also go through Shared when the closure
+                    // mutates them. `mutable_flags[i]` is already known
+                    // true at this point (early return above).
+                    _ if is_module_binding_slot => CaptureKind::Shared,
                     _ => CaptureKind::Immutable,
                 }
             })
             .collect();
+        // Track A.1C.3: record persistent witnesses for each classified
+        // capture so sibling closures (after the type-tracker has been
+        // wiped by `compile_function`) reclassify the same way rather
+        // than falling back to `Immutable`.
+        for (i, name) in captured_vars.iter().enumerate() {
+            match capture_kinds[i] {
+                CaptureKind::OwnedMutable if self.resolve_local(name).is_some() => {
+                    self.owned_mutable_locals.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
         self.closure_capture_kinds
             .push((func_idx as u16, capture_kinds.clone()));
 
@@ -383,25 +429,22 @@ impl BytecodeCompiler {
                     .get(i)
                     .copied()
                     .unwrap_or(CaptureKind::Immutable);
-                // Track A.1C.2: Shared (var) captures whose outer slot
-                // is a local slot route through the A.1B
-                // Load/StoreSharedCapture opcodes. Module-binding
-                // `var` captures (outer slot is not a local) stay on
-                // the legacy SharedCell / `LoadClosure` path — A.1C.1's
-                // outer-scope opcodes cover local slots only.
-                if matches!(kind, CaptureKind::Shared) && self.resolve_local(name).is_some() {
+                // Track A.1C.2 + A.1C.3: Shared (var) captures — whether
+                // the outer slot is a local or a module binding — route
+                // through the A.1B Load/StoreSharedCapture opcodes
+                // inside the closure body. The closure-side machinery
+                // is identical; only the outer-scope promotion opcodes
+                // differ between locals and module bindings.
+                if matches!(kind, CaptureKind::Shared) {
                     self.shared_closure_captures.insert(name.clone(), i as u16);
                 }
                 // Track A.1C.2b: OwnedMutable (let mut) captures route
                 // through the A.1B Load/StoreOwnedMutableCapture
-                // opcodes. Gate on `resolve_local` — the closure-
-                // creation path below only pushes a plain initial
-                // value for captures whose outer slot is a local. If
-                // the source is a module binding (rare for `let mut`,
-                // but can happen at top-level eval) we fall through
-                // to the legacy BoxModuleBinding + SharedCell path
-                // and the closure body uses `LoadClosure` with
-                // SharedCell auto-deref.
+                // opcodes. Gate on `resolve_local` — only locals can be
+                // captured OwnedMutable (module bindings have program-
+                // lifetime and don't admit move semantics); for module-
+                // binding sources the capture was reclassified to
+                // `Immutable` upstream.
                 if matches!(kind, CaptureKind::OwnedMutable) && self.resolve_local(name).is_some() {
                     self.owned_mutable_closure_captures
                         .insert(name.clone(), i as u16);
@@ -522,6 +565,19 @@ impl BytecodeCompiler {
                     let is_shared_local_slot = matches!(kind, CaptureKind::Shared)
                         && self.resolve_local(captured).is_some();
                     let is_owned_mutable = matches!(kind, CaptureKind::OwnedMutable);
+                    let shared_module_binding_scoped_name = if matches!(kind, CaptureKind::Shared)
+                        && !is_shared_local_slot
+                    {
+                        self.resolve_scoped_module_binding_name(captured).or_else(|| {
+                            if self.module_bindings.contains_key(captured) {
+                                Some(captured.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     if is_shared_local_slot {
                         let local_idx = self
                             .resolve_local(captured)
@@ -567,24 +623,47 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
                         ));
-                    } else if let Some(scoped_name) =
-                        self.resolve_scoped_module_binding_name(captured)
-                    {
-                        self.boxed_locals.insert(captured.clone());
+                    } else if let Some(scoped_name) = shared_module_binding_scoped_name {
+                        // Track A.1C.3: Shared module-binding var
+                        // capture. Mirrors the Shared local-slot path
+                        // above with module-binding addressing:
+                        //   First promotion: `LoadModuleBinding` +
+                        //     `AllocSharedModuleBinding` promotes the
+                        //     module-binding slot to raw Arc pointer
+                        //     bits.
+                        //   Then: `LoadModuleBinding` pushes those raw
+                        //     pointer bits for `op_make_closure` to
+                        //     `Arc::increment_strong_count` on.
+                        // `LoadModuleBinding`'s auto-deref for legacy
+                        // SharedCell is retired in this same commit —
+                        // the bits pushed here are raw pointer bits, not
+                        // a NaN-tagged SharedCell ValueWord, so
+                        // `LoadModuleBinding` passes them through
+                        // unmodified (no `HeapValue::SharedCell` tag).
                         let mb_idx = self.get_or_create_module_binding(&scoped_name);
+                        if !self.shared_module_bindings.contains(&scoped_name) {
+                            self.emit(Instruction::new(
+                                OpCode::LoadModuleBinding,
+                                Some(Operand::ModuleBinding(mb_idx)),
+                            ));
+                            self.emit(Instruction::new(
+                                OpCode::AllocSharedModuleBinding,
+                                Some(Operand::ModuleBinding(mb_idx)),
+                            ));
+                            self.shared_module_bindings.insert(scoped_name);
+                        }
                         self.emit(Instruction::new(
-                            OpCode::BoxModuleBinding,
-                            Some(Operand::ModuleBinding(mb_idx)),
-                        ));
-                    } else if self.module_bindings.contains_key(captured) {
-                        self.boxed_locals.insert(captured.clone());
-                        let mb_idx = self.get_or_create_module_binding(captured);
-                        self.emit(Instruction::new(
-                            OpCode::BoxModuleBinding,
+                            OpCode::LoadModuleBinding,
                             Some(Operand::ModuleBinding(mb_idx)),
                         ));
                     } else {
-                        // Last resort fallback — just load the value
+                        // Last resort fallback — just load the value.
+                        // Reached when the capture is Immutable (e.g.
+                        // OwnedMutable that resolved to a module
+                        // binding and was reclassified). A plain load
+                        // is correct: op_make_closure will store the
+                        // ValueWord directly into the capture slot as
+                        // an Immutable capture.
                         let temp = Expr::Identifier(captured.clone(), Span::DUMMY);
                         self.compile_expr(&temp)?;
                     }
@@ -2133,47 +2212,41 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Closure Spec Phase H4 — LocalMutablePtr extended to module bindings
+    // Track A.1C.3 — Module-binding `var` capture migration
     // ──────────────────────────────────────────────────────────────────────
     //
-    // H4 extends Phase D's `LocalMutablePtr` eligibility from local-slot
-    // captures to module-binding captures (and, by extension, any binding
-    // Phase G's task-boundary heap promotion does not already escape-flag).
-    // The typed mut-ptr opcodes now
-    // fire for non-escaping mutable captures of module-scope variables.
-    //
-    // `BoxModuleBinding` emission remains in place: the SharedCell
-    // backing it arranges is still the interpreter's shared-mutation
-    // carrier for module-scope `var` captures. A.1C.3 retires it in
-    // lockstep with the `HeapValue::Closure` fallback producer.
+    // A.1C.3 migrates module-scope `var` captures onto the A.1B Shared
+    // pipeline: the compiler emits `AllocSharedModuleBinding` at first
+    // promotion, `Load/StoreSharedModuleBinding` for outer-scope reads
+    // and writes, and populates `shared_closure_captures` so the closure
+    // body emits `Load/StoreSharedCapture`. The legacy `BoxModuleBinding`
+    // opcode and `HeapValue::SharedCell` backing are retired.
 
     #[test]
-    fn test_phase_h4_mutable_module_binding_uses_legacy_closure_opcodes() {
-        // Post-A.1C.2b: a `var` at module scope, captured mutably by a
-        // closure, falls back to the legacy `LoadClosure` /
-        // `StoreClosure` path (the SharedCell-backed Upvalue auto-deref
-        // stays wired via `BoxModuleBinding`). The Phase D typed
-        // typed mut-ptr path is no longer emitted — A.1C.2b
-        // retired the emission sites to clear the way for A.1C.3's
-        // `HeapValue::Closure` deletion.
-        //
-        // A.1C.3 migrates module-binding var captures onto A.1B's
-        // `Load/StoreSharedCapture` and retires the legacy pair.
+    fn test_a1c3_mutable_module_binding_uses_shared_capture_opcodes() {
+        // Module-scope `var` captured mutably by a closure emits:
+        //   - `AllocSharedModuleBinding` at first promotion,
+        //   - `LoadSharedCapture` / `StoreSharedCapture` in the closure
+        //     body (via the A.1B pipeline).
         let program = compile_source(
             "var n: int = 0\n\
              let f = |x: int| { n = n + x }",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::StoreClosure
-                || op == OC::LoadClosure),
-            "expected legacy LoadClosure/StoreClosure for module-binding var capture"
+            any_opcode_in_program(&program, |op| op == OC::AllocSharedModuleBinding),
+            "expected AllocSharedModuleBinding for module-binding var capture"
+        );
+        assert!(
+            any_opcode_in_program(&program, |op| op == OC::LoadSharedCapture
+                || op == OC::StoreSharedCapture),
+            "expected Load/StoreSharedCapture in closure body for module-binding var capture"
         );
     }
 
     #[test]
-    fn test_phase_h4_runtime_mutable_module_binding_capture_propagates() {
-        // Runtime sanity: with the H4 typed-opcode path, mutations through
-        // the closure still propagate to the outer module binding.
+    fn test_a1c3_runtime_mutable_module_binding_capture_propagates() {
+        // Runtime sanity: mutations through the closure propagate to the
+        // outer module-binding slot via the shared Arc<Mutex<ValueWord>>.
         let val = run_program_top_level(
             "var n: int = 0\n\
              let f = |x: int| { n = n + x }\n\
@@ -2185,10 +2258,9 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_h4_nested_closures_with_module_binding_capture() {
+    fn test_a1c3_nested_closures_with_module_binding_capture() {
         // Two closures capture the same mutable module binding; the outer
-        // closure calls the inner. Both should use the typed path and
-        // both should observe the shared mutation.
+        // closure calls the inner. Both observe the shared mutation.
         let val = run_program_top_level(
             "var n: int = 0\n\
              let bump = || { n = n + 1 }\n\
@@ -2201,20 +2273,17 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_h4_mutable_module_binding_f64_roundtrip() {
-        // Post-A.1C.2b: module-binding `var` captures fall back to the
-        // legacy `LoadClosure` / `StoreClosure` path regardless of
-        // underlying type. Typed Phase D opcodes are retired. Runtime
-        // behaviour is unchanged: mutations through the closure still
-        // propagate to the outer `var`.
+    fn test_a1c3_mutable_module_binding_f64_roundtrip() {
+        // A.1C.3: module-binding `var` captures of `number` also route
+        // through the Shared pipeline — the encoding of the inner
+        // ValueWord is orthogonal to the capture mechanism.
         let program = compile_source(
             "var x: number = 0.0\n\
              let tick = |d: number| { x = x + d }",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::StoreClosure
-                || op == OC::LoadClosure),
-            "expected legacy closure opcodes for f64 module-binding capture"
+            any_opcode_in_program(&program, |op| op == OC::AllocSharedModuleBinding),
+            "expected AllocSharedModuleBinding for f64 module-binding capture"
         );
         let val = run_program_top_level(
             "var x: number = 0.0\n\
@@ -2224,6 +2293,21 @@ mod tests {
              x",
         );
         assert_eq!(val.as_f64(), Some(3.0));
+    }
+
+    #[test]
+    fn test_a1c3_module_binding_outer_read_after_capture() {
+        // After promotion, outer reads of the `var` must go through
+        // `LoadSharedModuleBinding` so they see the latest value the
+        // closure wrote (via the mutex), not the original pre-promotion
+        // bits.
+        let val = run_program_top_level(
+            "var n: int = 10\n\
+             let bump = |d: int| { n = n + d }\n\
+             bump(5)\n\
+             n",
+        );
+        assert_eq!(val.as_i64(), Some(15));
     }
 
     #[test]
@@ -2337,19 +2421,12 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_h4_audit_remaining_boxmodulebinding_emission_is_class_c() {
-        // Post-A.1C.2b audit gate: the legacy cell-wrapping local
-        // opcode is no longer emitted by the compiler (let-mut captures
-        // now use the A.1B OwnedMutable Raw path). `BoxModuleBinding`
-        // remains for module-binding `var` captures — A.1C.3 retires
-        // that emission site along with the `HeapValue::Closure`
-        // fallback producer.
-        //
-        // This end-to-end test pins the runtime contract for the
-        // module-binding side of the closure pipeline: a module-scope
-        // `var` captured mutably still propagates writes through the
-        // legacy SharedCell backing (`BoxModuleBinding` + auto-deref
-        // `Upvalue::get`/`set`).
+    fn test_a1c3_module_binding_var_capture_runtime_contract() {
+        // End-to-end audit gate for the A.1C.3 migration: a module-scope
+        // `var` captured mutably by a closure propagates writes through
+        // the `Arc<parking_lot::Mutex<ValueWord>>` cell that
+        // `AllocSharedModuleBinding` installs, and outer reads see the
+        // updated state via `LoadSharedModuleBinding`.
         let val = run_program_top_level(
             "var n: int = 0\n\
              let f = |x: int| { n = n + x }\n\
@@ -2359,7 +2436,7 @@ mod tests {
         assert_eq!(
             val.as_i64(),
             Some(10),
-            "module-binding var capture must still propagate writes (legacy BoxModuleBinding)"
+            "module-binding var capture must propagate writes via the A.1B/A.1C.3 Shared pipeline"
         );
     }
 

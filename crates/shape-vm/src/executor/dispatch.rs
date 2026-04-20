@@ -508,18 +508,6 @@ impl VirtualMachine {
             | DerefLoad
             | DerefStore
             | SetIndexRef
-            | BoxLocal
-            | BoxModuleBinding
-            | LoadCaptureMutPtrF64
-            | LoadCaptureMutPtrI64
-            | LoadCaptureMutPtrI32
-            | LoadCaptureMutPtrBool
-            | LoadCaptureMutPtrPtr
-            | StoreCaptureMutPtrF64
-            | StoreCaptureMutPtrI64
-            | StoreCaptureMutPtrI32
-            | StoreCaptureMutPtrBool
-            | StoreCaptureMutPtrPtr
             | LoadOwnedMutableCapture
             | StoreOwnedMutableCapture
             | LoadSharedCapture
@@ -527,7 +515,10 @@ impl VirtualMachine {
             | AllocSharedLocal
             | LoadSharedLocal
             | StoreSharedLocal
-            | DropSharedLocal => {
+            | DropSharedLocal
+            | AllocSharedModuleBinding
+            | LoadSharedModuleBinding
+            | StoreSharedModuleBinding => {
                 return self.exec_variables(instruction);
             }
 

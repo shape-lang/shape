@@ -4462,6 +4462,14 @@ impl BytecodeCompiler {
                             if var_decl.kind == VarKind::Let && !var_decl.is_mut {
                                 self.immutable_locals.insert(local_idx);
                             }
+                            // Track A.1C.3: record `let mut` locals so
+                            // later closure capture classification has
+                            // a persistent witness when the type-
+                            // tracker local semantics get wiped by a
+                            // sibling closure's `compile_function`.
+                            if var_decl.kind == VarKind::Let && var_decl.is_mut {
+                                self.owned_mutable_locals.insert(binding_name.clone());
+                            }
                         }
                     }
                     self.apply_binding_semantics_to_pattern_bindings(

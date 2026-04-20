@@ -359,7 +359,6 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::Content(_) => SemanticType::Named("Content".to_string()),
         HeapValue::Instant(_) => SemanticType::Named("Instant".to_string()),
         HeapValue::IoHandle(_) => SemanticType::Named("IoHandle".to_string()),
-        HeapValue::SharedCell(arc) => infer_semantic_type_nb(&arc.read().unwrap()),
         HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(_)) => SemanticType::Array(Box::new(SemanticType::Integer)),
         HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F64(_)) => SemanticType::Array(Box::new(SemanticType::Number)),
         HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::FloatSlice { .. }) => SemanticType::Array(Box::new(SemanticType::Number)),

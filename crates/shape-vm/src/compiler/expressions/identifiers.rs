@@ -327,6 +327,16 @@ impl BytecodeCompiler {
                     OpCode::DerefLoad,
                     Some(Operand::Local(temp)),
                 ));
+            } else if self.shared_module_bindings.contains(&scoped_name) {
+                // Track A.1C.3: slot was promoted to
+                // `Arc<SharedCell>` by a prior closure capture; read
+                // through the mutex via `LoadSharedModuleBinding`.
+                // Plain `LoadModuleBinding` would push the raw Arc
+                // pointer bits, corrupting the downstream consumer.
+                self.emit(Instruction::new(
+                    OpCode::LoadSharedModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
             } else {
                 self.emit(Instruction::new(
                     OpCode::LoadModuleBinding,

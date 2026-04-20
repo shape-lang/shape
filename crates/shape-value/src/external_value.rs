@@ -366,7 +366,6 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             ExternalValue::Array(d.items.iter().map(|v| nb_to_external(v, schemas)).collect())
         }
         HeapValue::Content(node) => ExternalValue::String(format!("{}", node)),
-        HeapValue::SharedCell(arc) => nb_to_external(&arc.read().unwrap(), schemas),
         // TypedArray
         HeapValue::TypedArray(crate::heap_value::TypedArrayData::I64(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v)).collect())

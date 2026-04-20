@@ -10,7 +10,7 @@
 use shape_value::heap_value::{HashMapData, HeapValue};
 use shape_value::slot::ValueSlot;
 use shape_value::tag_bits::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
-use shape_value::{TypedArrayData, TemporalData, RareHeapData, ArrayView, Upvalue, VMError, ValueWord, ValueWordExt};
+use shape_value::{TypedArrayData, TemporalData, RareHeapData, ArrayView, VMError, ValueWord, ValueWordExt};
 
 // ─── Inline scalar extraction ─────────────────────────────────────────────
 
@@ -239,20 +239,7 @@ pub fn extract_content(bits: u64) -> Option<&'static shape_value::content::Conte
     }
 }
 
-// ─── SharedCell / Future / TaskGroup extraction ─────────────────────────
-
-/// Extract &Arc<RwLock<ValueWord>> from heap-tagged SharedCell bits.
-#[inline]
-pub fn extract_shared_cell(
-    bits: u64,
-) -> Option<&'static std::sync::Arc<std::sync::RwLock<ValueWord>>> {
-    unsafe {
-        extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::SharedCell(arc) => Some(arc),
-            _ => None,
-        })
-    }
-}
+// ─── Future / TaskGroup extraction ─────────────────────────
 
 /// Extract future ID from heap-tagged Future bits.
 #[inline]

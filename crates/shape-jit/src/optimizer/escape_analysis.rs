@@ -412,11 +412,6 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
             }
 
             // Closure capture: array escapes.
-            (OpCode::BoxLocal, Some(Operand::Local(slot))) => {
-                if let Some(&cand_idx) = slot_to_candidate.get(slot) {
-                    candidates[cand_idx].escaped = true;
-                }
-            }
             (OpCode::MakeClosure, _) => {
                 for &slot in &active_slots {
                     if let Some(&cand_idx) = slot_to_candidate.get(&slot) {

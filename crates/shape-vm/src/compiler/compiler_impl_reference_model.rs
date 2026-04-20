@@ -1389,31 +1389,18 @@ impl BytecodeCompiler {
             for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
                 if let Some(registry_layout) = self.closure_registry.get(type_id) {
                     if (fn_idx as usize) < total_fns {
-                        // Track A.1C.2b: authoritative per-function kinds.
+                        // Track A.1C.3: authoritative per-function kinds.
                         // Both `Shared` AND `OwnedMutable` captures flip
-                        // their corresponding mask bits — the compiler
-                        // now routes `let mut` captures through A.1B's
-                        // `Load/StoreOwnedMutableCapture` and `op_make_
-                        // closure` allocates `Box::into_raw(Box::new(
-                        // initial))` based on the
-                        // `owned_mutable_capture_mask` bit. The only
-                        // kind that still needs sanitizing to Immutable
-                        // is an edge case: when a `var` capture resolves
-                        // to a module binding (no local slot) we keep
-                        // the legacy SharedCell / LoadClosure path
-                        // (A.1C.1's outer-scope opcodes cover local
-                        // slots only). Those captures still reach us
-                        // classified as `CaptureKind::Shared` in the
-                        // `closure_capture_kinds` metadata, but the
-                        // compiler's closure-creation path emits a
-                        // `BoxModuleBinding` rather than an
-                        // `AllocSharedLocal`+`LoadLocal` pair, so the
-                        // Raw allocator would see a SharedCell-shaped
-                        // ValueWord on the stack instead of a
-                        // `*const SharedCell`. We fall back to the
-                        // registry-default Immutable layout shape in
-                        // that case — the legacy HeapValue::Closure
-                        // producer owns the allocation.
+                        // their corresponding mask bits; `op_make_closure`
+                        // allocates `Box::into_raw(Box::new(initial))` for
+                        // OwnedMutable slots and `Arc::into_raw(Arc::new(
+                        // parking_lot::Mutex<ValueWord>))` / `Arc::increment_
+                        // strong_count` for Shared slots. Module-binding
+                        // `var` captures (migrated in A.1C.3) are also
+                        // Shared and follow the same closure-side
+                        // allocation discipline; the outer-scope promotion
+                        // emits `AllocSharedModuleBinding` (vs.
+                        // `AllocSharedLocal` for locals).
                         let per_fn_kinds = kinds_by_fn.get(&fn_idx);
                         let layout_arc = if let Some(kinds) = per_fn_kinds
                             && kinds.len() == registry_layout.capture_types.len()

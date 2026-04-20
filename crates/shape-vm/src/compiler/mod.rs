@@ -945,6 +945,28 @@ pub struct BytecodeCompiler {
     /// closure and gets classified as `CaptureKind::Shared`.
     pub(crate) shared_locals: HashSet<String>,
 
+    /// Track A.1C.3: local names that have been classified as
+    /// `CaptureKind::OwnedMutable` by at least one closure in the
+    /// current function scope. Needed because `binding_semantics_for_name`
+    /// can return `None` after an inner closure's `compile_function`
+    /// wipes the type-tracker local semantics, and we need the
+    /// classification to be stable across sibling closures (otherwise
+    /// a second closure capturing a different `let mut` local could
+    /// fall back to `Immutable`, nulling the layout's OwnedMutable mask
+    /// bit and triggering a layout mismatch in `op_make_closure`).
+    pub(crate) owned_mutable_locals: HashSet<String>,
+
+    /// Track A.1C.3: module-binding slots that have been promoted to
+    /// `Arc<parking_lot::Mutex<ValueWord>>` via `AllocSharedModuleBinding`.
+    /// After promotion, every outer-scope read/write of the binding must
+    /// go through `LoadSharedModuleBinding` / `StoreSharedModuleBinding`
+    /// (never plain `LoadModuleBinding` / `StoreModuleBinding`). Keyed
+    /// by the binding's **scoped name** — the same key used by
+    /// `resolve_scoped_module_binding_name` and the `module_bindings`
+    /// index map. Populated by `compile_expr_closure` when a
+    /// module-scope `var` is captured mutably.
+    pub(crate) shared_module_bindings: HashSet<String>,
+
     /// Track A.1C.2: per-scope stack of slot indices that need a
     /// `DropSharedLocal` opcode at scope exit, mirroring the
     /// `ownership_drop_locals` discipline. Push in lockstep with

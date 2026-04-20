@@ -360,24 +360,42 @@ impl BytecodeCompiler {
                     let source_loc = self.span_to_source_location(*id_span);
                     self.check_named_binding_write_allowed(name, Some(source_loc))?;
                     let binding_idx = self.get_or_create_module_binding(name);
-                    self.emit(Instruction::new(
-                        OpCode::StoreModuleBinding,
-                        Some(Operand::ModuleBinding(binding_idx)),
-                    ));
-                    // Patch StoreModuleBinding → StoreModuleBindingTyped for width-typed bindings
-                    if let Some(type_name) = self
-                        .type_tracker
-                        .get_binding_type(binding_idx)
-                        .and_then(|info| info.type_name.as_deref())
-                    {
-                        if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
-                            if let Some(last) = self.program.instructions.last_mut() {
-                                if last.opcode == OpCode::StoreModuleBinding {
-                                    last.opcode = OpCode::StoreModuleBindingTyped;
-                                    last.operand = Some(Operand::TypedModuleBinding(
-                                        binding_idx,
-                                        crate::bytecode::NumericWidth::from_int_width(w),
-                                    ));
+                    // Track A.1C.3: if the module-binding slot has been
+                    // promoted to `Arc<SharedCell>` by a prior closure
+                    // capture, writes must go through
+                    // `StoreSharedModuleBinding` (which takes the mutex
+                    // and writes the inner ValueWord). Plain
+                    // `StoreModuleBinding` would overwrite the raw Arc
+                    // pointer bits, leaking the Arc and losing the
+                    // shared state.
+                    let shared_module_name = self
+                        .resolve_scoped_module_binding_name(name)
+                        .unwrap_or_else(|| name.to_string());
+                    if self.shared_module_bindings.contains(&shared_module_name) {
+                        self.emit(Instruction::new(
+                            OpCode::StoreSharedModuleBinding,
+                            Some(Operand::ModuleBinding(binding_idx)),
+                        ));
+                    } else {
+                        self.emit(Instruction::new(
+                            OpCode::StoreModuleBinding,
+                            Some(Operand::ModuleBinding(binding_idx)),
+                        ));
+                        // Patch StoreModuleBinding → StoreModuleBindingTyped for width-typed bindings
+                        if let Some(type_name) = self
+                            .type_tracker
+                            .get_binding_type(binding_idx)
+                            .and_then(|info| info.type_name.as_deref())
+                        {
+                            if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
+                                if let Some(last) = self.program.instructions.last_mut() {
+                                    if last.opcode == OpCode::StoreModuleBinding {
+                                        last.opcode = OpCode::StoreModuleBindingTyped;
+                                        last.operand = Some(Operand::TypedModuleBinding(
+                                            binding_idx,
+                                            crate::bytecode::NumericWidth::from_int_width(w),
+                                        ));
+                                    }
                                 }
                             }
                         }

@@ -233,13 +233,6 @@ define_opcodes! {
     DerefStore = 0x5A, Variable, pops: 1, pushes: 0;
     /// Set an index on the array that a reference points to (in-place mutation)
     SetIndexRef = 0x5B, Variable, pops: 2, pushes: 0;
-    /// Box a local variable into a SharedCell for mutable closure capture.
-    /// Converts the local slot to a SharedCell (if not already one), then pushes
-    /// the SharedCell ValueWord onto the stack for MakeClosure to consume.
-    BoxLocal = 0x5C, Variable, pops: 0, pushes: 1;
-    /// Box a module binding into a SharedCell for mutable closure capture.
-    /// Same as BoxLocal but operates on the module_bindings vector.
-    BoxModuleBinding = 0x5D, Variable, pops: 0, pushes: 1;
     /// Create a projected typed-field reference from a base reference on the stack.
     MakeFieldRef = 0x5E, Variable, pops: 1, pushes: 1;
     /// Create a projected index reference: pops [base_ref, index] and pushes a
@@ -731,42 +724,15 @@ define_opcodes! {
     /// epilogue, not by this opcode itself.
     ReturnOwned = 0x117, Stack, pops: 0, pushes: 0;
 
-    // ===== Closure Spec Phase D: Typed mutable-capture access =====
-    //
-    // These opcodes implement the `LocalMutablePtr` capture ABI for
-    // non-escaping closures (see `docs/v2-closure-specialization.md` §4.1).
-    // Each opcode takes a `Local(capture_idx)` operand naming the capture
-    // index in the current frame's upvalue table and performs a typed read or
-    // write. The element type is encoded in the opcode name — no tag checks,
-    // no ValueWord round-trip on the hot path (Phase E will specialize the
-    // executor to raw typed loads/stores against a Cranelift `StackSlot`).
-    //
-    // In Phase D / H3 the interpreter backing storage is still a SharedCell
-    // sitting inside the single `Upvalue` payload, so correctness relies on
-    // the SharedCell auto-deref performed by `Upvalue::get` / `set` (itself
-    // a drop-in replacement for the retired mutable-upvalue enum variant).
-    // The typed variants skip the tag-dispatch step on read: the compiler
-    // has proven the ValueWord carries the declared encoding.
-    /// Load f64 through a mutable capture pointer. Operand: Local(idx).
-    LoadCaptureMutPtrF64 = 0x118, Variable, pops: 0, pushes: 1;
-    /// Load i64 through a mutable capture pointer. Operand: Local(idx).
-    LoadCaptureMutPtrI64 = 0x119, Variable, pops: 0, pushes: 1;
-    /// Load i32 through a mutable capture pointer. Operand: Local(idx).
-    LoadCaptureMutPtrI32 = 0x11A, Variable, pops: 0, pushes: 1;
-    /// Load bool through a mutable capture pointer. Operand: Local(idx).
-    LoadCaptureMutPtrBool = 0x11B, Variable, pops: 0, pushes: 1;
-    /// Load heap pointer through a mutable capture pointer. Operand: Local(idx).
-    LoadCaptureMutPtrPtr = 0x11C, Variable, pops: 0, pushes: 1;
-    /// Store f64 through a mutable capture pointer. Operand: Local(idx).
-    StoreCaptureMutPtrF64 = 0x11D, Variable, pops: 1, pushes: 0;
-    /// Store i64 through a mutable capture pointer. Operand: Local(idx).
-    StoreCaptureMutPtrI64 = 0x11E, Variable, pops: 1, pushes: 0;
-    /// Store i32 through a mutable capture pointer. Operand: Local(idx).
-    StoreCaptureMutPtrI32 = 0x11F, Variable, pops: 1, pushes: 0;
-    /// Store bool through a mutable capture pointer. Operand: Local(idx).
-    StoreCaptureMutPtrBool = 0x120, Variable, pops: 1, pushes: 0;
-    /// Store heap pointer through a mutable capture pointer. Operand: Local(idx).
-    StoreCaptureMutPtrPtr = 0x121, Variable, pops: 1, pushes: 0;
+    // NOTE: Byte range 0x118..=0x121 was formerly occupied by the
+    // Closure Spec Phase D typed mutable-capture opcodes
+    // (`LoadCaptureMutPtr<T>` / `StoreCaptureMutPtr<T>` for
+    // F64/I64/I32/Bool/Ptr). Track A.1C.3 retired them in favour of the
+    // A.1B dynamic-ValueWord path (`LoadOwnedMutableCapture` /
+    // `StoreOwnedMutableCapture`, `LoadSharedCapture` /
+    // `StoreSharedCapture`) which handles every let-mut / var capture
+    // universally. These byte values are intentionally left unassigned
+    // to keep the A.1B opcodes below at their original values.
 
     // ===== Track A.1B: CaptureKind::OwnedMutable / CaptureKind::Shared =====
     //
@@ -895,6 +861,64 @@ define_opcodes! {
     /// to mark it spent. Operand: Local(idx). Sole releaser for Shared
     /// locals — emitted by the compiler at scope exit.
     DropSharedLocal = 0x139, Variable, pops: 0, pushes: 0;
+
+    // ===== Track A.1C.3: Shared outer-scope (`var`) cell opcodes =====
+    // =====                for module-binding slots             =====
+    //
+    // Parallel module-binding counterpart to A.1C.1's local-slot Shared
+    // opcodes. Module `var` bindings captured mutably by closures are
+    // promoted into `Arc<parking_lot::Mutex<ValueWord>>` (same
+    // `SharedCell` type) stored in `module_bindings[idx]` as raw
+    // pointer bits. The addressing mode is `Operand::ModuleBinding(u16)`
+    // instead of `Operand::Local(u16)`; semantics otherwise mirror the
+    // local counterparts.
+    //
+    // Lifecycle:
+    //   1. `AllocSharedModuleBinding { idx }` — sole allocator. Pops
+    //      the initial value, boxes it in an `Arc<SharedCell>`, writes
+    //      the `Arc::into_raw`-produced pointer bits into
+    //      `module_bindings[idx]`. Registers `idx` with the VM so
+    //      VM-drop releases the Arc.
+    //   2. `LoadSharedModuleBinding { idx }` /
+    //      `StoreSharedModuleBinding { idx }` — ordinary read/write
+    //      through the mutex.
+    //
+    // Unlike the local-scope counterparts, there is no explicit
+    // `DropSharedModuleBinding` opcode: module bindings live for the
+    // program's lifetime, so their Arcs are released once, at VM drop,
+    // via the `shared_module_bindings` side-table on the VM.
+    //
+    // SAFETY invariants (enforced by the compiler — these opcodes trust
+    // the emitter):
+    //   * `AllocSharedModuleBinding` is emitted exactly once per
+    //     module-binding slot that gets promoted.
+    //   * `LoadSharedModuleBinding` / `StoreSharedModuleBinding` only
+    //     fire on a slot whose bits were installed by
+    //     `AllocSharedModuleBinding`. Plain `LoadModuleBinding` /
+    //     `StoreModuleBinding` must not be emitted for a promoted
+    //     slot — they would read raw pointer bits as a ValueWord.
+    //
+    // A.1D / A.1E will lower these into Cranelift IR. Until then, the
+    // JIT preflight gate rejects functions containing any of these
+    // three opcodes so they run on the interpreter.
+
+    /// Pop the top-of-stack `ValueWord` as the initial value, allocate a
+    /// fresh `Arc<parking_lot::Mutex<ValueWord>>`, and store the
+    /// `Arc::into_raw` pointer bits into `module_bindings[idx]`.
+    /// Operand: ModuleBinding(idx). Sole allocator for Shared module
+    /// bindings.
+    AllocSharedModuleBinding = 0x13A, Variable, pops: 1, pushes: 0;
+    /// Read the SharedCell pointer bits from `module_bindings[idx]`,
+    /// take the parking_lot mutex for a read, clone the inner ValueWord
+    /// bits, drop the guard, push onto the stack. Operand:
+    /// ModuleBinding(idx).
+    LoadSharedModuleBinding = 0x13B, Variable, pops: 0, pushes: 1;
+    /// Pop a ValueWord from the stack, read the SharedCell pointer bits
+    /// from `module_bindings[idx]`, take the parking_lot mutex for a
+    /// write, overwrite the inner ValueWord bits, drop the guard. The
+    /// slot's pointer bits are NOT modified. Operand:
+    /// ModuleBinding(idx).
+    StoreSharedModuleBinding = 0x13C, Variable, pops: 1, pushes: 0;
 
     // ===== Closure Spec Phase F: escape-fallback dispatch =====
     //

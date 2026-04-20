@@ -1467,7 +1467,6 @@ impl fmt::Display for HeapValue {
                 v.layout.name,
                 v.ptr
             ),
-            HeapValue::SharedCell(arc) => write!(f, "{}", arc.read().unwrap()),
             HeapValue::TypedArray(ta) => write!(f, "{}", ta),
             HeapValue::Iterator(it) => {
                 write!(
