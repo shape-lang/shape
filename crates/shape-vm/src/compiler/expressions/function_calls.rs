@@ -2540,14 +2540,23 @@ impl BytecodeCompiler {
         receiver: &Expr,
         args: &[Expr],
     ) -> Option<usize> {
-        // 1. Check if the function has type parameters.
+        // 1. Check if the function has type parameters. Only type-kind
+        //    generics participate in the call-site annotation-unification
+        //    resolver — const-kind generics (B.3) are bound separately via
+        //    declaration defaults inside
+        //    `ensure_monomorphic_function_with_consts`, which is auto-invoked
+        //    by `ensure_monomorphic_function` on step 7 when the callee has
+        //    any const params.
         let type_params: Vec<String> = {
             let def = self.function_defs.get(func_name)?;
             let tps = def.type_params.as_ref()?;
             if tps.is_empty() {
                 return None;
             }
-            tps.iter().map(|tp| tp.name().to_string()).collect()
+            tps.iter()
+                .filter(|tp| !tp.is_const())
+                .map(|tp| tp.name().to_string())
+                .collect()
         };
 
         // 2. Build combined arg_types: [receiver_concrete_type, arg1_ct, ...].
@@ -2630,13 +2639,19 @@ impl BytecodeCompiler {
         func_name: &str,
         combined_args: &[Expr],
     ) -> Option<usize> {
+        // Only type-kind generics participate in call-site annotation
+        // unification. Const-kind generics (B.3) are bound separately via
+        // declaration defaults.
         let type_params: Vec<String> = {
             let def = self.function_defs.get(func_name)?;
             let tps = def.type_params.as_ref()?;
             if tps.is_empty() {
                 return None;
             }
-            tps.iter().map(|tp| tp.name().to_string()).collect()
+            tps.iter()
+                .filter(|tp| !tp.is_const())
+                .map(|tp| tp.name().to_string())
+                .collect()
         };
 
         // Per-arg concrete types (closure args collapse to an opaque

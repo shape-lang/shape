@@ -429,6 +429,75 @@ impl ComptimeConstValue {
             _ => None,
         }
     }
+
+    /// Short type-tag suitable for diagnostics (e.g. "int", "number", "bool",
+    /// "string"). Matches the Shape surface names for the declared const
+    /// generic type.
+    pub fn type_tag(&self) -> &'static str {
+        match self {
+            ComptimeConstValue::Int(_) => "int",
+            ComptimeConstValue::Number(_) => "number",
+            ComptimeConstValue::Bool(_) => "bool",
+            ComptimeConstValue::String(_) => "string",
+        }
+    }
+}
+
+/// B.3 — try to extract a [`ComptimeConstValue`] from a literal expression.
+///
+/// Handles only literal forms today: `Int`, `Number`, `Bool`, `String`, and
+/// `UnaryOp(Neg, Int|Number)` for negative literals. Returns `None` when the
+/// expression is not a literal form — the caller should surface a compile
+/// error to the user ("const generic arg must be a compile-time constant").
+///
+/// Full comptime-evaluation of arbitrary expressions (e.g. `<const N: int = 2
+/// + 2>`) is intentionally out of scope for B.3 and deferred to a follow-up
+/// commit; see the plan in `/home/dev/.claude/plans/v2-residuals-closeout.md`.
+pub fn comptime_const_value_from_literal_expr(expr: &Expr) -> Option<ComptimeConstValue> {
+    use shape_ast::ast::{Literal, UnaryOp};
+    match expr {
+        Expr::Literal(Literal::Int(i), _) => Some(ComptimeConstValue::Int(*i)),
+        Expr::Literal(Literal::UInt(u), _) => {
+            // A u64 only fits in our i64-shaped ComptimeConstValue::Int when it
+            // is in range. Larger values fall through to the non-literal path
+            // and surface as a clear compile error at the call site.
+            i64::try_from(*u).ok().map(ComptimeConstValue::Int)
+        }
+        Expr::Literal(Literal::TypedInt(i, _), _) => Some(ComptimeConstValue::Int(*i)),
+        Expr::Literal(Literal::Number(f), _) => Some(ComptimeConstValue::Number(*f)),
+        Expr::Literal(Literal::Bool(b), _) => Some(ComptimeConstValue::Bool(*b)),
+        Expr::Literal(Literal::String(s), _) => Some(ComptimeConstValue::String(s.clone())),
+        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => match operand.as_ref() {
+            Expr::Literal(Literal::Int(i), _) => Some(ComptimeConstValue::Int(-*i)),
+            Expr::Literal(Literal::Number(f), _) => Some(ComptimeConstValue::Number(-*f)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// B.3 — given a callee's declared `type_params`, classify each declaration
+/// as type-kind or const-kind. Returns the two lists of names in declaration
+/// order. Always preserves positional alignment: type-param positions are
+/// matched against the caller's `type_args` slice, and const-param positions
+/// against the caller's `const_args` slice.
+///
+/// The split mirrors what
+/// [`crate::compiler::monomorphization::cache::BytecodeCompiler::ensure_monomorphic_function_with_consts`]
+/// needs to build the `type_subs` and `const_subs` maps.
+pub fn split_type_and_const_param_names(
+    type_params: &[shape_ast::ast::TypeParam],
+) -> (Vec<String>, Vec<String>) {
+    let mut type_names: Vec<String> = Vec::new();
+    let mut const_names: Vec<String> = Vec::new();
+    for tp in type_params {
+        if tp.is_const() {
+            const_names.push(tp.name().to_string());
+        } else {
+            type_names.push(tp.name().to_string());
+        }
+    }
+    (type_names, const_names)
 }
 
 /// Render a single const generic value into a stable, filesystem-safe string
@@ -1757,6 +1826,105 @@ mod tests {
     /// 5. Replace the `__const_<i>` placeholder names in
     ///    `cache::ensure_monomorphic_function_with_consts` with the real
     ///    declared const-param names.
+    // ---- B.3: literal-to-ComptimeConstValue helpers ---------------------
+
+    #[test]
+    fn comptime_const_from_int_literal() {
+        let e = Expr::Literal(shape_ast::ast::Literal::Int(7), span());
+        assert_eq!(
+            comptime_const_value_from_literal_expr(&e),
+            Some(ComptimeConstValue::Int(7))
+        );
+    }
+
+    #[test]
+    fn comptime_const_from_number_literal() {
+        let e = Expr::Literal(shape_ast::ast::Literal::Number(3.25), span());
+        assert_eq!(
+            comptime_const_value_from_literal_expr(&e),
+            Some(ComptimeConstValue::Number(3.25))
+        );
+    }
+
+    #[test]
+    fn comptime_const_from_bool_literal() {
+        let e = Expr::Literal(shape_ast::ast::Literal::Bool(true), span());
+        assert_eq!(
+            comptime_const_value_from_literal_expr(&e),
+            Some(ComptimeConstValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn comptime_const_from_string_literal() {
+        let e = Expr::Literal(shape_ast::ast::Literal::String("hi".to_string()), span());
+        assert_eq!(
+            comptime_const_value_from_literal_expr(&e),
+            Some(ComptimeConstValue::String("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn comptime_const_from_negative_int_literal() {
+        // -5 parses as UnaryOp(Neg, Int(5))
+        let inner = Expr::Literal(shape_ast::ast::Literal::Int(5), span());
+        let e = Expr::UnaryOp {
+            op: shape_ast::ast::UnaryOp::Neg,
+            operand: Box::new(inner),
+            span: span(),
+        };
+        assert_eq!(
+            comptime_const_value_from_literal_expr(&e),
+            Some(ComptimeConstValue::Int(-5))
+        );
+    }
+
+    #[test]
+    fn comptime_const_rejects_non_literal() {
+        // An identifier is not a literal — callers must error at the call site.
+        let e = Expr::Identifier("N".to_string(), span());
+        assert_eq!(comptime_const_value_from_literal_expr(&e), None);
+    }
+
+    #[test]
+    fn split_partitions_const_and_type_params_in_declaration_order() {
+        // `fn f<T, const N: int, U, const M: int>(...)` — split into
+        // type names [T, U] and const names [N, M], preserving order.
+        let params = vec![
+            TypeParam::Type {
+                name: "T".into(),
+                span: Span::default(),
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: Vec::new(),
+            },
+            TypeParam::Const {
+                name: "N".into(),
+                span: Span::default(),
+                doc_comment: None,
+                ty: TypeAnnotation::Basic("int".into()),
+                default: Some(Expr::Literal(shape_ast::ast::Literal::Int(3), Span::default())),
+            },
+            TypeParam::Type {
+                name: "U".into(),
+                span: Span::default(),
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: Vec::new(),
+            },
+            TypeParam::Const {
+                name: "M".into(),
+                span: Span::default(),
+                doc_comment: None,
+                ty: TypeAnnotation::Basic("int".into()),
+                default: Some(Expr::Literal(shape_ast::ast::Literal::Int(5), Span::default())),
+            },
+        ];
+        let (types, consts) = split_type_and_const_param_names(&params);
+        assert_eq!(types, vec!["T".to_string(), "U".to_string()]);
+        assert_eq!(consts, vec!["N".to_string(), "M".to_string()]);
+    }
+
     #[test]
     #[ignore = "blocked on grammar support for const generics — see TODO"]
     fn const_generic_repeat_n_3_end_to_end() {

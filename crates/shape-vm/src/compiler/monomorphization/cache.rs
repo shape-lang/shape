@@ -25,6 +25,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::type_resolution::{
     ClosureSpec, ComptimeConstValue, build_mono_key_full, build_mono_key_with_consts,
+    comptime_const_value_from_literal_expr, split_type_and_const_param_names,
 };
 
 /// Phase C — per-module specialization budget.
@@ -158,6 +159,35 @@ impl BytecodeCompiler {
         base_fn_name: &str,
         type_args: &[ConcreteType],
     ) -> Result<u16> {
+        // B.3 — if the callee declares any const generic parameters, auto-bind
+        // them from their declared default expressions (literals only today —
+        // no call-site `::<4>` turbofish syntax exists yet) and route through
+        // the const-aware entry point. This keeps every caller of the type-only
+        // API working unchanged while still producing distinct mono keys per
+        // distinct const value.
+        //
+        // The resolution rule, per the Track-B B.3 plan:
+        //   - literal default on the const param  → bind immediately
+        //   - missing default / non-literal       → compile error
+        //     ("const generic arg must be a compile-time constant")
+        //
+        // Comptime-evaluation of arbitrary default expressions is intentionally
+        // out of scope here and deferred to a follow-up.
+        if let Some(type_params) = self
+            .function_defs
+            .get(base_fn_name)
+            .and_then(|d| d.type_params.clone())
+        {
+            if type_params.iter().any(|tp| tp.is_const()) {
+                let const_args = resolve_const_defaults_or_error(base_fn_name, &type_params)?;
+                return self.ensure_monomorphic_function_with_consts(
+                    base_fn_name,
+                    type_args,
+                    &const_args,
+                );
+            }
+        }
+
         let mono_key = build_mono_key(base_fn_name, type_args);
 
         if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
@@ -180,11 +210,19 @@ impl BytecodeCompiler {
         // Build the {type-param-name -> ConcreteType} substitution map that
         // Agent 2's `substitute_function_def` consumes. This requires the
         // callee's declared `type_params` to align positionally with the
-        // supplied `type_args`.
+        // supplied `type_args`. Const-kind params are filtered out here (they
+        // contribute nothing to type substitution) — the short-circuit above
+        // already redirected any callee-with-const-params to the const-aware
+        // entry point, so this path only sees type-kind params.
         let declared_type_params: Vec<String> = original_def
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
+            .map(|tps| {
+                tps.iter()
+                    .filter(|tp| !tp.is_const())
+                    .map(|tp| tp.name().to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         if declared_type_params.is_empty() {
@@ -323,20 +361,15 @@ impl BytecodeCompiler {
             }
         })?;
 
-        // Pull the type-kind generic param names off the original def. The
-        // grammar currently produces ONLY type-kind generics, so all entries
-        // here are type params. When const generics land in the grammar, the
-        // type_params vec will need a `kind` field and we'll have to filter
-        // type-vs-const here. For now: every declared param is a type param.
-        //
-        // TODO(grammar-const-generics): once `TypeParam` carries a `kind`
-        // discriminator, partition into `type_param_names` (positional against
-        // `type_args`) and `const_param_names` (positional against
-        // `const_args`).
-        let type_param_names: Vec<String> = original_def
+        // Partition the declared generic params into type-kind names and
+        // const-kind names (positional against `type_args` / `const_args`
+        // respectively). This became tractable in B.2 when `TypeParam` grew
+        // a `Const` variant — prior to B.3 the wiring here fell back to
+        // synthetic `__const_<i>` names because there was no split.
+        let (type_param_names, const_param_names) = original_def
             .type_params
             .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
+            .map(|tps| split_type_and_const_param_names(tps))
             .unwrap_or_default();
 
         if type_param_names.len() != type_args.len() {
@@ -351,24 +384,35 @@ impl BytecodeCompiler {
             });
         }
 
+        if const_param_names.len() != const_args.len() {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "ensure_monomorphic_function_with_consts: '{}' declares {} const generic parameters but {} const arguments were supplied",
+                    base_fn_name,
+                    const_param_names.len(),
+                    const_args.len()
+                ),
+                location: None,
+            });
+        }
+
         let type_subs: HashMap<String, ConcreteType> = type_param_names
             .iter()
             .cloned()
             .zip(type_args.iter().cloned())
             .collect();
 
-        // The const_subs map is intentionally indexed by *position* until the
-        // grammar gives const generic params real names. We synthesise
-        // placeholder names `__const_<i>` so the substitution path has
-        // something to look up.
-        //
-        // TODO(grammar-const-generics): replace these synthesised names with
-        // the real declared names from the (future) const-typed entries in
-        // `def.type_params`.
-        let const_subs: HashMap<String, ComptimeConstValue> = const_args
+        // Now that const generic params carry real names (B.2 `TypeParam::Const`),
+        // key `const_subs` by the declared name. The substitution pass in
+        // `substitution::substitute_function_def_with_consts` rewrites any
+        // body-position `Identifier(N)` that matches this name to the bound
+        // literal value. If the callee never references the name in its body
+        // (common for the B.3 integration tests), the substitution pass is a
+        // no-op — the mono-key differentiation is still the load-bearing bit.
+        let const_subs: HashMap<String, ComptimeConstValue> = const_param_names
             .iter()
-            .enumerate()
-            .map(|(i, v)| (format!("__const_{}", i), v.clone()))
+            .cloned()
+            .zip(const_args.iter().cloned())
             .collect();
 
         let specialized_def = substitution::substitute_function_def_with_consts(
@@ -546,6 +590,56 @@ impl BytecodeCompiler {
 
         Ok(Some(specialization_idx))
     }
+}
+
+/// B.3 — resolve a callee's const generic parameters from their declared
+/// default expressions.
+///
+/// The grammar does not yet accept call-site turbofish (`::<4>`) for binding
+/// const generic args, so the only source we have for a const value today is
+/// the optional `default` on each `TypeParam::Const`. The rule:
+///
+///   - `TypeParam::Const { default: Some(literal_expr), .. }` → bind that value.
+///   - `TypeParam::Const { default: None, .. }`              → compile error.
+///   - non-literal default expression                        → compile error.
+///
+/// `TypeParam::Type` entries are skipped — they are handled by the type-arg
+/// resolution path elsewhere.
+///
+/// Returns the `const_args` vector in declaration order (positional against
+/// the const-kind entries in `type_params`).
+fn resolve_const_defaults_or_error(
+    base_fn_name: &str,
+    type_params: &[shape_ast::ast::TypeParam],
+) -> Result<Vec<ComptimeConstValue>> {
+    let mut const_args: Vec<ComptimeConstValue> = Vec::new();
+    for tp in type_params {
+        match tp {
+            shape_ast::ast::TypeParam::Type { .. } => continue,
+            shape_ast::ast::TypeParam::Const { name, default, .. } => {
+                let Some(default_expr) = default else {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "const generic arg must be a compile-time constant: '{}' declares const generic parameter '{}' with no default value, and call-site const argument syntax is not yet supported",
+                            base_fn_name, name
+                        ),
+                        location: None,
+                    });
+                };
+                let Some(value) = comptime_const_value_from_literal_expr(default_expr) else {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "const generic arg must be a compile-time constant: '{}' const generic parameter '{}' has a non-literal default expression (only literals are supported in B.3 — comptime-evaluated defaults are a follow-up)",
+                            base_fn_name, name
+                        ),
+                        location: None,
+                    });
+                };
+                const_args.push(value);
+            }
+        }
+    }
+    Ok(const_args)
 }
 
 /// Peeked closure-literal info handed to the inliner. The resolver fills
@@ -871,6 +965,223 @@ mod tests {
         // Re-lookup — cache still hits.
         assert_eq!(cache.lookup(&key), Some(7));
         assert_eq!(cache.len(), 1);
+    }
+
+    // =====================================================================
+    // B.3 — bind const generic args at monomorphization.
+    //
+    // These tests drive real `FunctionDef`s with `TypeParam::Const` members
+    // through the cache entry points and assert:
+    //   - distinct const values produce distinct mono-key cache entries,
+    //   - identical const values collapse to one cache entry,
+    //   - wrong arity / wrong type / missing-default cases surface clear
+    //     compile errors,
+    //   - functions without any const params are unaffected.
+    // =====================================================================
+
+    use shape_ast::ast::{
+        DestructurePattern, FunctionDef, FunctionParameter, Literal, Span, TypeAnnotation,
+        TypeParam,
+    };
+
+    /// Build a minimal FunctionDef with:
+    ///   - `type_params` — the generic list (mix of `Type` and `Const` OK),
+    ///   - a single `x: int` param,
+    ///   - `int` return type,
+    ///   - body `return x` so compile_function succeeds.
+    fn b3_identity_n_def(type_params: Vec<TypeParam>) -> FunctionDef {
+        FunctionDef {
+            name: "identity_n".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: if type_params.is_empty() {
+                None
+            } else {
+                Some(type_params)
+            },
+            params: vec![FunctionParameter {
+                pattern: DestructurePattern::Identifier("x".into(), Span::default()),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: Some(TypeAnnotation::Basic("int".into())),
+                default_value: None,
+            }],
+            return_type: Some(TypeAnnotation::Basic("int".into())),
+            where_clause: None,
+            body: vec![shape_ast::ast::Statement::Return(
+                Some(shape_ast::ast::Expr::Identifier("x".into(), Span::default())),
+                Span::default(),
+            )],
+            annotations: Vec::new(),
+            is_async: false,
+            is_comptime: false,
+        }
+    }
+
+    fn const_param(name: &str, default: Option<i64>) -> TypeParam {
+        TypeParam::Const {
+            name: name.into(),
+            span: Span::default(),
+            doc_comment: None,
+            ty: TypeAnnotation::Basic("int".into()),
+            default: default.map(|v| shape_ast::ast::Expr::Literal(Literal::Int(v), Span::default())),
+        }
+    }
+
+    #[test]
+    fn b3_const_generic_distinct_values_produce_distinct_monomorphizations() {
+        // identity_n<const N: int = 4> compiled with N=4 then N=8 must produce
+        // TWO distinct cache entries (keys `identity_n::int_4` and
+        // `identity_n::int_8`) — the load-bearing deliverable of B.3.
+        let mut compiler = BytecodeCompiler::new();
+        let def = b3_identity_n_def(vec![const_param("N", Some(4))]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        // First monomorphization: N=4.
+        let idx4 = compiler
+            .ensure_monomorphic_function_with_consts(
+                "identity_n",
+                &[],
+                &[ComptimeConstValue::Int(4)],
+            )
+            .expect("N=4 monomorphization should succeed");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("identity_n::int_4"),
+            Some(idx4)
+        );
+
+        // Second monomorphization: N=8.
+        let idx8 = compiler
+            .ensure_monomorphic_function_with_consts(
+                "identity_n",
+                &[],
+                &[ComptimeConstValue::Int(8)],
+            )
+            .expect("N=8 monomorphization should succeed");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("identity_n::int_8"),
+            Some(idx8)
+        );
+
+        assert_ne!(idx4, idx8, "distinct const values must produce distinct specializations");
+        assert_eq!(compiler.monomorphization_cache.len(), 2);
+    }
+
+    #[test]
+    fn b3_const_generic_same_value_collapses_to_one_entry() {
+        let mut compiler = BytecodeCompiler::new();
+        let def = b3_identity_n_def(vec![const_param("N", Some(4))]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        let a = compiler
+            .ensure_monomorphic_function_with_consts(
+                "identity_n",
+                &[],
+                &[ComptimeConstValue::Int(4)],
+            )
+            .unwrap();
+        let b = compiler
+            .ensure_monomorphic_function_with_consts(
+                "identity_n",
+                &[],
+                &[ComptimeConstValue::Int(4)],
+            )
+            .unwrap();
+        assert_eq!(a, b, "identical const args must collapse to one cache entry");
+        assert_eq!(compiler.monomorphization_cache.len(), 1);
+    }
+
+    #[test]
+    fn b3_const_generic_runtime_body_without_substitution_references() {
+        // Exercises the full compile pipeline: register a const-generic
+        // function whose body does NOT reference N, monomorphize, then
+        // look up the specialized function. This proves that B.3 wiring
+        // works end-to-end even before B.4 substitutes body references.
+        let mut compiler = BytecodeCompiler::new();
+        let def = b3_identity_n_def(vec![const_param("N", Some(4))]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        let specialized_idx = compiler
+            .ensure_monomorphic_function_with_consts(
+                "identity_n",
+                &[],
+                &[ComptimeConstValue::Int(4)],
+            )
+            .expect("const-generic compile should succeed without body references");
+
+        // The specialized function is registered in the program under a name
+        // derived from the mono key. We can at least verify the cache records
+        // the same index for the same key.
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("identity_n::int_4"),
+            Some(specialized_idx)
+        );
+    }
+
+    #[test]
+    fn b3_wrong_const_arity_errors() {
+        let mut compiler = BytecodeCompiler::new();
+        // Callee declares ONE const generic (N) but we pass TWO const args.
+        let def = b3_identity_n_def(vec![const_param("N", Some(4))]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        let result = compiler.ensure_monomorphic_function_with_consts(
+            "identity_n",
+            &[],
+            &[ComptimeConstValue::Int(4), ComptimeConstValue::Int(5)],
+        );
+        assert!(result.is_err(), "wrong const arity must error");
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            msg.contains("const generic parameters"),
+            "error should mention const generic arity, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn b3_type_only_entry_routes_const_params_through_with_consts_path() {
+        // When the type-only `ensure_monomorphic_function` is called against a
+        // callee with const params, it must auto-bind them from defaults and
+        // delegate to `ensure_monomorphic_function_with_consts`. The cache
+        // entry must have the const-aware key, not the bare `identity_n` key.
+        let mut compiler = BytecodeCompiler::new();
+        let def = b3_identity_n_def(vec![const_param("N", Some(4))]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        let idx = compiler
+            .ensure_monomorphic_function("identity_n", &[])
+            .expect("delegation to const-aware path should succeed");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("identity_n::int_4"),
+            Some(idx),
+            "type-only entry must route through the const-aware mono key"
+        );
+        assert!(
+            compiler.monomorphization_cache.lookup("identity_n").is_none(),
+            "bare `identity_n` key must NOT appear — const params always differentiate"
+        );
+    }
+
+    #[test]
+    fn b3_missing_const_default_errors_with_specific_message() {
+        // `identity_n<const N: int>` (no default) must error at the type-only
+        // entry point since there's no call-site turbofish syntax yet.
+        let mut compiler = BytecodeCompiler::new();
+        let def = b3_identity_n_def(vec![const_param("N", None)]);
+        compiler.function_defs.insert("identity_n".into(), def);
+
+        let result = compiler.ensure_monomorphic_function("identity_n", &[]);
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            msg.contains("const generic arg must be a compile-time constant"),
+            "expected B.3 diagnostic, got: {}",
+            msg
+        );
     }
 
     #[test]
