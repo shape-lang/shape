@@ -28,7 +28,7 @@ use super::{BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, Re
 ///     of any heap-returning callee (DateTime arithmetic, comptime body
 ///     replacement). Fixed in `compiler/functions.rs`.
 ///   * `CloneLocal` was emitted for `let mut` slots that had been
-///     `BoxLocal`-wrapped into a `SharedCell` by a subsequent closure
+///     cell-wrapped into a `SharedCell` by a subsequent closure
 ///     capture. `clone_raw_bits` bumps the cell's Arc without unwrapping,
 ///     so arithmetic then saw `shared_cell` instead of the inner scalar
 ///     ("Cannot apply '+' to int and shared_cell"). Gated by
@@ -1407,10 +1407,11 @@ impl BytecodeCompiler {
     }
 
     /// Phase V1.1C: true when the slot has been converted to a SharedCell
-    /// wrapper via a prior `BoxLocal` (tracked in `self.boxed_locals` keyed
-    /// by binding name). The V1.1C `CloneLocal` opcode does not auto-
-    /// unwrap `SharedCell`s, so boxed slots must fall through to the
-    /// legacy `LoadLocal` path which handles the unwrap.
+    /// wrapper via a prior legacy cell-wrapping emission (tracked in
+    /// `self.boxed_locals` keyed by binding name). The V1.1C `CloneLocal`
+    /// opcode does not auto-unwrap `SharedCell`s, so boxed slots must
+    /// fall through to the legacy `LoadLocal` path which handles the
+    /// unwrap.
     pub(super) fn slot_is_boxed(&self, slot: u16) -> bool {
         self.local_name_for_slot(slot)
             .map(|name| self.boxed_locals.contains(name))
@@ -1903,9 +1904,10 @@ impl BytecodeCompiler {
 
     /// Emit store instruction for an identifier
     pub(super) fn emit_store_identifier(&mut self, name: &str) -> Result<()> {
-        // Mutable closure captures: emit StoreClosure (or Phase D's typed
-        // StoreCaptureMutPtr<T> when the outer slot is `LocalMutablePtr`;
-        // or Track A.1C.2's StoreSharedCapture for `var` captures).
+        // Mutable closure captures: dispatch by CaptureKind.
+        //   * `CaptureKind::Shared`       → A.1B StoreSharedCapture.
+        //   * `CaptureKind::OwnedMutable` → A.1B StoreOwnedMutableCapture.
+        //   * legacy SharedCell fallback  → StoreClosure.
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
             if let Some(&shared_idx) = self.shared_closure_captures.get(name) {
                 debug_assert_eq!(upvalue_idx, shared_idx);
@@ -1915,16 +1917,12 @@ impl BytecodeCompiler {
                 ));
                 return Ok(());
             }
-            if let Some(&(ptr_idx, kind)) = self.local_mutable_ptr_captures.get(name) {
-                use shape_value::v2::struct_layout::FieldKind;
-                let op = match kind {
-                    FieldKind::F64 => OpCode::StoreCaptureMutPtrF64,
-                    FieldKind::I64 => OpCode::StoreCaptureMutPtrI64,
-                    FieldKind::I32 => OpCode::StoreCaptureMutPtrI32,
-                    FieldKind::Bool => OpCode::StoreCaptureMutPtrBool,
-                    _ => OpCode::StoreCaptureMutPtrPtr,
-                };
-                self.emit(Instruction::new(op, Some(Operand::Local(ptr_idx))));
+            if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name) {
+                debug_assert_eq!(upvalue_idx, owned_idx);
+                self.emit(Instruction::new(
+                    OpCode::StoreOwnedMutableCapture,
+                    Some(Operand::Local(owned_idx)),
+                ));
                 return Ok(());
             }
             self.emit(Instruction::new(
@@ -2869,9 +2867,10 @@ impl BytecodeCompiler {
     ) -> bool {
         use crate::type_tracking::BindingStorageClass;
         // Phase V1.1C fix: if the slot has been SharedCell-wrapped by a prior
-        // `BoxLocal` (closure capture path), the legacy Arc-refcount release
-        // path in `pop_drop_scope` / `emit_drops_for_early_exit` handles the
-        // release. Emitting `DropLocal` here poisons the slot to `0u64`
+        // legacy cell-wrapping emission (module-binding capture path), the
+        // legacy Arc-refcount release path in `pop_drop_scope` /
+        // `emit_drops_for_early_exit` handles the release. Emitting
+        // `DropLocal` here poisons the slot to `0u64`
         // which breaks the auto-unwrap in `LoadLocal` / `LoadClosure` for any
         // subsequent read (e.g. compiler-injected reads like `LoadLocal` +
         // `DropCall` pairs that immediately follow the `DropLocal`).
@@ -2999,9 +2998,9 @@ impl BytecodeCompiler {
                     for local_idx in locals.into_iter().rev() {
                         // Phase V1.1C fix: skip `DropLocal` emission for
                         // slots that were SharedCell-wrapped by a prior
-                        // `BoxLocal`. See the companion comment in
-                        // `pop_drop_scope` for the rationale. Track A.1C.2
-                        // additionally skips slots promoted via
+                        // legacy cell-wrapping emission. See the companion
+                        // comment in `pop_drop_scope` for the rationale.
+                        // Track A.1C.2 additionally skips slots promoted via
                         // `AllocSharedLocal` — `DropSharedLocal` is emitted
                         // below in parallel.
                         if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {

@@ -1213,23 +1213,22 @@ mod h6_5_tests {
     }
 
     #[test]
-    fn h6_5_mutable_capture_falls_back_to_legacy_variant() {
-        // The H6.5 producer guards on `function.mutable_captures`. When
-        // any capture is mutable (SharedCell-backed), the raw path is
-        // skipped and the legacy `HeapValue::Closure { upvalues }`
-        // variant is emitted — preserving auto-deref semantics for
-        // shared-mutable captures.
+    fn h6_5_mutable_capture_uses_owned_mutable_raw_path() {
+        // Post-A.1C.2b: the H6.5 producer's legacy fallback no longer
+        // fires for `let mut` local captures — they route through the
+        // A.1B OwnedMutable Raw path with a `Box::into_raw` capture
+        // cell. The closure's private Box accumulates across calls;
+        // return it from the last invocation to observe.
         //
-        // Regression test: a mutating closure must still produce the
-        // correct observable shared-mutation result.
+        // (The legacy `HeapValue::Closure` fallback stays reachable
+        // via module-binding captures until A.1C.3 deletes it.)
         let val = eval(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\
-                 let f = |x: int| { n = n + x }\n\
+                 let f = |x: int| { n = n + x; n }\n\
                  f(1)\n\
                  f(2)\n\
                  f(3)\n\
-                 n\n\
              }\n\
              main()",
         );

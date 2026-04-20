@@ -122,7 +122,7 @@ impl BytecodeCompiler {
             drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
             shared_closure_captures: HashMap::new(),
-            local_mutable_ptr_captures: HashMap::new(),
+            owned_mutable_closure_captures: HashMap::new(),
             boxed_locals: HashSet::new(),
             shared_locals: HashSet::new(),
             shared_drop_locals: Vec::new(),

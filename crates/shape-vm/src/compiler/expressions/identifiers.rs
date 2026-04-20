@@ -121,9 +121,12 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(span)),
             });
         }
-        // Mutable closure captures: emit LoadClosure (or, Phase D, the typed
-        // LoadCaptureMutPtr<T>; or Track A.1C.2, LoadSharedCapture) to read
-        // from the shared upvalue / stack pointer.
+        // Mutable closure captures: dispatch by CaptureKind.
+        //   * `CaptureKind::Shared`        → A.1B `LoadSharedCapture`.
+        //   * `CaptureKind::OwnedMutable`  → A.1B `LoadOwnedMutableCapture`.
+        //   * legacy SharedCell fallback   → `LoadClosure` (module-
+        //     binding `var` captures that A.1C.1's outer-scope opcodes
+        //     don't yet cover; retired in A.1C.3).
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
             // Track A.1C.2: Shared (var) captures route through the A.1B
             // LoadSharedCapture opcode, which takes the parking_lot mutex
@@ -140,19 +143,16 @@ impl BytecodeCompiler {
                 self.last_expr_numeric_type = None;
                 return Ok(());
             }
-            // Phase D: if the capture was classified as LocalMutablePtr by the
-            // enclosing function's storage plan, emit a typed load that skips
-            // tag dispatch on the hot path.
-            if let Some(&(ptr_idx, kind)) = self.local_mutable_ptr_captures.get(name) {
-                use shape_value::v2::struct_layout::FieldKind;
-                let op = match kind {
-                    FieldKind::F64 => OpCode::LoadCaptureMutPtrF64,
-                    FieldKind::I64 => OpCode::LoadCaptureMutPtrI64,
-                    FieldKind::I32 => OpCode::LoadCaptureMutPtrI32,
-                    FieldKind::Bool => OpCode::LoadCaptureMutPtrBool,
-                    _ => OpCode::LoadCaptureMutPtrPtr,
-                };
-                self.emit(Instruction::new(op, Some(Operand::Local(ptr_idx))));
+            // Track A.1C.2b: OwnedMutable (let mut) captures route
+            // through the A.1B LoadOwnedMutableCapture opcode, which
+            // dereferences the `*mut ValueWord` pointer held in the
+            // capture slot and pushes the inner bits.
+            if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name) {
+                debug_assert_eq!(upvalue_idx, owned_idx);
+                self.emit(Instruction::new(
+                    OpCode::LoadOwnedMutableCapture,
+                    Some(Operand::Local(owned_idx)),
+                ));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
                 self.last_expr_numeric_type = None;
@@ -202,8 +202,8 @@ impl BytecodeCompiler {
                 // The MIR storage planner assigns each binding a BindingStorageClass:
                 //   Direct    → LoadLocal / LoadLocalTrusted (no indirection)
                 //   Deferred  → same as Direct (plan not yet resolved)
-                //   UniqueHeap→ BoxLocal + SharedCell, read via LoadClosure
-                //   SharedCow → BoxLocal + SharedCell, read via LoadClosure
+                //   UniqueHeap→ legacy cell + SharedCell, read via LoadClosure
+                //   SharedCow → legacy cell + SharedCell, read via LoadClosure
                 //   Reference → DerefLoad / DerefStore (handled above)
                 //
                 // Consult the MIR storage plan first (authoritative when available),

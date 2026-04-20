@@ -229,8 +229,8 @@ impl BytecodeCompiler {
         // Phase V1.1C gate. Flag off ⇒ byte-identical pre-V1.1C emission.
         //
         // Boxed-slot bailout: when the slot appears in `self.boxed_locals`,
-        // a prior `BoxLocal` emission has replaced the slot's inline value
-        // with a `SharedCell`-wrapped heap pointer (see
+        // a prior legacy cell-wrapping emission has replaced the slot's
+        // inline value with a `SharedCell`-wrapped heap pointer (see
         // `expressions/closures.rs`). The `LoadLocal` legacy path auto-
         // unwraps that cell via `raw_helpers::extract_shared_cell`. The
         // V1.1C `CloneLocal` path reads the raw u64 bits and delegates to

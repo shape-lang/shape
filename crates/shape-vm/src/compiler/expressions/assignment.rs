@@ -246,10 +246,10 @@ impl BytecodeCompiler {
                     }
                 }
                 self.emit(Instruction::simple(OpCode::Dup));
-                // Mutable closure captures: emit StoreClosure (or, Phase D, a
-                // typed StoreCaptureMutPtr<T> when the storage plan classified
-                // the outer binding as LocalMutablePtr; or Track A.1C.2,
-                // StoreSharedCapture for `var` captures).
+                // Mutable closure captures: dispatch by CaptureKind.
+                //   * `CaptureKind::Shared`       → A.1B StoreSharedCapture.
+                //   * `CaptureKind::OwnedMutable` → A.1B StoreOwnedMutableCapture.
+                //   * legacy SharedCell fallback  → StoreClosure.
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
                     // Track A.1C.2: Shared (var) captures route through the
                     // A.1B StoreSharedCapture opcode, which takes the
@@ -264,18 +264,18 @@ impl BytecodeCompiler {
                         ));
                         return Ok(());
                     }
-                    if let Some(&(ptr_idx, kind)) =
-                        self.local_mutable_ptr_captures.get(name.as_str())
+                    // Track A.1C.2b: OwnedMutable (let mut) captures route
+                    // through the A.1B StoreOwnedMutableCapture opcode,
+                    // which writes through the `*mut ValueWord` pointer
+                    // held in the capture slot.
+                    if let Some(&owned_idx) =
+                        self.owned_mutable_closure_captures.get(name.as_str())
                     {
-                        use shape_value::v2::struct_layout::FieldKind;
-                        let op = match kind {
-                            FieldKind::F64 => OpCode::StoreCaptureMutPtrF64,
-                            FieldKind::I64 => OpCode::StoreCaptureMutPtrI64,
-                            FieldKind::I32 => OpCode::StoreCaptureMutPtrI32,
-                            FieldKind::Bool => OpCode::StoreCaptureMutPtrBool,
-                            _ => OpCode::StoreCaptureMutPtrPtr,
-                        };
-                        self.emit(Instruction::new(op, Some(Operand::Local(ptr_idx))));
+                        debug_assert_eq!(upvalue_idx, owned_idx);
+                        self.emit(Instruction::new(
+                            OpCode::StoreOwnedMutableCapture,
+                            Some(Operand::Local(owned_idx)),
+                        ));
                         return Ok(());
                     }
                     self.emit(Instruction::new(

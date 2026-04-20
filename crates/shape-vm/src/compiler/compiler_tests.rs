@@ -4031,18 +4031,19 @@ fn test_v11d_function_scope_does_not_leak_ownership_drops_to_main() {
 }
 
 #[test]
-fn test_v11d_clone_local_skipped_for_boxed_slot() {
-    // V1.1D fix #2: `BoxLocal` converts a slot from inline-scalar to a
-    // `SharedCell`-wrapped Arc<HeapValue> at closure-capture time. The
-    // V1.1C `CloneLocal` opcode (via `clone_raw_bits`) bumps the cell's
-    // Arc without unwrapping, so subsequent arithmetic would see
-    // `shared_cell` instead of the inner int. `emit_load_local_owned`
-    // must fall through to the legacy `LoadLocal` path when the slot
-    // is in `self.boxed_locals`.
+fn test_a1c2b_let_mut_closure_capture_emits_owned_mutable_opcodes() {
+    // Track A.1C.2b: `let mut` captures by a closure flow through
+    // the A.1B `Load/StoreOwnedMutableCapture` path. At closure-
+    // creation time the compiler pushes each outer slot's plain value
+    // with `LoadLocal`; `op_make_closure` sees the
+    // `owned_mutable_capture_mask` bit and allocates
+    // `Box::into_raw(Box::new(initial))`. The closure body reads and
+    // writes through the box via `LoadOwnedMutableCapture` /
+    // `StoreOwnedMutableCapture`.
     //
-    // Regression check: a `let mut b: int = 0` captured by a mutable
-    // closure then read outside the closure with `a + b` must use
-    // `LoadLocal` (auto-unwraps the SharedCell), not `CloneLocal`.
+    // This test replaces the pre-A.1C.2b V1.1D boxed-slot audits —
+    // those asserted positive emission of the retired opcode, so they
+    // no longer apply.
     let code = r#"
         fn main() -> int {
             let mut a: int = 0
@@ -4056,65 +4057,34 @@ fn test_v11d_clone_local_skipped_for_boxed_slot() {
     let ops = super::helpers::with_ownership_moves_flag(true, || {
         function_ownership_ops(code, "main")
     });
-    // After `BoxLocal`, the two reads for `a + b` must NOT appear as
-    // `CloneLocal` — they must stay `LoadLocal` so the executor auto-
-    // unwraps the SharedCell. (V1.1C would have emitted a `CloneLocal`
-    // for at least one of the two slots.)
-    let box_idx = ops
+    // Positive: the `let mut` captures flow through A.1B's
+    // OwnedMutable opcodes inside the closure body.
+    let has_owned_load = ops.iter().any(|op| *op == OpCode::LoadOwnedMutableCapture);
+    let has_owned_store = ops
         .iter()
-        .position(|op| *op == OpCode::BoxLocal)
-        .expect("closure capture must emit `BoxLocal`");
-    for (offset, op) in ops[box_idx..].iter().enumerate() {
-        assert!(
-            *op != OpCode::CloneLocal,
-            "post-BoxLocal index {} unexpectedly emits `CloneLocal`: \
-             V1.1C would bump the SharedCell Arc instead of unwrapping. \
-             Ops: {:?}",
-            box_idx + offset,
-            ops
-        );
-    }
-}
-
-#[test]
-fn test_v11d_drop_local_skipped_for_boxed_slot() {
-    // V1.1D fix #3: symmetric to fix #2. A slot that has been
-    // SharedCell-wrapped by `BoxLocal` must not receive a `DropLocal`
-    // at scope exit: `DropLocal` releases the Arc and poisons the slot
-    // with `0u64`, but the legacy `DropCall` pass that immediately
-    // follows reads the same slot. `binding_slot_needs_ownership_drop`
-    // and the drop-scope emission sites skip boxed slots so the
-    // Arc-refcount release path owns the release alone.
-    //
-    // Regression check: the same closure-capturing program must not
-    // contain any `DropLocal` for the boxed slots.
-    let code = r#"
-        fn main() -> int {
-            let mut a: int = 0
-            let mut b: int = 0
-            let f = || { a = a + 1; b = b + 2 }
-            f()
-            a + b
-        }
-        main()
-    "#;
-    let ops = super::helpers::with_ownership_moves_flag(true, || {
-        function_ownership_ops(code, "main")
-    });
-    // `BoxLocal` must appear (the closure captures both mutably).
+        .any(|op| *op == OpCode::StoreOwnedMutableCapture);
     assert!(
-        ops.contains(&OpCode::BoxLocal),
-        "test setup expects BoxLocal to be emitted, got: {:?}",
+        has_owned_load,
+        "A.1C.2b: closure body must emit LoadOwnedMutableCapture for \
+         `let mut` captures. Ops: {:?}",
         ops
     );
-    // After fix #3, no `DropLocal` can target a boxed slot. In this
-    // program slots 0 and 1 are the two boxed captures; the only
-    // `DropLocal` candidate would be a V1.1C leak, so the simplest
-    // assertion is that there is no `DropLocal` at all.
     assert!(
-        !ops.contains(&OpCode::DropLocal),
-        "flag-on: boxed slots must not receive DropLocal — the DropCall / \
-         Arc-refcount release path handles them. Got ops: {:?}",
+        has_owned_store,
+        "A.1C.2b: closure body must emit StoreOwnedMutableCapture for \
+         `let mut` captures. Ops: {:?}",
+        ops
+    );
+    // Negative: no `CloneLocal` for the captured slots. The two
+    // reads for `a + b` after the closure call use `LoadLocal` (the
+    // outer slot still holds the initial value; move-analysis is
+    // deferred).
+    let has_clone_local = ops.iter().any(|op| *op == OpCode::CloneLocal);
+    assert!(
+        !has_clone_local,
+        "A.1C.2b: captured-then-read `let mut` slots must not emit \
+         `CloneLocal` — the Raw path owns the cell and plain `LoadLocal` \
+         reads the original slot. Ops: {:?}",
         ops
     );
 }

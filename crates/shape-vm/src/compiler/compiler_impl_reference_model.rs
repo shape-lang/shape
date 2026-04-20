@@ -1389,53 +1389,44 @@ impl BytecodeCompiler {
             for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
                 if let Some(registry_layout) = self.closure_registry.get(type_id) {
                     if (fn_idx as usize) < total_fns {
-                        // Track A.1C.2: authoritative per-function kinds.
-                        // The registry may hold a layout whose masks were
-                        // set via `intern_with_kinds` (Shared/OwnedMutable
-                        // bits flipped). We rebuild the per-function layout
-                        // from the *sanitized* kinds vector so only
-                        // `Shared` captures get their mask bit set at this
-                        // commit; `OwnedMutable` captures stay on the
-                        // Phase D / legacy SharedCell body path and must
-                        // present an Immutable-shaped layout (zero
-                        // `owned_mutable_capture_mask`). A.1C.3 migrates
-                        // OwnedMutable to A.1B's
-                        // Load/StoreOwnedMutableCapture and removes the
-                        // sanitization.
+                        // Track A.1C.2b: authoritative per-function kinds.
+                        // Both `Shared` AND `OwnedMutable` captures flip
+                        // their corresponding mask bits — the compiler
+                        // now routes `let mut` captures through A.1B's
+                        // `Load/StoreOwnedMutableCapture` and `op_make_
+                        // closure` allocates `Box::into_raw(Box::new(
+                        // initial))` based on the
+                        // `owned_mutable_capture_mask` bit. The only
+                        // kind that still needs sanitizing to Immutable
+                        // is an edge case: when a `var` capture resolves
+                        // to a module binding (no local slot) we keep
+                        // the legacy SharedCell / LoadClosure path
+                        // (A.1C.1's outer-scope opcodes cover local
+                        // slots only). Those captures still reach us
+                        // classified as `CaptureKind::Shared` in the
+                        // `closure_capture_kinds` metadata, but the
+                        // compiler's closure-creation path emits a
+                        // `BoxModuleBinding` rather than an
+                        // `AllocSharedLocal`+`LoadLocal` pair, so the
+                        // Raw allocator would see a SharedCell-shaped
+                        // ValueWord on the stack instead of a
+                        // `*const SharedCell`. We fall back to the
+                        // registry-default Immutable layout shape in
+                        // that case — the legacy HeapValue::Closure
+                        // producer owns the allocation.
                         let per_fn_kinds = kinds_by_fn.get(&fn_idx);
                         let layout_arc = if let Some(kinds) = per_fn_kinds
                             && kinds.len() == registry_layout.capture_types.len()
                         {
-                            let sanitized_kinds: Vec<CaptureKind> = kinds
-                                .iter()
-                                .map(|k| match k {
-                                    CaptureKind::Shared => CaptureKind::Shared,
-                                    // OwnedMutable → Immutable-shaped
-                                    // layout (masks zero, FieldKind per
-                                    // the capture's natural width).
-                                    _ => CaptureKind::Immutable,
-                                })
-                                .collect();
-                            let has_any_shared = sanitized_kinds
-                                .iter()
-                                .any(|k| matches!(k, CaptureKind::Shared));
                             let rebuilt = ClosureLayout::from_capture_types(
                                 &registry_layout.capture_types,
-                                &sanitized_kinds,
+                                kinds,
                             );
                             // Preserve the authoritative per-capture
-                            // `capture_kinds` (including OwnedMutable)
-                            // for diagnostics and A.1D/E JIT lowering;
-                            // the MASKS come from the sanitized rebuild.
+                            // `capture_kinds` for diagnostics and
+                            // A.1D/E JIT lowering.
                             let mut rebuilt = rebuilt;
                             rebuilt.capture_kinds = (*kinds).clone();
-                            // Second guard: if the sanitization yielded no
-                            // Shared captures AND there are no OwnedMutable
-                            // annotations either, fall through to the
-                            // registry layout to keep Immutable-only
-                            // closures byte-identical to the pre-A.1C.2
-                            // emission.
-                            let _ = has_any_shared;
                             std::sync::Arc::new(rebuilt)
                         } else {
                             std::sync::Arc::new(registry_layout.clone())

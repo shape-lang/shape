@@ -916,17 +916,15 @@ pub struct BytecodeCompiler {
     /// / `StoreClosure`. Populated while compiling a closure body.
     pub(crate) shared_closure_captures: HashMap<String, u16>,
 
-    /// Closure Spec Phase D — subset of `mutable_closure_captures` that the
-    /// enclosing function's MIR storage plan classified as
-    /// `BindingStorageClass::LocalMutablePtr`. Maps captured variable name →
-    /// (upvalue_idx, FieldKind of the pointee type). When an identifier lookup
-    /// during closure-body compilation finds the name in this map, it emits
-    /// `LoadCaptureMutPtr<T>` / `StoreCaptureMutPtr<T>` instead of the legacy
-    /// `LoadClosure` / `StoreClosure`. When absent from this map (but present
-    /// in `mutable_closure_captures`), the legacy BoxLocal path is used —
-    /// Phase H will remove that path.
-    pub(crate) local_mutable_ptr_captures:
-        HashMap<String, (u16, shape_value::v2::struct_layout::FieldKind)>,
+    /// Track A.1C.2b: subset of `mutable_closure_captures` whose source
+    /// binding classifies as `CaptureKind::OwnedMutable` (a `let mut`
+    /// binding captured by move into a single closure). Maps captured
+    /// variable name → capture index. When the identifier lookup finds
+    /// a name in this map, the closure body emits
+    /// `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture` (A.1B)
+    /// instead of the legacy `LoadClosure` / `StoreClosure`. Populated
+    /// while compiling a closure body.
+    pub(crate) owned_mutable_closure_captures: HashMap<String, u16>,
 
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one
