@@ -1416,7 +1416,7 @@ pub fn serializable_to_nanboxed_with_layouts(
         }
         SerializableVMValue::Closure {
             function_id,
-            type_id: _type_id,
+            type_id,
             upvalues,
         } => {
             // Track A.2A: consult the receiver program's
@@ -1478,7 +1478,7 @@ pub fn serializable_to_nanboxed_with_layouts(
             // in-bounds via `write_capture_typed` at the typed width
             // dictated by the layout.
             let owned = unsafe {
-                let ptr = alloc_typed_closure(fid as u16, 0, &layout_arc);
+                let ptr = alloc_typed_closure(fid as u16, *type_id, &layout_arc);
                 for (i, bits) in capture_bits.iter().enumerate() {
                     match layout_arc.capture_storage_kind(i) {
                         CaptureKind::Immutable => {

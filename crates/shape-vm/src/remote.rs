@@ -27,6 +27,7 @@
 use serde::{Deserialize, Serialize};
 use shape_runtime::snapshot::{
     SerializableVMValue, SnapshotStore, nanboxed_to_serializable, serializable_to_nanboxed,
+    serializable_to_nanboxed_with_layouts,
 };
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::ValueWord;
@@ -673,15 +674,21 @@ fn execute_inner(
     };
     program.type_schema_registry = request.type_schemas;
 
-    // 2. Convert arguments from serializable form
+    // 2. Convert arguments from serializable form — layout-aware so that
+    // any closure-typed arg is rebuilt through the program's
+    // `closure_function_layouts` side-table (A.2B). A missing layout
+    // surfaces a hard error per the v2 closure closeout directive.
+    let closure_layouts_snapshot = program.closure_function_layouts.clone();
     let args: Vec<ValueWord> = request
         .arguments
         .iter()
         .map(|sv| {
-            serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
-                message: format!("Failed to deserialize argument: {}", e),
-                kind: RemoteErrorKind::ArgumentError,
-            })
+            serializable_to_nanboxed_with_layouts(sv, store, &closure_layouts_snapshot).map_err(
+                |e| RemoteCallError {
+                    message: format!("Failed to deserialize argument: {}", e),
+                    kind: RemoteErrorKind::ArgumentError,
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -703,7 +710,12 @@ fn execute_inner(
         let upvalues: Vec<shape_value::Upvalue> = upvalue_data
             .iter()
             .map(|sv| {
-                let nb = serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
+                let nb = serializable_to_nanboxed_with_layouts(
+                    sv,
+                    store,
+                    &closure_layouts_snapshot,
+                )
+                .map_err(|e| RemoteCallError {
                     message: format!("Failed to deserialize upvalue: {}", e),
                     kind: RemoteErrorKind::ArgumentError,
                 })?;
@@ -836,15 +848,20 @@ fn execute_inner_with_runtimes(
     };
     program.type_schema_registry = request.type_schemas;
 
-    // 2. Convert arguments from serializable form
+    // 2. Convert arguments from serializable form — layout-aware so
+    // closure-typed args are rebuilt via the program's
+    // `closure_function_layouts` side-table (A.2B).
+    let closure_layouts_snapshot = program.closure_function_layouts.clone();
     let args: Vec<ValueWord> = request
         .arguments
         .iter()
         .map(|sv| {
-            serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
-                message: format!("Failed to deserialize argument: {}", e),
-                kind: RemoteErrorKind::ArgumentError,
-            })
+            serializable_to_nanboxed_with_layouts(sv, store, &closure_layouts_snapshot).map_err(
+                |e| RemoteCallError {
+                    message: format!("Failed to deserialize argument: {}", e),
+                    kind: RemoteErrorKind::ArgumentError,
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -908,7 +925,12 @@ fn execute_inner_with_runtimes(
         let upvalues: Vec<shape_value::Upvalue> = upvalue_data
             .iter()
             .map(|sv| {
-                let nb = serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
+                let nb = serializable_to_nanboxed_with_layouts(
+                    sv,
+                    store,
+                    &closure_layouts_snapshot,
+                )
+                .map_err(|e| RemoteCallError {
                     message: format!("Failed to deserialize upvalue: {}", e),
                     kind: RemoteErrorKind::ArgumentError,
                 })?;
@@ -2707,5 +2729,85 @@ mod tests {
             }
             _ => panic!("Expected BlobNegotiationReply"),
         }
+    }
+
+    /// Track A.2B: a closure payload serialised through
+    /// `nanboxed_to_serializable` round-trips through
+    /// `serializable_to_nanboxed_with_layouts` when the receiver
+    /// supplies a matching `closure_function_layouts` slice. The wire
+    /// schema carries `function_id: u32` and `type_id: u32` so the
+    /// receiver can look up the capture signature without walking the
+    /// producer's upvalue bits.
+    #[test]
+    fn test_a2b_closure_arg_roundtrip_with_layouts() {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
+        };
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        let store = temp_store();
+
+        // Minimal closure: one F64 capture. Mirrors a value the client
+        // would send across the wire as a call argument.
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::F64],
+            &[CaptureKind::Immutable],
+        ));
+        let original_nb = unsafe {
+            let ptr = alloc_typed_closure(17, 42, &layout);
+            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(3.14).into_raw_bits());
+            let owned =
+                OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
+            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        };
+
+        // Outbound wire encode — use msgpack-compat rmp_serde (the same
+        // codec cross-node transports use today via `state.deserialize`).
+        let serialized = shape_runtime::snapshot::nanboxed_to_serializable(&original_nb, &store)
+            .expect("closure must serialise for cross-node transport");
+        let bytes = rmp_serde::to_vec(&serialized).expect("wire rmp_serde encode");
+        let decoded: SerializableVMValue =
+            rmp_serde::from_slice(&bytes).expect("wire rmp_serde decode");
+        match &decoded {
+            SerializableVMValue::Closure {
+                function_id,
+                type_id,
+                upvalues,
+            } => {
+                assert_eq!(*function_id, 17);
+                assert_eq!(*type_id, 42);
+                assert_eq!(upvalues.len(), 1);
+            }
+            other => panic!("expected Closure on the wire, got {:?}", other),
+        }
+
+        // Receiver-side reconstruction via the layout registry.
+        let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; 18];
+        layouts[17] = Some(std::sync::Arc::clone(&layout));
+        let restored = shape_runtime::snapshot::serializable_to_nanboxed_with_layouts(
+            &decoded, &store, &layouts,
+        )
+        .expect("layout-aware replay must succeed");
+        let handle = restored
+            .as_closure_handle()
+            .expect("restored value is a closure");
+        assert_eq!(handle.function_id(), 17);
+        assert_eq!(handle.type_id(), 42);
+        assert_eq!(handle.capture_count(), 1);
+        assert_eq!(handle.capture_as_value(0).as_f64(), Some(3.14));
+
+        // No layout → hard error. No legacy fallback.
+        let err = shape_runtime::snapshot::serializable_to_nanboxed_with_layouts(
+            &decoded,
+            &store,
+            &[],
+        )
+        .expect_err("missing layout must hard-error");
+        assert!(
+            err.to_string().contains("no ClosureLayout registered"),
+            "error surfaces missing-layout: {err}"
+        );
     }
 }
