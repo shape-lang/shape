@@ -48,6 +48,10 @@ impl JITCompiler {
             shared_lock_contended: r!("jit_shared_lock_contended"),
             shared_unlock_contended: r!("jit_shared_unlock_contended"),
 
+            // Session 1 Commit 3: outer-scope Shared-cell lifecycle.
+            alloc_shared_cell: r!("jit_alloc_shared_cell"),
+            arc_shared_release: r!("jit_arc_shared_release"),
+
             // TypedObject allocation + field store
             typed_object_alloc: r!("jit_typed_object_alloc"),
             typed_object_set_field: r!("jit_typed_object_set_field"),

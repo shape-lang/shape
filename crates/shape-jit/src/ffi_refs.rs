@@ -60,6 +60,19 @@ pub struct FFIFuncRefs {
     pub(crate) shared_lock_contended: FuncRef,
     pub(crate) shared_unlock_contended: FuncRef,
 
+    // Session 1 Commit 3: outer-scope Shared-cell lifecycle helpers.
+    //   `alloc_shared_cell`          — `Arc<SharedCell>` allocator called
+    //                                   from `MirToIR::initialize_shared_local_slots`
+    //                                   to materialise the cell behind a
+    //                                   SharedCow local slot at function
+    //                                   entry. Mirrors the interpreter's
+    //                                   `op_alloc_shared_local`.
+    //   `arc_shared_release`         — matching release, called from
+    //                                   `emit_drop` on SharedCow local
+    //                                   slots.  Mirrors `op_drop_shared_local`.
+    pub(crate) alloc_shared_cell: FuncRef,
+    pub(crate) arc_shared_release: FuncRef,
+
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,

@@ -110,6 +110,9 @@ impl JITCompiler {
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();
+                // Session 1 Commit 3: allocate Arc<SharedCell>s for
+                // every SharedCow local slot before the body runs.
+                mir_compiler.initialize_shared_local_slots();
                 mir_compiler.compile_body()?;
             }
             builder.finalize();
@@ -225,6 +228,9 @@ impl JITCompiler {
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();
+                // Session 1 Commit 3: allocate Arc<SharedCell>s for
+                // every SharedCow local slot before the body runs.
+                mir_compiler.initialize_shared_local_slots();
                 mir_compiler.compile_body()?;
                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                     eprintln!("[jit-mir] Compiled top-level code via MirToIR");

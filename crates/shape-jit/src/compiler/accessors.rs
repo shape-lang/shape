@@ -546,22 +546,47 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // paths call `jit_shared_lock_contended` /
     // `jit_shared_unlock_contended`.
     //
-    // The outer-scope `var` lifecycle opcodes (`AllocSharedLocal` /
-    // `LoadSharedLocal` / `StoreSharedLocal` / `DropSharedLocal` and
-    // the matching module-binding trio) remain gated — they allocate
-    // `Arc<SharedCell>` / reclaim shares, which is explicit follow-up
-    // work, not A.1E scope.
+    // Session 1 Commit 3: MirToIR now carries the infrastructure to
+    // lower the outer-scope `var` lifecycle opcodes
+    // (`AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
+    // `DropSharedLocal`) — see the `MirToIR::shared_local_slots`
+    // side-table populated from `StoragePlan::slot_classes`, the
+    // `initialize_shared_local_slots` helper that eagerly allocates
+    // one `Arc<SharedCell>` per SharedCow slot at function entry,
+    // the lock-gated `read_place` / `write_place` branches that
+    // mirror the interpreter's `op_load_shared_local` /
+    // `op_store_shared_local`, and the `emit_drop` branch that calls
+    // `jit_arc_shared_release` on the slot's share.
+    //
+    // The full end-to-end lift of the preflight gate still exhibits
+    // a cell-identity mismatch under the current JIT closure
+    // dispatch pipeline — see `project_jit_closure_fix.md`'s
+    // follow-up note. To keep the a1e gated e2e tests green (which
+    // rely on the outer frame staying interpreted while the closure
+    // body JIT-runs against the interpreter-allocated cell) the gate
+    // remains in place for the four local opcodes.
+    //
+    // The infrastructure is wired and tested at the FFI + preflight
+    // level so a follow-up commit can flip this match arm to `None`
+    // once the outer-frame cell-identity handshake is resolved.
+    //
+    // The module-binding variants remain gated for the same reason
+    // plus the per-module side-table requirement — their storage
+    // lives outside the MIR slot space.
     match opcode {
         OpCode::AllocSharedLocal
         | OpCode::LoadSharedLocal
         | OpCode::StoreSharedLocal
-        | OpCode::DropSharedLocal => {
-            Some("A.1C.1 outer-scope Shared-cell opcode; Cranelift lowering pending (follow-up to A.1E)")
-        }
+        | OpCode::DropSharedLocal => Some(
+            "Session 1 Commit 3: outer-scope `var` cell lifecycle; MirToIR \
+             infrastructure landed (shared_local_slots + alloc/release \
+             FFIs); preflight gate to be lifted in follow-up once \
+             outer-frame cell-identity handshake is resolved",
+        ),
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
         | OpCode::StoreSharedModuleBinding => Some(
-            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending (follow-up to A.1E)",
+            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending",
         ),
         _ => None,
     }
@@ -1016,17 +1041,49 @@ mod tests {
     // exactly which opcodes are still interpreter-only after A.1E.
 
     #[test]
-    fn a1e_preflight_still_rejects_outer_shared_opcodes() {
-        // These are the outer-scope `var` lifecycle opcodes —
-        // allocation, local read/write, drop, and module-binding
-        // parallels — that remain gated after A.1E. They allocate
-        // `Arc<SharedCell>` / reclaim shares and need their own JIT
-        // lowering work that is out of A.1E's scope.
+    fn session1_preflight_still_rejects_outer_shared_local_opcodes() {
+        // Session 1 Commit 3 lands the MirToIR infrastructure for
+        // lowering the outer-scope `var` lifecycle (see
+        // `shared_local_slots` side-table + `initialize_shared_local_slots`
+        // + lock-gated `read_place`/`write_place`/`emit_drop` branches).
+        //
+        // The preflight gate remains in place for the four local
+        // opcodes until the outer-frame cell-identity handshake is
+        // resolved — lifting the gate prematurely triggers a SIGSEGV
+        // in the JIT'd main's interaction with closure dispatch (see
+        // memory note `project_jit_closure_fix.md`). Pin the exact
+        // set still rejected.
         for op in [
             OpCode::AllocSharedLocal,
             OpCode::LoadSharedLocal,
             OpCode::StoreSharedLocal,
             OpCode::DropSharedLocal,
+        ] {
+            let program = BytecodeProgram {
+                instructions: vec![
+                    Instruction::new(op, Some(Operand::Local(0))),
+                    Instruction::simple(OpCode::ReturnValue),
+                ],
+                ..Default::default()
+            };
+            let report = preflight_jit_compatibility(&program);
+            assert!(
+                !report.can_jit(),
+                "Outer-scope Shared local opcode {:?} must remain \
+                 preflight-rejected until the cell-identity handshake \
+                 follow-up lands",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn session1_preflight_still_rejects_outer_shared_module_binding_opcodes() {
+        // The module-binding counterparts remain gated — their
+        // storage lives on a per-module side-table, not on a MIR slot,
+        // and needs its own lowering (A.1C.3 follow-up). This guard
+        // pins the exact set still rejected after Session 1 Commit 3.
+        for op in [
             OpCode::AllocSharedModuleBinding,
             OpCode::LoadSharedModuleBinding,
             OpCode::StoreSharedModuleBinding,
@@ -1041,7 +1098,8 @@ mod tests {
             let report = preflight_jit_compatibility(&program);
             assert!(
                 !report.can_jit(),
-                "Outer-scope Shared opcode {:?} must remain preflight-rejected after A.1E",
+                "Outer-scope Shared module-binding opcode {:?} must \
+                 remain preflight-rejected pending A.1C.3 JIT lowering",
                 op
             );
         }

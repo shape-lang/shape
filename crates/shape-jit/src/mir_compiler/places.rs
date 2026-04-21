@@ -435,6 +435,35 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.emit_shared_unlock(cell_ptr);
                     return Ok(value);
                 }
+                // Session 1 Commit 3: outer-scope Shared local slot.
+                // Structurally parallel to the A.1E `shared_capture_slots`
+                // branch above but backed by the slot's own
+                // `Arc<SharedCell>` pointer (materialised at function
+                // entry by `initialize_shared_local_slots`) instead of
+                // an inherited closure-capture share. The lock-gated
+                // load matches the interpreter's `op_load_shared_local`
+                // exactly: acquire the mutex, copy the payload bits
+                // from `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`, drop
+                // the guard.
+                //
+                // SAFETY: see `read_place`'s shared_capture_slots branch.
+                // The outer-scope lifecycle (alloc at entry, release
+                // at Drop(slot)) guarantees the cell pointer is non-
+                // null and lives for at least the duration of any
+                // JIT'd read/write on the slot.
+                if self.shared_local_slots.contains(slot) {
+                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let cell_ptr = self.builder.use_var(*var);
+                    self.emit_shared_lock(cell_ptr);
+                    let value = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::trusted(),
+                        cell_ptr,
+                        SHARED_CELL_VALUE_OFFSET,
+                    );
+                    self.emit_shared_unlock(cell_ptr);
+                    return Ok(value);
+                }
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
@@ -560,6 +589,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.emit_shared_unlock(cell_ptr);
                     return Ok(());
                 }
+                // Session 1 Commit 3: outer-scope Shared local slot
+                // write — structurally parallel to the
+                // `shared_capture_slots` branch above but the cell
+                // pointer lives in the slot's own Cranelift variable
+                // (set by `initialize_shared_local_slots` at entry).
+                // The lock-gated store matches
+                // `op_store_shared_local`: take the mutex, write the
+                // payload bits at
+                // `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`, drop the
+                // guard.
+                if self.shared_local_slots.contains(slot) {
+                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let var = *self.locals.get(slot).ok_or_else(|| {
+                        format!("MirToIR: unknown local slot {}", slot)
+                    })?;
+                    let cell_ptr = self.builder.use_var(var);
+                    let bits = self.coerce_value_to_i64_bits(val);
+                    self.emit_shared_lock(cell_ptr);
+                    self.builder.ins().store(
+                        MemFlags::trusted(),
+                        bits,
+                        cell_ptr,
+                        SHARED_CELL_VALUE_OFFSET,
+                    );
+                    self.emit_shared_unlock(cell_ptr);
+                    return Ok(());
+                }
 
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
                 let var = *self.locals.get(slot).ok_or_else(|| {
@@ -645,6 +701,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if matches!(place, Place::Local(_))
             && (self.owned_mutable_capture_slots.contains(&slot)
                 || self.shared_capture_slots.contains(&slot))
+        {
+            return Ok(());
+        }
+        // Session 1 Commit 3: SharedCow outer-scope local slots hold
+        // the raw `*const SharedCell` pointer bits of an Arc-shared
+        // cell allocated at function entry. Zeroing the slot would
+        // strand the cell (subsequent reads/writes would lock a null
+        // pointer). `emit_drop` handles reclaim via
+        // `jit_arc_shared_release`; this early-return preserves the
+        // cell pointer until that release runs.
+        if matches!(place, Place::Local(_))
+            && self.shared_local_slots.contains(&slot)
         {
             return Ok(());
         }

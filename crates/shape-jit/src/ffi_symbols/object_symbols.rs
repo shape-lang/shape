@@ -14,10 +14,10 @@ use super::super::ffi::conversion::{
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
-    jit_alloc_owned_mut_cell, jit_arc_shared_retain, jit_finalize_heap_closure, jit_format,
-    jit_get_prop, jit_hashmap_shape_id, jit_hashmap_value_at, jit_length, jit_make_closure,
-    jit_new_object, jit_object_rest, jit_set_prop, jit_shared_lock_contended,
-    jit_shared_unlock_contended,
+    jit_alloc_owned_mut_cell, jit_alloc_shared_cell, jit_arc_shared_release,
+    jit_arc_shared_retain, jit_finalize_heap_closure, jit_format, jit_get_prop,
+    jit_hashmap_shape_id, jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object,
+    jit_object_rest, jit_set_prop, jit_shared_lock_contended, jit_shared_unlock_contended,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
 use super::super::ffi::typed_object::jit_typed_object_get_field;
@@ -74,6 +74,20 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_shared_unlock_contended",
         jit_shared_unlock_contended as *const u8,
+    );
+    // Session 1 Commit 3: outer-scope Shared-cell lifecycle helpers.
+    //   `jit_alloc_shared_cell`      — allocates a fresh Arc<SharedCell>
+    //                                   when MirToIR initializes a
+    //                                   SharedCow local slot.
+    //   `jit_arc_shared_release`     — consumes one strong share when a
+    //                                   SharedCow slot is dropped.
+    builder.symbol(
+        "jit_alloc_shared_cell",
+        jit_alloc_shared_cell as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_shared_release",
+        jit_arc_shared_release as *const u8,
     );
     builder.symbol("jit_object_rest", jit_object_rest as *const u8);
     builder.symbol("jit_format", jit_format as *const u8);
@@ -290,6 +304,35 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_shared_unlock_contended", Linkage::Import, &sig)
             .expect("Failed to declare jit_shared_unlock_contended");
         ffi_funcs.insert("jit_shared_unlock_contended".to_string(), func_id);
+    }
+
+    // Session 1 Commit 3: jit_alloc_shared_cell(initial_bits: u64) -> u64.
+    // Allocates a fresh `Arc<SharedCell>` seeded with `initial_bits` and
+    // returns the raw pointer bits of the sole strong share.
+    // `MirToIR::initialize_shared_local_slots` calls this at function
+    // entry to materialise the cell that backs every SharedCow local.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // initial_bits (ValueWord)
+        sig.returns.push(AbiParam::new(types::I64)); // *const SharedCell
+        let func_id = module
+            .declare_function("jit_alloc_shared_cell", Linkage::Import, &sig)
+            .expect("Failed to declare jit_alloc_shared_cell");
+        ffi_funcs.insert("jit_alloc_shared_cell".to_string(), func_id);
+    }
+
+    // Session 1 Commit 3: jit_arc_shared_release(ptr: u64).
+    // Consumes exactly one strong share of the `Arc<SharedCell>` at
+    // `ptr`. `ptr == 0` is a no-op (matches the interpreter's
+    // `op_drop_shared_local` null-pointer guard). The JIT emits this
+    // on MIR `Drop(Local(slot))` when the slot is a SharedCow local.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ptr (*const SharedCell)
+        let func_id = module
+            .declare_function("jit_arc_shared_release", Linkage::Import, &sig)
+            .expect("Failed to declare jit_arc_shared_release");
+        ffi_funcs.insert("jit_arc_shared_release".to_string(), func_id);
     }
 
     // jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64

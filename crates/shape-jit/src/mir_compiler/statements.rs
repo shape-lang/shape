@@ -684,7 +684,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // the pointer bits into the capture slot. The
                     // allocator's (`AllocSharedLocal`'s `Arc::into_raw`)
                     // 8-byte alignment is preserved.
-                    let raw = self.compile_operand(op)?;
+                    //
+                    // Session 1 Commit 3: when the operand's source is
+                    // an outer-scope `var` slot in the SAME function's
+                    // MIR (a `SharedCow` local), the default
+                    // `compile_operand` would emit a lock-gated read of
+                    // the cell's payload. We bypass that via
+                    // `compile_operand_for_shared_capture`, which reads
+                    // the raw pointer bits directly from the slot's
+                    // Cranelift variable. For operands that are NOT
+                    // SharedCow slots (e.g. a capture inherited from
+                    // an outer-outer frame), the helper falls back to
+                    // the standard `compile_operand` path.
+                    let raw = self.compile_operand_for_shared_capture(op)?;
                     let val_ty = self.builder.func.dfg.value_type(raw);
                     // The pointer is a raw u64 bit pattern — for an
                     // outer `var` slot promoted to Shared storage,

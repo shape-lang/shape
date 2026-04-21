@@ -82,4 +82,53 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 .iconst(types::I64, 0i64),
         }
     }
+
+    /// Session 1 Commit 3: for every SharedCow local slot, allocate a
+    /// fresh `Arc<SharedCell>` and store its pointer bits into the
+    /// slot's Cranelift variable.
+    ///
+    /// The interpreter's `op_alloc_shared_local` promotes the slot
+    /// lazily (only at the first `MakeClosure` that captures it). The
+    /// JIT doesn't have visibility into that promotion point from MIR
+    /// (MIR sees plain `Assign` / `Drop` on the slot); instead we
+    /// eagerly allocate the cell at function entry. The initial
+    /// payload is `NONE_BITS` (u64::MAX / TAG_NULL tag pattern) —
+    /// subsequent `Assign` statements on the slot will lock-gated
+    /// store the real value through the cell.
+    ///
+    /// Must be called AFTER `initialize_locals` and BEFORE function
+    /// parameters are stored (shared locals are never parameters so
+    /// there is no ordering conflict, but callers follow the same
+    /// order for all setup helpers).
+    ///
+    /// SAFETY: the cell is allocated exactly once per function entry
+    /// and released exactly once by `emit_drop` when the MIR emits
+    /// `StatementKind::Drop(Place::Local(slot))` at scope exit. A
+    /// function that never emits a matching `Drop` would leak one
+    /// strong share per SharedCow slot; the MIR lowering pass is
+    /// responsible for emitting balanced `Drop` statements.
+    pub(crate) fn initialize_shared_local_slots(&mut self) {
+        if self.shared_local_slots.is_empty() {
+            return;
+        }
+        // Collect into a Vec to avoid borrowing self across the loop.
+        let slots: Vec<_> = self.shared_local_slots.iter().copied().collect();
+        for slot in slots {
+            let Some(&var) = self.locals.get(&slot) else {
+                continue;
+            };
+            // NONE_BITS — matches the interpreter's pre-AllocSharedLocal
+            // slot state (legacy NaN-boxed null sentinel). Using a
+            // well-known bit pattern avoids undefined bits in the cell.
+            let none_bits = shape_value::tag_bits::TAG_BASE
+                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
+            let init = self.builder.ins().iconst(types::I64, none_bits as i64);
+            let inst = self
+                .builder
+                .ins()
+                .call(self.ffi.alloc_shared_cell, &[init]);
+            let cell_ptr = self.builder.inst_results(inst)[0];
+            self.builder.def_var(var, cell_ptr);
+        }
+    }
 }

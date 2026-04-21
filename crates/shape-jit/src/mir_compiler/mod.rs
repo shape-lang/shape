@@ -216,6 +216,45 @@ pub struct MirToIR<'a, 'b> {
     /// disjoint). Empty when the function being compiled is not a
     /// closure body, or has no Shared captures.
     pub(crate) shared_capture_slots: HashSet<SlotId>,
+
+    // ── Session 1 Commit 3: outer-scope Shared-cell slot side-table ─
+    /// Local slots whose `BindingStorageClass` is `SharedCow` — i.e.
+    /// outer-scope `var` bindings that escape into a closure and hence
+    /// get promoted to `Arc<SharedCell>` storage by the bytecode
+    /// compiler (`AllocSharedLocal` on promotion;
+    /// `Load/StoreSharedLocal` on every subsequent access;
+    /// `DropSharedLocal` at scope exit — see
+    /// `shape-vm/src/executor/variables/mod.rs`).
+    ///
+    /// MIR doesn't reflect that promotion directly — it emits plain
+    /// `Assign(Local(s), ...)` and `Drop(Local(s))` on the slot — so
+    /// the JIT must recognise SharedCow slots via this side-table and
+    /// dispatch read/write/drop to the lock-gated + Arc-lifecycle
+    /// lowering path.
+    ///
+    /// Effects on the lowering pipeline:
+    /// - `initialize_shared_local_slots` (called once at the start of
+    ///   `compile`) allocates a fresh `Arc<SharedCell>` per slot via
+    ///   `jit_alloc_shared_cell(NONE_BITS)` and stores the pointer
+    ///   bits into the slot's Cranelift variable.
+    /// - `read_place(Local(s))` emits the inline lock-gated
+    ///   `load.i64 [cell_ptr + SHARED_CELL_VALUE_OFFSET]` (same lowering
+    ///   as `shared_capture_slots` — see
+    ///   `emit_shared_lock`/`emit_shared_unlock`).
+    /// - `write_place(Local(s), v)` emits the matching lock-gated
+    ///   store.
+    /// - `emit_drop(Local(s))` calls `jit_arc_shared_release` to
+    ///   consume the slot's strong share.
+    /// - `compile_operand_for_shared_capture` (new) emits a raw
+    ///   pointer read — bypassing the lock — so `ClosureCapture`
+    ///   operands install the outer cell pointer into the closure's
+    ///   Shared capture slot without locking.
+    ///
+    /// Disjoint from `owned_mutable_capture_slots` and
+    /// `shared_capture_slots` — those are leading-capture param slots
+    /// of a closure BODY; `shared_local_slots` is a declaring-scope
+    /// slot in the outer function.
+    pub(crate) shared_local_slots: HashSet<SlotId>,
 }
 
 /// Result of MIR preflight check.
@@ -386,6 +425,55 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `jit_make_closure` FFI path (Phase H will delete that).
         let non_escaping_closure_slots =
             mir_data.storage_plan.non_escaping_closure_slots.clone();
+
+        // Session 1 Commit 3: scan `storage_plan` for outer-scope
+        // local slots that actually get promoted to
+        // `Arc<SharedCell>` storage at runtime. The bytecode
+        // compiler emits `AllocSharedLocal` ONLY when a slot is
+        // captured by a closure AND gets the Shared capture kind —
+        // not for every SharedCow slot. The `SHAPE_V2_VAR_SHAREDCOW`
+        // default classifies every `var` binding as SharedCow even
+        // when it never escapes, so we cannot use the storage class
+        // alone.
+        //
+        // The authoritative signal is `slot_semantics[slot]
+        // .escape_status == Captured` AND
+        // `slot_classes[slot] == SharedCow`. Captured-by-closure +
+        // SharedCow is the exact condition under which the bytecode
+        // compiler emits `AllocSharedLocal` (see
+        // `expressions/closures.rs`'s `is_shared_local_slot` arm).
+        //
+        // Param slots (captures) are further excluded because they
+        // are governed by the capture-side-tables
+        // `owned_mutable_capture_slots` / `shared_capture_slots`.
+        use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
+        let param_slot_set: HashSet<SlotId> =
+            mir_data.mir.param_slots.iter().copied().collect();
+        let mut shared_local_slots: HashSet<SlotId> = HashSet::new();
+        for (slot, class) in &mir_data.storage_plan.slot_classes {
+            if !matches!(class, BindingStorageClass::SharedCow) {
+                continue;
+            }
+            if param_slot_set.contains(slot) {
+                continue;
+            }
+            // Only slots captured by a closure get the cell
+            // promotion at the bytecode level. A `var` that never
+            // escapes into a closure stays plain-valued in the
+            // interpreter — the JIT must match that semantics or
+            // diverge from the interpreter's view of the same slot.
+            let is_captured = mir_data
+                .storage_plan
+                .slot_semantics
+                .get(slot)
+                .map(|sem| matches!(sem.escape_status, EscapeStatus::Captured))
+                .unwrap_or(false);
+            if !is_captured {
+                continue;
+            }
+            shared_local_slots.insert(*slot);
+        }
+
         Self {
             builder,
             ctx_ptr,
@@ -410,6 +498,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             closure_function_layouts,
             owned_mutable_capture_slots: HashSet::new(),
             shared_capture_slots: HashSet::new(),
+            shared_local_slots,
         }
     }
 
@@ -523,6 +612,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub fn compile(&mut self) -> Result<(), String> {
         self.create_blocks();
         self.declare_locals();
+        // Session 1 Commit 3: eagerly materialise Arc<SharedCell>s for
+        // every SharedCow local slot. No-op when the set is empty.
+        self.initialize_shared_local_slots();
         self.compile_body()
     }
 

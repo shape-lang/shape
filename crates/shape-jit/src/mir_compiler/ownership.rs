@@ -61,6 +61,45 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// Session 1 Commit 3: compile an operand for a `ClosureCapture`
+    /// slot whose capture kind is `Shared`.
+    ///
+    /// Semantics: when the capture's source is an outer-scope `var`
+    /// local that has been promoted to `SharedCow` storage, the
+    /// closure capture needs the RAW `*const SharedCell` pointer bits
+    /// — not the locked payload. This matches the interpreter's
+    /// `expressions/closures.rs` path, which emits
+    /// `LoadLocal(outer_var_slot)` immediately after `AllocSharedLocal`
+    /// to push the pointer bits that `op_make_closure` then feeds
+    /// through `Arc::increment_strong_count`.
+    ///
+    /// For all other operand shapes (Constant, Copy/Move of a slot
+    /// that isn't a SharedCow local), defer to the standard
+    /// `compile_operand`. This keeps the legacy Immutable /
+    /// OwnedMutable capture paths untouched.
+    pub(crate) fn compile_operand_for_shared_capture(
+        &mut self,
+        operand: &Operand,
+    ) -> Result<Value, String> {
+        if let Operand::Move(place)
+        | Operand::MoveExplicit(place)
+        | Operand::Copy(place) = operand
+        {
+            if let Place::Local(slot) = place {
+                if self.shared_local_slots.contains(slot) {
+                    // Bypass the lock-gated read in `read_place` and
+                    // produce the raw pointer bits held in the slot's
+                    // Cranelift variable.
+                    let var = *self.locals.get(slot).ok_or_else(|| {
+                        format!("MirToIR: unknown local slot {}", slot)
+                    })?;
+                    return Ok(self.builder.use_var(var));
+                }
+            }
+        }
+        self.compile_operand(operand)
+    }
+
     /// Compile a MIR constant to a Cranelift value.
     ///
     /// Returns native types when possible (F64 for floats, I64 for ints, I8 for bools).
@@ -178,6 +217,42 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
+        // Session 1 Commit 3: SharedCow outer-scope local slots hold a
+        // raw `*const SharedCell` Arc pointer (allocated at function
+        // entry by `initialize_shared_local_slots`). The MIR emits
+        // `StatementKind::Drop(Place::Local(slot))` at scope exit; we
+        // consume the slot's one strong share via
+        // `jit_arc_shared_release`. Mirrors the interpreter's
+        // `op_drop_shared_local` handler: reconstruct `Arc::from_raw`,
+        // drop it (one atomic decrement), then overwrite the slot
+        // bits with 0 so any reentrant access reports a null pointer
+        // rather than dereferencing freed memory.
+        //
+        // SAFETY: the pointer is a live `Arc::into_raw`-produced
+        // `*const SharedCell` (from `jit_alloc_shared_cell`) with at
+        // least one outstanding strong share at the time of release.
+        // Additional shares minted by `jit_arc_shared_retain` for
+        // capturing closures are reclaimed independently by
+        // `release_typed_closure`.
+        if let Place::Local(slot_id) = place {
+            if self.shared_local_slots.contains(slot_id) {
+                let var = *self.locals.get(slot_id).ok_or_else(|| {
+                    format!("MirToIR: unknown local slot {}", slot_id)
+                })?;
+                let cell_ptr = self.builder.use_var(var);
+                self.builder
+                    .ins()
+                    .call(self.ffi.arc_shared_release, &[cell_ptr]);
+                // Mark the slot spent. 0 is a genuine null pointer,
+                // distinct from NONE_BITS; matches the interpreter's
+                // `self.stack[slot] = 0u64` step in
+                // `op_drop_shared_local`.
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                self.builder.def_var(var, zero);
+                return Ok(());
+            }
+        }
+
         let slot = place.root_local();
         let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
@@ -246,6 +321,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if self.owned_mutable_capture_slots.contains(slot_id)
                 || self.shared_capture_slots.contains(slot_id)
             {
+                return Ok(());
+            }
+        }
+
+        // Session 1 Commit 3: SharedCow outer-scope local slots: the
+        // "old value" is a `*const SharedCell` pointer — not a
+        // refcounted NaN-boxed heap value. `jit_arc_shared_release`
+        // runs once at `Drop(slot)`, not on every reassignment.
+        // Subsequent assignments only update the cell's payload
+        // via the lock-gated store in `write_place`; the cell
+        // pointer stays intact.
+        if let Place::Local(slot_id) = place {
+            if self.shared_local_slots.contains(slot_id) {
                 return Ok(());
             }
         }

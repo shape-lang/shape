@@ -423,6 +423,16 @@ impl JITCompiler {
                 // Initialize ALL locals with type-appropriate defaults.
                 mir_compiler.initialize_locals();
 
+                // Session 1 Commit 3: allocate Arc<SharedCell>s for
+                // every SharedCow local slot (outer-scope `var` bindings
+                // that escape into closures). After this call every
+                // SharedCow slot's Cranelift var holds the raw
+                // `*const SharedCell` pointer bits; subsequent
+                // read_place / write_place route through the lock-gated
+                // pointer-deref lowering, and `emit_drop` on the slot
+                // emits `jit_arc_shared_release` to balance the share.
+                mir_compiler.initialize_shared_local_slots();
+
                 // Store function parameters (including captures) to MIR local variables.
                 // MIR param_slots includes capture slots followed by user param slots.
                 // Entry block params: [ctx_ptr, capture0..N, param0..M]
@@ -572,16 +582,33 @@ impl JITCompiler {
             // `vm_only_opcode_reason`, so `bytecode_ok` is now `true`
             // for functions whose only cell opcodes are OwnedMutable.
             //
-            // A.1E still gates the Shared-cell opcodes
-            // (`LoadSharedCapture`, `StoreSharedCapture`,
-            // `AllocSharedLocal`, `LoadSharedLocal`, `StoreSharedLocal`,
-            // `DropSharedLocal`, `AllocSharedModuleBinding`,
-            // `LoadSharedModuleBinding`, `StoreSharedModuleBinding`) —
-            // until that lands, any function containing one of these
-            // opcodes MUST fall back to the interpreter. Keeping
-            // `bytecode_ok` as a hard requirement preserves that
-            // invariant and continues to block the MIR disjunction
-            // bypass that A.1D closed.
+            // A.1E closed the gap for the closure-body Shared-cell
+            // opcodes (`LoadSharedCapture` / `StoreSharedCapture`) via
+            // the `MirToIR::shared_capture_slots` side-table.
+            //
+            // Session 1 Commit 3 lands the MirToIR infrastructure for
+            // the outer-scope `var` cell lifecycle — the
+            // `MirToIR::shared_local_slots` side-table is populated
+            // from `StoragePlan::slot_classes`, function entry
+            // allocates one `Arc<SharedCell>` per SharedCow slot via
+            // `jit_alloc_shared_cell`, and `read_place`/`write_place`
+            // /`emit_drop` branch to lock-gated access +
+            // `jit_arc_shared_release`. The preflight gate for the
+            // four local opcodes (`AllocSharedLocal` /
+            // `LoadSharedLocal` / `StoreSharedLocal` /
+            // `DropSharedLocal`) REMAINS IN PLACE pending resolution
+            // of the outer-frame cell-identity handshake —
+            // lifting the gate prematurely segfaults the JIT'd
+            // outer frame's interaction with closure dispatch (see
+            // memory note `project_jit_closure_fix.md`).
+            //
+            // Still gated after this commit:
+            //   * the four outer-scope `var` local opcodes above;
+            //   * the three module-binding opcodes
+            //     (`AllocSharedModuleBinding`,
+            //     `LoadSharedModuleBinding`,
+            //     `StoreSharedModuleBinding`) — per-module side-table,
+            //     separate lowering (A.1C.3 follow-up).
             let _ = mir_ok;
             jit_compatible.push(bytecode_ok);
         }
