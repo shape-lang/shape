@@ -222,7 +222,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
                     self.builder.ins().store(MemFlags::new(), method_val, method_addr, 0);
 
-                    // v2-boundary: arg_count pushed as NaN-boxed number to ctx.stack
+                    // v2-boundary: arg_count pushed as raw i64 to ctx.stack.
+                    // jit_call_method decodes this via direct `as usize` — no NaN-box.
                     let actual_arg_count = if args.is_empty() { 0 } else { args.len() - 1 };
                     let argc_bits = actual_arg_count as i64;
                     let argc_val = self.builder.ins().iconst(types::I64, argc_bits as i64);
@@ -468,7 +469,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
                     }
 
-                    // v2-boundary: arg_count as NaN-boxed number on ctx.stack
+                    // v2-boundary: arg_count stored as a raw i64 on ctx.stack.
+                    // jit_call_value decodes this via direct `as usize` — no NaN-box.
                     let total_items = 1 + args.len() + 1; // callee + args + arg_count
                     let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);

@@ -220,18 +220,16 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             );
         }
 
-        // Pop arg_count
+        // Pop arg_count.
+        // ABI: the MIR producer stores arg_count as a raw i64 (see
+        // mir_compiler/terminators.rs CallValue lowering). We decode it directly
+        // as usize — do NOT attempt NaN-box decode.
         if ctx_ref.stack_ptr == 0 {
             if debug { eprintln!("[jit-call-value] BAIL: stack_ptr=0 at arg_count pop"); }
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
-        let arg_count_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-        let arg_count = if is_number(arg_count_bits) {
-            unbox_number(arg_count_bits) as usize
-        } else {
-            return TAG_NULL;
-        };
+        let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
 
         // Pop args (in reverse order, then we'll reverse)
         let mut args = Vec::with_capacity(arg_count);
@@ -459,7 +457,7 @@ pub extern "C" fn jit_control_fold(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(3.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 3u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             accumulator = jit_call_value(ctx);
@@ -520,7 +518,7 @@ pub extern "C" fn jit_control_map(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -579,7 +577,7 @@ pub extern "C" fn jit_control_filter(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -629,7 +627,7 @@ pub extern "C" fn jit_control_foreach(ctx: *mut JITContext, _count: usize) -> u6
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let _result = jit_call_value(ctx);
@@ -682,7 +680,7 @@ pub extern "C" fn jit_control_find(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -717,7 +715,7 @@ unsafe fn jit_callable_invoker(
         jit_ctx.stack[jit_ctx.stack_ptr] = nanboxed_to_jit_bits(arg);
         jit_ctx.stack_ptr += 1;
     }
-    jit_ctx.stack[jit_ctx.stack_ptr] = box_number(args.len() as f64);
+    jit_ctx.stack[jit_ctx.stack_ptr] = args.len() as u64; // arg_count (raw i64 ABI)
     jit_ctx.stack_ptr += 1;
 
     let result_bits = jit_call_value(jit_ctx as *mut JITContext);
@@ -938,7 +936,7 @@ pub extern "C" fn jit_control_find_index(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -994,7 +992,7 @@ pub extern "C" fn jit_control_some(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -1054,7 +1052,7 @@ pub extern "C" fn jit_control_every(ctx: *mut JITContext) -> u64 {
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
             ctx_ref.stack_ptr += 1;
 
             let result = jit_call_value(ctx);
@@ -1070,6 +1068,39 @@ pub extern "C" fn jit_control_every(ctx: *mut JITContext) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: the MIR CallValue producer stores arg_count as a raw i64
+    // (mir_compiler/terminators.rs). jit_call_value must decode it as a raw
+    // usize — not via unbox_number. Previously the decode went through
+    // unbox_number, which misread 1 as ~5e-324 and truncated to 0, dropping
+    // all args and promoting the first arg to the callee slot.
+    //
+    // This test exercises the decode end-to-end by laying out a stack of
+    // [callee, arg1..argN, arg_count] with a non-callable callee (TAG_NULL).
+    // After decode, jit_call_value pops arg_count + args + callee and bails
+    // at the "neither function nor closure" check. Correct decode leaves
+    // stack_ptr at 0; the old (buggy) decode would leave leftover args.
+    #[test]
+    fn jit_call_value_decodes_arg_count_as_raw_i64() {
+        for arg_count in [0usize, 1, 2, 3] {
+            let mut ctx = JITContext::default();
+            // Layout: [callee, arg0, ..., arg_{N-1}, arg_count]
+            ctx.stack[0] = TAG_NULL; // callee — non-callable, triggers BAIL after decode
+            for i in 0..arg_count {
+                ctx.stack[1 + i] = TAG_NULL;
+            }
+            // Producer writes arg_count as raw i64 via `iconst(I64, args.len())`.
+            ctx.stack[1 + arg_count] = arg_count as u64;
+            ctx.stack_ptr = 1 + arg_count + 1;
+
+            let result = jit_call_value(&mut ctx as *mut JITContext);
+            assert_eq!(result, TAG_NULL, "arg_count={}: expected BAIL → TAG_NULL", arg_count);
+            assert_eq!(
+                ctx.stack_ptr, 0,
+                "arg_count={}: stack not fully drained (incorrect decode)", arg_count
+            );
+        }
+    }
 
     #[test]
     fn native_fixed_arity_helpers_return_null_for_null_context() {

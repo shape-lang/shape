@@ -57,14 +57,15 @@ pub extern "C" fn jit_run_simulation(ctx: *mut JITContext, config_bits: u64) -> 
                 break;
             }
 
-            // Push: callee, state, row_index, arg_count
+            // Push: callee, state, row_index, arg_count.
+            // ABI: arg_count is a raw i64 (see jit_call_value decode).
             ctx_ref.stack[ctx_ref.stack_ptr] = handler_bits;
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = state;
             ctx_ref.stack_ptr += 1;
             ctx_ref.stack[ctx_ref.stack_ptr] = box_number(row_idx as f64);
             ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0); // arg_count = 2
+            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count = 2 (raw i64)
             ctx_ref.stack_ptr += 1;
 
             state = jit_call_value(ctx);

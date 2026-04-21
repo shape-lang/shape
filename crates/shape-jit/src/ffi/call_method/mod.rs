@@ -328,17 +328,15 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
 
         let ctx_ref = &mut *ctx;
 
-        // Pop arg_count from stack (number)
+        // Pop arg_count from stack.
+        // ABI: the MIR producer stores arg_count as a raw i64 (see
+        // mir_compiler/terminators.rs CallMethod lowering). We decode it directly
+        // as usize — do NOT attempt NaN-box decode.
         if ctx_ref.stack_ptr == 0 {
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
-        let arg_count_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-        let arg_count = if is_number(arg_count_bits) {
-            unbox_number(arg_count_bits) as usize
-        } else {
-            return TAG_NULL;
-        };
+        let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
 
         // Pop method_name from stack (string)
         if ctx_ref.stack_ptr == 0 {
