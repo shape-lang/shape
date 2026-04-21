@@ -73,6 +73,27 @@ impl BytecodeCompiler {
         &mut self,
         assign_expr: &shape_ast::ast::AssignExpr,
     ) -> Result<()> {
+        // Session 1 — Rust-move: `let mut` bindings captured by a
+        // closure are consumed at the capture site. Reject outer-scope
+        // writes to a moved binding with the same diagnostic used on
+        // the read path (use-after-move).
+        if let Expr::Identifier(name, target_span) = assign_expr.target.as_ref() {
+            if self.captured_let_mut_moved.contains_key(name) {
+                let move_span = self.captured_let_mut_moved[name];
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "[B0005] `let mut` binding '{name}' was moved into a closure and cannot \
+                         be assigned to in the outer scope afterwards (Rust-move semantics). \
+                         Use `var {name}` if the binding needs to be mutated in the outer scope \
+                         after capture."
+                    ),
+                    location: {
+                        let _ = move_span;
+                        Some(self.span_to_source_location(*target_span))
+                    },
+                });
+            }
+        }
         // Check for const reassignment (covers compound assignments like +=)
         if let Expr::Identifier(name, _) = assign_expr.target.as_ref() {
             if let Some(local_idx) = self.resolve_local(name) {

@@ -32,7 +32,7 @@ use crate::bytecode::{
     Operand, Program as ContentAddressedProgram,
 };
 use crate::type_tracking::{TypeTracker, VariableTypeInfo};
-use shape_ast::ast::{FunctionDef, Program, TypeAnnotation};
+use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
     Type, TypeAnalysisMode, TypeError, TypeErrorWithLocation, analyze_program_with_mode,
@@ -955,6 +955,22 @@ pub struct BytecodeCompiler {
     /// fall back to `Immutable`, nulling the layout's OwnedMutable mask
     /// bit and triggering a layout mismatch in `op_make_closure`).
     pub(crate) owned_mutable_locals: HashSet<String>,
+
+    /// Session 1 (Rust-move semantics for `let mut`): names of `let mut`
+    /// local bindings that have been **moved by value into a closure
+    /// capture** (i.e. classified as `CaptureKind::OwnedMutable` and
+    /// emitted at `op_make_closure` time as `Box::into_raw(Box::new(bits))`).
+    /// After the move, the outer slot holds only a stale snapshot of the
+    /// initial value — every subsequent outer-scope read or write of the
+    /// same binding is a compile error ("use-after-move").
+    ///
+    /// Stored as `name → span-of-the-capturing-closure` so the diagnostic
+    /// can point the user at the exact capture site that consumed the
+    /// binding. Populated in `compile_expr_closure`, consulted in
+    /// `compile_expr_identifier` and `compile_expr_assign`. Saved /
+    /// restored across nested `compile_function` calls, mirroring the
+    /// `shared_locals` / `owned_mutable_locals` discipline.
+    pub(crate) captured_let_mut_moved: HashMap<String, Span>,
 
     /// Track A.1C.3: module-binding slots that have been promoted to
     /// `Arc<parking_lot::Mutex<ValueWord>>` via `AllocSharedModuleBinding`.

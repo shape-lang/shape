@@ -1096,7 +1096,9 @@ impl BytecodeCompiler {
             }
 
             // Closures
-            Expr::FunctionExpr { params, body, .. } => self.compile_expr_closure(params, body),
+            Expr::FunctionExpr {
+                params, body, span, ..
+            } => self.compile_expr_closure(params, body, *span),
 
             // Conditionals
             Expr::Conditional {

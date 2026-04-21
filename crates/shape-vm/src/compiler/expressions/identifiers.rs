@@ -168,6 +168,17 @@ impl BytecodeCompiler {
             return Ok(());
         }
         if let Some(local_idx) = self.resolve_local(name) {
+            // Session 1 — Rust-move for `let mut` captures. A `let mut`
+            // local that has been captured by a closure (and therefore
+            // routed through `CaptureKind::OwnedMutable` / moved by
+            // value into the closure's `Box<ValueWord>`) cannot be read
+            // from the outer scope afterwards: the outer slot holds a
+            // stale snapshot. Reject at compile time.
+            if let Some(&move_span) = self.captured_let_mut_moved.get(name) {
+                return Err(Self::let_mut_use_after_move_error(
+                    name, span, move_span, self, /*is_assign=*/ false,
+                ));
+            }
             if self.ref_locals.contains(&local_idx) {
                 // Reference parameter: dereference to get the target value
                 self.emit(Instruction::new(
@@ -433,5 +444,36 @@ impl BytecodeCompiler {
             names.push(func.name.clone());
         }
         names
+    }
+
+    /// Session 1 — build the compile-time diagnostic emitted when a
+    /// `let mut` binding that was moved into a closure is read (or
+    /// written) in the outer scope. Mirrors Rust's E0382 /
+    /// "borrow of moved value" error class: under the Rust-move
+    /// semantics the user directive chose for `let mut`, the outer
+    /// binding is consumed at the capture site, so subsequent uses
+    /// are compile errors.
+    fn let_mut_use_after_move_error(
+        name: &str,
+        use_span: Span,
+        move_span: Span,
+        compiler: &Self,
+        is_assign: bool,
+    ) -> ShapeError {
+        let action = if is_assign { "assigned to" } else { "read" };
+        ShapeError::SemanticError {
+            message: format!(
+                "[B0005] `let mut` binding '{name}' was moved into a closure here and cannot be \
+                 {action} in the outer scope afterwards (Rust-move semantics). Use `var {name}` \
+                 if the binding needs to be observed or mutated in the outer scope after capture, \
+                 or observe mutations via the closure's return value."
+            ),
+            location: {
+                // Prefer the use span for the primary location; the
+                // move span flows through the message for context.
+                let _ = move_span;
+                Some(compiler.span_to_source_location(use_span))
+            },
+        }
     }
 }

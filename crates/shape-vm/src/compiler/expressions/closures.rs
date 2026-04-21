@@ -13,10 +13,15 @@ use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
     /// Compile a function expression (closure)
+    ///
+    /// `closure_span` is the span of the `||`/`|args|` expression itself
+    /// — used by Session 1's Rust-move move-after-capture diagnostic to
+    /// point at the capturing closure that consumed a `let mut` binding.
     pub(super) fn compile_expr_closure(
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[shape_ast::ast::Statement],
+        closure_span: Span,
     ) -> Result<()> {
         let closure_name = format!("__closure_{}", self.closure_counter);
         self.closure_counter += 1;
@@ -614,11 +619,15 @@ impl BytecodeCompiler {
                         // allocates `Box::into_raw(Box::new(bits))` into
                         // the Ptr slot. No cell wrapping, no SharedCell.
                         //
-                        // Move semantics (post-capture reads of the outer
-                        // slot being an error) is deferred — the compiler
-                        // does not yet enforce it. In practice, typical
-                        // `let mut` patterns don't read the outer slot
-                        // after capture.
+                        // Session 1 — Rust-move semantics: record the
+                        // binding as "moved into closure at closure_span"
+                        // so subsequent outer reads / writes fail at
+                        // compile time with a use-after-move diagnostic.
+                        // The `captured_let_mut_moved` map is consulted
+                        // in `compile_expr_identifier` (load path) and
+                        // `compile_expr_assign` (store path).
+                        self.captured_let_mut_moved
+                            .insert(captured.clone(), closure_span);
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
@@ -955,7 +964,7 @@ mod tests {
         );
 
         compiler
-            .compile_expr_closure(params, body)
+            .compile_expr_closure(params, body, Span::DUMMY)
             .expect("closure should compile");
 
         assert_eq!(
@@ -999,7 +1008,7 @@ mod tests {
         );
 
         compiler
-            .compile_expr_closure(params, body)
+            .compile_expr_closure(params, body, Span::DUMMY)
             .expect("closure should compile");
 
         assert_eq!(
@@ -1026,7 +1035,7 @@ mod tests {
             panic!("expected closure initializer");
         };
         compiler
-            .compile_expr_closure(params, body)
+            .compile_expr_closure(params, body, Span::DUMMY)
             .expect("closure should compile");
     }
 
@@ -1234,12 +1243,16 @@ mod tests {
         // `owned_mutable_capture_mask` and allocates a `Box<ValueWord>`
         // per capture instead of relying on the compiler to insert
         // typed read/write opcodes against a SharedCell-backed slot.
+        //
+        // Session 1 — Rust-move: the outer `n` read that used to tail
+        // this function is now a use-after-move error. The closure now
+        // returns the updated value instead, which preserves the
+        // OwnedMutable capture-kind classification the test audits.
         let program = compile_source(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\
-                 let f = |x: int| { n = n + x }\n\
+                 let f = |x: int| { n = n + x; n }\n\
                  f(5)\n\
-                 n\n\
              }\n\
              main()",
         );
@@ -1394,20 +1407,34 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_d_runtime_outer_reads_after_closure_completes() {
-        // Track A.1C.2b: post-capture, the closure owns the cell.
-        // Outer reads of a captured `let mut` slot observe the
-        // un-moved initial value. Move analysis is deferred, so the
-        // read compiles; its runtime value is the initial.
-        let val = run_program_top_level(
+    fn test_a1f_let_mut_outer_read_after_capture_is_use_after_move() {
+        // Session 1 — Rust-move semantics: the outer read of `n` after
+        // a closure has captured `let mut n` by move is now a compile
+        // error (B0005). This pin replaces the former
+        // `test_phase_d_runtime_outer_reads_after_closure_completes`,
+        // which asserted the stale-initial-value behaviour that those
+        // pre-move semantics produced. See planner-a's root-cause
+        // analysis at `jit-outer-frame-cell-identity.md §I.2`.
+        let err = try_compile_source(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\
                  { let f = || { n = n + 1 }; f() }\n\
                  n\n\
              }\n\
              main()",
-        );
-        assert_eq!(val.as_i64(), Some(0));
+        )
+        .expect_err("outer read after let-mut capture must fail at compile time");
+        match err {
+            shape_ast::error::ShapeError::SemanticError { message, .. } => {
+                assert!(
+                    message.contains("B0005")
+                        && message.contains("moved into a closure")
+                        && message.contains("'n'"),
+                    "expected Rust-move use-after-move diagnostic for `n`, got: {message}"
+                );
+            }
+            other => panic!("expected SemanticError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2383,12 +2410,15 @@ mod tests {
         // A.1B's Load/StoreOwnedMutableCapture regardless of the
         // pointee width. Typed Phase D opcodes (F64/I64/Bool) are
         // retired — the dynamic ValueWord path is universal.
+        //
+        // Session 1 — Rust-move: observe the mutated cell via the
+        // closure's return value; the outer binding is consumed at
+        // the capture site and outer reads are now compile errors.
         let int_prog = compile_source(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\
-                 let f = |x: int| { n = n + x }\n\
+                 let f = |x: int| { n = n + x; n }\n\
                  f(5)\n\
-                 n\n\
              }\n\
              main()",
         );
@@ -2398,9 +2428,8 @@ mod tests {
         let f64_prog = compile_source(
             "fn main() -> number {\n\
                  let mut x: number = 0.0\n\
-                 let f = |d: number| { x = x + d }\n\
+                 let f = |d: number| { x = x + d; x }\n\
                  f(1.5)\n\
-                 x\n\
              }\n\
              main()",
         );
@@ -2410,9 +2439,8 @@ mod tests {
         let bool_prog = compile_source(
             "fn main() -> bool {\n\
                  let mut flag: bool = false\n\
-                 let f = || { flag = true }\n\
+                 let f = || { flag = true; flag }\n\
                  f()\n\
-                 flag\n\
              }\n\
              main()",
         );
@@ -2621,12 +2649,14 @@ mod tests {
         // flips `owned_mutable_capture_mask` (bit 0). `op_make_closure`
         // reads the mask at creation time and allocates
         // `Box::into_raw(Box::new(initial))` into the Ptr slot.
+        //
+        // Session 1 — Rust-move: closure returns the updated value in
+        // place of the invalidated outer read.
         let program = compile_source(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\
-                 let f = |x: int| { n = n + x }\n\
+                 let f = |x: int| { n = n + x; n }\n\
                  f(5)\n\
-                 n\n\
              }\n\
              main()",
         );
@@ -2861,13 +2891,16 @@ mod tests {
     fn test_a1c2b_let_mut_closure_emits_owned_mutable_opcodes() {
         // Witness the full opcode migration end-to-end: the compiler
         // emits A.1B's OwnedMutable opcodes for let-mut captures.
+        //
+        // Session 1 — Rust-move: observe the accumulated cell via the
+        // closure's return value (the outer `x` read after capture is
+        // now a use-after-move compile error).
         let program = compile_source(
             "fn main() -> int {\n\
                  let mut x: int = 0\n\
-                 let inc = || { x = x + 1 }\n\
+                 let inc = || { x = x + 1; x }\n\
                  inc()\n\
                  inc()\n\
-                 x\n\
              }\n\
              main()",
         );

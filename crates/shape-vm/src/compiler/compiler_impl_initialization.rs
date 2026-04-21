@@ -126,6 +126,7 @@ impl BytecodeCompiler {
             boxed_locals: HashSet::new(),
             shared_locals: HashSet::new(),
             owned_mutable_locals: HashSet::new(),
+            captured_let_mut_moved: HashMap::new(),
             shared_module_bindings: HashSet::new(),
             shared_drop_locals: Vec::new(),
             permission_set: None,

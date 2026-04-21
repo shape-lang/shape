@@ -1026,6 +1026,12 @@ impl BytecodeCompiler {
         // scope (parallel to the ownership/boxed restoration above).
         let saved_shared_locals = std::mem::take(&mut self.shared_locals);
         let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
+        // Session 1 (Rust-move for let-mut captures): the moved-set is
+        // function-scoped — a `let mut` binding moved into a closure in
+        // the OUTER function must not leak its "moved" status into a
+        // nested function compilation. Restore on exit, matching the
+        // shared_locals discipline above.
+        let saved_captured_let_mut_moved = std::mem::take(&mut self.captured_let_mut_moved);
         // Track A.1C.2: snapshot the outer function's local binding
         // semantics. `compile_function` calls `type_tracker.clear_locals`
         // below to prepare the nested function's own slot indexing, which
@@ -1278,6 +1284,7 @@ impl BytecodeCompiler {
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
+                        self.captured_let_mut_moved = saved_captured_let_mut_moved;
                         self.type_tracker
                             .restore_local_binding_semantics(saved_local_binding_semantics);
                         self.param_locals = saved_param_locals;
@@ -1380,6 +1387,7 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
+        self.captured_let_mut_moved = saved_captured_let_mut_moved;
         self.type_tracker
             .restore_local_binding_semantics(saved_local_binding_semantics);
         self.current_function_params = saved_function_params;
