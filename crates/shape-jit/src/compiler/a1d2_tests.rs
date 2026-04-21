@@ -118,16 +118,19 @@ fn jit_run(source: &str) -> shape_wire::WireValue {
 
 #[test]
 fn a1d2_jit_let_mut_closure_body_is_natively_compiled() {
-    // Minimal `let mut` counter closure: `let mut x = 0; let f = || { x = x + 1 }`.
+    // Minimal `let mut` counter closure: `let mut x = 0; let f = || { x = x + 1; x }`.
     // The closure body emits `Load/StoreOwnedMutableCapture`. Before
     // A.1D.2, this would land in the mixed table as Interpreted(...);
     // under A.1D.2 it must appear as Native.
+    //
+    // Session 1 — Rust-move: observe the mutated cell via the closure's
+    // return value (the former `x` tail-read is now a use-after-move
+    // compile error).
     let source = r#"
         fn main() -> int {
             let mut x: int = 0
-            let f = || { x = x + 1 }
+            let f = || { x = x + 1; x }
             f()
-            x
         }
         main()
     "#;
@@ -151,12 +154,14 @@ fn a1d2_jit_let_mut_closure_preflight_did_not_reject() {
     // below. We also pin `preflight_count() > 0` to prove the gate
     // accepted at least one function (guarding against silent
     // whole-program rejection).
+    //
+    // Session 1 — Rust-move: observe the mutated cell via the closure's
+    // return value.
     let source = r#"
         fn main() -> int {
             let mut counter: int = 0
-            let f = || { counter = counter + 1 }
+            let f = || { counter = counter + 1; counter }
             f()
-            counter
         }
         main()
     "#;
@@ -244,14 +249,18 @@ fn a1d2_jit_let_mut_counter_increments() {
     //   - overwrite the cell pointer (SIGSEGV on next call),
     //   - increment the closure's capture arg instead of the cell
     //     (reads 1 every time; final value 1, not 3).
+    //
+    // Session 1 — Rust-move: the outer `x` read after the third `f()`
+    // is now a use-after-move compile error, so the closure returns
+    // the accumulator instead. The three `f()` calls still exercise
+    // the OwnedMutable cell mutation path across invocations.
     let source = r#"
         fn main() -> int {
             let mut x: int = 0
-            let f = || { x = x + 1 }
+            let f = || { x = x + 1; x }
             f()
             f()
             f()
-            x
         }
         main()
     "#;
@@ -277,14 +286,16 @@ fn a1d2_jit_let_mut_mixed_immutable() {
     // (written). The immutable capture stays on the Immutable fast path;
     // the `let mut` one routes through the cell. Result exercises both
     // paths coexisting in a single closure layout.
+    //
+    // Session 1 — Rust-move: observe `x` via the closure's return
+    // value. Two calls still exercise both capture kinds in concert.
     let source = r#"
         fn main() -> int {
             let base: int = 10
             let mut x: int = 0
-            let f = || { x = x + base }
+            let f = || { x = x + base; x }
             f()
             f()
-            x
         }
         main()
     "#;
@@ -308,14 +319,18 @@ fn a1d2_jit_let_mut_closure_release_drops_box() {
     // `Box::from_raw`. No leak / double-free should occur. This test
     // simply runs to completion under the sanitizers the workspace
     // enables; a double-free would crash here before returning.
+    //
+    // Session 1 — Rust-move: `let mut result` is the outer-scope
+    // sink. The inner `let mut x` must not be read in its declaring
+    // scope after capture; the closure returns its own updated cell
+    // and `result` absorbs that return value.
     let source = r#"
         fn main() -> int {
-            let mut result: int = 0
+            var result: int = 0
             {
                 let mut x: int = 42
-                let f = || { x = x + 1 }
-                f()
-                result = x
+                let f = || { x = x + 1; x }
+                result = f()
             }
             result
         }
