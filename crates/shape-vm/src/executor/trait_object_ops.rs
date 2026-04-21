@@ -147,25 +147,62 @@ impl VirtualMachine {
                         VTableEntry::FunctionId(func_id) => {
                             (ValueWord::from_function(*func_id), *func_id)
                         }
-                        // Closure spec §14.6 (H6.5): VTable closure entries
-                        // keep carrying their legacy `Vec<Upvalue>` because
-                        // the VTable itself predates the raw layout
-                        // plumbing; producing `HeapValue::Closure` here
-                        // keeps backward compatibility. The shim will read
-                        // this as Legacy backing (see
-                        // `VmClosureHandle::legacy`). A follow-up phase
-                        // can promote VTables to carry
-                        // `Arc<OwnedClosureBlock>` directly.
+                        // Track A.3: VTable closure entries carry only
+                        // `(function_id, type_id)`; captures are
+                        // resolved via the program's
+                        // `closure_function_layouts` registry and a
+                        // fresh `OwnedClosureBlock` is allocated for
+                        // each dispatch. Zero captures is the only
+                        // shape today — the compiler never emits a
+                        // vtable closure entry, so the captures vector
+                        // was empty on every prior invocation.
                         VTableEntry::Closure {
                             function_id,
-                            upvalues,
-                        } => (
-                            ValueWord::from_heap_value(HeapValue::Closure {
-                                function_id: *function_id,
-                                upvalues: upvalues.clone(),
-                            }),
-                            *function_id,
-                        ),
+                            type_id,
+                        } => {
+                            let fid = *function_id;
+                            let layout_arc = self
+                                .program
+                                .closure_function_layouts
+                                .get(fid as usize)
+                                .and_then(|slot| slot.as_ref())
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "VTable closure dispatch for function_id {} has no \
+                                         registered ClosureLayout (A.3 requires the program's \
+                                         closure_function_layouts side-table to carry the \
+                                         capture signature)",
+                                        fid
+                                    ))
+                                })?;
+                            if layout_arc.capture_count() != 0 {
+                                return Err(VMError::RuntimeError(format!(
+                                    "VTable closure for function_id {} declares {} captures; \
+                                     A.3 only supports zero-capture vtable entries (no producer \
+                                     emits captured vtable closures today)",
+                                    fid,
+                                    layout_arc.capture_count()
+                                )));
+                            }
+                            // SAFETY: `alloc_typed_closure` returns a
+                            // fresh block with refcount=1 and matching
+                            // layout; zero captures means the block is
+                            // ready without any per-capture writes.
+                            let owned = unsafe {
+                                let ptr = shape_value::v2::closure_raw::alloc_typed_closure(
+                                    fid as u16, *type_id, &layout_arc,
+                                );
+                                shape_value::v2::closure_raw::OwnedClosureBlock::from_raw(
+                                    ptr as *const u8,
+                                    layout_arc,
+                                )
+                            };
+                            (
+                                ValueWord::from_heap_value(HeapValue::ClosureRaw(owned)),
+                                fid as u16,
+                            )
+                        }
                     };
 
                     // Record IC with resolved function_id for future fast-path hits.
@@ -505,12 +542,15 @@ mod tests {
 
     #[test]
     fn test_vtable_closure_entry() {
+        // Track A.3: vtable closure entries now carry `(function_id,
+        // type_id)` only — captures are rebuilt at dispatch time via
+        // the program's `closure_function_layouts` registry.
         let mut methods = HashMap::new();
         methods.insert(
             "render".to_string(),
             VTableEntry::Closure {
                 function_id: 5,
-                upvalues: vec![],
+                type_id: 11,
             },
         );
 
@@ -522,12 +562,114 @@ mod tests {
         match vtable.methods.get("render") {
             Some(VTableEntry::Closure {
                 function_id,
-                upvalues,
+                type_id,
             }) => {
                 assert_eq!(*function_id, 5);
-                assert!(upvalues.is_empty());
+                assert_eq!(*type_id, 11);
             }
             other => panic!("Expected Closure entry, got {:?}", other),
+        }
+    }
+
+    /// Track A.3: a VTable closure entry whose registered layout
+    /// declares captures (>0) is rejected on dispatch — today's
+    /// compiler emits zero-capture vtable closures only; any future
+    /// producer must extend the vtable carrier with per-capture state
+    /// before the guard is relaxed.
+    #[test]
+    fn test_a3_vtable_closure_dispatch_rejects_captured_layout() {
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Wire a single-capture layout at function_id 0.
+        let layout = Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::Immutable],
+        ));
+        vm.program.closure_function_layouts = vec![Some(layout)];
+
+        let mut methods = HashMap::new();
+        methods.insert(
+            "render".to_string(),
+            VTableEntry::Closure {
+                function_id: 0,
+                type_id: 0,
+            },
+        );
+        let vtable = Arc::new(VTable {
+            trait_names: vec!["Renderable".to_string()],
+            methods,
+        });
+        let trait_obj = ValueWord::from_trait_object(ValueWord::from_i64(5), vtable);
+
+        vm.push_value(trait_obj);
+        vm.push_value(ValueWord::from_string(Arc::new("render".to_string())));
+        vm.push_value(ValueWord::from_f64(0.0));
+
+        let instr = Instruction {
+            opcode: OpCode::DynMethodCall,
+            operand: None,
+        };
+        let result = vm.exec_trait_object_ops(&instr, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            VMError::RuntimeError(msg) => {
+                assert!(
+                    msg.contains("zero-capture vtable entries"),
+                    "error must mention zero-capture guard, got: {msg}"
+                );
+            }
+            other => panic!("Expected RuntimeError, got {:?}", other),
+        }
+    }
+
+    /// Track A.3: a VTable closure entry missing its matching
+    /// `ClosureLayout` in the program's `closure_function_layouts`
+    /// side-table must surface a hard-error (`RuntimeError`) on
+    /// dispatch — no legacy `HeapValue::Closure` fallback exists.
+    #[test]
+    fn test_a3_vtable_closure_dispatch_without_layout_errors() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Build a vtable with a closure entry at function_id 0 —
+        // the program's `closure_function_layouts` is empty so
+        // dispatch must fail loudly rather than silently producing a
+        // Legacy-backed closure.
+        let mut methods = HashMap::new();
+        methods.insert(
+            "render".to_string(),
+            VTableEntry::Closure {
+                function_id: 0,
+                type_id: 0,
+            },
+        );
+        let vtable = Arc::new(VTable {
+            trait_names: vec!["Renderable".to_string()],
+            methods,
+        });
+        let trait_obj = ValueWord::from_trait_object(ValueWord::from_i64(5), vtable);
+
+        // Stack layout for DynMethodCall: [trait_object, method_name, arg_count]
+        vm.push_value(trait_obj);
+        vm.push_value(ValueWord::from_string(Arc::new("render".to_string())));
+        vm.push_value(ValueWord::from_f64(0.0));
+
+        let instr = Instruction {
+            opcode: OpCode::DynMethodCall,
+            operand: None,
+        };
+        let result = vm.exec_trait_object_ops(&instr, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            VMError::RuntimeError(msg) => {
+                assert!(
+                    msg.contains("no registered ClosureLayout"),
+                    "error must mention missing layout, got: {msg}"
+                );
+            }
+            other => panic!("Expected RuntimeError, got {:?}", other),
         }
     }
 

@@ -198,11 +198,23 @@ pub struct VTable {
 pub enum VTableEntry {
     /// A compiled function by ID
     FunctionId(u16),
-    /// A closure with captured upvalues
-    Closure {
-        function_id: u16,
-        upvalues: Vec<Upvalue>,
-    },
+    /// A closure implementation of a trait method.
+    ///
+    /// Track A.3: VTable closure entries now carry `(function_id,
+    /// type_id)` instead of a legacy `Vec<Upvalue>`. Dispatch allocates
+    /// a fresh `OwnedClosureBlock` per call via the program's
+    /// `closure_function_layouts` registry so the call convention sees
+    /// the same raw `TypedClosureHeader` shape that
+    /// `op_make_closure` emits today.
+    ///
+    /// No producer for this variant ships today — vtable closure
+    /// methods have never been constructed by the compiler. The
+    /// representation is kept (a) so `VTableEntry` remains expressive
+    /// enough to describe closure-as-method dispatch if the compiler
+    /// lights up the feature, and (b) so Track A.5 can retire
+    /// `HeapValue::Closure` without a data-shape edit to the vtable
+    /// carrier.
+    Closure { function_id: u32, type_id: u32 },
 }
 
 /// Create a VMArray from an iterator of ValueWord values.
