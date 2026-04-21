@@ -355,14 +355,11 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
 
         HeapValue::FunctionRef { name, .. } => WireValue::FunctionRef { name: name.clone() },
 
-        // Closure spec H6.4: pure discriminator — no field reads, so
-        // there is nothing to route through `VmClosureHandle`. The wire
+        // Track A.5: only the `ClosureRaw` variant survives. The wire
         // format erases closure internals and emits a fixed
-        // "<closure>" FunctionRef regardless of the backing. The variant
-        // pattern stays for exhaustive-match coverage; the H6.5 producer
-        // swap (Arc<HeapValue::Closure> → raw TypedClosureHeader) is
-        // transparent here — wire bytes are unchanged.
-        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => WireValue::FunctionRef {
+        // "<closure>" FunctionRef — byte-for-byte compatible with the
+        // pre-A.5 output.
+        HeapValue::ClosureRaw(..) => WireValue::FunctionRef {
             name: "<closure>".to_string(),
         },
 
@@ -1649,13 +1646,12 @@ mod tests {
         }
     }
 
-    /// Closure spec §14.6 (H6.5): a `HeapValue::ClosureRaw` must
-    /// serialize to the same `WireValue::FunctionRef { name: "<closure>" }`
-    /// shape as the legacy `HeapValue::Closure` variant — the wire format
-    /// erases closure internals and downstream peers need to observe no
-    /// difference between the two producer backings.
+    /// Track A.5: `HeapValue::ClosureRaw` serializes to a fixed
+    /// `WireValue::FunctionRef { name: "<closure>" }` — the wire format
+    /// erases closure internals. This is the canonical behaviour now
+    /// that the legacy variant is gone.
     #[test]
-    fn test_h6_5_closure_raw_wire_roundtrip() {
+    fn test_closure_raw_wire_roundtrip() {
         use shape_value::heap_value::HeapValue;
         use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
         use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
@@ -1673,25 +1669,14 @@ mod tests {
             shape_value::ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
         };
 
-        // Also build a legacy closure value for comparison.
-        let legacy_nb = shape_value::ValueWord::from_heap_value(HeapValue::Closure {
-            function_id: 3,
-            upvalues: vec![shape_value::Upvalue::new(
-                shape_value::ValueWord::from_i64(0),
-            )],
-        });
-
         let ctx = get_dummy_context();
         let raw_wire = nb_to_wire(&raw_nb, &ctx);
-        let legacy_wire = nb_to_wire(&legacy_nb, &ctx);
 
-        // Both variants erase to the same WireValue.
         assert_eq!(
             raw_wire,
             WireValue::FunctionRef {
                 name: "<closure>".to_string()
             }
         );
-        assert_eq!(raw_wire, legacy_wire);
     }
 }

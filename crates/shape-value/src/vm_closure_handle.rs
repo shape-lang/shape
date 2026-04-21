@@ -1,98 +1,52 @@
-//! `VmClosureHandle` — a read-only shim over closure backing storage.
+//! `VmClosureHandle` — a read-only shim over the raw closure backing.
 //!
-//! # Closure spec §14.2 (H6.1)
+//! # Closure spec §14.2
 //!
-//! Closure state is currently stored in `HeapValue::Closure { function_id,
-//! upvalues }` (an `Arc<HeapValue>` enum variant). The H6.5 migration will
-//! swap the producer side to emit raw `*const TypedClosureHeader` blocks,
-//! matching the JIT's Phase H1 memory layout exactly. Between now and
-//! H6.6 (where the enum variant is finally deleted), VM and tooling
-//! consumers need a stable API that can read closure state regardless of
-//! which backing is in use.
+//! Closure state is stored in [`crate::heap_value::HeapValue::ClosureRaw`],
+//! backed by a raw `*const TypedClosureHeader` block whose capture layout
+//! is described by a [`ClosureLayout`]. `VmClosureHandle` is the stable
+//! read API over that backing — readers go through the handle so any
+//! future backing changes remain contained.
 //!
-//! `VmClosureHandle` is that API. H6.1 introduces it additively — no
-//! consumer has migrated yet. H6.2–H6.4 migrate readers, H6.5 swaps the
-//! producer, H6.6 deletes the legacy variant.
+//! Track A.5 retired the legacy `HeapValue::Closure { function_id,
+//! upvalues }` variant and its `ClosureBacking::Legacy` shim variant —
+//! every closure is now `ClosureRaw`-backed.
 //!
 //! # API surface
 //!
 //! ```ignore
 //! handle.function_id()          // u32 function table index
-//! handle.type_id()              // u32 ClosureTypeId (0 in Legacy backing)
+//! handle.type_id()              // u32 ClosureTypeId
 //! handle.capture_count()
 //! handle.capture_as_value(i)    // widen capture i to ValueWord
 //! handle.captures_as_values()   // Vec<ValueWord> of all captures
-//! handle.refcount()             // best-effort refcount
+//! handle.refcount()             // exact refcount on the block
 //! ```
-//!
-//! # Backings
-//!
-//! * `Legacy` — backed by a borrowed `&[Upvalue]` slice and a stored
-//!   `function_id`, constructed via [`VmClosureHandle::legacy`]. Used
-//!   while `HeapValue::Closure` remains the primary closure variant.
-//! * `Raw` — backed by a `*const TypedClosureHeader` + `&ClosureLayout`,
-//!   constructed via [`VmClosureHandle::raw`]. Used once H6.5 swaps the
-//!   producer and, today, by tests that exercise the raw allocator
-//!   directly.
 
 use crate::v2::closure_layout::{CaptureKind, ClosureLayout, SharedCell, TypedClosureHeader};
 use crate::v2::closure_raw::{
     read_capture_as_value_bits, typed_closure_function_id, typed_closure_refcount,
     typed_closure_type_id,
 };
-use crate::value::Upvalue;
 use crate::value_word::{ValueWord, ValueWordExt};
-
-/// Storage backing for a `VmClosureHandle`.
-///
-/// Both variants borrow their respective storage — construction is cheap
-/// and the handle itself is a thin read-only facade.
-enum ClosureBacking<'a> {
-    /// Pre-H6.5: closure state lives inside `HeapValue::Closure {
-    /// function_id, upvalues }`.
-    Legacy {
-        function_id: u32,
-        upvalues: &'a [Upvalue],
-    },
-    /// Post-H6.5: closure state lives in a raw `TypedClosureHeader` block
-    /// whose capture layout is described by `layout`.
-    ///
-    /// # Safety invariant
-    ///
-    /// `ptr` must have been returned by
-    /// [`crate::v2::closure_raw::alloc_typed_closure`] paired with the
-    /// exact `layout` reference carried here, and must still be live for
-    /// the borrow `'a`.
-    Raw {
-        ptr: *const TypedClosureHeader,
-        layout: &'a ClosureLayout,
-    },
-}
 
 /// Read-only handle to a closure's function id, type id, and captures.
 ///
-/// Construction is a cheap reborrow over the backing storage — no
-/// allocation, no refcount traffic.
+/// Construction is a cheap reborrow over the `TypedClosureHeader`
+/// block + its `ClosureLayout` — no allocation, no refcount traffic.
+///
+/// # Safety invariant
+///
+/// `ptr` must have been returned by
+/// [`crate::v2::closure_raw::alloc_typed_closure`] paired with the
+/// exact `layout` reference carried here, and must still be live for
+/// the borrow `'a`.
 pub struct VmClosureHandle<'a> {
-    backing: ClosureBacking<'a>,
+    ptr: *const TypedClosureHeader,
+    layout: &'a ClosureLayout,
 }
 
 impl<'a> VmClosureHandle<'a> {
-    /// Construct a handle over the legacy `HeapValue::Closure` backing.
-    ///
-    /// The legacy backing stores `function_id` as a `u16`; it is widened
-    /// to `u32` here so the handle's public API is stable across the
-    /// H6.5 swap (the raw backing uses `u32` throughout).
-    #[inline]
-    pub fn legacy(function_id: u16, upvalues: &'a [Upvalue]) -> Self {
-        VmClosureHandle {
-            backing: ClosureBacking::Legacy {
-                function_id: function_id as u32,
-                upvalues,
-            },
-        }
-    }
-
     /// Construct a handle over a raw `TypedClosureHeader` block.
     ///
     /// # Safety
@@ -106,66 +60,40 @@ impl<'a> VmClosureHandle<'a> {
     ///   [`read_capture_as_value_bits`] can safely decode.
     #[inline]
     pub unsafe fn raw(ptr: *const TypedClosureHeader, layout: &'a ClosureLayout) -> Self {
-        VmClosureHandle {
-            backing: ClosureBacking::Raw { ptr, layout },
-        }
+        VmClosureHandle { ptr, layout }
     }
 
     /// Function table index for the closure body.
-    ///
-    /// The legacy backing stores this as `u16`; the raw backing stores
-    /// it as `u32`. Both are widened to `u32` here.
     #[inline]
     pub fn function_id(&self) -> u32 {
-        match self.backing {
-            ClosureBacking::Legacy { function_id, .. } => function_id,
-            ClosureBacking::Raw { ptr, .. } => {
-                // SAFETY: the Raw constructor requires `ptr` to be a live
-                // `TypedClosureHeader`; reading the 4-byte `function_id`
-                // at offset 8 is in-bounds.
-                unsafe { typed_closure_function_id(ptr as *const u8) as u32 }
-            }
-        }
+        // SAFETY: the Raw constructor requires `ptr` to be a live
+        // `TypedClosureHeader`; reading the 4-byte `function_id`
+        // at offset 8 is in-bounds.
+        unsafe { typed_closure_function_id(self.ptr as *const u8) as u32 }
     }
 
-    /// `ClosureTypeId` for the closure's capture layout, or `0` for
-    /// Legacy-backed handles (which do not carry a per-closure layout id
-    /// — the layout is implicit in the `upvalues` slice's length and per-
-    /// element dynamic types).
+    /// `ClosureTypeId` for the closure's capture layout.
     #[inline]
     pub fn type_id(&self) -> u32 {
-        match self.backing {
-            ClosureBacking::Legacy { .. } => 0,
-            ClosureBacking::Raw { ptr, .. } => {
-                // SAFETY: see `function_id` above — same live-block
-                // invariant covers the 4-byte read at offset 12.
-                unsafe { typed_closure_type_id(ptr as *const u8) }
-            }
-        }
+        // SAFETY: see `function_id` above — same live-block
+        // invariant covers the 4-byte read at offset 12.
+        unsafe { typed_closure_type_id(self.ptr as *const u8) }
     }
 
     /// Number of captures.
     #[inline]
     pub fn capture_count(&self) -> usize {
-        match self.backing {
-            ClosureBacking::Legacy { upvalues, .. } => upvalues.len(),
-            ClosureBacking::Raw { layout, .. } => layout.capture_count(),
-        }
+        self.layout.capture_count()
     }
 
     /// Read capture `i` as a `ValueWord`.
     ///
-    /// For the Legacy backing, this delegates to `Upvalue::get()` which
-    /// auto-deref's through a `HeapValue::SharedCell` wrapper when
-    /// present (mutable-shared captures).
-    ///
-    /// For the Raw backing, the capture's typed native width is read and
-    /// widened to a `ValueWord` bit pattern via
-    /// [`read_capture_as_value_bits`].
+    /// The capture's typed native width is read and widened to a
+    /// `ValueWord` bit pattern via [`read_capture_as_value_bits`].
     ///
     /// # Track A.1B — CaptureKind dispatch
     ///
-    /// When the Raw backing's layout marks capture `i` as
+    /// When the layout marks capture `i` as
     /// [`CaptureKind::OwnedMutable`], the slot stores `*mut ValueWord` —
     /// this method dereferences the box and returns the inner value.
     /// When the layout marks it [`CaptureKind::Shared`], the slot stores
@@ -176,53 +104,49 @@ impl<'a> VmClosureHandle<'a> {
     /// This widening is correct for debug/print/equality/wire paths that
     /// want the *current value* of a mutable-cell capture. Execution-path
     /// readers (the A.1B MIR opcodes) go through
-    /// [`capture_owned_mutable_ptr`] / [`capture_shared_cell_ptr`] so
-    /// writes propagate to the underlying cell.
+    /// [`Self::capture_owned_mutable_ptr`] /
+    /// [`Self::capture_shared_cell_ptr`] so writes propagate to the
+    /// underlying cell.
     ///
     /// # Panics
     ///
     /// Panics if `i >= self.capture_count()`.
     #[inline]
     pub fn capture_as_value(&self, i: usize) -> ValueWord {
-        match self.backing {
-            ClosureBacking::Legacy { upvalues, .. } => upvalues[i].get(),
-            ClosureBacking::Raw { ptr, layout } => {
-                match layout.capture_storage_kind(i) {
-                    CaptureKind::Immutable => {
-                        // SAFETY: the Raw constructor guarantees `ptr` +
-                        // `layout` match and that the block is live.
-                        // `i < capture_count` is upheld by the caller
-                        // (panics on overflow at the layout accessor).
-                        let bits = unsafe {
-                            read_capture_as_value_bits(ptr as *const u8, layout, i)
-                        };
-                        ValueWord::from_raw_bits(bits)
-                    }
-                    CaptureKind::OwnedMutable => {
-                        let cell = unsafe { owned_mutable_cell_ptr(ptr, layout, i) };
-                        // SAFETY: `cell` is a live `*mut ValueWord` from
-                        // `Box::into_raw` (see A.1B `op_make_closure`).
-                        // Reading 8 bytes is in-bounds and aligned. The
-                        // box is not mutated concurrently — OwnedMutable
-                        // has no sharing semantics.
-                        unsafe { std::ptr::read(cell) }
-                    }
-                    CaptureKind::Shared => {
-                        let cell_ptr = unsafe { shared_cell_ptr(ptr, layout, i) };
-                        // SAFETY: `cell_ptr` is a live `*const SharedCell`
-                        // from `Arc::into_raw`. Reborrowing it for the
-                        // duration of the lock is safe because the
-                        // closure's block holds the strong-count share
-                        // and is alive for the lifetime of this handle.
-                        // The mutex is held only for the clone.
-                        unsafe {
-                            let cell: &SharedCell = &*cell_ptr;
-                            let guard = cell.lock();
-                            let bits = *guard;
-                            drop(guard);
-                            bits
-                        }
-                    }
+        match self.layout.capture_storage_kind(i) {
+            CaptureKind::Immutable => {
+                // SAFETY: the Raw constructor guarantees `ptr` +
+                // `layout` match and that the block is live.
+                // `i < capture_count` is upheld by the caller
+                // (panics on overflow at the layout accessor).
+                let bits = unsafe {
+                    read_capture_as_value_bits(self.ptr as *const u8, self.layout, i)
+                };
+                ValueWord::from_raw_bits(bits)
+            }
+            CaptureKind::OwnedMutable => {
+                let cell = unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) };
+                // SAFETY: `cell` is a live `*mut ValueWord` from
+                // `Box::into_raw` (see A.1B `op_make_closure`).
+                // Reading 8 bytes is in-bounds and aligned. The
+                // box is not mutated concurrently — OwnedMutable
+                // has no sharing semantics.
+                unsafe { std::ptr::read(cell) }
+            }
+            CaptureKind::Shared => {
+                let cell_ptr = unsafe { shared_cell_ptr(self.ptr, self.layout, i) };
+                // SAFETY: `cell_ptr` is a live `*const SharedCell`
+                // from `Arc::into_raw`. Reborrowing it for the
+                // duration of the lock is safe because the
+                // closure's block holds the strong-count share
+                // and is alive for the lifetime of this handle.
+                // The mutex is held only for the clone.
+                unsafe {
+                    let cell: &SharedCell = &*cell_ptr;
+                    let guard = cell.lock();
+                    let bits = *guard;
+                    drop(guard);
+                    bits
                 }
             }
         }
@@ -233,16 +157,13 @@ impl<'a> VmClosureHandle<'a> {
     /// auto-deref.
     ///
     /// For [`CaptureKind::Immutable`] captures this returns the ValueWord
-    /// bit pattern (identical to [`capture_as_value`]'s result).
+    /// bit pattern (identical to [`Self::capture_as_value`]'s result).
     ///
     /// For [`CaptureKind::OwnedMutable`] captures this returns the raw
     /// `*mut ValueWord` pointer bits (cast to `u64`).
     ///
     /// For [`CaptureKind::Shared`] captures this returns the raw
     /// `*const SharedCell` pointer bits (cast to `u64`).
-    ///
-    /// The Legacy backing returns `Upvalue::get()`'s widened value — it
-    /// has no mutable-cell pointer semantics.
     ///
     /// Used by the closure-call plumbing to populate `frame.upvalues` so
     /// the A.1B MIR opcodes
@@ -255,28 +176,23 @@ impl<'a> VmClosureHandle<'a> {
     /// Panics if `i >= self.capture_count()`.
     #[inline]
     pub fn capture_execution_bits(&self, i: usize) -> u64 {
-        match self.backing {
-            ClosureBacking::Legacy { upvalues, .. } => upvalues[i].get(),
-            ClosureBacking::Raw { ptr, layout } => {
-                match layout.capture_storage_kind(i) {
-                    CaptureKind::Immutable => {
-                        // SAFETY: see `capture_as_value` — Raw constructor
-                        // + layout + in-bounds index upheld.
-                        unsafe { read_capture_as_value_bits(ptr as *const u8, layout, i) }
-                    }
-                    CaptureKind::OwnedMutable => {
-                        // SAFETY: same invariants as
-                        // `capture_owned_mutable_ptr`; reinterpreting the
-                        // `*mut ValueWord` as `u64` is a lossless cast.
-                        unsafe { owned_mutable_cell_ptr(ptr, layout, i) as u64 }
-                    }
-                    CaptureKind::Shared => {
-                        // SAFETY: same invariants as
-                        // `capture_shared_cell_ptr`; reinterpreting the
-                        // `*const SharedCell` as `u64` is a lossless cast.
-                        unsafe { shared_cell_ptr(ptr, layout, i) as u64 }
-                    }
-                }
+        match self.layout.capture_storage_kind(i) {
+            CaptureKind::Immutable => {
+                // SAFETY: see `capture_as_value` — Raw constructor
+                // + layout + in-bounds index upheld.
+                unsafe { read_capture_as_value_bits(self.ptr as *const u8, self.layout, i) }
+            }
+            CaptureKind::OwnedMutable => {
+                // SAFETY: same invariants as
+                // `capture_owned_mutable_ptr`; reinterpreting the
+                // `*mut ValueWord` as `u64` is a lossless cast.
+                unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) as u64 }
+            }
+            CaptureKind::Shared => {
+                // SAFETY: same invariants as
+                // `capture_shared_cell_ptr`; reinterpreting the
+                // `*const SharedCell` as `u64` is a lossless cast.
+                unsafe { shared_cell_ptr(self.ptr, self.layout, i) as u64 }
             }
         }
     }
@@ -284,7 +200,7 @@ impl<'a> VmClosureHandle<'a> {
     /// Track A.1B: raw pointer to the `*mut ValueWord` box cell for an
     /// `OwnedMutable` capture.
     ///
-    /// Returns `None` on the Legacy backing or when capture `i` is not
+    /// Returns `None` when capture `i` is not
     /// [`CaptureKind::OwnedMutable`].
     ///
     /// # Safety
@@ -296,20 +212,18 @@ impl<'a> VmClosureHandle<'a> {
     /// or release is needed.
     #[inline]
     pub fn capture_owned_mutable_ptr(&self, i: usize) -> Option<*mut ValueWord> {
-        match self.backing {
-            ClosureBacking::Raw { ptr, layout } => match layout.capture_storage_kind(i) {
-                CaptureKind::OwnedMutable => Some(unsafe { owned_mutable_cell_ptr(ptr, layout, i) }),
-                _ => None,
-            },
-            ClosureBacking::Legacy { .. } => None,
+        match self.layout.capture_storage_kind(i) {
+            CaptureKind::OwnedMutable => {
+                Some(unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) })
+            }
+            _ => None,
         }
     }
 
     /// Track A.1B: raw pointer to the `*const SharedCell` (
     /// `Arc<parking_lot::Mutex<ValueWord>>`) for a `Shared` capture.
     ///
-    /// Returns `None` on the Legacy backing or when capture `i` is not
-    /// [`CaptureKind::Shared`].
+    /// Returns `None` when capture `i` is not [`CaptureKind::Shared`].
     ///
     /// # Safety
     ///
@@ -321,12 +235,9 @@ impl<'a> VmClosureHandle<'a> {
     /// possibly on different threads).
     #[inline]
     pub fn capture_shared_cell_ptr(&self, i: usize) -> Option<*const SharedCell> {
-        match self.backing {
-            ClosureBacking::Raw { ptr, layout } => match layout.capture_storage_kind(i) {
-                CaptureKind::Shared => Some(unsafe { shared_cell_ptr(ptr, layout, i) }),
-                _ => None,
-            },
-            ClosureBacking::Legacy { .. } => None,
+        match self.layout.capture_storage_kind(i) {
+            CaptureKind::Shared => Some(unsafe { shared_cell_ptr(self.ptr, self.layout, i) }),
+            _ => None,
         }
     }
 
@@ -341,60 +252,13 @@ impl<'a> VmClosureHandle<'a> {
         out
     }
 
-    /// Best-effort refcount.
-    ///
-    /// * Raw backing: returns the `HeapHeader.refcount` — the exact number
-    ///   of live shares on the `TypedClosureHeader` block.
-    /// * Legacy backing: **always returns `0`**. The meaningful refcount
-    ///   for a legacy closure lives on the enclosing `Arc<HeapValue>`,
-    ///   which this handle does not hold. Callers that need the Arc-level
-    ///   refcount must consult the owning `Arc` directly (via
-    ///   `Arc::strong_count`). This caveat goes away after H6.5, when all
-    ///   handles are Raw-backed.
+    /// Exact refcount on the `TypedClosureHeader` block — i.e. the
+    /// number of live shares on the block.
     #[inline]
     pub fn refcount(&self) -> u32 {
-        match self.backing {
-            ClosureBacking::Legacy { .. } => 0,
-            ClosureBacking::Raw { ptr, .. } => {
-                // SAFETY: live-block invariant from the Raw constructor
-                // covers the 4-byte atomic load at offset 0.
-                unsafe { typed_closure_refcount(ptr as *const u8) }
-            }
-        }
-    }
-
-    /// Legacy-only escape hatch: borrow the underlying `&[Upvalue]` slice.
-    ///
-    /// Returns `Some` only when the handle was constructed from the Legacy
-    /// backing (i.e. from a `HeapValue::Closure`). The Raw backing has no
-    /// `Upvalue` slice — captures are stored as typed native widths inside
-    /// a `TypedClosureHeader` block — so this method returns `None` there.
-    ///
-    /// Added for H6.2 to let low-blast-radius consumers whose current code
-    /// passes `&[Upvalue]` further downstream (e.g.
-    /// `raw_helpers::extract_closure_info`) migrate to the shim without
-    /// rewriting unfamiliar consumer logic. **H6.5 swaps the producer to
-    /// the Raw backing**, at which point every Legacy-only hatch becomes
-    /// a dead branch; H6.5/H6.6 will remove this method along with the
-    /// `ClosureBacking::Legacy` variant.
-    ///
-    /// # Compromise
-    ///
-    /// Preferring `captures_as_values()` (which works on both backings) is
-    /// the goal everywhere it fits; this hatch is strictly for sites that
-    /// cannot accept a `Vec<ValueWord>` without rewriting their consumers.
-    ///
-    /// The return type threads the handle's `'a` through so consumers that
-    /// constructed the handle from a `&'static HeapValue` (e.g. raw
-    /// heap-bit helpers that launder the Arc's lifetime) get a
-    /// correspondingly-lifetimed slice back, not one bound to the shorter
-    /// `&self` borrow.
-    #[inline]
-    pub fn upvalues_legacy(&self) -> Option<&'a [Upvalue]> {
-        match self.backing {
-            ClosureBacking::Legacy { upvalues, .. } => Some(upvalues),
-            ClosureBacking::Raw { .. } => None,
-        }
+        // SAFETY: live-block invariant from the Raw constructor
+        // covers the 4-byte atomic load at offset 0.
+        unsafe { typed_closure_refcount(self.ptr as *const u8) }
     }
 }
 
@@ -442,106 +306,10 @@ unsafe fn shared_cell_ptr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heap_value::HeapValue;
     use crate::v2::closure_layout::ClosureLayout;
     use crate::v2::closure_raw::{alloc_typed_closure, release_typed_closure, write_capture_typed};
     use crate::v2::concrete_type::ConcreteType;
     use crate::value_word::{ValueWord, ValueWordExt};
-
-    // ── Legacy backing ─────────────────────────────────────────────────
-
-    fn legacy_closure(function_id: u16, captures: Vec<ValueWord>) -> HeapValue {
-        HeapValue::Closure {
-            function_id,
-            upvalues: captures.into_iter().map(Upvalue::new).collect(),
-        }
-    }
-
-    #[test]
-    fn test_legacy_function_id_read() {
-        let hv = legacy_closure(42, vec![]);
-        let handle = hv.as_closure_handle().expect("closure handle");
-        assert_eq!(handle.function_id(), 42);
-        // Legacy backing has no per-closure layout id.
-        assert_eq!(handle.type_id(), 0);
-    }
-
-    #[test]
-    fn test_legacy_capture_count_read() {
-        let hv = legacy_closure(
-            0,
-            vec![
-                ValueWord::from_i64(1),
-                ValueWord::from_i64(2),
-                ValueWord::from_i64(3),
-            ],
-        );
-        let handle = hv.as_closure_handle().expect("closure handle");
-        assert_eq!(handle.capture_count(), 3);
-    }
-
-    #[test]
-    fn test_legacy_capture_as_value_f64() {
-        let hv = legacy_closure(0, vec![ValueWord::from_f64(3.14)]);
-        let handle = hv.as_closure_handle().expect("closure handle");
-        let v = handle.capture_as_value(0);
-        assert_eq!(v.as_f64(), Some(3.14));
-    }
-
-    #[test]
-    fn test_legacy_capture_as_value_i64() {
-        let hv = legacy_closure(0, vec![ValueWord::from_i64(-9001)]);
-        let handle = hv.as_closure_handle().expect("closure handle");
-        let v = handle.capture_as_value(0);
-        assert_eq!(v.as_i64(), Some(-9001));
-    }
-
-    #[test]
-    fn test_legacy_capture_as_value_bool() {
-        let hv = legacy_closure(0, vec![ValueWord::from_bool(true)]);
-        let handle = hv.as_closure_handle().expect("closure handle");
-        let v = handle.capture_as_value(0);
-        assert_eq!(v.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_legacy_captures_as_values_roundtrip() {
-        let expected: Vec<ValueWord> = vec![
-            ValueWord::from_f64(1.5),
-            ValueWord::from_i64(42),
-            ValueWord::from_bool(false),
-        ];
-        let hv = legacy_closure(7, expected.clone());
-        let handle = hv.as_closure_handle().expect("closure handle");
-        assert_eq!(handle.function_id(), 7);
-        let actual = handle.captures_as_values();
-        assert_eq!(actual.len(), expected.len());
-        assert_eq!(actual[0].as_f64(), Some(1.5));
-        assert_eq!(actual[1].as_i64(), Some(42));
-        assert_eq!(actual[2].as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_legacy_refcount_is_sentinel_zero() {
-        // Documented caveat: Legacy backing's `refcount()` returns 0; the
-        // meaningful refcount lives on the enclosing `Arc<HeapValue>`.
-        let hv = legacy_closure(0, vec![]);
-        let handle = hv.as_closure_handle().expect("closure handle");
-        assert_eq!(handle.refcount(), 0);
-    }
-
-    #[test]
-    fn test_value_word_as_closure_handle() {
-        // The ValueWord accessor delegates through the HeapValue path.
-        let hv = legacy_closure(99, vec![ValueWord::from_i64(7)]);
-        let vw = ValueWord::from_heap_value(hv);
-        let handle = vw
-            .as_closure_handle()
-            .expect("closure handle via ValueWord");
-        assert_eq!(handle.function_id(), 99);
-        assert_eq!(handle.capture_count(), 1);
-        assert_eq!(handle.capture_as_value(0).as_i64(), Some(7));
-    }
 
     #[test]
     fn test_value_word_non_closure_returns_none() {

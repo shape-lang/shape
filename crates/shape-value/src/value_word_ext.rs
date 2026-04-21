@@ -423,13 +423,12 @@ pub trait ValueWordExt {
     fn as_column_ref(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
     fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
     fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)>;
-    fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])>;
     /// Obtain a [`crate::vm_closure_handle::VmClosureHandle`] over this
     /// value's closure backing, if any.
     ///
-    /// Closure spec §14.2 (H6.1): additive accessor that delegates to
-    /// `as_closure` through the Legacy backing today; H6.5 swaps the
-    /// producer to the Raw backing and flips the backing in place.
+    /// Track A.5: returns `Some` for `HeapValue::ClosureRaw` and `None`
+    /// for any other value. The handle is the sole read API for closure
+    /// state.
     fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>>;
     fn as_err_payload(&self) -> Option<ValueWord>;
     fn as_future(&self) -> Option<u64>;
@@ -1138,21 +1137,6 @@ impl ValueWordExt for u64 {
             _ => None,
         }
     }
-    #[inline]
-    fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])> {
-        // Closure spec H6.2: read through the shim so H6.5's producer swap
-        // does not revisit this body. The `upvalues_legacy` escape hatch
-        // preserves the `&[Upvalue]` return type that existing callers
-        // (VM dispatch — H6.3 scope) still consume; both this accessor
-        // and the hatch are retired together in H6.5–H6.6.
-        let handle = self.as_closure_handle()?;
-        let fid = handle.function_id() as u16;
-        let upvalues = handle
-            .upvalues_legacy()
-            .expect("H6.2: Legacy backing is the only producer until H6.5");
-        Some((fid, upvalues))
-    }
-
     #[inline]
     fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>> {
         self.as_heap_ref()?.as_closure_handle()
@@ -2487,44 +2471,10 @@ mod tests {
         assert_eq!(&**s1, "intern_test_e2e_id");
     }
 
-    // ── Closure spec H6.2 — ValueWord::as_closure_handle integration ────
-    //
-    // H6.2 migrates introspection readers to `VmClosureHandle`. These
-    // tests exercise the accessor directly on a `ValueWord` so the shim
-    // path is covered at the `ValueWordExt` layer (not just on
-    // `HeapValue`, which `vm_closure_handle::tests` already covers).
-
-    #[test]
-    fn test_value_word_as_closure_handle_reads_function_id_and_captures() {
-        use crate::heap_value::HeapValue;
-        use crate::value::Upvalue;
-
-        let captures = vec![
-            Upvalue::new(ValueWord::from_i64(11)),
-            Upvalue::new(ValueWord::from_f64(2.5)),
-            Upvalue::new(ValueWord::from_bool(false)),
-        ];
-        let vw = ValueWord::from_heap_value(HeapValue::Closure {
-            function_id: 17,
-            upvalues: captures,
-        });
-
-        let handle = vw.as_closure_handle().expect("closure handle");
-        assert_eq!(handle.function_id(), 17);
-        assert_eq!(handle.capture_count(), 3);
-
-        let vs = handle.captures_as_values();
-        assert_eq!(vs[0].as_i64(), Some(11));
-        assert_eq!(vs[1].as_f64(), Some(2.5));
-        assert_eq!(vs[2].as_bool(), Some(false));
-
-        // `as_closure` body (also H6.2-migrated) must agree with the
-        // handle on both `function_id` and the borrowed `Upvalue` slice.
-        let (fid, upvalues) = vw.as_closure().expect("legacy accessor");
-        assert_eq!(fid, 17);
-        assert_eq!(upvalues.len(), 3);
-        assert_eq!(upvalues[0].get().as_i64(), Some(11));
-    }
+    // Closure spec: `VmClosureHandle` is the sole read path for closure
+    // state. The positive-path tests live in `vm_closure_handle::tests`
+    // (Raw backing). Here we only cover the `ValueWordExt` accessor's
+    // negative arm — a non-closure `ValueWord` must return `None`.
 
     #[test]
     fn test_value_word_as_closure_handle_none_on_non_closure() {

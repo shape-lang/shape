@@ -227,8 +227,14 @@ impl VirtualMachine {
 
             res?
         } else if callable_nb.is_heap() {
-            if let Some((function_id, upvalues)) = callable_nb.as_closure() {
-                let upvalues = upvalues.to_vec();
+            if let Some(handle) = callable_nb.as_closure_handle() {
+                let function_id = handle.function_id() as u16;
+                let n = handle.capture_count();
+                let mut upvalues: Vec<Upvalue> = Vec::with_capacity(n);
+                for i in 0..n {
+                    upvalues.push(Upvalue::new(handle.capture_execution_bits(i)));
+                }
+                drop(handle);
                 let saved_ip = self.ip;
                 let saved_sp = self.sp;
 
@@ -431,36 +437,25 @@ impl VirtualMachine {
                 let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
                 return Ok(result_nb);
             }
-            // Closure spec H6.3/H6.5: closure dispatch routes through
-            // `VmClosureHandle`. The Legacy backing still yields an
-            // `&[Upvalue]` via `upvalues_legacy()` (cloned to preserve
-            // SharedCell-backed mutable-capture identity); the Raw
-            // backing widens its captures through
-            // `capture_execution_bits()` — for Immutable captures this
-            // returns the ValueWord bits identical to the pre-A.1B
-            // `captures_as_values()` path, and for Track A.1B's
-            // `OwnedMutable` / `Shared` captures it returns the raw
-            // `*mut ValueWord` / `*const SharedCell` pointer bits. The
-            // `LoadOwnedMutableCapture` / `LoadSharedCapture` opcodes
-            // later recover the pointer by reading the upvalue's raw
-            // bits (bypassing `Upvalue::get`'s SharedCell auto-deref,
-            // which is a legacy-only code path).
+            // Track A.5: closure dispatch routes through
+            // `VmClosureHandle` over the `ClosureRaw` backing. Captures
+            // are widened through `capture_execution_bits()` — for
+            // Immutable captures this returns the ValueWord bits, and
+            // for Track A.1B's `OwnedMutable` / `Shared` captures it
+            // returns the raw `*mut ValueWord` / `*const SharedCell`
+            // pointer bits. The `LoadOwnedMutableCapture` /
+            // `LoadSharedCapture` opcodes later recover the pointer
+            // by reading the upvalue's raw bits.
             // cold-path: as_heap_ref retained — multi-variant callee dispatch
             TAG_HEAP => {
                 let heap_ref = callee.as_heap_ref(); // cold-path
                 if let Some(handle) = heap_ref.and_then(|hv| hv.as_closure_handle()) {
                     let fid = handle.function_id() as u16;
-                    let upvalues: Vec<Upvalue> =
-                        if let Some(slice) = handle.upvalues_legacy() {
-                            slice.to_vec()
-                        } else {
-                            let n = handle.capture_count();
-                            let mut out: Vec<Upvalue> = Vec::with_capacity(n);
-                            for i in 0..n {
-                                out.push(Upvalue::new(handle.capture_execution_bits(i)));
-                            }
-                            out
-                        };
+                    let n = handle.capture_count();
+                    let mut upvalues: Vec<Upvalue> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        upvalues.push(Upvalue::new(handle.capture_execution_bits(i)));
+                    }
                     self.call_closure_with_nb_args(fid, upvalues, args)?;
                 } else if let Some(shape_value::HeapValue::HostClosure(callable)) = heap_ref {
                     let args_vec: Vec<ValueWord> = args.to_vec();

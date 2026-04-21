@@ -359,21 +359,28 @@ mod tests {
 
     #[test]
     fn test_closure_registration() {
+        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
+
         let mut registry = ModuleBindingRegistry::new();
 
-        let closure_val = ValueWord::from_heap_value(HeapValue::Closure {
-            function_id: 0,
-            upvalues: vec![],
-        });
+        // Build a zero-capture `ClosureRaw` value — the canonical (Track
+        // A.5) closure representation. The registry stores it as any
+        // other heap-backed value; a handle round-trip confirms it
+        // decodes back as a closure.
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[], &[]));
+        let closure_val = unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            let owned = OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
+            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        };
 
         let idx = registry.register_const("test_func", closure_val).unwrap();
         assert_eq!(idx, 0);
 
         // Should be retrievable
         let val = registry.get_by_name("test_func");
-        assert!(
-            matches!(val, Some(nb) if nb.as_closure().is_some())
-        );
+        assert!(matches!(val, Some(nb) if nb.as_closure_handle().is_some()));
     }
 
     #[test]

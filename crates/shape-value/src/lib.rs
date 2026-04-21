@@ -64,9 +64,8 @@ pub use external_value::{
     ExternalValue, NoSchemaLookup, SchemaLookup, external_to_nb, nb_to_external,
 };
 pub use extraction::{
-    nb_to_display_string, require_arc_string, require_array, require_bool, require_closure,
-    require_datatable, require_f64, require_int, require_number, require_string,
-    require_typed_object,
+    nb_to_display_string, require_arc_string, require_array, require_bool, require_datatable,
+    require_f64, require_int, require_number, require_string, require_typed_object,
 };
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 pub use heap_value::{

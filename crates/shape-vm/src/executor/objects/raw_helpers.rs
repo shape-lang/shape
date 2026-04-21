@@ -580,47 +580,25 @@ pub fn drop_raw_bits(bits: u64) {
 
 /// Extract closure info (function_id, upvalues) from raw heap-tagged bits.
 ///
-/// Closure spec H6.5: returns an owned `Vec<Upvalue>` because the new
-/// `HeapValue::ClosureRaw` backing stores captures as typed bytes in a
-/// `TypedClosureHeader` block — there is no `&[Upvalue]` to borrow. For
-/// the legacy `HeapValue::Closure { upvalues }` backing the original
-/// `Upvalue` slice is cloned verbatim (NOT re-constructed from
-/// `captures_as_values()`) so `SharedCell`-backed mutable captures
-/// retain their pointer identity — the auto-deref in `Upvalue::get()` /
-/// `set()` only preserves shared mutation semantics when the SharedCell
-/// `ValueWord` itself is the stored capture, not the cell's inner value.
-///
-/// Track A.1B: for the Raw backing, captures are widened through
-/// `capture_execution_bits()` instead of `captures_as_values()` so that
-/// `CaptureKind::OwnedMutable` / `CaptureKind::Shared` captures carry
-/// their raw `*mut ValueWord` / `*const SharedCell` pointer bits (rather
-/// than the dereferenced value) into the call frame's `upvalues` —
-/// required for the new `LoadOwnedMutableCapture` / `LoadSharedCapture`
-/// opcodes to recover the cell pointer.
+/// Track A.5: closures are exclusively `HeapValue::ClosureRaw`-backed,
+/// so captures are widened through `capture_execution_bits()` into a
+/// fresh `Vec<Upvalue>`. For `CaptureKind::Immutable` captures this
+/// returns the ValueWord bits; for Track A.1B's
+/// `CaptureKind::OwnedMutable` / `CaptureKind::Shared` captures it
+/// returns the raw `*mut ValueWord` / `*const SharedCell` pointer bits
+/// so the `LoadOwnedMutableCapture` / `LoadSharedCapture` opcodes can
+/// recover the cell.
 #[inline]
 pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>)> {
     unsafe {
         let hv: &'static HeapValue = extract_heap_ref(bits)?;
         let handle = hv.as_closure_handle()?;
         let fid = handle.function_id() as u16;
-        // Legacy backing: preserve the `Upvalue` values verbatim so
-        // SharedCell-backed captures keep their identity. The Raw backing
-        // has no `Upvalue` slice — its captures are raw typed bytes — so
-        // fall through to `capture_execution_bits` + fresh `Upvalue::new`
-        // for it. For `CaptureKind::OwnedMutable` / `CaptureKind::Shared`
-        // captures, `capture_execution_bits` returns the raw pointer bits
-        // so the new A.1B opcodes can recover the cell.
-        let upvalues: Vec<shape_value::Upvalue> =
-            if let Some(slice) = handle.upvalues_legacy() {
-                slice.to_vec()
-            } else {
-                let n = handle.capture_count();
-                let mut out: Vec<shape_value::Upvalue> = Vec::with_capacity(n);
-                for i in 0..n {
-                    out.push(shape_value::Upvalue::new(handle.capture_execution_bits(i)));
-                }
-                out
-            };
+        let n = handle.capture_count();
+        let mut upvalues: Vec<shape_value::Upvalue> = Vec::with_capacity(n);
+        for i in 0..n {
+            upvalues.push(shape_value::Upvalue::new(handle.capture_execution_bits(i)));
+        }
         Some((fid, upvalues))
     }
 }

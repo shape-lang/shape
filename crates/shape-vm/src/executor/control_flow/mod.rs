@@ -669,42 +669,23 @@ impl VirtualMachine {
             // write semantics that the fresh-Arc branch provided pre-H3.
             let _ = &mutable_captures; // mutability flag remains for future frame-pointer work
 
-            // Closure spec §14.6 (H6.5): when the program has a registered
-            // `ClosureLayout` for this function id, emit the new
-            // `HeapValue::ClosureRaw` variant backed by a raw
-            // `TypedClosureHeader` block. The captures are written at the
-            // layout's typed offsets via `closure_raw::write_capture_typed`.
-            // Heap-typed captures (`heap_capture_mask` bits) need an
-            // additional retain — the block takes ownership of one share,
-            // the source stack slot keeps its own share.
+            // Track A.5: every closure is emitted as `HeapValue::ClosureRaw`,
+            // backed by a raw `TypedClosureHeader` block. The captures are
+            // written at the layout's typed offsets via
+            // `closure_raw::write_capture_typed`. Heap-typed captures
+            // (`heap_capture_mask` bits) need an additional retain — the
+            // block takes ownership of one share; the source stack slot
+            // keeps its own share.
             //
-            // When no layout is registered (e.g. runtime-loaded bytecode
-            // where the side-table wasn't serialised — see
-            // `closure_function_layouts` serde skip), fall back to the
-            // legacy `HeapValue::Closure` variant. H6.6 deletes this
-            // fallback once layout registration becomes universal.
+            // A missing `ClosureLayout` is a compile-time / link-time bug
+            // (A.5 retired the legacy fallback); see the error path
+            // below.
             //
-            // Mutable-capture guard (pre-A.1B): when any capture bit is
-            // set in `mutable_captures` and the registered layout marks
-            // every capture as `CaptureKind::Immutable`, the enclosing
-            // scope has boxed the underlying binding into a
-            // `HeapValue::SharedCell`. Writing that ValueWord through
-            // `write_capture_typed` at a typed width would strip the
-            // SharedCell pointer, breaking auto-deref semantics — fall
-            // back to the legacy `Vec<Upvalue>` variant for those
-            // closures.
-            //
-            // Track A.1B refinement: when the registered layout marks any
-            // capture as `CaptureKind::OwnedMutable` or
-            // `CaptureKind::Shared` (the kinds A.1C's compiler will emit
-            // for `let mut` / `var` captures), the Raw path ALREADY knows
-            // how to allocate and release `Box<ValueWord>` /
-            // `Arc<SharedCell>`; the SharedCell legacy shim is not
-            // involved, so the `mutable_captures` guard does not apply.
-            // This distinguishes "today's compiler producing an Immutable
-            // layout + SharedCell stack slot" (legacy fallback) from
-            // "A.1C's compiler producing an OwnedMutable/Shared layout +
-            // raw initial value" (new Raw path).
+            // Track A.1B: when the registered layout marks any capture as
+            // `CaptureKind::OwnedMutable` or `CaptureKind::Shared` (the
+            // kinds A.1C's compiler emits for `let mut` / `var`
+            // captures), the Raw path handles `Box<ValueWord>` /
+            // `Arc<SharedCell>` allocation + release directly.
             let layout_opt: Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>> =
                 self.program
                     .closure_function_layouts
@@ -861,17 +842,13 @@ impl VirtualMachine {
                 // link-time bug, not a runtime-recoverable condition.
             }
 
-            // Track A.1C.3: the legacy `HeapValue::Closure { .. }`
-            // producer is retired. Every `op_make_closure` invocation
-            // now produces a `HeapValue::ClosureRaw` via the
-            // `ClosureLayout` path above. The `HeapValue::Closure`
-            // variant itself stays alive for the remaining three
-            // producers (vtable dispatch, snapshot replay, cross-node
-            // remote builtins) which are retired by follow-up Tracks
-            // A.2A / A.3 / A.4.
+            // Track A.5: every `op_make_closure` invocation must produce
+            // a `HeapValue::ClosureRaw` via the `ClosureLayout` path
+            // above. There is no legacy fallback — A.2A / A.3 / A.4 /
+            // A.5 retired the remaining `HeapValue::Closure` producers.
             let _ = upvalues;
             Err(VMError::RuntimeError(format!(
-                "internal error: MakeClosure for function {} has no registered ClosureLayout (A.1C.3 retired the legacy HeapValue::Closure fallback; layout registration is now mandatory)",
+                "internal error: MakeClosure for function {} has no registered ClosureLayout (layout registration is mandatory; Track A.5 retired every legacy closure producer)",
                 func_id.0
             )))
         } else {
@@ -1225,8 +1202,9 @@ mod h6_5_tests {
         // cell. The closure's private Box accumulates across calls;
         // return it from the last invocation to observe.
         //
-        // (The legacy `HeapValue::Closure` fallback stays reachable
-        // via module-binding captures until A.1C.3 deletes it.)
+        // (Track A.5 retired the legacy `HeapValue::Closure` fallback
+        // entirely; every `let mut` capture now routes through the
+        // OwnedMutable Raw path.)
         let val = eval(
             "fn main() -> int {\n\
                  let mut n: int = 0\n\

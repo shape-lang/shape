@@ -706,13 +706,10 @@ fn heap_value_to_serializable(
             }
             SerializableVMValue::Array(out)
         }
-        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => {
-            // Track A.2A: emit the widened closure schema carrying
-            // `function_id: u32` and `type_id: u32`. Both arms of the
-            // legacy `Closure` variant (soon-to-be-retired) and
-            // `ClosureRaw` report these fields through the shim: legacy
-            // reports `type_id == 0` because the Arc-backed variant
-            // never had a layout identity.
+        HeapValue::ClosureRaw(..) => {
+            // Track A.5: only the `ClosureRaw` variant survives. Emit
+            // the widened closure schema carrying `function_id: u32`
+            // and `type_id: u32`; both are read via the handle.
             let handle = hv
                 .as_closure_handle()
                 .expect("closure arm implies a closure handle");

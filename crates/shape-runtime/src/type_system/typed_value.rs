@@ -278,14 +278,10 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
             name: "Object".to_string(),
             fields: vec![],
         },
-        // Closure spec H6.4: pure discriminator — no field reads, so
-        // there is nothing to route through `VmClosureHandle`. Both
-        // closure-backed and function-ref values map to the same empty
-        // `SemanticType::Function` shell; the variant pattern stays for
-        // exhaustive-match coverage. The H6.5 producer swap
-        // (Arc<HeapValue::Closure> → raw TypedClosureHeader) is
-        // transparent here.
-        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) | HeapValue::FunctionRef { .. } => {
+        // Track A.5: only `ClosureRaw` + `FunctionRef` reach this arm.
+        // Both map to the same empty `SemanticType::Function` shell —
+        // a pure discriminator, no field reads.
+        HeapValue::ClosureRaw(..) | HeapValue::FunctionRef { .. } => {
             SemanticType::Function(Box::new(super::semantic::FunctionSignature {
                 params: vec![],
                 return_type: SemanticType::Named("Unknown".to_string()),

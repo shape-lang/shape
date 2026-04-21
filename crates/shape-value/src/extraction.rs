@@ -12,7 +12,6 @@
 use crate::context::VMError;
 use crate::datatable::DataTable;
 use crate::slot::ValueSlot;
-use crate::value::Upvalue;
 use crate::value_word::{ArrayView, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -83,13 +82,6 @@ pub fn require_datatable(nb: &ValueWord) -> Result<&Arc<DataTable>, VMError> {
 pub fn require_typed_object(nb: &ValueWord) -> Result<(u64, &[ValueSlot], u64), VMError> {
     nb.as_typed_object()
         .ok_or_else(|| VMError::type_mismatch("object", nb.type_name()))
-}
-
-/// Extract Closure fields (function_id, upvalues) from a ValueWord, or return a type error.
-#[inline]
-pub fn require_closure(nb: &ValueWord) -> Result<(u16, &[Upvalue]), VMError> {
-    nb.as_closure()
-        .ok_or_else(|| VMError::type_mismatch("closure", nb.type_name()))
 }
 
 /// Convert a ValueWord to a display string.
