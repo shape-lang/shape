@@ -314,8 +314,19 @@ pub enum SerializableVMValue {
         value: Box<SerializableVMValue>,
     },
     Enum(EnumValueSnapshot),
+    /// A closure value carrying the function body id, its capture signature
+    /// id, and the raw capture payloads.
+    ///
+    /// Track A.2A: `function_id` is widened to `u32` (from `u16`) to match
+    /// the raw `TypedClosureHeader` field width, and a new `type_id: u32`
+    /// carries the `ClosureTypeId` needed to re-resolve the
+    /// `ClosureLayout` side-table on the receiver. Deserialization hard-
+    /// errors when no layout is available — no legacy
+    /// `HeapValue::Closure` fallback exists per the v2 closure closeout
+    /// directive.
     Closure {
-        function_id: u16,
+        function_id: u32,
+        type_id: u32,
         upvalues: Vec<SerializableVMValue>,
     },
     ModuleFunction(String),
@@ -696,22 +707,24 @@ fn heap_value_to_serializable(
             SerializableVMValue::Array(out)
         }
         HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => {
-            // Closure spec H6.4/H6.5: read via `VmClosureHandle` so both
-            // the legacy `Closure { function_id, upvalues }` and the new
-            // `ClosureRaw(OwnedClosureBlock)` backings serialize through
-            // the same path. Byte format is unchanged — the shim widens
-            // `function_id` back to u16 and renders captures via
-            // `captures_as_values`, which handles the raw typed read.
+            // Track A.2A: emit the widened closure schema carrying
+            // `function_id: u32` and `type_id: u32`. Both arms of the
+            // legacy `Closure` variant (soon-to-be-retired) and
+            // `ClosureRaw` report these fields through the shim: legacy
+            // reports `type_id == 0` because the Arc-backed variant
+            // never had a layout identity.
             let handle = hv
                 .as_closure_handle()
                 .expect("closure arm implies a closure handle");
-            let function_id = handle.function_id() as u16;
+            let function_id = handle.function_id();
+            let type_id = handle.type_id();
             let mut ups = Vec::with_capacity(handle.capture_count());
             for nb in handle.captures_as_values().iter() {
                 ups.push(nanboxed_to_serializable(nb, store)?);
             }
             SerializableVMValue::Closure {
                 function_id,
+                type_id,
                 upvalues: ups,
             }
         }
@@ -1113,14 +1126,44 @@ fn heap_value_to_serializable(
     })
 }
 
-/// Deserialize a SerializableVMValue directly to ValueWord, avoiding ValueWord intermediate.
+/// Deserialize a SerializableVMValue directly to ValueWord, avoiding
+/// ValueWord intermediate.
 ///
-/// For inline types (Int, Number, Bool, None, Unit, Function), this constructs the ValueWord
-/// directly using inline constructors. For heap types, it uses typed ValueWord constructors
-/// (from_string, from_array, from_decimal, etc.) to skip any intermediate conversion.
+/// For inline types (Int, Number, Bool, None, Unit, Function), this constructs
+/// the ValueWord directly using inline constructors. For heap types, it uses
+/// typed ValueWord constructors (from_string, from_array, from_decimal, etc.)
+/// to skip any intermediate conversion.
+///
+/// # Closure deserialization
+///
+/// Track A.2A: closure payloads require a matching `ClosureLayout` side-
+/// table to rebuild the raw `TypedClosureHeader` block; call
+/// [`serializable_to_nanboxed_with_layouts`] with the receiver program's
+/// `closure_function_layouts` slice instead. This convenience wrapper
+/// hard-errors when it encounters a `SerializableVMValue::Closure` — per
+/// the v2 closure closeout directive there is no legacy
+/// `HeapValue::Closure` fallback.
 pub fn serializable_to_nanboxed(
     value: &SerializableVMValue,
     store: &SnapshotStore,
+) -> Result<ValueWord> {
+    serializable_to_nanboxed_with_layouts(value, store, &[])
+}
+
+/// Deserialize a [`SerializableVMValue`] with access to the receiver
+/// program's closure layout registry.
+///
+/// `closure_function_layouts[function_id]` must be `Some(layout)` for any
+/// closure in the payload. A missing entry is a hard error — Track A.2A
+/// retires the legacy `HeapValue::Closure` fallback, so a snapshot / wire
+/// payload carrying a closure can only be decoded by a program that
+/// shipped the matching layout side-table.
+pub fn serializable_to_nanboxed_with_layouts(
+    value: &SerializableVMValue,
+    store: &SnapshotStore,
+    closure_function_layouts: &[Option<
+        std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+    >],
 ) -> Result<ValueWord> {
     Ok(match value {
         SerializableVMValue::Int(i) => ValueWord::from_i64(*i),
@@ -1132,9 +1175,15 @@ pub fn serializable_to_nanboxed(
         SerializableVMValue::Unit => ValueWord::unit(),
         SerializableVMValue::Function(f) => ValueWord::from_function(*f),
         SerializableVMValue::ModuleFunction(_name) => ValueWord::from_module_function(0),
-        SerializableVMValue::Some(v) => ValueWord::from_some(serializable_to_nanboxed(v, store)?),
-        SerializableVMValue::Ok(v) => ValueWord::from_ok(serializable_to_nanboxed(v, store)?),
-        SerializableVMValue::Err(v) => ValueWord::from_err(serializable_to_nanboxed(v, store)?),
+        SerializableVMValue::Some(v) => ValueWord::from_some(
+            serializable_to_nanboxed_with_layouts(v, store, closure_function_layouts)?,
+        ),
+        SerializableVMValue::Ok(v) => ValueWord::from_ok(
+            serializable_to_nanboxed_with_layouts(v, store, closure_function_layouts)?,
+        ),
+        SerializableVMValue::Err(v) => ValueWord::from_err(
+            serializable_to_nanboxed_with_layouts(v, store, closure_function_layouts)?,
+        ),
         SerializableVMValue::Timeframe(tf) => ValueWord::from_timeframe(*tf),
         SerializableVMValue::Duration(d) => ValueWord::from_duration(d.clone()),
         SerializableVMValue::Time(t) => ValueWord::from_time(*t),
@@ -1149,7 +1198,11 @@ pub fn serializable_to_nanboxed(
         SerializableVMValue::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
-                out.push(serializable_to_nanboxed(v, store)?);
+                out.push(serializable_to_nanboxed_with_layouts(
+                    v,
+                    store,
+                    closure_function_layouts,
+                )?);
             }
             ValueWord::from_array(shape_value::vmarray_from_vec(out))
         }
@@ -1157,7 +1210,7 @@ pub fn serializable_to_nanboxed(
         SerializableVMValue::TypeAnnotatedValue { type_name, value } => {
             ValueWord::from_type_annotated_value(
                 type_name.clone(),
-                serializable_to_nanboxed(value, store)?,
+                serializable_to_nanboxed_with_layouts(value, store, closure_function_layouts)?,
             )
         }
         SerializableVMValue::Range {
@@ -1166,11 +1219,19 @@ pub fn serializable_to_nanboxed(
             inclusive,
         } => ValueWord::from_range(
             match start {
-                Some(v) => Some(serializable_to_nanboxed(v, store)?),
+                Some(v) => Some(serializable_to_nanboxed_with_layouts(
+                    v,
+                    store,
+                    closure_function_layouts,
+                )?),
                 None => None,
             },
             match end {
-                Some(v) => Some(serializable_to_nanboxed(v, store)?),
+                Some(v) => Some(serializable_to_nanboxed_with_layouts(
+                    v,
+                    store,
+                    closure_function_layouts,
+                )?),
                 None => None,
             },
             *inclusive,
@@ -1179,7 +1240,11 @@ pub fn serializable_to_nanboxed(
         SerializableVMValue::FunctionRef { name, closure } => ValueWord::from_function_ref(
             name.clone(),
             match closure {
-                Some(c) => Some(serializable_to_nanboxed(c, store)?),
+                Some(c) => Some(serializable_to_nanboxed_with_layouts(
+                    c,
+                    store,
+                    closure_function_layouts,
+                )?),
                 None => None,
             },
         ),
@@ -1323,11 +1388,19 @@ pub fn serializable_to_nanboxed(
         SerializableVMValue::HashMap { keys, values } => {
             let mut k_out = Vec::with_capacity(keys.len());
             for k in keys.iter() {
-                k_out.push(serializable_to_nanboxed(k, store)?);
+                k_out.push(serializable_to_nanboxed_with_layouts(
+                    k,
+                    store,
+                    closure_function_layouts,
+                )?);
             }
             let mut v_out = Vec::with_capacity(values.len());
             for v in values.iter() {
-                v_out.push(serializable_to_nanboxed(v, store)?);
+                v_out.push(serializable_to_nanboxed_with_layouts(
+                    v,
+                    store,
+                    closure_function_layouts,
+                )?);
             }
             ValueWord::from_hashmap_pairs(k_out, v_out)
         }
@@ -1343,27 +1416,126 @@ pub fn serializable_to_nanboxed(
         }
         SerializableVMValue::Closure {
             function_id,
+            type_id: _type_id,
             upvalues,
         } => {
-            // Closure spec §14.6 (H6.5): snapshot deserialize keeps
-            // emitting the legacy `HeapValue::Closure { function_id,
-            // upvalues }` variant — the byte format is unchanged, and
-            // reloaded programs don't necessarily carry a matching
-            // `ClosureLayout` (the side-table is `#[serde(skip)]` — see
-            // `BytecodeProgram.closure_function_layouts`). The H6.2–H6.4
-            // reader migrations already route snapshot-resurrected
-            // closures through `VmClosureHandle`, so no call-site sees a
-            // difference. A follow-up phase may promote snapshot format
-            // to a typed blob once every program ships its layout
-            // side-table.
-            let mut ups = Vec::new();
-            for v in upvalues.iter() {
-                ups.push(Upvalue::new(serializable_to_nanboxed(v, store)?));
+            // Track A.2A: consult the receiver program's
+            // `closure_function_layouts` side-table, allocate a fresh
+            // `OwnedClosureBlock`, write each capture at its typed
+            // offset, and wrap in `HeapValue::ClosureRaw`. There is no
+            // legacy `HeapValue::Closure` fallback — a missing layout
+            // is a hard error per the v2 closure closeout directive.
+            //
+            // `type_id` is carried through the payload so cross-program
+            // transports (A.4) can look up the layout by capture-
+            // signature id. For in-program snapshot replay the
+            // `function_id` → layout mapping from the side-table is
+            // sufficient, so `_type_id` is not consulted here; future
+            // name-based cross-node paths (A.4) pick their own lookup.
+            use shape_value::v2::closure_layout::CaptureKind;
+            use shape_value::v2::closure_raw::{
+                OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
+            };
+
+            let fid = *function_id;
+            let layout_arc = closure_function_layouts
+                .get(fid as usize)
+                .and_then(|slot| slot.as_ref())
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cannot deserialize closure: no ClosureLayout registered \
+                         for function_id {} (program's closure_function_layouts \
+                         side-table does not carry the layout required to rebuild \
+                         the TypedClosureHeader block)",
+                        fid
+                    )
+                })?;
+
+            if upvalues.len() != layout_arc.capture_count() {
+                return Err(anyhow::anyhow!(
+                    "closure capture-count mismatch for function_id {}: \
+                     payload has {} captures but ClosureLayout expects {}",
+                    fid,
+                    upvalues.len(),
+                    layout_arc.capture_count()
+                ));
             }
-            ValueWord::from_heap_value(shape_value::heap_value::HeapValue::Closure {
-                function_id: *function_id,
-                upvalues: ups,
-            })
+
+            let mut capture_bits = Vec::with_capacity(upvalues.len());
+            for sv in upvalues.iter() {
+                let nb = serializable_to_nanboxed_with_layouts(
+                    sv,
+                    store,
+                    closure_function_layouts,
+                )?;
+                capture_bits.push(nb.into_raw_bits());
+            }
+
+            // SAFETY: the layout was just looked up from the receiver's
+            // side-table (so its capture shape matches the producing
+            // compiler's view), and every capture slot is written
+            // in-bounds via `write_capture_typed` at the typed width
+            // dictated by the layout.
+            let owned = unsafe {
+                let ptr = alloc_typed_closure(fid as u16, 0, &layout_arc);
+                for (i, bits) in capture_bits.iter().enumerate() {
+                    match layout_arc.capture_storage_kind(i) {
+                        CaptureKind::Immutable => {
+                            // Heap-typed captures: retain one share for
+                            // the block — the capture bits came from
+                            // `into_raw_bits` on a freshly-deserialised
+                            // ValueWord, which owns its share; the block
+                            // needs its own share so the deserialised
+                            // ValueWord's drop doesn't release the slot.
+                            if layout_arc.is_heap_capture(i) {
+                                let _dup = shape_value::ValueWord::clone_from_bits(*bits);
+                                std::mem::forget(_dup);
+                            }
+                            write_capture_typed(ptr, &layout_arc, i, *bits);
+                        }
+                        CaptureKind::OwnedMutable => {
+                            // Mirror `op_make_closure`: move the
+                            // deserialised ValueWord into a fresh
+                            // `Box<ValueWord>` so the closure owns it.
+                            let cell_ptr: *mut shape_value::ValueWord =
+                                Box::into_raw(Box::new(*bits));
+                            let off = layout_arc.heap_capture_offset(i);
+                            std::ptr::write(
+                                (ptr as *mut u8).add(off) as *mut *mut shape_value::ValueWord,
+                                cell_ptr,
+                            );
+                        }
+                        CaptureKind::Shared => {
+                            // Wire payloads do not preserve `SharedCell`
+                            // identity across a replay boundary — each
+                            // snapshot replay gets a fresh
+                            // `Arc<SharedCell>` per Shared capture.
+                            // Aliasing between nested closures that
+                            // captured the same `var` before the
+                            // snapshot is therefore lost on replay;
+                            // tracking that invariant end-to-end is a
+                            // follow-up beyond A.2A's scope (there is
+                            // no pointer-identity channel in the
+                            // `SerializableVMValue` schema). Rebuild a
+                            // standalone cell with the captured value.
+                            let cell = std::sync::Arc::new(
+                                shape_value::v2::closure_layout::SharedCell::new(*bits),
+                            );
+                            let cell_ptr = std::sync::Arc::into_raw(cell);
+                            let off = layout_arc.heap_capture_offset(i);
+                            std::ptr::write(
+                                (ptr as *mut u8).add(off)
+                                    as *mut *const shape_value::v2::closure_layout::SharedCell,
+                                cell_ptr,
+                            );
+                        }
+                    }
+                }
+                OwnedClosureBlock::from_raw(ptr as *const u8, layout_arc)
+            };
+
+            ValueWord::from_heap_value(shape_value::heap_value::HeapValue::ClosureRaw(owned))
         }
         SerializableVMValue::TypedObject {
             schema_id,
@@ -1378,7 +1550,11 @@ pub fn serializable_to_nanboxed(
                     // Backward compat: old snapshots may have inline types (Number,
                     // Bool, None, Unit, Function) marked as heap. nb_to_slot handles
                     // this by storing them as inline ValueSlots with is_heap=false.
-                    let nb = serializable_to_nanboxed(sv, store)?;
+                    let nb = serializable_to_nanboxed_with_layouts(
+                        sv,
+                        store,
+                        closure_function_layouts,
+                    )?;
                     let (slot, is_heap) = crate::type_schema::nb_to_slot(&nb);
                     slots.push(slot);
                     if is_heap {
@@ -1408,7 +1584,11 @@ pub fn serializable_to_nanboxed(
             // SimulationCallData stores ValueWord (structural boundary in shape-value)
             let mut out = HashMap::new();
             for (k, v) in params.iter() {
-                out.insert(k.clone(), serializable_to_nanboxed(v, store)?.clone());
+                out.insert(
+                    k.clone(),
+                    serializable_to_nanboxed_with_layouts(v, store, closure_function_layouts)?
+                        .clone(),
+                );
             }
             ValueWord::from_simulation_call(name.clone(), out)
         }
@@ -2042,52 +2222,70 @@ mod tests {
         assert_eq!(decoded.version, SNAPSHOT_VERSION);
     }
 
-    /// Closure spec H6.4: snapshot round-trip through a `HeapValue::Closure`
-    /// proves that the migrated reader in `heap_value_to_serializable`
-    /// agrees bit-for-bit with the pre-H6.4 destructure. The producer on
-    /// the deserialize side is unchanged (it is H6.5's scope), so a full
-    /// round-trip exercises only the H6.4 migration on the serialize side
-    /// while the deserialize side round-trips the byte format back into a
-    /// fresh `HeapValue::Closure`. If the shim ever diverges from the
-    /// legacy destructure (wrong `function_id`, wrong capture count,
-    /// wrong capture values, wrong ordering) this test catches it.
+    /// Track A.2A: round-trip a `HeapValue::ClosureRaw`-backed closure
+    /// through the snapshot serialize → layout-aware deserialize pipeline
+    /// and verify the reconstructed value matches through the
+    /// `VmClosureHandle` shim.
+    ///
+    /// Uses a mixed capture layout (F64 / I64 / Bool / Ptr) to exercise
+    /// the `write_capture_typed` + `read_capture_as_value_bits` path in
+    /// both directions. The deserializer now consults
+    /// `closure_function_layouts` (slot indexed by `function_id`) to
+    /// rebuild the raw block — no legacy `HeapValue::Closure` fallback.
     #[test]
-    fn test_h6_4_closure_snapshot_roundtrip_preserves_function_id_and_captures() {
+    fn test_a2a_mixed_capture_closure_snapshot_roundtrip() {
         use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64, write_capture_typed,
+        };
+        use shape_value::v2::concrete_type::ConcreteType;
 
         let dir = tempfile::tempdir().unwrap();
         let store = SnapshotStore::new(dir.path().join("store")).unwrap();
 
-        // Mixed-type captures exercise the shim's `captures_as_values`
-        // path (f64 / i64 / bool / string) — each widens through
-        // `Upvalue::get()` today; post-H6.5 each will widen through
-        // `read_capture_as_value_bits` and this test keeps the contract.
-        let original_captures: Vec<ValueWord> = vec![
-            ValueWord::from_f64(1.5),
-            ValueWord::from_i64(42),
-            ValueWord::from_bool(true),
-            ValueWord::from_heap_value(HeapValue::String(std::sync::Arc::new(
-                "hi".to_string(),
-            ))),
-        ];
-        let original_nb = ValueWord::from_heap_value(HeapValue::Closure {
-            function_id: 73,
-            upvalues: original_captures
-                .iter()
-                .cloned()
-                .map(Upvalue::new)
-                .collect(),
-        });
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
+            &[
+                ConcreteType::F64,
+                ConcreteType::I64,
+                ConcreteType::Bool,
+                ConcreteType::String,
+            ],
+            &[
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+                CaptureKind::Immutable,
+            ],
+        ));
+        // function_id 73, type_id 0 (single-layout test — id is local).
+        let original_nb = unsafe {
+            let ptr = alloc_typed_closure(73, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(1.5).into_raw_bits());
+            write_capture_typed(ptr, &layout, 1, ValueWord::from_i64(42).into_raw_bits());
+            write_capture_typed(ptr, &layout, 2, ValueWord::from_bool(true).into_raw_bits());
+            // Ptr capture: emit the raw bits and retain the string's
+            // refcount share for the block.
+            let s = ValueWord::from_string(std::sync::Arc::new("hi".to_string()));
+            let s_bits = s.into_raw_bits();
+            let _dup = ValueWord::clone_from_bits(s_bits);
+            let _ = _dup;
+            write_capture_raw_u64(ptr, &layout, 3, s_bits);
+            let owned =
+                OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
+            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        };
 
-        // Serialize — this drives the H6.4 migrated reader.
         let serialized = nanboxed_to_serializable(&original_nb, &store)
             .expect("closure serialization must succeed");
         match &serialized {
             SerializableVMValue::Closure {
                 function_id,
+                type_id,
                 upvalues,
             } => {
-                assert_eq!(*function_id, 73, "function_id must round-trip as u16");
+                assert_eq!(*function_id, 73, "function_id widened to u32");
+                assert_eq!(*type_id, 0, "type_id preserved");
                 assert_eq!(upvalues.len(), 4, "4 captures preserved");
                 match &upvalues[0] {
                     SerializableVMValue::Number(f) => assert_eq!(*f, 1.5),
@@ -2109,55 +2307,54 @@ mod tests {
             other => panic!("expected SerializableVMValue::Closure, got {:?}", other),
         }
 
-        // Deserialize through the unchanged producer — byte format is
-        // transparent under H6.4.
-        let restored_nb = serializable_to_nanboxed(&serialized, &store)
-            .expect("closure deserialization must succeed");
+        // Layout-aware replay: slot at `function_id` carries the layout.
+        let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; 74];
+        layouts[73] = Some(std::sync::Arc::clone(&layout));
+        let restored_nb = serializable_to_nanboxed_with_layouts(&serialized, &store, &layouts)
+            .expect("closure deserialization with layout must succeed");
         let restored_handle = restored_nb
             .as_closure_handle()
             .expect("restored value must be a closure");
-        assert_eq!(
-            restored_handle.function_id(),
-            73,
-            "function_id survives the round-trip"
-        );
-        assert_eq!(
-            restored_handle.capture_count(),
-            4,
-            "capture count survives the round-trip"
-        );
-        let restored_caps = restored_handle.captures_as_values();
-        assert_eq!(restored_caps[0].as_f64(), Some(1.5));
-        assert_eq!(restored_caps[1].as_i64(), Some(42));
-        assert_eq!(restored_caps[2].as_bool(), Some(true));
-        // The string capture comes back via a HeapValue::String on the
-        // heap — verify the restored reference still parses as a string.
-        let restored_str = restored_caps[3]
+        assert_eq!(restored_handle.function_id(), 73);
+        assert_eq!(restored_handle.capture_count(), 4);
+        let caps = restored_handle.captures_as_values();
+        assert_eq!(caps[0].as_f64(), Some(1.5));
+        assert_eq!(caps[1].as_i64(), Some(42));
+        assert_eq!(caps[2].as_bool(), Some(true));
+        let s = caps[3]
             .as_heap_ref()
             .and_then(|hv| match hv {
                 HeapValue::String(s) => Some((**s).clone()),
                 _ => None,
             })
             .expect("string capture restored as HeapValue::String");
-        assert_eq!(restored_str, "hi");
+        assert_eq!(s, "hi");
+
+        // Without a matching layout, deserialization must hard-error.
+        let missing_layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = Vec::new();
+        let err =
+            serializable_to_nanboxed_with_layouts(&serialized, &store, &missing_layouts)
+                .expect_err("missing layout must hard-error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no ClosureLayout registered"),
+            "error must mention missing layout, got: {msg}"
+        );
+
+        // The convenience wrapper (no layouts) also hard-errors.
+        let err = serializable_to_nanboxed(&serialized, &store)
+            .expect_err("convenience wrapper must hard-error on closure");
+        assert!(
+            err.to_string().contains("no ClosureLayout registered"),
+            "convenience wrapper surface the same error"
+        );
     }
 
-    /// Closure spec §14.6 (H6.5): round-trip a
-    /// `HeapValue::ClosureRaw`-backed closure through the snapshot
-    /// serialize → deserialize pipeline and verify the reconstructed
-    /// value exposes the same function_id + captures through the
-    /// `VmClosureHandle` shim.
-    ///
-    /// The H6.5 deserialize producer continues to emit the legacy
-    /// `HeapValue::Closure { function_id, upvalues }` variant — the byte
-    /// format is unchanged and reloaded programs don't always ship a
-    /// matching `ClosureLayout` side-table. This test cements that
-    /// cross-variant interop: the shim resolves both `Closure` and
-    /// `ClosureRaw` through the same path, so the deserialized value
-    /// reads identically regardless of which variant the original
-    /// snapshot-taker produced.
+    /// Track A.2A: every `CaptureKind` round-trips through the replay
+    /// path. Covers Immutable, OwnedMutable, and Shared — the three
+    /// discrete storage disciplines `op_make_closure` emits.
     #[test]
-    fn test_h6_5_closure_raw_snapshot_roundtrip() {
+    fn test_a2a_all_capture_kinds_snapshot_roundtrip() {
         use shape_value::heap_value::HeapValue;
         use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
         use shape_value::v2::closure_raw::{
@@ -2168,63 +2365,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SnapshotStore::new(dir.path().join("store")).unwrap();
 
-        // Build a ClosureRaw value directly (bypassing the compiler —
-        // we're testing the serialize path, not the producer).
         let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
-            &[ConcreteType::I64, ConcreteType::F64, ConcreteType::Bool],
+            &[ConcreteType::I64, ConcreteType::I64, ConcreteType::I64],
             &[
                 CaptureKind::Immutable,
-                CaptureKind::Immutable,
-                CaptureKind::Immutable,
+                CaptureKind::OwnedMutable,
+                CaptureKind::Shared,
             ],
         ));
+
         let original_nb = unsafe {
-            let ptr = alloc_typed_closure(91, 0, &layout);
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_i64(-5).into_raw_bits());
-            write_capture_typed(ptr, &layout, 1, ValueWord::from_f64(6.5).into_raw_bits());
-            write_capture_typed(ptr, &layout, 2, ValueWord::from_bool(true).into_raw_bits());
+            let ptr = alloc_typed_closure(5, 0, &layout);
+            // Immutable: write the bits at their typed offset.
+            write_capture_typed(ptr, &layout, 0, ValueWord::from_i64(10).into_raw_bits());
+            // OwnedMutable: Box the ValueWord bits.
+            let cell: *mut ValueWord =
+                Box::into_raw(Box::new(ValueWord::from_i64(20).into_raw_bits()));
+            let off1 = layout.heap_capture_offset(1);
+            std::ptr::write((ptr as *mut u8).add(off1) as *mut *mut ValueWord, cell);
+            // Shared: Arc into a SharedCell.
+            let shared = std::sync::Arc::new(shape_value::v2::closure_layout::SharedCell::new(
+                ValueWord::from_i64(30).into_raw_bits(),
+            ));
+            let shared_ptr = std::sync::Arc::into_raw(shared);
+            let off2 = layout.heap_capture_offset(2);
+            std::ptr::write(
+                (ptr as *mut u8).add(off2) as *mut *const shape_value::v2::closure_layout::SharedCell,
+                shared_ptr,
+            );
             let owned =
                 OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
             ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
         };
 
-        // Sanity: the original reads through the shim as expected.
-        let orig_handle = original_nb
-            .as_closure_handle()
-            .expect("original must be a closure");
-        assert_eq!(orig_handle.function_id(), 91);
-        assert_eq!(orig_handle.capture_count(), 3);
-        assert_eq!(orig_handle.capture_as_value(0).as_i64(), Some(-5));
-        assert_eq!(orig_handle.capture_as_value(1).as_f64(), Some(6.5));
-        assert_eq!(orig_handle.capture_as_value(2).as_bool(), Some(true));
-
-        // Serialize through the H6.4 producer path.
         let serialized = nanboxed_to_serializable(&original_nb, &store)
-            .expect("ClosureRaw serialization must succeed");
-        match &serialized {
-            SerializableVMValue::Closure {
-                function_id,
-                upvalues,
-            } => {
-                assert_eq!(*function_id, 91, "function_id preserved");
-                assert_eq!(upvalues.len(), 3, "3 captures preserved");
-            }
-            other => panic!("expected SerializableVMValue::Closure, got {:?}", other),
-        }
+            .expect("mixed-kind closure serialization must succeed");
 
-        // Deserialize — byte format is unchanged under H6.5, so the
-        // reconstructed value is a legacy `HeapValue::Closure`. The
-        // shim reads it identically.
-        let restored_nb = serializable_to_nanboxed(&serialized, &store)
-            .expect("closure deserialization must succeed");
-        let restored_handle = restored_nb
+        let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; 6];
+        layouts[5] = Some(std::sync::Arc::clone(&layout));
+        let restored_nb = serializable_to_nanboxed_with_layouts(&serialized, &store, &layouts)
+            .expect("replay must succeed");
+        let handle = restored_nb
             .as_closure_handle()
             .expect("restored value must be a closure");
-        assert_eq!(restored_handle.function_id(), 91);
-        assert_eq!(restored_handle.capture_count(), 3);
-        let caps = restored_handle.captures_as_values();
-        assert_eq!(caps[0].as_i64(), Some(-5));
-        assert_eq!(caps[1].as_f64(), Some(6.5));
-        assert_eq!(caps[2].as_bool(), Some(true));
+        assert_eq!(handle.function_id(), 5);
+        assert_eq!(handle.capture_count(), 3);
+        let caps = handle.captures_as_values();
+        // Immutable read preserves the initial value.
+        assert_eq!(caps[0].as_i64(), Some(10));
+        // OwnedMutable and Shared replay both snapshot the current
+        // value behind the cell/lock (replay does not preserve
+        // pointer identity across nested closures — see the A.2A
+        // code comment), but the observed scalar is the same 20/30.
+        assert_eq!(caps[1].as_i64(), Some(20));
+        assert_eq!(caps[2].as_i64(), Some(30));
     }
 }

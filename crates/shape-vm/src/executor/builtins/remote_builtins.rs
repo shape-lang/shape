@@ -293,10 +293,15 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                     SerializableVMValue::Array(items)
                 }
                 _ if nb.as_closure_handle().is_some() => {
-                    // Closure spec H6.2: read via the shim so the producer
-                    // swap in H6.5 doesn't need to revisit this site.
+                    // Track A.2A: emit the widened closure schema
+                    // (`function_id: u32` + `type_id: u32`) for cross-
+                    // node transport. Receivers consult the remote
+                    // program's `closure_function_layouts_by_name` /
+                    // `closure_function_layouts` side-table to rebuild
+                    // the raw block (A.4 finalises the reader).
                     let handle = nb.as_closure_handle().unwrap();
-                    let function_id = handle.function_id() as u16;
+                    let function_id = handle.function_id();
+                    let type_id = handle.type_id();
                     let ups: Vec<_> = handle
                         .captures_as_values()
                         .iter()
@@ -304,6 +309,7 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                         .collect();
                     SerializableVMValue::Closure {
                         function_id,
+                        type_id,
                         upvalues: ups,
                     }
                 }
@@ -424,16 +430,23 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
         ),
         SerializableVMValue::Closure {
             function_id,
-            upvalues,
+            type_id: _type_id,
+            upvalues: _upvalues,
         } => {
-            let ups: Vec<_> = upvalues
-                .iter()
-                .map(|sv| shape_value::value::Upvalue::new(serializable_to_nb(sv)))
-                .collect();
-            ValueWord::from_heap_value(shape_value::HeapValue::Closure {
-                function_id: *function_id,
-                upvalues: ups,
-            })
+            // Track A.4 (pending): cross-node closures need layout-aware
+            // dispatch — thread the remote program's
+            // `closure_function_layouts_by_name` through this path and
+            // rebuild an `OwnedClosureBlock` via
+            // `serializable_to_nanboxed_with_layouts`. Until that lands,
+            // this function cannot decode closures — the signature is
+            // `-> ValueWord` with no error channel, so we panic with a
+            // clear diagnostic. The caller (remote-call response
+            // marshaller) should move to the Result-returning path.
+            panic!(
+                "remote_builtins::serializable_to_nb: closure deserialization \
+                 requires layout registry (function_id {function_id}); A.4 \
+                 upgrades this path to consult closure_function_layouts"
+            );
         }
         SerializableVMValue::TypedObject {
             schema_id,
