@@ -83,3 +83,40 @@ times_two(7)
         14,
     );
 }
+
+/// Trampoline dispatch regression: a closure that fails JIT compilation
+/// (so its function_table slot stays null) must still produce the
+/// correct result when invoked from JIT'd code.
+///
+/// Before the fix:
+///   1. `execute_with_jit` never called `set_trampoline_vm`, so the
+///      thread-local `TRAMPOLINE_VM` was null and
+///      `dispatch_call_via_trampoline_vm` short-circuited to `TAG_NULL`.
+///   2. Even with the VM wired, the trampoline constructed a bare
+///      `ValueWord::from_function(fid)` — discarding the closure's
+///      captures and producing `Null` / wrong values on return.
+///
+/// This test lowers a closure whose body takes the JIT's current
+/// dynamic-arithmetic bail path (forcing a null function_table slot)
+/// while still needing captures to produce the right answer. The
+/// pre-fix code returned `Null`; the fix dispatches through
+/// `jit_trampoline_call_closure` with the captures threaded through.
+#[test]
+fn closure_non_jit_compiled_dispatches_through_trampoline_vm() {
+    // `|| { x = x + base; x }` with `let base` (immutable capture) and
+    // `let mut x` (OwnedMutable capture) exercises the exact shape from
+    // the original bug report. Calling it twice sums base twice into x.
+    jit_expect_int(
+        r#"
+fn main() -> int {
+    let base: int = 10
+    let mut x: int = 0
+    let f = || { x = x + base; x }
+    f()
+    f()
+}
+main()
+"#,
+        20,
+    );
+}
