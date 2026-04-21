@@ -394,11 +394,22 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
     }
 }
 
-/// Lightweight SerializableVMValue → ValueWord conversion for remote call responses.
-fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> ValueWord {
+/// Lightweight SerializableVMValue → ValueWord conversion for remote call
+/// responses.
+///
+/// Track A.4: closure payloads in a response require the caller program's
+/// `closure_function_layouts` side-table to rebuild the raw
+/// `TypedClosureHeader`. The `layouts` slice is passed through verbatim; a
+/// missing entry for the payload's `function_id` surfaces a hard error
+/// through the returned `Result` — no legacy `HeapValue::Closure`
+/// fallback exists.
+fn serializable_to_nb(
+    sv: &shape_runtime::snapshot::SerializableVMValue,
+    layouts: &[Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>],
+) -> Result<ValueWord, String> {
     use shape_runtime::snapshot::SerializableVMValue;
 
-    match sv {
+    Ok(match sv {
         SerializableVMValue::Number(n) => ValueWord::from_f64(*n),
         SerializableVMValue::Int(i) => ValueWord::from_i64(*i),
         SerializableVMValue::Bool(b) => ValueWord::from_bool(*b),
@@ -407,16 +418,29 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
         SerializableVMValue::String(s) => ValueWord::from_string(Arc::new(s.clone())),
         SerializableVMValue::Function(id) => ValueWord::from_function(*id),
         SerializableVMValue::Array(items) => {
-            let vals: Vec<_> = items.iter().map(serializable_to_nb).collect();
+            let mut vals = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                vals.push(serializable_to_nb(it, layouts)?);
+            }
             ValueWord::from_array(shape_value::vmarray_from_vec(vals))
         }
         SerializableVMValue::Decimal(d) => ValueWord::from_decimal(*d),
-        SerializableVMValue::Some(inner) => ValueWord::from_some(serializable_to_nb(inner)),
-        SerializableVMValue::Ok(inner) => ValueWord::from_ok(serializable_to_nb(inner)),
-        SerializableVMValue::Err(inner) => ValueWord::from_err(serializable_to_nb(inner)),
+        SerializableVMValue::Some(inner) => {
+            ValueWord::from_some(serializable_to_nb(inner, layouts)?)
+        }
+        SerializableVMValue::Ok(inner) => ValueWord::from_ok(serializable_to_nb(inner, layouts)?),
+        SerializableVMValue::Err(inner) => {
+            ValueWord::from_err(serializable_to_nb(inner, layouts)?)
+        }
         SerializableVMValue::HashMap { keys, values } => {
-            let k: Vec<_> = keys.iter().map(serializable_to_nb).collect();
-            let v: Vec<_> = values.iter().map(serializable_to_nb).collect();
+            let mut k = Vec::with_capacity(keys.len());
+            for key in keys.iter() {
+                k.push(serializable_to_nb(key, layouts)?);
+            }
+            let mut v = Vec::with_capacity(values.len());
+            for val in values.iter() {
+                v.push(serializable_to_nb(val, layouts)?);
+            }
             ValueWord::from_hashmap_pairs(k, v)
         }
         SerializableVMValue::Range {
@@ -424,53 +448,53 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
             end,
             inclusive,
         } => ValueWord::from_range(
-            start.as_ref().map(|s| serializable_to_nb(s)),
-            end.as_ref().map(|e| serializable_to_nb(e)),
+            match start {
+                Some(s) => Some(serializable_to_nb(s, layouts)?),
+                None => None,
+            },
+            match end {
+                Some(e) => Some(serializable_to_nb(e, layouts)?),
+                None => None,
+            },
             *inclusive,
         ),
-        SerializableVMValue::Closure {
-            function_id,
-            type_id: _type_id,
-            upvalues: _upvalues,
-        } => {
-            // Track A.4 (pending): cross-node closures need layout-aware
-            // dispatch — thread the remote program's
-            // `closure_function_layouts_by_name` through this path and
-            // rebuild an `OwnedClosureBlock` via
-            // `serializable_to_nanboxed_with_layouts`. Until that lands,
-            // this function cannot decode closures — the signature is
-            // `-> ValueWord` with no error channel, so we panic with a
-            // clear diagnostic. The caller (remote-call response
-            // marshaller) should move to the Result-returning path.
-            panic!(
-                "remote_builtins::serializable_to_nb: closure deserialization \
-                 requires layout registry (function_id {function_id}); A.4 \
-                 upgrades this path to consult closure_function_layouts"
-            );
+        SerializableVMValue::Closure { .. } => {
+            // Track A.4: defer to the snapshot crate's
+            // `serializable_to_nanboxed_with_layouts` so the replay
+            // logic has a single home. `SnapshotStore` is only
+            // consulted for sidecar blobs (not present in the remote
+            // response payloads that reach this path), so a temp
+            // store with a throwaway directory is sufficient.
+            let tmp = std::env::temp_dir().join("shape_remote_builtins_closure_stage");
+            let store = shape_runtime::snapshot::SnapshotStore::new(&tmp).map_err(|e| {
+                format!("remote_builtins: failed to create staging store: {}", e)
+            })?;
+            shape_runtime::snapshot::serializable_to_nanboxed_with_layouts(sv, &store, layouts)
+                .map_err(|e| {
+                    format!(
+                        "remote_builtins: cross-node closure replay failed: {}",
+                        e
+                    )
+                })?
         }
         SerializableVMValue::TypedObject {
             schema_id,
             slot_data,
             heap_mask,
         } => {
-            let slots: Vec<_> = slot_data
-                .iter()
-                .enumerate()
-                .map(|(i, sv)| {
-                    if *heap_mask & (1u64 << i) != 0 {
-                        let vw = serializable_to_nb(sv);
-                        let (slot, _) = shape_value::ValueSlot::from_value_word(&vw);
-                        slot
-                    } else {
-                        match sv {
-                            SerializableVMValue::Number(n) => {
-                                shape_value::ValueSlot::from_number(*n)
-                            }
-                            _ => shape_value::ValueSlot::from_raw(0),
-                        }
-                    }
-                })
-                .collect();
+            let mut slots = Vec::with_capacity(slot_data.len());
+            for (i, sv) in slot_data.iter().enumerate() {
+                if *heap_mask & (1u64 << i) != 0 {
+                    let vw = serializable_to_nb(sv, layouts)?;
+                    let (slot, _) = shape_value::ValueSlot::from_value_word(&vw);
+                    slots.push(slot);
+                } else {
+                    slots.push(match sv {
+                        SerializableVMValue::Number(n) => shape_value::ValueSlot::from_number(*n),
+                        _ => shape_value::ValueSlot::from_raw(0),
+                    });
+                }
+            }
             ValueWord::from_heap_value(shape_value::HeapValue::TypedObject {
                 schema_id: *schema_id,
                 slots: slots.into_boxed_slice(),
@@ -478,7 +502,7 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
             })
         }
         _ => ValueWord::none(),
-    }
+    })
 }
 
 /// remote.__call(addr, fn_ref, args) -> Result<_, string>
@@ -539,7 +563,12 @@ fn remote_call(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
     match response {
         crate::remote::WireMessage::CallResponse(r) => match r.result {
             Ok(serialized_value) => {
-                let value = serializable_to_nb(&serialized_value);
+                // Track A.4: decode closures via the caller's layout
+                // registry. Cross-node closure payloads must carry a
+                // `function_id` that maps to a live layout in the
+                // caller's program — missing layouts hard-error.
+                let value =
+                    serializable_to_nb(&serialized_value, &program.closure_function_layouts)?;
                 Ok(ValueWord::from_ok(value))
             }
             Err(e) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
@@ -564,5 +593,93 @@ mod tests {
         assert!(module.exports.contains_key("execute"));
         assert!(module.exports.contains_key("ping"));
         assert!(module.exports.contains_key("__call"));
+    }
+
+    /// Track A.4: fabricate a wire payload representing a cross-node
+    /// closure response, decode it through `serializable_to_nb` with a
+    /// matching layout registry, and verify the rebuilt closure reads
+    /// back through the `VmClosureHandle` shim.
+    #[test]
+    fn test_a4_cross_node_closure_decode_with_layout() {
+        use shape_runtime::snapshot::SerializableVMValue;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        // Synthesize a closure payload as if sent by a remote node.
+        let payload = SerializableVMValue::Closure {
+            function_id: 9,
+            type_id: 3,
+            upvalues: vec![SerializableVMValue::Int(123)],
+        };
+
+        // Caller-side layout registry — the function at id 9 captures
+        // a single I64 (Immutable).
+        let layout = Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::I64],
+            &[CaptureKind::Immutable],
+        ));
+        let mut layouts: Vec<Option<Arc<ClosureLayout>>> = vec![None; 10];
+        layouts[9] = Some(Arc::clone(&layout));
+
+        let nb = serializable_to_nb(&payload, &layouts).expect("A.4 replay must succeed");
+        let handle = nb
+            .as_closure_handle()
+            .expect("decoded value must be a closure");
+        assert_eq!(handle.function_id(), 9);
+        assert_eq!(handle.type_id(), 3);
+        assert_eq!(handle.capture_count(), 1);
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(123));
+
+        // Missing layout must surface a hard error, not a panic, not a
+        // Legacy-backed closure.
+        let err =
+            serializable_to_nb(&payload, &[]).expect_err("missing layout must hard-error");
+        assert!(
+            err.contains("no ClosureLayout registered"),
+            "error must mention missing layout, got: {err}"
+        );
+    }
+
+    /// Track A.4: a nested closure inside an Array payload must also
+    /// propagate the layouts slice through the recursive walk.
+    #[test]
+    fn test_a4_nested_closure_in_array_decodes_with_layout() {
+        use shape_runtime::snapshot::SerializableVMValue;
+        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        let closure_payload = SerializableVMValue::Closure {
+            function_id: 2,
+            type_id: 0,
+            upvalues: vec![SerializableVMValue::Number(1.25)],
+        };
+        let payload = SerializableVMValue::Array(vec![
+            SerializableVMValue::Int(7),
+            closure_payload,
+            SerializableVMValue::String("tail".to_string()),
+        ]);
+
+        let layout = Arc::new(ClosureLayout::from_capture_types(
+            &[ConcreteType::F64],
+            &[CaptureKind::Immutable],
+        ));
+        let mut layouts: Vec<Option<Arc<ClosureLayout>>> = vec![None; 3];
+        layouts[2] = Some(Arc::clone(&layout));
+
+        let nb = serializable_to_nb(&payload, &layouts).expect("nested replay succeeds");
+        let arr = nb
+            .as_heap_ref()
+            .and_then(|hv| match hv {
+                shape_value::HeapValue::Array(a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("top-level must be an array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_i64(), Some(7));
+        let handle = arr[1]
+            .as_closure_handle()
+            .expect("nested closure must decode");
+        assert_eq!(handle.function_id(), 2);
+        assert_eq!(handle.capture_as_value(0).as_f64(), Some(1.25));
     }
 }
