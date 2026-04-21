@@ -81,14 +81,33 @@ where
 
 /// Dispatch a function call through the trampoline VM for functions that
 /// aren't JIT-compiled (null entries in the function table).
+///
+/// `upvalue_bits` carries the closure's captures when the callee is a
+/// closure (either VM-format heap or unified-heap `JITClosure`). When the
+/// callee is a bare function (TAG_FUNCTION inline), pass `None` to dispatch
+/// through `call_value_immediate_nb` with a plain function ValueWord.
+///
+/// When captures are present we route through `jit_trampoline_call_closure`
+/// on the interpreter side, which binds them to the callee frame's
+/// upvalues exactly as the `op_call_closure` path does. Without this
+/// path, a closure that fails JIT compilation (null entry in the function
+/// table) would be reconstructed as a bare function, losing its captures
+/// and producing `Null` on return.
 fn dispatch_call_via_trampoline_vm(
     function_id: u32,
+    upvalue_bits: Option<&[u64]>,
     jit_args: &[u64],
-    _jit_ctx: *const JITContext,
+    jit_ctx: *const JITContext,
 ) -> u64 {
     TRAMPOLINE_VM.with(|cell| {
         let vm_ptr = cell.get();
         if vm_ptr.is_null() {
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                eprintln!(
+                    "[jit-trampoline] fn_id={} BAIL: trampoline VM not registered",
+                    function_id
+                );
+            }
             return TAG_NULL;
         }
         let vm = unsafe { &mut *vm_ptr };
@@ -96,16 +115,51 @@ fn dispatch_call_via_trampoline_vm(
         // Convert JIT NaN-boxed args to ValueWord
         let args: Vec<shape_value::ValueWord> = jit_args
             .iter()
-            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, _jit_ctx))
+            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, jit_ctx))
             .collect();
 
-        // Use call_value_immediate_nb instead of execute_function_by_id
-        // because execute_function_by_id calls reset() which wipes VM state.
-        // call_value_immediate_nb preserves existing state for nested calls.
-        let callee = shape_value::ValueWord::from_function(function_id as u16);
-        match vm.call_value_immediate_nb(&callee, &args, None) {
-            Ok(result) => nanboxed_to_jit_bits(&result),
-            Err(_) => TAG_NULL,
+        if let Some(caps) = upvalue_bits {
+            // Closure dispatch: bind captures as the callee frame's
+            // upvalues. The raw bits are passed through verbatim —
+            // Immutable captures carry widened ValueWord bits, while
+            // OwnedMutable / Shared captures carry raw cell pointer bits
+            // that the interpreter's Load/Store*Capture opcodes recover.
+            let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
+            match vm.jit_trampoline_call_closure(function_id as u16, caps, &args, None) {
+                Ok(bits) => {
+                    if debug {
+                        eprintln!(
+                            "[jit-trampoline-closure] fn_id={} returned {:#x}",
+                            function_id, bits
+                        );
+                    }
+                    // `pop_raw_u64` transfers ownership of any Arc refcount
+                    // to us. Wrap in a `ValueWord` so its Drop releases
+                    // that refcount after `nanboxed_to_jit_bits` has
+                    // performed its own ref-management (unified-heap path
+                    // bumps the refcount; VM-format path clones fields
+                    // it wants to retain).
+                    let vw = shape_value::ValueWord::from_raw_bits(bits);
+                    nanboxed_to_jit_bits(&vw)
+                }
+                Err(e) => {
+                    if debug {
+                        eprintln!("[jit-trampoline-closure] fn_id={} ERROR: {}", function_id, e);
+                    }
+                    TAG_NULL
+                }
+            }
+        } else {
+            // Bare function (TAG_FUNCTION inline, no captures).
+            // Use call_value_immediate_nb instead of execute_function_by_id
+            // because execute_function_by_id calls reset() which wipes VM
+            // state. call_value_immediate_nb preserves existing state for
+            // nested calls.
+            let callee = shape_value::ValueWord::from_function(function_id as u16);
+            match vm.call_value_immediate_nb(&callee, &args, None) {
+                Ok(result) => nanboxed_to_jit_bits(&result),
+                Err(_) => TAG_NULL,
+            }
         }
     })
 }
@@ -340,22 +394,50 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         if raw_fn_ptr.is_null() {
             // Not JIT-compiled — dispatch through trampoline VM.
             //
-            // For VM-format closures the trampoline dispatch path still
-            // takes bare `args` — captures will be rebound by the
-            // interpreter from the closure value still present in the
-            // stack. Drop any captures we gathered here.
-            drop(vm_captures);
+            // We must pass captures through to the interpreter or the
+            // closure would be invoked as a bare function, returning
+            // `Null` (this was the pre-fix trampoline-null bug).
+            //
+            // Three callee shapes:
+            //   - TAG_FUNCTION inline: no captures — pass `None`.
+            //   - VM-format heap closure: captures live in `vm_captures`
+            //     (populated above via `VmClosureHandle`).
+            //   - Unified-heap `HK_CLOSURE` (JITClosure): captures live
+            //     inline at `closure.captures_ptr` — extract here.
+            let unified_caps_storage: Option<Vec<u64>> =
+                if vm_captures.is_none() && is_heap_kind(callee_bits, HK_CLOSURE) {
+                    let closure = unified_unbox::<JITClosure>(callee_bits);
+                    let count = closure.captures_count as usize;
+                    let mut v: Vec<u64> = Vec::with_capacity(count);
+                    for i in 0..count {
+                        v.push(*closure.captures_ptr.add(i));
+                    }
+                    Some(v)
+                } else {
+                    None
+                };
+            let upvalues: Option<&[u64]> = vm_captures
+                .as_deref()
+                .or_else(|| unified_caps_storage.as_deref());
             if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                 eprintln!(
-                    "[jit-call-value] function {} NOT JIT-compiled, trampoline fallback (returns null!)",
-                    function_id
+                    "[jit-call-value] function {} NOT JIT-compiled, dispatching through trampoline VM (upvalues={})",
+                    function_id,
+                    upvalues.map(|c| c.len() as isize).unwrap_or(-1),
                 );
             }
-            return dispatch_call_via_trampoline_vm(
+            let result = dispatch_call_via_trampoline_vm(
                 function_id as u32,
+                upvalues,
                 &args,
                 ctx as *const JITContext,
             );
+            // Drop any VM-format capture storage now that the call
+            // returned. The VmClosureHandle share was released when the
+            // original ValueWord clone went out of scope above.
+            drop(vm_captures);
+            drop(unified_caps_storage);
+            return result;
         }
 
         // Reset ctx.stack_ptr before calling — the callee's internal operations

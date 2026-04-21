@@ -472,6 +472,37 @@ impl VirtualMachine {
         self.pop_raw_u64()
     }
 
+    /// Trampoline entry: call a closure by `func_id` with pre-extracted raw
+    /// upvalue bits and raw args, returning the result as raw `u64` bits.
+    ///
+    /// Used by the JIT trampoline when a callee's `function_id` is not
+    /// JIT-compiled (null slot in the function table). The JIT has already
+    /// extracted captures — either from a VM-format `Closure`/`ClosureRaw`
+    /// via `VmClosureHandle::capture_execution_bits` or from a unified-heap
+    /// `JITClosure` block — and passes them through as raw bits. Each
+    /// upvalue's raw bits encode `Immutable` (widened `ValueWord` bits),
+    /// `OwnedMutable` (raw `*mut ValueWord` pointer bits), or `Shared`
+    /// (raw `*const SharedCell` pointer bits), matching what the
+    /// interpreter's `Load/StoreOwnedMutableCapture` opcodes expect.
+    ///
+    /// This is a thin public wrapper around `call_closure_with_nb_args` +
+    /// `execute_until_call_depth` + `pop_raw_u64` — mirroring the TAG_HEAP
+    /// closure branch of `call_value_immediate_nb` but without requiring the
+    /// caller to reconstruct a VM-format heap pointer.
+    pub fn jit_trampoline_call_closure(
+        &mut self,
+        func_id: u16,
+        upvalue_bits: &[u64],
+        args: &[ValueWord],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<u64, VMError> {
+        let target_depth = self.call_stack.len();
+        let upvalues: Vec<Upvalue> = upvalue_bits.iter().map(|&b| Upvalue::new(b)).collect();
+        self.call_closure_with_nb_args(func_id, upvalues, args)?;
+        self.execute_until_call_depth(target_depth, ctx)?;
+        self.pop_raw_u64()
+    }
+
     // ─── Raw u64 call API (v2) ─────────────────────────────────────────────
 
     /// Raw-bits closure/function call: dispatches on tag/HeapKind.

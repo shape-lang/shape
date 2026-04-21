@@ -187,6 +187,45 @@ impl JITExecutor {
             jit_ctx.function_table_len = table.len();
         }
 
+        // Set up the trampoline VM that JIT's `jit_call_value` falls back
+        // to when a callee's function_table slot is null (i.e. the
+        // function was not JIT-compiled, typically because its MIR
+        // lowering bailed). Without this, `dispatch_call_via_trampoline_vm`
+        // short-circuits to TAG_NULL, losing the callee's real result.
+        //
+        // The VM is populated with the **unlinked** bytecode (the exact
+        // same input the JIT compiled from) so function_id lookups agree
+        // between JIT and interpreter. Going through `load_program` with
+        // a `content_addressed` field set would route through the linker,
+        // which topologically sorts function blobs and renumbers them —
+        // breaking JIT↔interpreter function-ID parity. Clear the
+        // content-addressed payload first so `load_program` takes the
+        // direct path.
+        //
+        // The trampoline VM lives for the duration of `jit_fn` execution
+        // and is unset afterwards so a stale pointer does not leak across
+        // threads / subsequent executions.
+        let mut trampoline_bytecode = bytecode.clone();
+        trampoline_bytecode.content_addressed = None;
+        let mut trampoline_vm = shape_vm::VirtualMachine::new(shape_vm::VMConfig::default());
+        trampoline_vm.load_program(trampoline_bytecode);
+        unsafe {
+            crate::ffi::control::set_trampoline_vm(
+                &mut trampoline_vm as *mut shape_vm::VirtualMachine,
+            );
+        }
+
+        // Drop guard: even if `jit_fn` panics, the thread-local
+        // TRAMPOLINE_VM must not keep pointing at a VM that is about to
+        // be freed when the stack unwinds.
+        struct TrampolineGuard;
+        impl Drop for TrampolineGuard {
+            fn drop(&mut self) {
+                crate::ffi::control::unset_trampoline_vm();
+            }
+        }
+        let _trampoline_guard = TrampolineGuard;
+
         // Execute the JIT-compiled function
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
             eprintln!("[jit-debug] compilation OK, about to execute...");
