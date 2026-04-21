@@ -258,11 +258,71 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             return dispatch_module_fn_call(module_fn_id, &args, ctx);
         }
 
+        // Resolve the function_id and any VM-format closure captures.
+        //
+        // Three callee shapes are supported here:
+        //  1. `TAG_FUNCTION` inline: bare function value (no captures).
+        //  2. Unified heap `HK_CLOSURE`: v2 `JITClosure` block allocated by
+        //     the JIT itself (captures are raw bits in an inline array).
+        //  3. VM-format heap: `HeapValue::Closure` / `HeapValue::ClosureRaw`
+        //     produced by the interpreter's `op_make_closure`. The JIT sees
+        //     these when a bytecode-emitted closure flows into a JIT-compiled
+        //     call site — that's the A.1D.2 / A.1E scenario where the
+        //     closure body runs natively but was allocated by the VM.
+        //
+        // For shape 3 we go through `VmClosureHandle` to read function_id
+        // and capture_execution_bits, mirroring the interpreter's
+        // `op_call_closure`. `capture_execution_bits` returns raw pointer
+        // bits for OwnedMutable / Shared captures — identical to what the
+        // bytecode's Load/StoreOwnedMutableCapture opcodes expect to see in
+        // `frame.upvalues[i]`.
+        let mut vm_captures: Option<Vec<u64>> = None;
         let function_id = if is_inline_function(callee_bits) {
             unbox_function_id(callee_bits)
         } else if is_heap_kind(callee_bits, HK_CLOSURE) {
             let closure = unified_unbox::<JITClosure>(callee_bits);
             closure.function_id
+        } else if shape_value::ValueBits::from_raw(callee_bits).is_heap()
+            && !shape_value::ValueBits::from_raw(callee_bits).is_unified_heap()
+        {
+            // VM-format heap pointer: decode through ValueWord. Use
+            // `clone_from_bits` so the refcount is bumped — the original
+            // share on the stack is still live and independent.
+            //
+            // SAFETY: `callee_bits` was produced by the interpreter's
+            // op_make_closure (or a prior VM-format pass) which stores
+            // a live Arc<HeapValue> with refcount ≥ 1. Cloning here
+            // bumps the count; the clone is dropped at function exit.
+            let vw = unsafe { ValueWord::clone_from_bits(callee_bits) };
+            let Some(hv) = vw.as_heap_ref() else {
+                if debug { eprintln!("[jit-call-value] BAIL: VM-format heap but as_heap_ref() returned None: {:#x}", callee_bits); }
+                return TAG_NULL;
+            };
+            let Some(handle) = hv.as_closure_handle() else {
+                if debug { eprintln!("[jit-call-value] BAIL: VM-format heap is not a closure: {:#x}", callee_bits); }
+                return TAG_NULL;
+            };
+            let fid = handle.function_id() as u16;
+            let n = handle.capture_count();
+            let mut caps: Vec<u64> = Vec::with_capacity(n);
+            for i in 0..n {
+                // `capture_execution_bits` returns:
+                //   - Immutable: the widened ValueWord bit pattern (Arc
+                //     refcount already bumped by the handle's live
+                //     closure block — no extra retain needed; the
+                //     receiving JIT frame does not free these).
+                //   - OwnedMutable: raw `*mut ValueWord` pointer bits.
+                //   - Shared: raw `*const SharedCell` pointer bits.
+                //
+                // All three variants are passed straight through to the
+                // callee's frame.upvalues, matching interpreter semantics.
+                caps.push(handle.capture_execution_bits(i));
+            }
+            vm_captures = Some(caps);
+            // Drop the cloned handle — the captures are already copied.
+            // `vw` goes out of scope here, releasing the +1 share we took.
+            drop(vw);
+            fid
         } else {
             if debug { eprintln!("[jit-call-value] BAIL: callee is neither function nor closure: {:#x}", callee_bits); }
             return TAG_NULL;
@@ -278,7 +338,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         let raw_fn_ptr =
             *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
         if raw_fn_ptr.is_null() {
-            // Not JIT-compiled — dispatch through trampoline VM
+            // Not JIT-compiled — dispatch through trampoline VM.
+            //
+            // For VM-format closures the trampoline dispatch path still
+            // takes bare `args` — captures will be rebound by the
+            // interpreter from the closure value still present in the
+            // stack. Drop any captures we gathered here.
+            drop(vm_captures);
             if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                 eprintln!(
                     "[jit-call-value] function {} NOT JIT-compiled, trampoline fallback (returns null!)",
@@ -303,7 +369,26 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // matching the VM calling convention where bytecode does LoadLocal/StoreLocal
         // for captures first, then params.
         let full_args;
-        let call_args: &[u64] = if is_heap_kind(callee_bits, HK_CLOSURE) {
+        let call_args: &[u64] = if let Some(caps) = vm_captures.as_ref() {
+            // Shape 3: VM-format closure. Captures were extracted via
+            // `VmClosureHandle::capture_execution_bits` above.
+            if debug {
+                eprintln!(
+                    "[jit-call-value] vm-closure fn_id={}: prepending {} captures before {} args",
+                    function_id, caps.len(), args.len()
+                );
+            }
+            full_args = {
+                let mut v = Vec::with_capacity(caps.len() + args.len());
+                v.extend_from_slice(caps);
+                v.extend_from_slice(&args);
+                v
+            };
+            &full_args
+        } else if is_heap_kind(callee_bits, HK_CLOSURE) {
+            // Shape 2: unified-heap JITClosure. Captures live inline at
+            // `closure.captures_ptr`; read directly without crossing the
+            // VM-format boundary.
             let closure = unified_unbox::<JITClosure>(callee_bits);
             let count = closure.captures_count as usize;
             if debug {
@@ -322,6 +407,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             };
             &full_args
         } else {
+            // Shape 1: inline TAG_FUNCTION — no captures.
             &args
         };
 
