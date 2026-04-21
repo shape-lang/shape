@@ -20,6 +20,154 @@ const UNIFIED_VALUE_DATA_OFFSET: i32 = 8;
 const TYPED_OBJ_HEADER: i32 = 8;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    // ── Track A.1E: Shared capture lock fast path ─────────────────
+    //
+    // A `Shared` capture slot holds a raw `*const SharedCell`. The
+    // SharedCell layout (pinned in `shape_value::v2::closure_layout`):
+    //
+    //   #[repr(C)]
+    //   pub struct SharedCell {
+    //       state: AtomicU8,          // offset 0 — 0=unlocked, 1=locked
+    //       _pad:  [u8; 7],           // offsets 1..=7
+    //       value: UnsafeCell<u64>,   // offset 8 — ValueWord payload
+    //   }
+    //
+    // Size 16 bytes, align 8. The JIT's inline lock/unlock emits a
+    // compare-exchange on the state byte at offset 0; on failure it
+    // calls the slow-path FFI helpers (`jit_shared_lock_contended` /
+    // `jit_shared_unlock_contended`). The value is read/written as
+    // `i64` at offset 8.
+    //
+    // IR sketch for lock acquire:
+    //
+    //   old = atomic_cas.i8 [ptr + 0], 0, 1  (Acquire on success)
+    //   brif (old != 0) → contended_block else → locked_block
+    //   contended_block:
+    //     call jit_shared_lock_contended(ptr); jump locked_block
+    //   locked_block: ...
+    //
+    // Cranelift's `atomic_cas` returns the *previous* value. On success
+    // the old byte was 0 (unlocked); on failure the old byte was 1 (or
+    // whatever the contended holder left).
+
+    /// Emit the inline lock fast path on a SharedCell pointer. On
+    /// success, the state byte transitions from 0→1 with `Acquire`
+    /// ordering; on failure, calls `jit_shared_lock_contended` which
+    /// spin-waits. After this emission the current block is a
+    /// freshly-switched block in which the lock is held.
+    ///
+    /// # SAFETY
+    ///
+    /// The caller must have validated that `cell_ptr` is a non-null
+    /// `*const SharedCell` (equivalently, the closure's Ptr slot still
+    /// holds the raw pointer bits installed by `emit_heap_closure` /
+    /// `jit_arc_shared_retain`). The Arc strong share owned by the
+    /// closure keeps the allocation alive for the duration of any
+    /// JIT'd call that uses this slot, so the state byte read/write is
+    /// always in-bounds.
+    fn emit_shared_lock(&mut self, cell_ptr: Value) {
+        use shape_value::v2::closure_layout::{
+            SHARED_CELL_LOCKED, SHARED_CELL_STATE_OFFSET, SHARED_CELL_UNLOCKED,
+        };
+        // Inline CAS from 0→1 with Acquire ordering on success.
+        // `atomic_cas` in Cranelift returns the previous value, so
+        // success = (prev == 0).
+        let state_addr = if SHARED_CELL_STATE_OFFSET == 0 {
+            cell_ptr
+        } else {
+            // Compile-time constant — this branch is currently dead
+            // because SHARED_CELL_STATE_OFFSET == 0, but kept for
+            // forward-compatibility if the layout ever shifts.
+            self.builder
+                .ins()
+                .iadd_imm(cell_ptr, SHARED_CELL_STATE_OFFSET as i64)
+        };
+        let unlocked = self
+            .builder
+            .ins()
+            .iconst(types::I8, SHARED_CELL_UNLOCKED as i64);
+        let locked = self
+            .builder
+            .ins()
+            .iconst(types::I8, SHARED_CELL_LOCKED as i64);
+        let prev = self
+            .builder
+            .ins()
+            .atomic_cas(MemFlags::trusted(), state_addr, unlocked, locked);
+        // If prev != 0, the CAS failed (state was already locked). Call
+        // the contended helper which spin-waits until it can flip to 1.
+        let ok = self.builder.ins().icmp_imm(
+            IntCC::Equal,
+            prev,
+            SHARED_CELL_UNLOCKED as i64,
+        );
+        let contended_block = self.builder.create_block();
+        let after_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(ok, after_block, &[], contended_block, &[]);
+        self.builder.switch_to_block(contended_block);
+        self.builder.seal_block(contended_block);
+        self.builder
+            .ins()
+            .call(self.ffi.shared_lock_contended, &[cell_ptr]);
+        self.builder.ins().jump(after_block, &[]);
+        self.builder.switch_to_block(after_block);
+        self.builder.seal_block(after_block);
+    }
+
+    /// Emit the inline unlock fast path. On success, state byte
+    /// transitions from 1→0 with `Release` ordering. The current
+    /// implementation always uses a release store (no PARKED_BIT to
+    /// check for); the "contended" branch is vestigial but kept for
+    /// ABI parity with the lock side.
+    fn emit_shared_unlock(&mut self, cell_ptr: Value) {
+        use shape_value::v2::closure_layout::{
+            SHARED_CELL_LOCKED, SHARED_CELL_STATE_OFFSET, SHARED_CELL_UNLOCKED,
+        };
+        let state_addr = if SHARED_CELL_STATE_OFFSET == 0 {
+            cell_ptr
+        } else {
+            self.builder
+                .ins()
+                .iadd_imm(cell_ptr, SHARED_CELL_STATE_OFFSET as i64)
+        };
+        // Inline CAS from 1→0 with Release ordering on success. If the
+        // CAS fails (someone smashed our state byte — a bug, but we
+        // defend against it), call the contended unlocker which writes
+        // state=0 with release ordering unconditionally.
+        let locked = self
+            .builder
+            .ins()
+            .iconst(types::I8, SHARED_CELL_LOCKED as i64);
+        let unlocked = self
+            .builder
+            .ins()
+            .iconst(types::I8, SHARED_CELL_UNLOCKED as i64);
+        let prev = self
+            .builder
+            .ins()
+            .atomic_cas(MemFlags::trusted(), state_addr, locked, unlocked);
+        let ok = self.builder.ins().icmp_imm(
+            IntCC::Equal,
+            prev,
+            SHARED_CELL_LOCKED as i64,
+        );
+        let contended_block = self.builder.create_block();
+        let after_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(ok, after_block, &[], contended_block, &[]);
+        self.builder.switch_to_block(contended_block);
+        self.builder.seal_block(contended_block);
+        self.builder
+            .ins()
+            .call(self.ffi.shared_unlock_contended, &[cell_ptr]);
+        self.builder.ins().jump(after_block, &[]);
+        self.builder.switch_to_block(after_block);
+        self.builder.seal_block(after_block);
+    }
+
     // ── Track A.1D.2: OwnedMutable capture cell write widening ──────
     //
     // A cell stores a raw `ValueWord` u64 bit-pattern regardless of the
@@ -252,6 +400,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         0,
                     ));
                 }
+                // Track A.1E: Shared capture slots hold the raw
+                // `*const SharedCell` bits of an Arc-shared cell
+                // (retained via `jit_arc_shared_retain` in
+                // `emit_heap_closure`). The captured variable's current
+                // value lives inside the cell's `value` field at offset
+                // `SHARED_CELL_VALUE_OFFSET` (8); reads/writes must
+                // lock-gate through the state byte at offset 0.
+                //
+                // Matches the interpreter's `op_load_shared_capture`
+                // handler semantics exactly: acquire the mutex, copy
+                // the inner ValueWord bits, release the mutex. No
+                // retain/release on the Arc strong share — the closure
+                // owns one share for the lifetime of the frame.
+                //
+                // SAFETY: the pointer is non-null and 8-aligned (Rust
+                // `Arc::<SharedCell>` allocator + `SharedCell`'s
+                // align=8). The Arc share owned by the closure keeps
+                // the allocation alive for the duration of any JIT'd
+                // call that reads this slot; the reclaim (via
+                // `Arc::from_raw` in `release_typed_closure`) only
+                // runs after the closure's refcount hits zero, which
+                // is strictly after the JIT body returns.
+                if self.shared_capture_slots.contains(slot) {
+                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let cell_ptr = self.builder.use_var(*var);
+                    self.emit_shared_lock(cell_ptr);
+                    let value = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::trusted(),
+                        cell_ptr,
+                        SHARED_CELL_VALUE_OFFSET,
+                    );
+                    self.emit_shared_unlock(cell_ptr);
+                    return Ok(value);
+                }
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
@@ -352,6 +535,31 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .store(MemFlags::trusted(), bits, cell_ptr, 0);
                     return Ok(());
                 }
+                // Track A.1E: Shared capture slot write — lock-gated
+                // store through the SharedCell. Mirrors the interpreter's
+                // `op_store_shared_capture`: take the mutex, overwrite
+                // the inner ValueWord payload, drop the guard. The Arc
+                // pointer bits in the slot are NOT modified (the closure
+                // still owns its one strong share for frame lifetime).
+                //
+                // SAFETY: see `read_place` Shared branch.
+                if self.shared_capture_slots.contains(slot) {
+                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let var = *self.locals.get(slot).ok_or_else(|| {
+                        format!("MirToIR: unknown local slot {}", slot)
+                    })?;
+                    let cell_ptr = self.builder.use_var(var);
+                    let bits = self.coerce_value_to_i64_bits(val);
+                    self.emit_shared_lock(cell_ptr);
+                    self.builder.ins().store(
+                        MemFlags::trusted(),
+                        bits,
+                        cell_ptr,
+                        SHARED_CELL_VALUE_OFFSET,
+                    );
+                    self.emit_shared_unlock(cell_ptr);
+                    return Ok(());
+                }
 
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
                 let var = *self.locals.get(slot).ok_or_else(|| {
@@ -428,8 +636,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `owned_mutable_capture_mask`, A.1A) would see a null pointer.
         // The interpreter's handlers never touch the upvalue slot on
         // Move semantics either; this preserves parity.
+        //
+        // Track A.1E: same story for Shared capture slots — they
+        // permanently hold the `*const SharedCell` bits of the Arc-
+        // shared cell, and `release_typed_closure`'s `Arc::from_raw`
+        // (gated on `shared_capture_mask`, A.1A) reclaims them exactly
+        // once when the closure's refcount hits zero.
         if matches!(place, Place::Local(_))
-            && self.owned_mutable_capture_slots.contains(&slot)
+            && (self.owned_mutable_capture_slots.contains(&slot)
+                || self.shared_capture_slots.contains(&slot))
         {
             return Ok(());
         }

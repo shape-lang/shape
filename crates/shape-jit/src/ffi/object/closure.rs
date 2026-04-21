@@ -210,6 +210,186 @@ pub unsafe extern "C" fn jit_alloc_owned_mut_cell(initial: u64) -> *mut u64 {
     Box::into_raw(Box::new(initial))
 }
 
+// ============================================================================
+// Track A.1E: Shared capture FFI helpers
+// ============================================================================
+
+/// Retain a Shared capture's `Arc<SharedCell>` strong share.
+///
+/// The closure's capture slot for a `CaptureKind::Shared` capture holds
+/// a `*const SharedCell` obtained via `Arc::into_raw` on an outer-scope
+/// `Arc<SharedCell>`. At closure-allocation time, the outer slot already
+/// owns one strong share; the closure needs its own share. Matches the
+/// interpreter's `op_make_closure` Shared branch (`control_flow/mod.rs`)
+/// which calls `Arc::<SharedCell>::increment_strong_count(cell_ptr)` on
+/// the capture pointer before writing it into the closure's Ptr slot.
+///
+/// The JIT emits a call to this helper from
+/// `MirToIR::emit_heap_closure`'s Shared branch. The helper returns the
+/// same pointer so the store-back site can chain: `store(retain(ptr),
+/// closure + off)`.
+///
+/// # Safety
+///
+/// - `ptr` must be a non-null `*const SharedCell` obtained from a live
+///   `Arc<SharedCell>`. `Arc::increment_strong_count` has the same
+///   safety contract: the pointer must have come from `Arc::into_raw`
+///   (or another `Arc::as_ptr`) on a valid `Arc<SharedCell>` and the
+///   Arc must still have at least one strong share live.
+/// - The caller must install the returned pointer into a capture Ptr
+///   slot that `release_typed_closure` will reclaim (via
+///   `Arc::from_raw`) on closure drop, balancing this increment.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_arc_shared_retain(ptr: u64) -> u64 {
+    use shape_value::v2::closure_layout::SharedCell;
+    use std::sync::Arc;
+    unsafe {
+        Arc::<SharedCell>::increment_strong_count(ptr as *const SharedCell);
+    }
+    ptr
+}
+
+/// Contended lock-slow-path helper for Shared capture reads/writes.
+///
+/// Called by the JIT when the inline CAS lock (state byte 0→1) fails.
+/// Spins on the state byte, matching the interpreter's
+/// `SharedCell::lock_contended` implementation. Closure-capture
+/// contention is rare in practice, so a spin-wait is acceptable.
+///
+/// # Safety
+///
+/// - `ptr` must be a live `*const SharedCell` whose state byte lives at
+///   offset `SHARED_CELL_STATE_OFFSET` (0). Callers reach this helper
+///   only after a failing inline CAS against the same state byte, so
+///   the layout contract is inherited from the caller.
+/// - On return, the lock state byte is `1` (locked) with `Acquire`
+///   ordering. The caller must eventually pair this with a matching
+///   release (via the inline unlock CAS or
+///   `jit_shared_unlock_contended`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_shared_lock_contended(ptr: u64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    if ptr == 0 {
+        return;
+    }
+    // SAFETY: see function SAFETY docs. Reborrowing `&SharedCell` for
+    // the duration of the spinlock is sound as long as the Arc strong
+    // share owning the allocation outlives this call — which the
+    // closure's capture slot guarantees (slot release is keyed on the
+    // closure's refcount hitting zero, which cannot race with a JIT'd
+    // body's lock acquire on the same slot).
+    let cell: &SharedCell = unsafe { &*(ptr as *const SharedCell) };
+    cell.lock_contended();
+}
+
+/// Contended unlock-slow-path helper for Shared capture reads/writes.
+///
+/// In the current hand-rolled-spinlock design, unlock is always a
+/// single `state.store(0, Release)` — there is no actual "slow path"
+/// because we don't park threads. This helper is provided for
+/// ABI-compatibility with the JIT's branch structure (the inline CAS
+/// could fail in a future implementation that adds a PARKED_BIT) and
+/// simply performs the release store.
+///
+/// # Safety
+///
+/// Same contract as `jit_shared_lock_contended`. Caller must currently
+/// hold the lock.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    if ptr == 0 {
+        return;
+    }
+    // SAFETY: see `jit_shared_lock_contended`. Unlock with release
+    // ordering so the JIT-body's writes become visible to the next
+    // acquirer.
+    let cell: &SharedCell = unsafe { &*(ptr as *const SharedCell) };
+    unsafe { cell.unlock() };
+}
+
+#[cfg(test)]
+mod a1e_shared_ffi_tests {
+    //! Track A.1E unit tests for the Shared capture FFI helpers.
+    //!
+    //! These are direct FFI tests that manipulate `Arc<SharedCell>` by
+    //! hand and verify the refcount bookkeeping matches the interpreter's
+    //! `op_make_closure` Shared branch contract.
+    use super::*;
+    use shape_value::v2::closure_layout::SharedCell;
+    use shape_value::{ValueWord, ValueWordExt};
+    use std::sync::Arc;
+
+    #[test]
+    fn a1e_ffi_arc_shared_retain_increments_strong_count() {
+        // Allocate an Arc<SharedCell> and take its raw pointer. Initial
+        // strong count = 1 (the cloned observer share below takes count
+        // to 2 — our baseline).
+        let arc: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(1234)));
+        let observer = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&observer), 2);
+
+        // Take one raw share via Arc::into_raw (this is what the outer
+        // slot's AllocSharedLocal did; we simulate it here).
+        let raw_slot_share = Arc::into_raw(Arc::clone(&arc));
+        assert_eq!(Arc::strong_count(&observer), 3);
+
+        // Call the FFI retain — mirrors `op_make_closure`'s
+        // `Arc::increment_strong_count` on the capture pointer.
+        let returned = unsafe { jit_arc_shared_retain(raw_slot_share as u64) };
+        assert_eq!(returned, raw_slot_share as u64, "helper returns the pointer");
+        assert_eq!(
+            Arc::strong_count(&observer),
+            4,
+            "retain must bump the strong count by one"
+        );
+
+        // Unwind: release the two shares taken via `Arc::into_raw` /
+        // `increment_strong_count` by reconstructing Arcs and dropping.
+        unsafe {
+            Arc::<SharedCell>::from_raw(raw_slot_share);
+            Arc::<SharedCell>::from_raw(raw_slot_share);
+        }
+        assert_eq!(Arc::strong_count(&observer), 2);
+        drop(arc);
+        assert_eq!(Arc::strong_count(&observer), 1);
+    }
+
+    #[test]
+    fn a1e_ffi_shared_lock_unlock_contended_roundtrip() {
+        // Lock / unlock roundtrip via the FFI slow-path helpers. No
+        // contention — these helpers are still correct on uncontended
+        // cells.
+        let cell = Box::new(SharedCell::new(ValueWord::from_i64(42)));
+        let ptr = Box::into_raw(cell);
+        unsafe {
+            jit_shared_lock_contended(ptr as u64);
+            // While locked, the state byte must read 1.
+            let state = (*ptr)
+                .state
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(state, 1, "lock helper must leave state byte = 1");
+            jit_shared_unlock_contended(ptr as u64);
+            let state = (*ptr)
+                .state
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(state, 0, "unlock helper must leave state byte = 0");
+            drop(Box::from_raw(ptr));
+        }
+    }
+
+    #[test]
+    fn a1e_ffi_shared_helpers_handle_null_ptr_safely() {
+        // Null pointers should be no-ops, not crashes. The JIT guards
+        // against codegen bugs by emitting a branch on null; this is a
+        // defense-in-depth test.
+        unsafe {
+            jit_shared_lock_contended(0);
+            jit_shared_unlock_contended(0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod a1d_owned_mutable_cell_tests {
     //! Track A.1D unit tests for `jit_alloc_owned_mut_cell`.

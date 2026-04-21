@@ -663,26 +663,47 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .store(MemFlags::trusted(), cell_ptr, closure_ptr, offset);
                 }
                 CaptureKind::Shared => {
-                    // Pre-A.1E: Shared captures are interpreter-only. The
-                    // JIT preflight (accessors::vm_only_opcode_reason)
-                    // rejects any function that reads/writes a Shared
-                    // capture, so we shouldn't see one here. If we ever
-                    // do (codegen bug), emit a `trap` so the JIT fails
-                    // fast rather than silently miscompiling.
-                    debug_assert!(
-                        false,
-                        "emit_heap_closure: CaptureKind::Shared at index {} \
-                         reached JIT lowering (A.1E should have gated this)",
-                        i
-                    );
-                    self.builder
+                    // Track A.1E: Shared capture lowering. The operand
+                    // pushes the raw `*const SharedCell` pointer bits
+                    // already held in the outer slot — the bytecode
+                    // compiler emits `LoadLocal(outer_var_slot)`
+                    // against a slot previously filled by
+                    // `AllocSharedLocal`. We retain one additional Arc
+                    // strong share for the closure via
+                    // `jit_arc_shared_retain` (mirrors the interpreter's
+                    // `Arc::<SharedCell>::increment_strong_count(ptr)`
+                    // in `op_make_closure`), then store the pointer
+                    // into the Ptr slot. `release_typed_closure` on
+                    // closure drop walks `shared_capture_mask` and
+                    // reclaims each share with `Arc::from_raw`.
+                    //
+                    // SAFETY: the operand produces a non-null
+                    // `*const SharedCell` whose Arc strong count ≥ 1
+                    // (owned by the outer slot). The retain FFI bumps
+                    // the count by 1; the subsequent store installs
+                    // the pointer bits into the capture slot. The
+                    // allocator's (`AllocSharedLocal`'s `Arc::into_raw`)
+                    // 8-byte alignment is preserved.
+                    let raw = self.compile_operand(op)?;
+                    let val_ty = self.builder.func.dfg.value_type(raw);
+                    // The pointer is a raw u64 bit pattern — for an
+                    // outer `var` slot promoted to Shared storage,
+                    // the bytecode compiler emits the pointer bits as
+                    // an I64 LoadLocal. Widen to I64 defensively in
+                    // case upstream type inference narrowed it.
+                    let ptr_bits =
+                        self.coerce_for_capture_store(raw, val_ty, cl_types::I64);
+                    let inst = self
+                        .builder
                         .ins()
-                        .trap(cranelift::codegen::ir::TrapCode::User(1));
-                    return Err(format!(
-                        "MirToIR::emit_heap_closure: CaptureKind::Shared \
-                         capture at index {} is not yet lowered (A.1E)",
-                        i
-                    ));
+                        .call(self.ffi.arc_shared_retain, &[ptr_bits]);
+                    let retained_ptr = self.builder.inst_results(inst)[0];
+                    self.builder.ins().store(
+                        MemFlags::trusted(),
+                        retained_ptr,
+                        closure_ptr,
+                        offset,
+                    );
                 }
             }
         }

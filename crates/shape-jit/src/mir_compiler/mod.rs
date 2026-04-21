@@ -176,6 +176,40 @@ pub struct MirToIR<'a, 'b> {
     /// or has no OwnedMutable captures — non-closure functions then
     /// behave identically to pre-A.1D.2.
     pub(crate) owned_mutable_capture_slots: HashSet<SlotId>,
+
+    // ── Track A.1E: Shared capture side-table ─────────────────────
+    /// Local slots whose Cranelift variable holds the raw
+    /// `*const SharedCell` bits of a `Shared` capture cell (retained via
+    /// `jit_arc_shared_retain` in `emit_heap_closure`). Structurally
+    /// parallel to `owned_mutable_capture_slots`: the leading `N`
+    /// entries of `MirFunction::param_slots` are captures, and each slot
+    /// whose `capture_storage_kind(i) == Shared` is recorded here.
+    ///
+    /// Effects on the lowering pipeline:
+    /// - `read_place(Local(s))` emits the inline lock fast path (CAS
+    ///   state byte 0→1 with `Acquire` ordering; on failure, call
+    ///   `jit_shared_lock_contended`), then `load.i64 [cell_ptr,
+    ///   SHARED_CELL_VALUE_OFFSET]`, then inline unlock fast path
+    ///   (CAS 1→0 with `Release` ordering; on failure, call
+    ///   `jit_shared_unlock_contended`). Matches the interpreter's
+    ///   `op_load_shared_capture` handler semantics (take mutex, clone
+    ///   inner bits, drop guard).
+    /// - `write_place(Local(s), v)` emits the same lock fast path,
+    ///   then `store.i64 v, [cell_ptr, SHARED_CELL_VALUE_OFFSET]`,
+    ///   then the unlock fast path. Matches
+    ///   `op_store_shared_capture` (take mutex, write, drop guard).
+    /// - `null_place` / `release_old_value_if_heap` / `emit_drop` all
+    ///   early-return for these slots: the Arc pointer bits must
+    ///   survive for the entire frame so every read/write finds the
+    ///   right cell, and the share is reclaimed exactly once by
+    ///   `release_typed_closure`'s `Arc::from_raw` loop (see
+    ///   `ClosureLayout::shared_capture_mask`, A.1A).
+    ///
+    /// Mutually exclusive with `owned_mutable_capture_slots` per the
+    /// `ClosureLayout` invariant (the three capture-kind masks are
+    /// disjoint). Empty when the function being compiled is not a
+    /// closure body, or has no Shared captures.
+    pub(crate) shared_capture_slots: HashSet<SlotId>,
 }
 
 /// Result of MIR preflight check.
@@ -369,6 +403,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             stack_closure_slots: HashMap::new(),
             closure_function_layouts,
             owned_mutable_capture_slots: HashSet::new(),
+            shared_capture_slots: HashSet::new(),
         }
     }
 
@@ -404,8 +439,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// not the width of the slot itself.
     ///
     /// No-op for non-closure functions (`captures_count == 0`) and for
-    /// closures whose layout marks every capture as `Immutable` /
-    /// `Shared` — `Shared` still bails to the interpreter until A.1E.
+    /// closures whose layout marks every capture as `Immutable`. A.1E
+    /// extends this registration to populate `shared_capture_slots`
+    /// alongside `owned_mutable_capture_slots`; both side-tables are
+    /// parallel in structure but drive different lowering paths (see
+    /// their doc-comments on `MirToIR`).
     pub fn register_owned_mutable_capture_slots(
         &mut self,
         captures_count: u16,
@@ -429,22 +467,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .take(len)
             .enumerate()
         {
-            if layout.capture_storage_kind(i) == CaptureKind::OwnedMutable {
-                self.owned_mutable_capture_slots.insert(param_slot);
-                // Propagate the layout's known concrete type onto the
-                // slot kind vector so `Rvalue::BinaryOp` lowering can
-                // pick the typed arithmetic path. Only patch when the
-                // slot was previously `Unknown`; a non-Unknown kind
-                // from the bytecode frame descriptor wins.
-                if let Some(concrete) = layout.capture_types.get(i) {
-                    if let Some(kind) = types::elem_slot_kind_for_concrete(concrete) {
-                        let idx = param_slot.0 as usize;
-                        if idx < self.slot_kinds.len() {
-                            if self.slot_kinds[idx]
-                                == shape_vm::type_tracking::SlotKind::Unknown
-                            {
-                                self.slot_kinds[idx] = kind;
-                            }
+            let capture_kind = layout.capture_storage_kind(i);
+            let is_cell_capture = matches!(
+                capture_kind,
+                CaptureKind::OwnedMutable | CaptureKind::Shared
+            );
+            if !is_cell_capture {
+                continue;
+            }
+            match capture_kind {
+                CaptureKind::OwnedMutable => {
+                    self.owned_mutable_capture_slots.insert(param_slot);
+                }
+                CaptureKind::Shared => {
+                    self.shared_capture_slots.insert(param_slot);
+                }
+                CaptureKind::Immutable => unreachable!(),
+            }
+            // Propagate the layout's known concrete type onto the
+            // slot kind vector so `Rvalue::BinaryOp` lowering can
+            // pick the typed arithmetic path. Only patch when the
+            // slot was previously `Unknown`; a non-Unknown kind
+            // from the bytecode frame descriptor wins. Same
+            // treatment applies to OwnedMutable and Shared — in
+            // both cases `read_place` returns an I64 ValueWord-
+            // shaped value and the downstream binop picker keys on
+            // the kind, not the cell-pointer width itself.
+            if let Some(concrete) = layout.capture_types.get(i) {
+                if let Some(kind) = types::elem_slot_kind_for_concrete(concrete) {
+                    let idx = param_slot.0 as usize;
+                    if idx < self.slot_kinds.len() {
+                        if self.slot_kinds[idx]
+                            == shape_vm::type_tracking::SlotKind::Unknown
+                        {
+                            self.slot_kinds[idx] = kind;
                         }
                     }
                 }

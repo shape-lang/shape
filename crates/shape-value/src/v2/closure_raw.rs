@@ -954,7 +954,7 @@ mod tests {
             // Build the cell and hold an external share for strong-count
             // inspection.
             let external: Arc<SharedCell> =
-                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(77)));
+                Arc::new(SharedCell::new(ValueWord::from_i64(77)));
             assert_eq!(Arc::strong_count(&external), 1);
 
             // Clone one share for the closure, convert to raw pointer.
@@ -1046,7 +1046,7 @@ mod tests {
             // Shared capture 2: Arc<SharedCell>. Keep the `external`
             // Arc around to observe the strong-count decrement.
             let external: Arc<SharedCell> =
-                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(200)));
+                Arc::new(SharedCell::new(ValueWord::from_i64(200)));
             let closure_share = Arc::clone(&external);
             let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
             let off2 = layout.heap_capture_offset(2);
@@ -1098,7 +1098,7 @@ mod tests {
         let _pre = DROP_COUNTER.load(Ordering::SeqCst);
 
         unsafe {
-            let cell: Arc<SharedCell> = Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(5)));
+            let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(5)));
             let cell_ptr = Arc::into_raw(cell); // strong_count == 1
 
             let ptr = alloc_typed_closure(3, 0, &layout);

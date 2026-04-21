@@ -662,7 +662,7 @@ mod tests {
         unsafe {
             let ptr = alloc_typed_closure(7, 0, &layout);
             let external: Arc<SharedCell> =
-                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(271828)));
+                Arc::new(SharedCell::new(ValueWord::from_i64(271828)));
             let closure_share: Arc<SharedCell> = Arc::clone(&external);
             let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
             let off = layout.heap_capture_offset(0);
@@ -720,7 +720,7 @@ mod tests {
             std::ptr::write(ptr.add(off1) as *mut *mut ValueWord, box_cell);
             // Shared at slot 2.
             let external: Arc<SharedCell> =
-                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(300)));
+                Arc::new(SharedCell::new(ValueWord::from_i64(300)));
             let arc_share: Arc<SharedCell> = Arc::clone(&external);
             let arc_raw: *const SharedCell = Arc::into_raw(arc_share);
             let off2 = layout.heap_capture_offset(2);
@@ -812,7 +812,7 @@ mod tests {
         unsafe {
             let ptr = alloc_typed_closure(1, 0, &layout);
             let external: Arc<SharedCell> =
-                Arc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+                Arc::new(SharedCell::new(ValueWord::from_i64(0)));
             let share_for_closure: Arc<SharedCell> = Arc::clone(&external);
             let cell_ptr: *const SharedCell = Arc::into_raw(share_for_closure);
             let off = layout.heap_capture_offset(0);

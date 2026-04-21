@@ -536,25 +536,32 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // the `*mut ValueWord` cell bits stored in the slot. These opcodes
     // no longer force interpreter fallback.
     //
-    // A.1E still gates `LoadSharedCapture` / `StoreSharedCapture` and
-    // the outer-scope Shared-cell opcodes (`AllocSharedLocal` /
-    // `LoadSharedLocal` / `StoreSharedLocal` / `DropSharedLocal`) plus
-    // the Shared module-binding lifecycle — the Cranelift inline
-    // parking_lot fast path is pending.
+    // Track A.1E: `LoadSharedCapture` / `StoreSharedCapture` are now
+    // compiled by MirToIR via the Shared-capture side-table (see
+    // `MirToIR::shared_capture_slots`). The MIR's plain `LoadLocal` /
+    // `StoreLocal` on capture param slots are dispatched to lock-gated
+    // pointer-deref `load.i64` / `store.i64` through the
+    // `*const SharedCell` pointer bits stored in the slot. The lock
+    // fast path is a single CAS on the state byte at offset 0; slow
+    // paths call `jit_shared_lock_contended` /
+    // `jit_shared_unlock_contended`.
+    //
+    // The outer-scope `var` lifecycle opcodes (`AllocSharedLocal` /
+    // `LoadSharedLocal` / `StoreSharedLocal` / `DropSharedLocal` and
+    // the matching module-binding trio) remain gated — they allocate
+    // `Arc<SharedCell>` / reclaim shares, which is explicit follow-up
+    // work, not A.1E scope.
     match opcode {
-        OpCode::LoadSharedCapture | OpCode::StoreSharedCapture => {
-            Some("A.1B Shared capture opcode; Cranelift lowering pending in A.1E")
-        }
         OpCode::AllocSharedLocal
         | OpCode::LoadSharedLocal
         | OpCode::StoreSharedLocal
         | OpCode::DropSharedLocal => {
-            Some("A.1C.1 outer-scope Shared-cell opcode; Cranelift lowering pending in A.1E")
+            Some("A.1C.1 outer-scope Shared-cell opcode; Cranelift lowering pending (follow-up to A.1E)")
         }
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
         | OpCode::StoreSharedModuleBinding => Some(
-            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending in A.1E",
+            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending (follow-up to A.1E)",
         ),
         _ => None,
     }
@@ -939,8 +946,14 @@ mod tests {
         );
     }
 
+    // Track A.1E replaces the A.1C rejection tests for
+    // `LoadSharedCapture` / `StoreSharedCapture` with acceptance
+    // assertions on the lifted gate. The Cranelift inline parking_lot
+    // fast path is now live — see `MirToIR::shared_capture_slots` and
+    // the lock-gated pointer-deref in `read_place` / `write_place`.
+
     #[test]
-    fn a1c_preflight_rejects_load_shared_capture() {
+    fn a1e_preflight_accepts_load_shared_capture() {
         let program = BytecodeProgram {
             instructions: vec![
                 Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0))),
@@ -949,15 +962,19 @@ mod tests {
             ..Default::default()
         };
         let report = preflight_jit_compatibility(&program);
-        assert!(!report.can_jit());
         assert!(
-            report.vm_only_opcodes.contains(&OpCode::LoadSharedCapture),
-            "LoadSharedCapture must appear in vm_only_opcodes until A.1E"
+            report.can_jit(),
+            "A.1E: LoadSharedCapture is now lowered by MirToIR; \
+             preflight must accept it"
+        );
+        assert!(
+            !report.vm_only_opcodes.contains(&OpCode::LoadSharedCapture),
+            "A.1E removes LoadSharedCapture from vm_only_opcode_reason"
         );
     }
 
     #[test]
-    fn a1c_preflight_rejects_store_shared_capture() {
+    fn a1e_preflight_accepts_store_shared_capture() {
         let program = BytecodeProgram {
             instructions: vec![
                 Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0))),
@@ -966,10 +983,14 @@ mod tests {
             ..Default::default()
         };
         let report = preflight_jit_compatibility(&program);
-        assert!(!report.can_jit());
         assert!(
-            report.vm_only_opcodes.contains(&OpCode::StoreSharedCapture),
-            "StoreSharedCapture must appear in vm_only_opcodes until A.1E"
+            report.can_jit(),
+            "A.1E: StoreSharedCapture is now lowered by MirToIR; \
+             preflight must accept it"
+        );
+        assert!(
+            !report.vm_only_opcodes.contains(&OpCode::StoreSharedCapture),
+            "A.1E removes StoreSharedCapture from vm_only_opcode_reason"
         );
     }
 
@@ -989,18 +1010,19 @@ mod tests {
         assert!(report.can_jit());
     }
 
-    // Track A.1D.2 — Shared-cell opcodes remain gated. This guard pins
-    // that A.1D.2's lifting of the OwnedMutable gate was surgical: it
-    // only removed `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture`
-    // from `vm_only_opcode_reason`. A.1E lifts the Shared-cell opcodes
-    // once the inline parking_lot fast path lands.
+    // Track A.1E — A.1E lifts the capture-side Shared opcodes
+    // (`Load/StoreSharedCapture`). The outer-scope `var`-lifecycle
+    // opcodes remain gated pending follow-up work. This guard pins
+    // exactly which opcodes are still interpreter-only after A.1E.
 
     #[test]
-    fn a1d2_preflight_still_rejects_shared_opcodes() {
-        // A.1E lifts these. Double-check they're still gated after A.1D.
+    fn a1e_preflight_still_rejects_outer_shared_opcodes() {
+        // These are the outer-scope `var` lifecycle opcodes —
+        // allocation, local read/write, drop, and module-binding
+        // parallels — that remain gated after A.1E. They allocate
+        // `Arc<SharedCell>` / reclaim shares and need their own JIT
+        // lowering work that is out of A.1E's scope.
         for op in [
-            OpCode::LoadSharedCapture,
-            OpCode::StoreSharedCapture,
             OpCode::AllocSharedLocal,
             OpCode::LoadSharedLocal,
             OpCode::StoreSharedLocal,
@@ -1019,7 +1041,29 @@ mod tests {
             let report = preflight_jit_compatibility(&program);
             assert!(
                 !report.can_jit(),
-                "Shared opcode {:?} must remain preflight-rejected until A.1E",
+                "Outer-scope Shared opcode {:?} must remain preflight-rejected after A.1E",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn a1e_preflight_accepts_capture_side_shared_opcodes() {
+        // Symmetric to the outer-scope rejection: the capture-side
+        // opcodes `Load/StoreSharedCapture` DO pass preflight after
+        // A.1E.
+        for op in [OpCode::LoadSharedCapture, OpCode::StoreSharedCapture] {
+            let program = BytecodeProgram {
+                instructions: vec![
+                    Instruction::new(op, Some(Operand::Local(0))),
+                    Instruction::simple(OpCode::ReturnValue),
+                ],
+                ..Default::default()
+            };
+            let report = preflight_jit_compatibility(&program);
+            assert!(
+                report.can_jit(),
+                "Capture-side Shared opcode {:?} must pass preflight after A.1E",
                 op
             );
         }

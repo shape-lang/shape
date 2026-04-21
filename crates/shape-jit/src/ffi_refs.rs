@@ -49,6 +49,16 @@ pub struct FFIFuncRefs {
     // `emit_heap_closure` once per `CaptureKind::OwnedMutable` capture to
     // obtain the `*mut ValueWord` pointer installed into the Ptr slot.
     pub(crate) alloc_owned_mut_cell: FuncRef,
+    // Track A.1E: Shared capture FFI helpers.
+    //   `arc_shared_retain`          — per-capture Arc strong-count retain
+    //                                  in `emit_heap_closure`'s Shared branch.
+    //   `shared_lock_contended`      — spin-wait fallback for the inline
+    //                                  CAS lock acquire.
+    //   `shared_unlock_contended`    — release store fallback for the
+    //                                  inline CAS unlock.
+    pub(crate) arc_shared_retain: FuncRef,
+    pub(crate) shared_lock_contended: FuncRef,
+    pub(crate) shared_unlock_contended: FuncRef,
 
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,

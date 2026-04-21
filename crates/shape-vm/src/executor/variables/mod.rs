@@ -726,10 +726,15 @@ impl VirtualMachine {
         // the inner payload of the new mutex.
         let initial_bits = self.pop_raw_u64()?;
 
-        // Allocate the Arc<Mutex<ValueWord>> and convert into a raw
-        // pointer. `Arc::into_raw` keeps one strong-count share alive;
+        // Allocate the Arc<SharedCell> and convert into a raw pointer.
+        // `Arc::into_raw` keeps one strong-count share alive;
         // `DropSharedLocal` is responsible for reclaiming it later.
-        let arc: StdArc<SharedCell> = StdArc::new(parking_lot::Mutex::new(initial_bits));
+        //
+        // A.1E: SharedCell is now a `#[repr(C)]` struct with a hand-rolled
+        // spinlock at offset 0 and the ValueWord payload at offset 8. The
+        // JIT's inline lock/unlock paths depend on this fixed layout —
+        // see `closure_layout.rs::SharedCell` for the SAFETY contract.
+        let arc: StdArc<SharedCell> = StdArc::new(SharedCell::new(initial_bits));
         let cell_ptr: *const SharedCell = StdArc::into_raw(arc);
 
         // Compute the absolute stack index for the requested local slot.
@@ -980,8 +985,10 @@ impl VirtualMachine {
         self.module_bindings[index] = Self::NONE_BITS;
         drop(ValueWord::from_raw_bits(old_bits));
 
-        // Allocate the Arc<Mutex<ValueWord>>.
-        let arc: StdArc<SharedCell> = StdArc::new(parking_lot::Mutex::new(initial_bits));
+        // Allocate the Arc<SharedCell>. A.1E: SharedCell is a
+        // `#[repr(C)]` hand-rolled-spinlock struct, see
+        // `closure_layout.rs::SharedCell`.
+        let arc: StdArc<SharedCell> = StdArc::new(SharedCell::new(initial_bits));
         let cell_ptr: *const SharedCell = StdArc::into_raw(arc);
 
         // Install raw pointer bits. Intentionally NOT via
@@ -2740,7 +2747,7 @@ mod tests {
     fn a1b_load_shared_capture_locks_and_returns_inner() {
         let mut vm = fresh_vm_for_capture_opcode_test();
         let external: StdArc<SharedCell> =
-            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(77)));
+            StdArc::new(SharedCell::new(ValueWord::from_i64(77)));
         let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
         let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
         push_synthetic_frame_with_upvalues(
@@ -2767,7 +2774,7 @@ mod tests {
     fn a1b_store_shared_capture_writes_through_mutex() {
         let mut vm = fresh_vm_for_capture_opcode_test();
         let external: StdArc<SharedCell> =
-            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
         let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
         let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
         push_synthetic_frame_with_upvalues(
@@ -2798,7 +2805,7 @@ mod tests {
         // observe via closure B's upvalue.
         let mut vm = fresh_vm_for_capture_opcode_test();
         let external: StdArc<SharedCell> =
-            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(0)));
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
 
         // Two raw-ptr shares — one per "closure".
         let share_a: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
@@ -2843,7 +2850,7 @@ mod tests {
         let mut vm = fresh_vm_for_capture_opcode_test();
         let box_cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(200)));
         let external: StdArc<SharedCell> =
-            StdArc::new(parking_lot::Mutex::new(ValueWord::from_i64(300)));
+            StdArc::new(SharedCell::new(ValueWord::from_i64(300)));
         let arc_raw: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
         push_synthetic_frame_with_upvalues(
             &mut vm,

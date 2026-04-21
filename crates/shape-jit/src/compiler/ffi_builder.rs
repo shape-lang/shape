@@ -43,6 +43,10 @@ impl JITCompiler {
             finalize_heap_closure: r!("jit_finalize_heap_closure"),
             // Track A.1D: OwnedMutable capture cell allocator.
             alloc_owned_mut_cell: r!("jit_alloc_owned_mut_cell"),
+            // Track A.1E: Shared capture FFI helpers.
+            arc_shared_retain: r!("jit_arc_shared_retain"),
+            shared_lock_contended: r!("jit_shared_lock_contended"),
+            shared_unlock_contended: r!("jit_shared_unlock_contended"),
 
             // TypedObject allocation + field store
             typed_object_alloc: r!("jit_typed_object_alloc"),

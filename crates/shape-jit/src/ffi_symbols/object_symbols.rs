@@ -14,9 +14,10 @@ use super::super::ffi::conversion::{
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
-    jit_alloc_owned_mut_cell, jit_finalize_heap_closure, jit_format, jit_get_prop,
-    jit_hashmap_shape_id, jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object,
-    jit_object_rest, jit_set_prop,
+    jit_alloc_owned_mut_cell, jit_arc_shared_retain, jit_finalize_heap_closure, jit_format,
+    jit_get_prop, jit_hashmap_shape_id, jit_hashmap_value_at, jit_length, jit_make_closure,
+    jit_new_object, jit_object_rest, jit_set_prop, jit_shared_lock_contended,
+    jit_shared_unlock_contended,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
 use super::super::ffi::typed_object::jit_typed_object_get_field;
@@ -51,6 +52,28 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_alloc_owned_mut_cell",
         jit_alloc_owned_mut_cell as *const u8,
+    );
+    // Track A.1E: Shared capture FFI helpers.
+    //   `jit_arc_shared_retain`        — per-capture strong-count retain
+    //                                    in `emit_heap_closure`'s Shared
+    //                                    branch. Mirrors the interpreter's
+    //                                    `Arc::increment_strong_count` in
+    //                                    `op_make_closure`.
+    //   `jit_shared_lock_contended`    — spin-wait fallback when the
+    //                                    inline CAS lock (0→1) fails.
+    //   `jit_shared_unlock_contended`  — release store fallback when the
+    //                                    inline CAS unlock fails.
+    builder.symbol(
+        "jit_arc_shared_retain",
+        jit_arc_shared_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_shared_lock_contended",
+        jit_shared_lock_contended as *const u8,
+    );
+    builder.symbol(
+        "jit_shared_unlock_contended",
+        jit_shared_unlock_contended as *const u8,
     );
     builder.symbol("jit_object_rest", jit_object_rest as *const u8);
     builder.symbol("jit_format", jit_format as *const u8);
@@ -224,6 +247,49 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_alloc_owned_mut_cell", Linkage::Import, &sig)
             .expect("Failed to declare jit_alloc_owned_mut_cell");
         ffi_funcs.insert("jit_alloc_owned_mut_cell".to_string(), func_id);
+    }
+
+    // Track A.1E: jit_arc_shared_retain(ptr: u64) -> u64.
+    // Increments the strong count of the `Arc<SharedCell>` pointed to by
+    // `ptr` and returns `ptr` unchanged. Called from
+    // `MirToIR::emit_heap_closure` once per `CaptureKind::Shared` capture
+    // to mint the closure's own Arc share on top of the outer slot's
+    // share. `release_typed_closure` balances each retain via
+    // `Arc::from_raw` on closure drop.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ptr (*const SharedCell)
+        sig.returns.push(AbiParam::new(types::I64)); // ptr (same, chained)
+        let func_id = module
+            .declare_function("jit_arc_shared_retain", Linkage::Import, &sig)
+            .expect("Failed to declare jit_arc_shared_retain");
+        ffi_funcs.insert("jit_arc_shared_retain".to_string(), func_id);
+    }
+
+    // Track A.1E: jit_shared_lock_contended(ptr: u64).
+    // Slow-path lock acquire for Shared capture reads/writes. Called
+    // when the JIT's inline CAS on the state byte (0→1) fails.
+    // Spins until the byte transitions to `1` under `Acquire` ordering.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ptr (*const SharedCell)
+        let func_id = module
+            .declare_function("jit_shared_lock_contended", Linkage::Import, &sig)
+            .expect("Failed to declare jit_shared_lock_contended");
+        ffi_funcs.insert("jit_shared_lock_contended".to_string(), func_id);
+    }
+
+    // Track A.1E: jit_shared_unlock_contended(ptr: u64).
+    // Slow-path unlock for Shared capture reads/writes. In the current
+    // spinlock design this is just a release store; the branch is kept
+    // for ABI parity with the inline CAS structure.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ptr (*const SharedCell)
+        let func_id = module
+            .declare_function("jit_shared_unlock_contended", Linkage::Import, &sig)
+            .expect("Failed to declare jit_shared_unlock_contended");
+        ffi_funcs.insert("jit_shared_unlock_contended".to_string(), func_id);
     }
 
     // jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64

@@ -41,4 +41,13 @@ pub use closure::jit_finalize_heap_closure;
 // gets installed into the closure's `Ptr` capture slot.
 pub use closure::jit_alloc_owned_mut_cell;
 
+// Track A.1E: Shared capture FFI helpers.
+//   - `jit_arc_shared_retain`        — Arc strong-count retain for
+//                                       `emit_heap_closure`'s Shared branch.
+//   - `jit_shared_lock_contended`    — slow-path lock spin-wait.
+//   - `jit_shared_unlock_contended`  — slow-path unlock release store.
+pub use closure::{
+    jit_arc_shared_retain, jit_shared_lock_contended, jit_shared_unlock_contended,
+};
+
 pub use pattern::{jit_pattern_check_constructor, jit_pattern_extract_constructor};

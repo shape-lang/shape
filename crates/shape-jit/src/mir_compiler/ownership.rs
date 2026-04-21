@@ -162,8 +162,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `null_place` also early-returns for these slots (preserving
         // the cell pointer for release_typed_closure), so we skip it
         // here too.
+        //
+        // Track A.1E: parallel rationale for Shared capture slots.
+        // The slot holds a `*const SharedCell` (Arc pointer). Calling
+        // `arc_release` on it would misinterpret the Arc pointer as a
+        // NaN-boxed value. The Arc share is reclaimed exactly once by
+        // `release_typed_closure`'s `Arc::from_raw` (gated on the
+        // `shared_capture_mask`, A.1A). Frame-exit `Drop` must be a
+        // no-op.
         if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains(slot_id) {
+            if self.owned_mutable_capture_slots.contains(slot_id)
+                || self.shared_capture_slots.contains(slot_id)
+            {
                 return Ok(());
             }
         }
@@ -224,8 +234,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // interpreter's `op_store_owned_mutable_capture` likewise does
         // not release the old inner value (see its SAFETY note), so
         // skipping release here is parity-correct.
+        //
+        // Track A.1E: parallel rationale for Shared capture slots. The
+        // slot holds a `*const SharedCell` Arc pointer. `arc_release`
+        // would misinterpret it. The Arc share is reclaimed once by
+        // `release_typed_closure`'s `Arc::from_raw` (gated on
+        // `shared_capture_mask`, A.1A); the interpreter's
+        // `op_store_shared_capture` does not modify the Arc strong
+        // count either.
         if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains(slot_id) {
+            if self.owned_mutable_capture_slots.contains(slot_id)
+                || self.shared_capture_slots.contains(slot_id)
+            {
                 return Ok(());
             }
         }

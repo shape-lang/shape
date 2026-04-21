@@ -47,10 +47,212 @@ use std::collections::HashMap;
 /// holds exactly one strong-count share; closure Drop reclaims it with
 /// `Arc::from_raw(ptr).drop()`.
 ///
-/// `parking_lot::Mutex` is used instead of `std::sync::Mutex` so the
-/// uncontended-fast-path is a single atomic compare-exchange — important
-/// for the JIT's inline lock/unlock lowering in A.1E.
-pub type SharedCell = parking_lot::Mutex<crate::ValueWord>;
+/// # ABI and layout (Track A.1E)
+///
+/// Pre-A.1E this was a `parking_lot::Mutex<ValueWord>` type alias. The
+/// JIT Cranelift inline lock/unlock lowering in A.1E reads the lock
+/// state byte and the value payload at **hard-coded byte offsets**
+/// (state @ 0, value @ 8), so the cell is redefined as an explicit
+/// `#[repr(C)]` struct with a hand-rolled spinlock. This gives the JIT
+/// full ABI control without depending on parking_lot's (non-repr-C)
+/// internal layout. The interpreter continues to use the `.lock()`
+/// API, which returns a guard that supports `*guard = ...` and
+/// `let bits = *guard;` — so interpreter code paths stay unchanged.
+///
+/// ## Layout invariants (load-bearing for JIT)
+///
+/// - Size: 16 bytes.
+/// - Offset 0: `AtomicU8` state. `0` = unlocked, `1` = locked. All other
+///   bit patterns are reserved — the JIT CAS is `0 → 1` for lock and
+///   `1 → 0` for unlock.
+/// - Offsets 1..=7: padding. Must be zero on construction but not read.
+/// - Offset 8: `ValueWord` payload (u64 bit pattern).
+///
+/// ## Contention
+///
+/// The JIT's inline fast path is a single CAS from 0→1 for lock and
+/// 1→0 for unlock. On failure it calls the `jit_shared_lock_contended`
+/// / `jit_shared_unlock_contended` FFI helpers. The interpreter's
+/// `.lock()` method runs the same acquire-loop. Closure-capture
+/// contention is rare so a simple `spin_loop`-based wait is sufficient
+/// — no parking behaviour is preserved from the old parking_lot-based
+/// implementation.
+///
+/// Memory ordering: lock acquire is `Acquire`, lock release is `Release`,
+/// matching the standard `Mutex` contract.
+#[repr(C)]
+pub struct SharedCell {
+    /// Lock state byte at offset 0. `0` = unlocked, `1` = locked.
+    pub state: std::sync::atomic::AtomicU8,
+    /// Padding to align `value` to offset 8. Not read.
+    _pad: [u8; 7],
+    /// Value payload. Read/written only while the lock is held.
+    pub value: std::cell::UnsafeCell<crate::ValueWord>,
+}
+
+// SAFETY: SharedCell provides interior mutability guarded by its own
+// atomic state byte, matching the `Mutex<T: Send>: Send + Sync` contract.
+// ValueWord is a `u64` alias, trivially Send + Sync.
+unsafe impl Send for SharedCell {}
+unsafe impl Sync for SharedCell {}
+
+const _: () = {
+    // Load-bearing for the JIT Cranelift lowering: the state byte MUST be
+    // at offset 0 and the value at offset 8. If these layout assumptions
+    // ever drift, the JIT's inline CAS on the state byte and the
+    // `load/store.i64 [ptr + 8]` on the value would touch the wrong
+    // bytes. The JIT reads these offsets as compile-time constants
+    // (`SHARED_CELL_STATE_OFFSET` / `SHARED_CELL_VALUE_OFFSET` in
+    // `shape-jit::ffi::object::closure`), so a mismatch surfaces as a
+    // hard build error here, not a runtime miscompile.
+    assert!(std::mem::size_of::<SharedCell>() == 16);
+    assert!(std::mem::align_of::<SharedCell>() == 8);
+    assert!(std::mem::offset_of!(SharedCell, state) == 0);
+    assert!(std::mem::offset_of!(SharedCell, value) == 8);
+};
+
+/// Byte offset of the lock state byte within [`SharedCell`]. The JIT's
+/// inline lock CAS targets this offset as a compile-time constant.
+pub const SHARED_CELL_STATE_OFFSET: i32 = 0;
+
+/// Byte offset of the value payload within [`SharedCell`]. The JIT's
+/// inline load/store targets this offset as a compile-time constant.
+pub const SHARED_CELL_VALUE_OFFSET: i32 = 8;
+
+/// Locked state byte value.
+pub const SHARED_CELL_LOCKED: u8 = 1;
+/// Unlocked state byte value.
+pub const SHARED_CELL_UNLOCKED: u8 = 0;
+
+impl SharedCell {
+    /// Construct a new unlocked cell holding `value`.
+    #[inline]
+    pub fn new(value: crate::ValueWord) -> Self {
+        Self {
+            state: std::sync::atomic::AtomicU8::new(SHARED_CELL_UNLOCKED),
+            _pad: [0; 7],
+            value: std::cell::UnsafeCell::new(value),
+        }
+    }
+
+    /// Acquire the lock, blocking (spinning) until the state byte
+    /// transitions from `0` to `1`. Returns a RAII guard that unlocks
+    /// on Drop.
+    ///
+    /// Memory ordering: `Acquire` on the successful CAS, so all writes
+    /// protected by the lock on the previous owner are visible here.
+    #[inline]
+    pub fn lock(&self) -> SharedCellGuard<'_> {
+        use std::sync::atomic::Ordering;
+        // Uncontended fast path: single CAS 0→1.
+        if self
+            .state
+            .compare_exchange(
+                SHARED_CELL_UNLOCKED,
+                SHARED_CELL_LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return SharedCellGuard { cell: self };
+        }
+        // Contended slow path: spin-wait.
+        self.lock_contended();
+        SharedCellGuard { cell: self }
+    }
+
+    /// Spin-wait on the state byte until it becomes `0` and we
+    /// successfully flip it to `1`. Uses `spin_loop` hints to ease the
+    /// CPU during the busy-wait. Closure-capture contention is rare in
+    /// practice so the simplicity of a spinlock is acceptable.
+    ///
+    /// `pub` so the JIT's `jit_shared_lock_contended` FFI helper can
+    /// call it directly on a `&SharedCell` reborrowed from the raw
+    /// pointer bits stored in a capture slot. The lock transitions from
+    /// `0` → `1` with `Acquire` ordering and does NOT return a guard —
+    /// the JIT-emitted body is responsible for the matching unlock.
+    #[cold]
+    #[inline(never)]
+    pub fn lock_contended(&self) {
+        use std::sync::atomic::Ordering;
+        loop {
+            // Spin-wait for the state byte to show unlocked. Use a
+            // relaxed load in the inner spin (the CAS below does the
+            // acquire ordering on success).
+            while self.state.load(Ordering::Relaxed) != SHARED_CELL_UNLOCKED {
+                std::hint::spin_loop();
+            }
+            if self
+                .state
+                .compare_exchange_weak(
+                    SHARED_CELL_UNLOCKED,
+                    SHARED_CELL_LOCKED,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    /// Release the lock. Only the current lock holder may call this.
+    ///
+    /// # Safety
+    ///
+    /// The caller must currently hold the lock (state == 1). Callers
+    /// other than `SharedCellGuard::drop` must guarantee this manually;
+    /// the normal path is to let the guard go out of scope.
+    ///
+    /// `pub` so the JIT's `jit_shared_unlock_contended` FFI helper can
+    /// call it on a `&SharedCell` reborrowed from a capture slot.
+    #[inline]
+    pub unsafe fn unlock(&self) {
+        use std::sync::atomic::Ordering;
+        self.state.store(SHARED_CELL_UNLOCKED, Ordering::Release);
+    }
+}
+
+/// RAII guard returned by [`SharedCell::lock`]. Releases the lock on
+/// Drop. Dereffs to the inner `ValueWord`.
+pub struct SharedCellGuard<'a> {
+    cell: &'a SharedCell,
+}
+
+impl<'a> std::ops::Deref for SharedCellGuard<'a> {
+    type Target = crate::ValueWord;
+    #[inline]
+    fn deref(&self) -> &crate::ValueWord {
+        // SAFETY: holding the guard implies the lock is held, so we
+        // have exclusive access to the UnsafeCell payload.
+        unsafe { &*self.cell.value.get() }
+    }
+}
+
+impl<'a> std::ops::DerefMut for SharedCellGuard<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut crate::ValueWord {
+        // SAFETY: see `deref`.
+        unsafe { &mut *self.cell.value.get() }
+    }
+}
+
+impl<'a> Drop for SharedCellGuard<'a> {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: we hold the lock (guard construction acquired it);
+        // `unlock` transitions state 1→0 via a `Release` store.
+        unsafe { self.cell.unlock() };
+    }
+}
+
+impl std::fmt::Debug for SharedCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedCell").finish_non_exhaustive()
+    }
+}
 
 /// Storage discipline for a closure capture.
 ///
