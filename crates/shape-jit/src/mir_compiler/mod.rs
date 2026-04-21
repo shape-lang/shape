@@ -47,6 +47,12 @@ mod integration_tests;
 #[cfg(all(test, jit_v2_unstable_tests))]
 mod v2_array_tests;
 
+// Un-gated: pins the fix-jit-lead arg_count ABI / closure-param typing
+// / ClosureRaw decode commits. Keeps the primary regression gate green
+// on the default test path (no RUSTFLAGS).
+#[cfg(test)]
+mod closure_dispatch_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
