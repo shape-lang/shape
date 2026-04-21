@@ -174,6 +174,19 @@ impl JITExecutor {
             }
         }
 
+        // Link the JIT function table into the context. jit_call_value uses
+        // this table to resolve callees — unlinked, every closure / function
+        // value dispatch BAILs at the "fn_id out of bounds" check.
+        //
+        // SAFETY: `jit.get_function_table()` borrows from the JITCompiler
+        // which lives for the duration of this block. The ctx does not
+        // outlive `jit` — we execute below and drop `jit` at end of scope.
+        {
+            let table: &[*const u8] = jit.get_function_table();
+            jit_ctx.function_table = table.as_ptr() as *const crate::context::JittedStrategyFn;
+            jit_ctx.function_table_len = table.len();
+        }
+
         // Execute the JIT-compiled function
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
             eprintln!("[jit-debug] compilation OK, about to execute...");
