@@ -92,7 +92,7 @@ fn test_iterable_trait_has_type_param() {
     assert!(iterable.type_params.is_some());
     let params = iterable.type_params.as_ref().unwrap();
     assert_eq!(params.len(), 1);
-    assert_eq!(params[0].name, "T");
+    assert_eq!(params[0].name(), "T");
 }
 
 #[test]
