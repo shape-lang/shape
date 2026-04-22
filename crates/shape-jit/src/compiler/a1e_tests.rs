@@ -221,6 +221,145 @@ fn a1e_jit_var_two_closures_share_cell() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 3. cell-identity fix regression tests — exercise the outer-scope Shared
+//    local lifecycle now that preflight accepts AllocSharedLocal /
+//    LoadSharedLocal / StoreSharedLocal / DropSharedLocal. Previously these
+//    programs triggered a SIGSEGV because the JIT's `main` ran without an
+//    Arc<SharedCell> allocation and the closure's `jit_arc_shared_retain`
+//    dereferenced a plain scalar as a cell pointer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a1e_jit_var_no_closure_runs() {
+    // `var` binding without any closure capture. MIR storage planner
+    // classifies this slot as Direct (no promotion). The JIT compiles
+    // the function as a plain integer — no Arc<SharedCell>. Exercise
+    // the path that must remain unaffected by the cell-identity fix.
+    let source = r#"
+        fn main() -> int {
+            var x: int = 0
+            x = x + 1
+            x = x + 1
+            x
+        }
+        main()
+    "#;
+    use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+    shape_runtime::initialize_shared_runtime().ok();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    let mut executor = crate::executor::JITExecutor::new();
+    let result = executor
+        .execute_program(&mut engine, &program)
+        .expect("JIT execution failed");
+    match result.wire_value {
+        shape_wire::WireValue::Integer(n) => assert_eq!(n, 2),
+        shape_wire::WireValue::Number(n) => {
+            assert!((n - 2.0).abs() < 1e-9, "expected 2, got Number {}", n)
+        }
+        other => panic!("expected Integer(2), got {:?}", other),
+    }
+}
+
+#[test]
+fn a1e_jit_var_captured_then_outer_observe() {
+    // Closure captures `x`, single call updates it, outer reads the
+    // post-call value. Pins the canonical cell-identity contract: the
+    // same Arc<SharedCell> is seen by the JIT'd outer function and
+    // the JIT'd closure body.
+    let source = r#"
+        fn main() -> int {
+            var x: int = 5
+            let f = || { x = x + 10 }
+            f()
+            x
+        }
+        main()
+    "#;
+    use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+    shape_runtime::initialize_shared_runtime().ok();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    let mut executor = crate::executor::JITExecutor::new();
+    let result = executor
+        .execute_program(&mut engine, &program)
+        .expect("JIT execution failed");
+    match result.wire_value {
+        shape_wire::WireValue::Integer(n) => assert_eq!(n, 15),
+        shape_wire::WireValue::Number(n) => {
+            assert!((n - 15.0).abs() < 1e-9, "expected 15, got Number {}", n)
+        }
+        other => panic!("expected Integer(15), got {:?}", other),
+    }
+}
+
+#[test]
+fn a1e_jit_two_closures_share_cell() {
+    // Two closures capture the same `var x`. Both share the Arc
+    // strong count; mutations via one are visible from the other.
+    let source = r#"
+        fn main() -> int {
+            var x: int = 10
+            let inc = || { x = x + 1 }
+            let dec = || { x = x - 1 }
+            inc()
+            inc()
+            dec()
+            x
+        }
+        main()
+    "#;
+    use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+    shape_runtime::initialize_shared_runtime().ok();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    let mut executor = crate::executor::JITExecutor::new();
+    let result = executor
+        .execute_program(&mut engine, &program)
+        .expect("JIT execution failed");
+    match result.wire_value {
+        shape_wire::WireValue::Integer(n) => assert_eq!(n, 11),
+        shape_wire::WireValue::Number(n) => {
+            assert!((n - 11.0).abs() < 1e-9, "expected 11, got Number {}", n)
+        }
+        other => panic!("expected Integer(11), got {:?}", other),
+    }
+}
+
+#[test]
+fn a1e_jit_var_counter_repeated_calls() {
+    // Three successive calls accumulate through the shared cell.
+    // Mirrors `a1e_jit_var_counter_e2e` but un-gated — the cell-
+    // identity fix makes this stable without `jit_v2_unstable_tests`.
+    let source = r#"
+        fn main() -> int {
+            var x: int = 0
+            let inc = || { x = x + 1 }
+            inc()
+            inc()
+            inc()
+            x
+        }
+        main()
+    "#;
+    use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+    shape_runtime::initialize_shared_runtime().ok();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    let mut executor = crate::executor::JITExecutor::new();
+    let result = executor
+        .execute_program(&mut engine, &program)
+        .expect("JIT execution failed");
+    match result.wire_value {
+        shape_wire::WireValue::Integer(n) => assert_eq!(n, 3),
+        shape_wire::WireValue::Number(n) => {
+            assert!((n - 3.0).abs() < 1e-9, "expected 3, got Number {}", n)
+        }
+        other => panic!("expected Integer(3), got {:?}", other),
+    }
+}
+
 #[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1e_jit_mixed_let_letmut_var() {

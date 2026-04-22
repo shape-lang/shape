@@ -574,15 +574,6 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // plus the per-module side-table requirement — their storage
     // lives outside the MIR slot space.
     match opcode {
-        OpCode::AllocSharedLocal
-        | OpCode::LoadSharedLocal
-        | OpCode::StoreSharedLocal
-        | OpCode::DropSharedLocal => Some(
-            "Session 1 Commit 3: outer-scope `var` cell lifecycle; MirToIR \
-             infrastructure landed (shared_local_slots + alloc/release \
-             FFIs); preflight gate to be lifted in follow-up once \
-             outer-frame cell-identity handshake is resolved",
-        ),
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
         | OpCode::StoreSharedModuleBinding => Some(
@@ -1041,18 +1032,17 @@ mod tests {
     // exactly which opcodes are still interpreter-only after A.1E.
 
     #[test]
-    fn session1_preflight_still_rejects_outer_shared_local_opcodes() {
-        // Session 1 Commit 3 lands the MirToIR infrastructure for
-        // lowering the outer-scope `var` lifecycle (see
-        // `shared_local_slots` side-table + `initialize_shared_local_slots`
-        // + lock-gated `read_place`/`write_place`/`emit_drop` branches).
-        //
-        // The preflight gate remains in place for the four local
-        // opcodes until the outer-frame cell-identity handshake is
-        // resolved — lifting the gate prematurely triggers a SIGSEGV
-        // in the JIT'd main's interaction with closure dispatch (see
-        // memory note `project_jit_closure_fix.md`). Pin the exact
-        // set still rejected.
+    fn cell_identity_preflight_accepts_outer_shared_local_opcodes() {
+        // cell-identity #3: after the JIT/VM cell-identity handshake
+        // fix, the outer-scope `var` lifecycle opcodes pass preflight.
+        // MirToIR lowers them via `shared_local_slots` +
+        // `initialize_shared_local_slots` + lock-gated
+        // `read_place` / `write_place` / `emit_drop` (see
+        // `mir_compiler/mod.rs`, `blocks.rs`, `places.rs`,
+        // `ownership.rs`). The trampoline boundary preserves cell
+        // identity by sharing the trampoline VM's stack slot through
+        // `jit_shared_local_install` — see
+        // `crates/shape-jit/src/ffi/object/closure.rs`.
         for op in [
             OpCode::AllocSharedLocal,
             OpCode::LoadSharedLocal,
@@ -1068,10 +1058,14 @@ mod tests {
             };
             let report = preflight_jit_compatibility(&program);
             assert!(
-                !report.can_jit(),
-                "Outer-scope Shared local opcode {:?} must remain \
-                 preflight-rejected until the cell-identity handshake \
-                 follow-up lands",
+                report.can_jit(),
+                "cell-identity: outer-scope Shared local opcode {:?} \
+                 must pass preflight after the handshake fix",
+                op
+            );
+            assert!(
+                !report.vm_only_opcodes.contains(&op),
+                "cell-identity: {:?} must be removed from vm_only_opcode_reason",
                 op
             );
         }
