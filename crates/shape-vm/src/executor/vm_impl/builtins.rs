@@ -126,37 +126,37 @@ impl VirtualMachine {
                 }
                 // Array builtins (6)
                 BuiltinFunction::Push => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_push(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::Pop => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_pop(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::First => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_first(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::Last => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_last(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::Zip => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_zip(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::Len => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_len(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::Filled => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_filled(args)?;
                     self.push_raw_u64(result)?;
                 }
@@ -582,22 +582,22 @@ impl VirtualMachine {
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::DateTimeParse => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_datetime_parse(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::DateTimeFromEpoch => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_datetime_from_epoch(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::DateTimeFromParts => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_datetime_from_parts(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::DateTimeFromUnixSecs => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_datetime_from_unix_secs(args)?;
                     self.push_raw_u64(result)?;
                 }
@@ -706,27 +706,27 @@ impl VirtualMachine {
 
                 // Json navigation helpers
                 BuiltinFunction::JsonObjectGet => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_json_object_get(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::JsonArrayAt => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_json_array_at(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::JsonObjectKeys => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_json_object_keys(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::JsonArrayLen => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_json_array_len(args)?;
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::JsonObjectLen => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_json_object_len(args)?;
                     self.push_raw_u64(result)?;
                 }

@@ -3,13 +3,13 @@
 //! Direct builtin methods — no string-based dispatch.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 use std::sync::Arc;
 
 impl VirtualMachine {
     pub(in crate::executor) fn builtin_push(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError(
@@ -29,7 +29,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_pop(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError(
@@ -52,7 +52,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_first(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("first() requires 1 argument".into()));
@@ -68,7 +68,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_last(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("last() requires 1 argument".into()));
@@ -84,7 +84,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_zip(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError("zip() requires 2 arguments".into()));
@@ -107,7 +107,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_filled(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError(
@@ -125,7 +125,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_len(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("len() requires 1 argument".into()));
