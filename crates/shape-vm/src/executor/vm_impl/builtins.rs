@@ -233,7 +233,7 @@ impl VirtualMachine {
                     self.push_raw_u64(result)?;
                 }
                 BuiltinFunction::ObjectRest => {
-                    let args = self.pop_builtin_args()?;
+                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_object_rest(args)?;
                     self.push_raw_u64(result)?;
                 }
