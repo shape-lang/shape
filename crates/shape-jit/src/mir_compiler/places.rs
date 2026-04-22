@@ -290,16 +290,50 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Inline array element read: arr[index] → direct memory load.
     /// ~8 Cranelift instructions instead of an FFI call.
+    ///
+    /// Out-of-bounds reads return a raw `0` I64 — matches the v2 typed-array
+    /// path's zero-default semantics. The old implementation pinned the index
+    /// to `0` on OOB, which silently returned `arr[0]`; that differs from user-
+    /// visible semantics where OOB should read as a zero value.
     fn inline_array_get(&mut self, arr_boxed: Value, index_val: Value) -> Value {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
         let idx_i64 = self.index_to_i64(index_val);
         let final_idx = self.normalize_index(idx_i64, length);
-        let safe_idx = self.bounds_check(final_idx, length);
 
-        // Element address: data_ptr + safe_idx * 8 (u64 slots)
-        let byte_offset = self.builder.ins().ishl_imm(safe_idx, 3); // * 8
+        let in_bounds_block = self.builder.create_block();
+        let oob_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+
+        let in_bounds = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, final_idx, length);
+        self.builder
+            .ins()
+            .brif(in_bounds, in_bounds_block, &[], oob_block, &[]);
+
+        // OOB: return raw zero (decoded as `Integer(0)` / `Number(0.0)` /
+        // `Bool(false)` depending on the result slot's interpretation).
+        self.builder.switch_to_block(oob_block);
+        self.builder.seal_block(oob_block);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().jump(merge_block, &[zero]);
+
+        // In-bounds: compute address and load the element word.
+        self.builder.switch_to_block(in_bounds_block);
+        self.builder.seal_block(in_bounds_block);
+        let byte_offset = self.builder.ins().ishl_imm(final_idx, 3); // * 8
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
-        self.builder.ins().load(types::I64, MemFlags::trusted(), elem_addr, 0)
+        let loaded = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), elem_addr, 0);
+        self.builder.ins().jump(merge_block, &[loaded]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        self.builder.block_params(merge_block)[0]
     }
 
     /// Inline array element write: arr[index] = value → direct memory store.
