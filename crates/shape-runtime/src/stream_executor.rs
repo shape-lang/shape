@@ -12,7 +12,7 @@ use crate::plugins::PluginLoader;
 use parking_lot::RwLock;
 use shape_ast::ast::{Statement, StreamDef, VariableDecl};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt, vw_clone};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -22,8 +22,11 @@ use tokio::sync::mpsc;
 pub struct StreamState {
     /// Stream name
     pub name: String,
-    /// State variables (stored as ValueWord for efficiency)
-    pub variables: HashMap<String, ValueWord>,
+    /// State variables (stored as ValueWord for efficiency).
+    /// `ValueMap` ensures owned heap refs (Arc/unified) are released when the
+    /// stream state is torn down, avoiding leaks that the plain
+    /// `HashMap<String, ValueWord>` form could not.
+    pub variables: ValueMap,
     /// Active subscription IDs
     pub subscriptions: Vec<u64>,
     /// Is the stream running
@@ -127,13 +130,17 @@ impl StreamExecutor {
         }
 
         // Initialize state variables
-        let mut state_vars = HashMap::new();
+        let mut state_vars = ValueMap::new();
         for var_decl in &stream_def.state {
             let value = self.initialize_variable(var_decl, ctx)?;
-            // Get all identifiers from the pattern
-            for ident in var_decl.pattern.get_identifiers() {
-                state_vars.insert(ident, value.clone());
+            // Get all identifiers from the pattern. Each identifier gets an
+            // independent heap ref so the map's Drop releases safely. Use
+            // vw_clone for every copy, then release the original once.
+            let idents = var_decl.pattern.get_identifiers();
+            for ident in idents {
+                state_vars.insert(ident, vw_clone(value));
             }
+            shape_value::vw_drop(value);
         }
 
         // Create stream state
@@ -308,10 +315,12 @@ impl StreamExecutor {
         // Get stream state variables
         let stream_state = self.streams.get_mut(stream_name);
 
-        // Set up context with stream variables and parameters
+        // Set up context with stream variables and parameters.
+        // Each set_variable_nb takes ownership of a ValueWord; bump the
+        // refcount with vw_clone so the map still owns its original refs.
         if let Some(state) = stream_state {
             for (name, value) in &state.variables {
-                let _ = ctx.set_variable_nb(name, value.clone());
+                let _ = ctx.set_variable_nb(name, vw_clone(*value));
             }
         }
 
@@ -325,11 +334,13 @@ impl StreamExecutor {
             let _ = evaluator.eval_statements(statements, ctx)?;
         }
 
-        // Update stream state variables from context
+        // Update stream state variables from context. `ValueMap::insert`
+        // releases any prior value in place, so stepping through keys and
+        // overwriting with the fresh ctx value maintains correct refcounts.
         if let Some(state) = self.streams.get_mut(stream_name) {
             for name in state.variables.keys().cloned().collect::<Vec<_>>() {
                 if let Ok(Some(value)) = ctx.get_variable_nb(&name) {
-                    state.variables.insert(name, value.clone());
+                    state.variables.insert(name, vw_clone(value));
                 }
             }
         }
@@ -466,7 +477,7 @@ mod tests {
     fn test_stream_state_creation() {
         let state = StreamState {
             name: "test_stream".to_string(),
-            variables: HashMap::new(),
+            variables: ValueMap::new(),
             subscriptions: Vec::new(),
             running: true,
         };

@@ -333,6 +333,19 @@ impl ValueMap {
         Self(m)
     }
 
+    /// Build a new `ValueMap` by copying keys and retaining (vw_clone) each
+    /// value from a borrowed `HashMap`. The source map still owns its
+    /// original heap refs; the returned `ValueMap` owns a fresh set of
+    /// refs and releases them on drop.
+    #[inline]
+    pub fn from_ref_map(m: &HashMap<String, ValueWord>) -> Self {
+        let mut out = HashMap::with_capacity(m.len());
+        for (k, &v) in m {
+            out.insert(k.clone(), vw_clone(v));
+        }
+        Self(out)
+    }
+
     /// Consume `self` and return the inner `HashMap`, bypassing the element
     /// release. Callers must drop each value by some other path.
     #[inline]
@@ -448,6 +461,17 @@ impl<'a> IntoIterator for &'a ValueMap {
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
+    }
+}
+
+/// `FromIterator<(String, ValueWord)>` wraps an iterator of key/value pairs
+/// as a `ValueMap`, taking ownership of any heap refs attached to the
+/// yielded values. Dropping the resulting map releases each value via
+/// `vw_drop`.
+impl FromIterator<(String, ValueWord)> for ValueMap {
+    #[inline]
+    fn from_iter<I: IntoIterator<Item = (String, ValueWord)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
     }
 }
 

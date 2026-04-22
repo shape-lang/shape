@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 
 use shape_ast::error::Result;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt};
 
 /// A condition for pattern matching
 #[derive(Debug, Clone)]
@@ -211,7 +211,10 @@ struct MatchState {
 pub struct MatchedEvent {
     pub timestamp: DateTime<Utc>,
     pub condition_name: String,
-    pub fields: HashMap<String, ValueWord>,
+    /// Captured event fields. `ValueMap` releases each heap ref on drop and
+    /// its `Clone` impl bumps refcounts correctly, preserving the outer
+    /// `derive(Clone)` on `MatchedEvent`.
+    pub fields: ValueMap,
 }
 
 /// A completed pattern match
@@ -345,7 +348,7 @@ impl PatternStateMachine {
                         matched_events: vec![MatchedEvent {
                             timestamp,
                             condition_name: cond.name.clone(),
-                            fields: fields.clone(),
+                            fields: ValueMap::from_ref_map(fields),
                         }],
                     }))
                 } else {
@@ -428,7 +431,7 @@ impl PatternStateMachine {
                             new_state.matched_events.push(MatchedEvent {
                                 timestamp,
                                 condition_name: cond.name.clone(),
-                                fields: fields.clone(),
+                                fields: ValueMap::from_ref_map(fields),
                             });
 
                             let is_complete = new_state.position >= patterns.len();
@@ -447,7 +450,7 @@ impl PatternStateMachine {
                             new_state.matched_events.push(MatchedEvent {
                                 timestamp,
                                 condition_name: cond.name.clone(),
-                                fields: fields.clone(),
+                                fields: ValueMap::from_ref_map(fields),
                             });
                             return Ok(Some((new_state, true)));
                         }

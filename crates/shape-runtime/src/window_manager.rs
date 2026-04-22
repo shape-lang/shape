@@ -10,7 +10,7 @@
 //! This module is industry-agnostic and works with any timestamped data.
 
 use chrono::{DateTime, Duration, Utc};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 use shape_ast::error::Result;
@@ -60,7 +60,10 @@ impl WindowType {
 #[derive(Debug, Clone)]
 pub struct WindowDataPoint {
     pub timestamp: DateTime<Utc>,
-    pub fields: HashMap<String, ValueWord>,
+    /// Raw field values. Stored as a `ValueMap` so heap refs (Arc/unified)
+    /// are released on drop; `ValueMap`'s custom `Clone` bumps the
+    /// refcounts, keeping the derive(Clone) on `WindowDataPoint` correct.
+    pub fields: ValueMap,
 }
 
 /// A completed window with aggregated data
@@ -159,7 +162,13 @@ impl WindowManager {
         timestamp: DateTime<Utc>,
         fields: HashMap<String, ValueWord>,
     ) -> Result<()> {
-        let data_point = WindowDataPoint { timestamp, fields };
+        // Wrap the caller-owned HashMap into a ValueMap so field heap refs
+        // are released when the data point (and its clones inside windows)
+        // are finally dropped.
+        let data_point = WindowDataPoint {
+            timestamp,
+            fields: ValueMap::from(fields),
+        };
 
         match &self.window_type {
             WindowType::Tumbling { size } => {

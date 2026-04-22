@@ -8,7 +8,7 @@ use crate::hashing::HashDigest;
 use crate::type_schema::TypeSchemaRegistry;
 use sha2::{Digest, Sha256};
 use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt, vw_clone};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct Delta {
     /// Fields/paths that changed, mapped to their new values.
-    pub changed: HashMap<String, ValueWord>,
+    pub changed: ValueMap,
     /// Paths that were removed (present in old, absent in new).
     pub removed: Vec<String>,
 }
@@ -35,7 +35,7 @@ impl Delta {
     /// Create an empty delta (no changes).
     pub fn empty() -> Self {
         Self {
-            changed: HashMap::new(),
+            changed: ValueMap::new(),
             removed: Vec::new(),
         }
     }
@@ -84,7 +84,9 @@ impl Delta {
 
         for (path, value) in &self.changed {
             if is_valid_delta_path(path) {
-                valid.changed.insert(path.clone(), value.clone());
+                // vw_clone bumps the underlying heap refcount so both maps
+                // own an independent release on drop.
+                valid.changed.insert(path.clone(), vw_clone(*value));
             } else {
                 rejected.push(path.clone());
             }
@@ -278,17 +280,20 @@ fn diff_recursive(
         return;
     }
 
-    // If tags differ, the whole subtree changed
+    // If tags differ, the whole subtree changed.
+    // `delta.changed` is a `ValueMap` that owns its values' heap refs; use
+    // `vw_clone(*new)` to bump the refcount so the delta's release on drop
+    // does not conflict with the caller-owned `new`.
     let old_bits = old.raw_bits();
     let new_bits = new.raw_bits();
     let old_is_tagged = is_tagged(old_bits);
     let new_is_tagged = is_tagged(new_bits);
     if old_is_tagged != new_is_tagged {
-        delta.changed.insert(root_path(prefix), new.clone());
+        delta.changed.insert(root_path(prefix), vw_clone(*new));
         return;
     }
     if old_is_tagged && get_tag(old_bits) != get_tag(new_bits) {
-        delta.changed.insert(root_path(prefix), new.clone());
+        delta.changed.insert(root_path(prefix), vw_clone(*new));
         return;
     }
 
@@ -317,9 +322,13 @@ fn diff_recursive(
                         } else if old_slots[i].raw() != new_slots[i].raw()
                             || old_is_heap != new_is_heap
                         {
-                            // Slot raw bits differ or heap-ness changed
+                            // Slot raw bits differ or heap-ness changed.
+                            // `as_heap_nb` constructs a fresh bit pattern
+                            // that borrows from the original slot; bump the
+                            // refcount so the delta owns its own ref.
                             if new_is_heap {
-                                delta.changed.insert(field_path, new_slots[i].as_heap_nb());
+                                let heap_nb = new_slots[i].as_heap_nb();
+                                delta.changed.insert(field_path, vw_clone(heap_nb));
                             } else {
                                 delta.changed.insert(field_path, unsafe {
                                     ValueWord::clone_from_bits(new_slots[i].raw())
@@ -336,7 +345,8 @@ fn diff_recursive(
                         let field_path = make_path(prefix, field_name);
                         let is_heap = (new_hm >> i) & 1 == 1;
                         if is_heap {
-                            delta.changed.insert(field_path, new_slots[i].as_heap_nb());
+                            let heap_nb = new_slots[i].as_heap_nb();
+                            delta.changed.insert(field_path, vw_clone(heap_nb));
                         } else {
                             delta.changed.insert(field_path, unsafe {
                                 ValueWord::clone_from_bits(new_slots[i].raw())
@@ -354,7 +364,7 @@ fn diff_recursive(
                     return;
                 }
                 // Different schemas: whole value changed
-                delta.changed.insert(root_path(prefix), new.clone());
+                delta.changed.insert(root_path(prefix), vw_clone(*new));
                 return;
             }
 
@@ -379,7 +389,7 @@ fn diff_recursive(
                     } else {
                         format!("{}.[{}]", prefix, i)
                     };
-                    delta.changed.insert(idx_path, new_arr[i].clone());
+                    delta.changed.insert(idx_path, vw_clone(new_arr[i]));
                 }
 
                 for i in min_len..old_arr.len() {
@@ -404,16 +414,16 @@ fn diff_recursive(
             // Try string diff
             if let (Some(old_s), Some(new_s)) = (old.as_str(), new.as_str()) {
                 if old_s != new_s {
-                    delta.changed.insert(root_path(prefix), new.clone());
+                    delta.changed.insert(root_path(prefix), vw_clone(*new));
                 }
                 return;
             }
 
             // Different heap subtypes: whole value changed
-        delta.changed.insert(root_path(prefix), new.clone());
+        delta.changed.insert(root_path(prefix), vw_clone(*new));
     } else {
         // Primitive types: already checked raw bits above, so they differ
-        delta.changed.insert(root_path(prefix), new.clone());
+        delta.changed.insert(root_path(prefix), vw_clone(*new));
     }
 }
 
@@ -451,10 +461,11 @@ fn diff_hashmap(
                 );
             }
             None => {
-                // Key added in new
+                // Key added in new. vw_clone bumps the heap refcount so the
+                // delta's ValueMap owns an independent release on drop.
                 delta
                     .changed
-                    .insert(key_path, new_data.values[new_idx].clone());
+                    .insert(key_path, vw_clone(new_data.values[new_idx]));
             }
         }
     }
@@ -511,8 +522,10 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
     if let Some((schema_id, slots, heap_mask)) = base.as_typed_object() {
         let schema = schemas.get_by_id(schema_id as u32);
         if let Some(schema) = schema {
-            // Partition changed entries into direct and nested
-            let mut direct_changes: HashMap<String, ValueWord> = HashMap::new();
+            // Partition changed entries into direct and nested. `direct_changes`
+            // is a `ValueMap` so that cloned heap refs (via vw_clone) are
+            // released on scope exit even if we never hit the apply path.
+            let mut direct_changes: ValueMap = ValueMap::new();
             let mut nested_changes: HashMap<String, Delta> = HashMap::new();
 
             for (path, value) in &delta.changed {
@@ -523,9 +536,9 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
                         .entry(top.to_string())
                         .or_insert_with(Delta::empty)
                         .changed
-                        .insert(rest.to_string(), value.clone());
+                        .insert(rest.to_string(), vw_clone(*value));
                 } else {
-                    direct_changes.insert(path.clone(), value.clone());
+                    direct_changes.insert(path.clone(), vw_clone(*value));
                 }
             }
 
@@ -669,16 +682,18 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
             }
         }
 
-        // Process changes
+        // Process changes. vw_clone bumps each heap refcount so the
+        // resulting array takes an independent ref (delta.changed still
+        // owns the original ref).
         for (path, new_val) in &delta.changed {
             if let Some(idx) = parse_array_index(path) {
                 if idx < new_arr.len() {
-                    new_arr[idx] = new_val.clone();
+                    new_arr[idx] = vw_clone(*new_val);
                 } else {
                     while new_arr.len() < idx {
                         new_arr.push(ValueWord::none());
                     }
-                    new_arr.push(new_val.clone());
+                    new_arr.push(vw_clone(*new_val));
                 }
             }
         }
@@ -703,7 +718,8 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
             }
         }
 
-        // Process changes (add or update)
+        // Process changes (add or update). vw_clone bumps the heap refcount
+        // so the resulting map owns its own refs.
         for (path, new_val) in &delta.changed {
             // Check if this path has nested sub-paths (contains '.')
             // For simplicity, direct key changes are applied here.
@@ -711,11 +727,11 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
                 .iter()
                 .position(|k| format_map_key(k) == *path);
             if let Some(idx) = existing_idx {
-                new_values[idx] = new_val.clone();
+                new_values[idx] = vw_clone(*new_val);
             } else {
                 // New key — use a string key matching the path label
                 new_keys.push(ValueWord::from_string(Arc::new(path.clone())));
-                new_values.push(new_val.clone());
+                new_values.push(vw_clone(*new_val));
             }
         }
 

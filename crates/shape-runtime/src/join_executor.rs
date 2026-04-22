@@ -11,7 +11,7 @@
 use crate::context::ExecutionContext;
 use shape_ast::ast::{JoinClause, JoinCondition, JoinType};
 use shape_ast::error::Result;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt, vw_clone};
 use std::collections::HashMap;
 
 /// Execute JOINs between data sources
@@ -20,22 +20,22 @@ pub struct JoinExecutor;
 impl JoinExecutor {
     /// Execute a join between left and right datasets
     pub fn execute(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         join: &JoinClause,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         Self::execute_with_evaluator(left, right, join, None, ctx)
     }
 
     /// Execute a join with an optional expression evaluator for ON clause evaluation
     pub fn execute_with_evaluator(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         join: &JoinClause,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         match join.join_type {
             JoinType::Inner => Self::inner_join(left, right, &join.condition, evaluator, ctx),
             JoinType::Left => Self::left_join(left, right, &join.condition, evaluator, ctx),
@@ -47,12 +47,12 @@ impl JoinExecutor {
 
     /// Execute INNER JOIN: only rows that match the condition
     fn inner_join(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         condition: &JoinCondition,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         let mut results = Vec::new();
 
         for l_row in &left {
@@ -69,12 +69,12 @@ impl JoinExecutor {
 
     /// Execute LEFT JOIN: all left rows, with matching right rows or nulls
     fn left_join(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         condition: &JoinCondition,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         let mut results = Vec::new();
 
         for l_row in &left {
@@ -100,12 +100,12 @@ impl JoinExecutor {
 
     /// Execute RIGHT JOIN: matching left rows or nulls, with all right rows
     fn right_join(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         condition: &JoinCondition,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         let mut results = Vec::new();
 
         for r_row in &right {
@@ -131,12 +131,12 @@ impl JoinExecutor {
 
     /// Execute FULL JOIN: all rows from both sides
     fn full_join(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
         condition: &JoinCondition,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+    ) -> Result<Vec<ValueMap>> {
         let mut results = Vec::new();
         let mut right_matched = vec![false; right.len()];
 
@@ -172,9 +172,9 @@ impl JoinExecutor {
 
     /// Execute CROSS JOIN: Cartesian product
     fn cross_join(
-        left: Vec<HashMap<String, ValueWord>>,
-        right: Vec<HashMap<String, ValueWord>>,
-    ) -> Result<Vec<HashMap<String, ValueWord>>> {
+        left: Vec<ValueMap>,
+        right: Vec<ValueMap>,
+    ) -> Result<Vec<ValueMap>> {
         let mut results = Vec::new();
 
         for l_row in &left {
@@ -189,25 +189,27 @@ impl JoinExecutor {
 
     /// Check if two rows match the join condition
     fn matches_condition(
-        left: &HashMap<String, ValueWord>,
-        right: &HashMap<String, ValueWord>,
+        left: &ValueMap,
+        right: &ValueMap,
         condition: &JoinCondition,
         evaluator: Option<&dyn crate::engine::ExpressionEvaluator>,
         ctx: &mut ExecutionContext,
     ) -> Result<bool> {
         match condition {
             JoinCondition::On(expr) => {
-                // Set up context with both row values
+                // Set up context with both row values. `ctx.set_variable_nb`
+                // takes ownership of each ValueWord; use vw_clone so the
+                // source ValueMap retains its refcounts.
                 ctx.push_scope();
 
                 // Add left row values
                 for (k, v) in left {
-                    let _ = ctx.set_variable_nb(k, v.clone());
+                    let _ = ctx.set_variable_nb(k, vw_clone(*v));
                 }
 
                 // Add right row values with prefix
                 for (k, v) in right {
-                    let _ = ctx.set_variable_nb(&format!("right.{}", k), v.clone());
+                    let _ = ctx.set_variable_nb(&format!("right.{}", k), vw_clone(*v));
                 }
 
                 let result = if let Some(eval) = evaluator {
@@ -277,16 +279,18 @@ impl JoinExecutor {
         }
     }
 
-    /// Merge two rows, prefixing right columns
+    /// Merge two rows, prefixing right columns. `ValueMap::clone` retains
+    /// every value via `vw_clone`, so `merged` takes an independent set of
+    /// heap refs.
     fn merge_rows(
-        left: &HashMap<String, ValueWord>,
-        right: &HashMap<String, ValueWord>,
+        left: &ValueMap,
+        right: &ValueMap,
         right_prefix: &str,
-    ) -> HashMap<String, ValueWord> {
+    ) -> ValueMap {
         let mut merged = left.clone();
 
         for (k, v) in right {
-            merged.insert(format!("{}.{}", right_prefix, k), v.clone());
+            merged.insert(format!("{}.{}", right_prefix, k), vw_clone(*v));
         }
 
         merged
@@ -294,10 +298,10 @@ impl JoinExecutor {
 
     /// Merge left row with null values for right columns
     fn merge_with_nulls(
-        left: &HashMap<String, ValueWord>,
-        right_sample: &[HashMap<String, ValueWord>],
+        left: &ValueMap,
+        right_sample: &[ValueMap],
         right_prefix: &str,
-    ) -> HashMap<String, ValueWord> {
+    ) -> ValueMap {
         let mut merged = left.clone();
 
         // Get column names from first right row (if any)
@@ -312,11 +316,11 @@ impl JoinExecutor {
 
     /// Merge null values for left columns with right row
     fn merge_with_nulls_left(
-        left_sample: &[HashMap<String, ValueWord>],
-        right: &HashMap<String, ValueWord>,
+        left_sample: &[ValueMap],
+        right: &ValueMap,
         right_prefix: &str,
-    ) -> HashMap<String, ValueWord> {
-        let mut merged = HashMap::new();
+    ) -> ValueMap {
+        let mut merged = ValueMap::new();
 
         // Get column names from first left row (if any)
         if let Some(first_left) = left_sample.first() {
@@ -325,9 +329,9 @@ impl JoinExecutor {
             }
         }
 
-        // Add right columns
+        // Add right columns with a fresh heap ref per value.
         for (k, v) in right {
-            merged.insert(format!("{}.{}", right_prefix, k), v.clone());
+            merged.insert(format!("{}.{}", right_prefix, k), vw_clone(*v));
         }
 
         merged
@@ -384,7 +388,7 @@ mod tests {
     use crate::context::ExecutionContext;
     use shape_ast::ast::JoinSource;
 
-    fn make_rows(data: Vec<Vec<(&str, ValueWord)>>) -> Vec<HashMap<String, ValueWord>> {
+    fn make_rows(data: Vec<Vec<(&str, ValueWord)>>) -> Vec<ValueMap> {
         data.into_iter()
             .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
             .collect()
