@@ -447,9 +447,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
     ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
-        // Enrich slot_kinds with MIR-level type inference when the bytecode
-        // compiler didn't provide them.
-        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &slot_kinds);
+        // Slot-numbering correction: the bytecode compiler's
+        // `FrameDescriptor.slots` and the MIR's local slots use different
+        // numbering. MIR reserves `SlotId(0)` for the implicit return
+        // value (`__mir_return`) and numbers parameters starting at 1;
+        // the bytecode compiler puts the first parameter at slot 0 with
+        // no implicit return slot. Seeding MirToIR with bytecode
+        // frame_descriptor kinds thus misaligns every slot by +1. In the
+        // worst case this declares MIR's return slot with the bytecode
+        // param's `SlotKind`, so a `return 7.0` write gets narrowed
+        // (e.g. `F64 → Bool` via `ireduce`) and corrupts the return value.
+        // Regression case: `fn get_val(flag: bool) -> number? { if flag
+        // { return 7.0 } return None }` declared MIR slot 0 as `Bool`
+        // because the bytecode put `flag` at index 0; writing the `7.0`
+        // F64 through `ensure_kind(_, Bool)` truncated to 0 and
+        // `None ?? 42.0` then evaluated to 42.0 for every branch.
+        //
+        // Until the two tables share a slot-numbering convention, drop
+        // the bytecode seed and rely on MIR-level inference only.
+        let _ = slot_kinds;
+        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &[]);
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
