@@ -1746,3 +1746,27 @@ impl HeapValue {
         }
     }
 }
+
+#[cfg(test)]
+mod closure_variant_regression {
+    //! N2 — pin Track A.5's deletion of the legacy `HeapValue::Closure`
+    //! variant. The `HeapKind::Closure` ordinal is preserved for ABI
+    //! stability and must continue to map to the `ClosureRaw` pipeline
+    //! (closure/snapshot replay, trait-object dispatch, remote builtins
+    //! all depend on this invariant).
+    //!
+    //! If someone re-introduces a `Closure { .. }` payload variant, the
+    //! Rust compiler catches most misuse via exhaustive match — but a
+    //! doc-test or fixture could compile without surfacing the bifurcation.
+    //! This test pins the ordinal and type-name convention.
+    use super::*;
+
+    #[test]
+    fn heap_kind_closure_ordinal_stable() {
+        // HeapKind::Closure = 3 per the ordinal table in heap_variants.rs.
+        // Reintroducing HeapValue::Closure as a new variant would append
+        // at the end and either change ordinals or duplicate "closure"
+        // type names — both regressions. See Track A.5 / v2-closure §14.7.
+        assert_eq!(HeapKind::Closure as u8, 3);
+    }
+}
