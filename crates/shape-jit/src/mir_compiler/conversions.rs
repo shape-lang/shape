@@ -23,6 +23,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
     }
 
+    /// Widen a Cranelift value to an I64 bit pattern (ValueWord-shaped) for
+    /// FFI boundaries that expect an `i64`-typed argument.
+    ///
+    /// F64 bitcasts in place (IEEE 754 bits = NaN-box encoding for numbers),
+    /// I32/I16 sign-extend, I8 zero-extends (bool is 0/1). Already-I64 values
+    /// pass through unchanged. Other Cranelift types are returned as-is.
+    ///
+    /// Use this when reading a raw native operand that must be handed to an
+    /// FFI helper (e.g. `jit_array_push_elem`, `jit_typed_object_set_field`)
+    /// whose signature is declared `(i64, …) -> i64` at the Cranelift layer.
+    pub(crate) fn widen_to_i64(&mut self, val: Value) -> Value {
+        let val_type = self.builder.func.dfg.value_type(val);
+        if val_type == types::I64 {
+            return val;
+        }
+        if val_type == types::F64 {
+            return self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+        }
+        if val_type == types::I32 || val_type == types::I16 {
+            return self.builder.ins().sextend(types::I64, val);
+        }
+        if val_type == types::I8 {
+            return self.builder.ins().uextend(types::I64, val);
+        }
+        val
+    }
+
     /// Coerce `val` so its Cranelift type matches `target_kind`'s declared
     /// Cranelift type.
     ///

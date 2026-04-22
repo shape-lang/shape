@@ -118,9 +118,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // R4.2B: FFI signatures accept plain u64 bit-patterns — no
                 // box wrap needed at call site. Operands reaching
-                // `jit_array_push_elem` are already ValueWord-encoded I64 slots.
+                // `jit_array_push_elem` are ValueWord-encoded I64 slots. Native
+                // F64/I32/I8 constants flowing in from `compile_operand_raw`
+                // must be widened/bitcast to I64 first so the Cranelift
+                // verifier accepts the call's `i64` parameter types.
                 for operand in operands {
-                    let elem = self.compile_operand_raw(operand)?;
+                    let elem_raw = self.compile_operand_raw(operand)?;
+                    let elem = self.widen_to_i64(elem_raw);
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, elem]);

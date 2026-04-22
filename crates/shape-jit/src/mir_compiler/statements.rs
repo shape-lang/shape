@@ -90,9 +90,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // R4.2B: FFI signatures accept plain u64 bit-patterns — no
                 // box wrap needed at call site. Array elements reach
-                // `array_push_elem` as already-ValueWord-encoded I64 slots.
+                // `array_push_elem` as ValueWord-encoded I64 slots. Native
+                // F64/I32/I8 operands from `compile_operand` must be widened
+                // to I64 before the FFI call so the Cranelift verifier
+                // accepts the parameter types.
                 for op in operands {
-                    let val = self.compile_operand(op)?;
+                    let val_raw = self.compile_operand(op)?;
+                    let val = self.widen_to_i64(val_raw);
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, val]);
@@ -143,9 +147,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // R4.2C: FFI signatures accept plain u64 bit-patterns — no
                 // box wrap needed at call site. `typed_object_set_field`
-                // takes field values as already-ValueWord-encoded I64 slots.
+                // takes field values as ValueWord-encoded I64 slots. Native
+                // F64/I32/I8 operands from `compile_operand_raw` must be
+                // widened to I64 before the FFI call so the Cranelift
+                // verifier accepts the parameter types.
                 for (i, op) in operands.iter().enumerate() {
-                    let val = self.compile_operand_raw(op)?;
+                    let val_raw = self.compile_operand_raw(op)?;
+                    let val = self.widen_to_i64(val_raw);
                     let offset_val = self.builder.ins().iconst(
                         cranelift::prelude::types::I64,
                         (i as i64) * 8,
@@ -192,10 +200,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                     // R4.2B: FFI signatures accept plain u64 bit-patterns —
                     // no box wrap needed at call site. Enum payload values
-                    // reach `array_push_elem` as already-ValueWord-encoded
-                    // I64 slots.
+                    // reach `array_push_elem` as ValueWord-encoded I64 slots.
+                    // Native F64/I32/I8 operands from `compile_operand` must
+                    // be widened to I64 before the FFI call so the Cranelift
+                    // verifier accepts the parameter types.
                     for op in operands {
-                        let val = self.compile_operand(op)?;
+                        let val_raw = self.compile_operand(op)?;
+                        let val = self.widen_to_i64(val_raw);
                         let inst = self.builder
                             .ins()
                             .call(self.ffi.array_push_elem, &[arr, val]);
