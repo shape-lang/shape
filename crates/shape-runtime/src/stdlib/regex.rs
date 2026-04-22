@@ -4,7 +4,7 @@
 //!          regex.is_match, regex.split
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Build a match result object as a ValueWord HashMap.
@@ -22,16 +22,16 @@ fn match_to_nanboxed(m: &regex::Match, captures: &regex::Captures) -> ValueWord 
     keys.push(ValueWord::from_string(Arc::new("end".to_string())));
     values.push(ValueWord::from_f64(m.end() as f64));
 
-    let groups: Vec<ValueWord> = captures
+    let groups: ArgVec = ArgVec::from_vec(captures
         .iter()
         .skip(1)
         .map(|opt| match opt {
             Some(g) => ValueWord::from_string(Arc::new(g.as_str().to_string())),
             None => ValueWord::none(),
         })
-        .collect();
+        .collect());
     keys.push(ValueWord::from_string(Arc::new("groups".to_string())));
-    values.push(ValueWord::from_array(shape_value::vmarray_from_vec(groups)));
+    values.push(ValueWord::from_array(shape_value::vmarray_from_vec(groups.into_inner())));
 
     ValueWord::from_hashmap_pairs(keys, values)
 }
@@ -170,15 +170,15 @@ pub fn create_regex_module() -> ModuleExports {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("regex.match_all() invalid pattern: {}", e))?;
 
-            let matches: Vec<ValueWord> = re
+            let matches: ArgVec = ArgVec::from_vec(re
                 .captures_iter(text)
                 .map(|caps| {
                     let m = caps.get(0).unwrap();
                     match_to_nanboxed(&m, &caps)
                 })
-                .collect();
+                .collect());
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(matches)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(matches.into_inner())))
         },
         ModuleFunction {
             description: "Find all non-overlapping matches of the pattern".to_string(),
@@ -326,12 +326,12 @@ pub fn create_regex_module() -> ModuleExports {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("regex.split() invalid pattern: {}", e))?;
 
-            let parts: Vec<ValueWord> = re
+            let parts: ArgVec = ArgVec::from_vec(re
                 .split(text)
                 .map(|s| ValueWord::from_string(Arc::new(s.to_string())))
-                .collect();
+                .collect());
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts.into_inner())))
         },
         ModuleFunction {
             description: "Split the text at each match of the pattern".to_string(),

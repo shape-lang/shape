@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::nb_to_string_coerce;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ pub(crate) fn handle_map_v2(
 
     let mapper_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
 
-    let mut results: Vec<ValueWord> = Vec::with_capacity(array.len());
+    let mut results: ArgVec = ArgVec::with_capacity(array.len());
     for (i, nb) in array.iter().enumerate() {
         let result_bits = if mapper_arity >= 2 {
             vm.call_value_immediate_raw(
@@ -72,10 +72,11 @@ pub(crate) fn handle_map_v2(
         } else {
             vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
         };
-        results.push(ValueWord::from_raw_bits(result_bits));
+        // Call return is already owned; transfer ownership to ArgVec.
+        results.push(result_bits);
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_filter_v2(
@@ -107,7 +108,7 @@ pub(crate) fn handle_filter_v2(
 
     let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
 
-    let mut filtered: Vec<ValueWord> = Vec::new();
+    let mut filtered: ArgVec = ArgVec::new();
     for (i, nb) in array.iter().enumerate() {
         let result_bits = if predicate_arity >= 2 {
             vm.call_value_immediate_raw(
@@ -119,11 +120,13 @@ pub(crate) fn handle_filter_v2(
             vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
         };
         if raw_helpers::is_truthy_raw(result_bits) {
-            filtered.push(nb.clone());
+            // `nb` borrows from the source array; retain before transferring
+            // into `filtered` so ArgVec::drop on error releases what it owns.
+            filtered.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_sort_v2(
@@ -144,18 +147,30 @@ pub(crate) fn handle_sort_v2(
         return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(vec![])).into_raw_bits());
     }
 
-    let mut sorted = array.to_vec();
+    // Build `sorted` as an ArgVec so an error on the comparator path releases
+    // the retained refs automatically. Each slot retains its own heap ref
+    // independent of the source array.
+    let mut sorted: ArgVec = ArgVec::with_capacity(array.len());
+    for v in array.iter() {
+        sorted.push(shape_value::vw_clone(v.raw_bits()));
+    }
 
     let has_comparator = args.len() >= 2 && raw_helpers::is_callable_raw(args[1]);
 
     if !has_comparator {
-        sorted.sort_by(|a, b| compare_nb_values(a, b));
+        // Sort in place; ownership stays with `sorted`.
+        let mut inner = sorted.into_inner();
+        inner.sort_by(|a, b| compare_nb_values(a, b));
+        sorted = ArgVec::from_vec(inner);
     } else {
-        let mut keyed: Vec<(usize, ValueWord)> = sorted
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i, v.clone()))
-            .collect();
+        // Transfer ownership of each element out of `sorted` into `keyed`.
+        // `keyed` holds owned refs. An error from `call_value_immediate_raw`
+        // below drops `keyed`, leaking (matching pre-Wave4 leak semantics for
+        // `Vec<(usize, ValueWord)>`). We accept the temporary leak here; the
+        // alternative — a nested ArgVec-guarded keyed — is followup work.
+        let keyed_vec: Vec<ValueWord> = sorted.into_inner();
+        let mut keyed: Vec<(usize, ValueWord)> =
+            keyed_vec.into_iter().enumerate().collect();
 
         let len = keyed.len();
         for i in 0..len {
@@ -179,10 +194,10 @@ pub(crate) fn handle_sort_v2(
             }
         }
 
-        sorted = keyed.into_iter().map(|(_, v)| v).collect();
+        sorted = ArgVec::from_vec(keyed.into_iter().map(|(_, v)| v).collect());
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_slice_v2(
@@ -346,18 +361,22 @@ pub(crate) fn handle_flatten_v2(
         })?
         .to_generic();
 
-    let mut flattened: Vec<ValueWord> = Vec::new();
+    let mut flattened: ArgVec = ArgVec::new();
 
     for nb in arr.iter() {
         if let Some(inner_view) = nb.as_any_array() {
             let inner = inner_view.to_generic();
-            flattened.extend_from_slice(&inner);
+            for elem in inner.iter() {
+                // Retain each borrowed element so ArgVec::drop on error
+                // decrements refs we actually own.
+                flattened.push(shape_value::vw_clone(elem.raw_bits()));
+            }
         } else {
-            flattened.push(nb.clone());
+            flattened.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(flattened)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(flattened.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_flat_map_v2(
@@ -389,7 +408,7 @@ pub(crate) fn handle_flat_map_v2(
 
     let mapper_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
 
-    let mut results: Vec<ValueWord> = Vec::with_capacity(array.len());
+    let mut results: ArgVec = ArgVec::with_capacity(array.len());
     for (i, nb) in array.iter().enumerate() {
         let result_bits = if mapper_arity >= 2 {
             vm.call_value_immediate_raw(
@@ -403,13 +422,20 @@ pub(crate) fn handle_flat_map_v2(
         let mapped = ValueWord::from_raw_bits(result_bits);
         if let Some(inner_view) = mapped.as_any_array() {
             let inner = inner_view.to_generic();
-            results.extend_from_slice(&inner);
+            // `inner` aliases the returned array. Retain each element so
+            // `results` truly owns them. The `mapped` outer ref is left
+            // unreleased to preserve today's leak semantics (Cat 1 VMArray
+            // drop will reconcile this once WB/WC lands).
+            for elem in inner.iter() {
+                results.push(shape_value::vw_clone(elem.raw_bits()));
+            }
         } else {
-            results.push(mapped);
+            // `mapped` owns the call-return ref; transfer into ArgVec.
+            results.push(result_bits);
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_group_by_v2(
@@ -440,8 +466,10 @@ pub(crate) fn handle_group_by_v2(
     }
 
     let mut group_keys: Vec<String> = Vec::new();
-    let mut group_key_nbs: Vec<ValueWord> = Vec::new();
-    let mut group_elements: Vec<Vec<ValueWord>> = Vec::new();
+    // `group_key_nbs` holds owned call-return refs from the key function.
+    let mut group_key_nbs: ArgVec = ArgVec::new();
+    // Each inner ArgVec holds retained element refs from `array`.
+    let mut group_elements: Vec<ArgVec> = Vec::new();
 
     for nb in array.iter() {
         let key_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
@@ -449,22 +477,32 @@ pub(crate) fn handle_group_by_v2(
         let key_str = nb_to_string_coerce(&key);
 
         if let Some(idx) = group_keys.iter().position(|k| k == &key_str) {
-            group_elements[idx].push(nb.clone());
+            // Duplicate key: release the key's call-return ref (we already
+            // have the canonical key stored at `group_key_nbs[idx]`).
+            shape_value::vw_drop(key_bits);
+            group_elements[idx].push(shape_value::vw_clone(nb.raw_bits()));
         } else {
             group_keys.push(key_str);
-            group_key_nbs.push(key);
-            group_elements.push(vec![nb.clone()]);
+            group_key_nbs.push(key_bits);
+            let mut first = ArgVec::with_capacity(1);
+            first.push(shape_value::vw_clone(nb.raw_bits()));
+            group_elements.push(first);
         }
     }
 
-    let mut pairs: Vec<ValueWord> = Vec::with_capacity(group_keys.len());
-    for (i, _) in group_keys.iter().enumerate() {
-        let pair = vec![
-            group_key_nbs[i].clone(),
-            ValueWord::from_array(shape_value::vmarray_from_vec(std::mem::take(&mut group_elements[i]))),
-        ];
-        pairs.push(ValueWord::from_array(shape_value::vmarray_from_vec(pair)));
+    let mut pairs: ArgVec = ArgVec::with_capacity(group_keys.len());
+    let mut group_elements_iter = group_elements.into_iter();
+    for key_bits in group_key_nbs.drain_raw() {
+        let elements = group_elements_iter.next().expect("group_elements length matches keys");
+        let inner_arr =
+            ValueWord::from_array(shape_value::vmarray_from_vec(elements.into_inner()));
+        let mut pair: ArgVec = ArgVec::with_capacity(2);
+        pair.push(key_bits);
+        pair.push(inner_arr.into_raw_bits());
+        pairs.push(
+            ValueWord::from_array(shape_value::vmarray_from_vec(pair.into_inner())).into_raw_bits(),
+        );
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs.into_inner())).into_raw_bits())
 }

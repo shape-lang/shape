@@ -6,7 +6,7 @@ use arrow_array::{
     UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::DataType;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -47,12 +47,12 @@ pub(crate) fn handle_columns(
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
-    let names: Vec<ValueWord> = dt
+    let names: ArgVec = ArgVec::from_vec(dt
         .column_names()
         .into_iter()
         .map(|n| ValueWord::from_string(Arc::new(n)))
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(names)).into_raw_bits())
+        .collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(names.into_inner())).into_raw_bits())
 }
 
 /// `dt.column(name)`
@@ -255,11 +255,11 @@ pub(crate) fn handle_select(
                 return Ok(super::common::wrap_result_table_nb(&receiver,
                     shape_value::datatable::DataTable::new(arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()))).into_raw_bits());
             }
-            let mut rows: Vec<ValueWord> = Vec::with_capacity(row_count);
+            let mut rows: ArgVec = ArgVec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
                 let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-                rows.push(ValueWord::from_raw_bits(result_bits));
+                rows.push(result_bits);
             }
             return Ok(super::common::build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits());
         }

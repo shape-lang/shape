@@ -13,7 +13,7 @@
 use crate::Context;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
-use shape_value::{DataTable, ValueSlot, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, DataTable, ValueSlot, ValueWord, ValueWordExt};
 use shape_wire::{
     DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue,
     metadata::{TypeInfo, TypeRegistry},
@@ -764,8 +764,9 @@ pub fn wire_to_nb(wire: &WireValue) -> ValueWord {
         }
 
         WireValue::Array(arr) => {
-            let elements: Vec<ValueWord> = arr.iter().map(wire_to_nb).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(elements))
+            let elements: ArgVec =
+                ArgVec::from_vec(arr.iter().map(wire_to_nb).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(elements.into_inner()))
         }
 
         WireValue::Object(obj) => {

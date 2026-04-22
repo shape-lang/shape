@@ -4,7 +4,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::objects::object_creation::nb_to_slot_with_field_type;
 use crate::executor::objects::raw_helpers;
 use shape_runtime::type_schema::FieldType;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::common::{
@@ -99,19 +99,19 @@ pub(crate) fn handle_simulate(
     let dt_arc = Arc::new(dt.as_ref().clone());
     let row_count = dt_arc.row_count();
     let mut state = initial_state;
-    let mut results: Vec<ValueWord> = if collect_results {
-        Vec::with_capacity(row_count)
+    let mut results: ArgVec = if collect_results {
+        ArgVec::with_capacity(row_count)
     } else {
-        Vec::new()
+        ArgVec::new()
     };
-    let mut event_log: Vec<ValueWord> = Vec::new();
+    let mut event_log: ArgVec = ArgVec::new();
     let mut handler_arg_bits: Vec<u64> = Vec::with_capacity(3);
 
     for row_idx in 0..row_count {
         handler_arg_bits.clear();
         if let Some(ref tables) = correlated_tables {
             // Correlated mode: build ctx TypedObject with row + named RowViews
-            let mut ctx_values: Vec<ValueWord> = Vec::with_capacity(1 + tables.len());
+            let mut ctx_values: ArgVec = ArgVec::with_capacity(1 + tables.len());
             ctx_values.push(ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx));
 
             // Add correlated tables -- use min(row_idx, len-1) to avoid out-of-bounds
@@ -125,7 +125,9 @@ pub(crate) fn handle_simulate(
                         other_idx,
                     ));
                 } else {
-                    ctx_values.push(table_val.clone());
+                    // `table_val` borrows from the outer tables map; retain
+                    // so the ArgVec owns a distinct ref.
+                    ctx_values.push(shape_value::vw_clone(table_val.raw_bits()));
                 }
             }
 
@@ -133,7 +135,7 @@ pub(crate) fn handle_simulate(
             let sid = ctx_schema_id.unwrap();
             let mut slots = Vec::with_capacity(ctx_values.len());
             let mut heap_mask: u64 = 0;
-            for (i, val) in ctx_values.into_iter().enumerate() {
+            for (i, val) in ctx_values.into_inner().into_iter().enumerate() {
                 let (slot, is_heap) = nb_to_slot_with_field_type(&val, Some(&FieldType::Any));
                 slots.push(slot);
                 if is_heap {
@@ -169,7 +171,9 @@ pub(crate) fn handle_simulate(
             state = obj.get("state").cloned().unwrap_or_else(ValueWord::none);
             if collect_results {
                 if let Some(r) = obj.get("result") {
-                    results.push(r.clone());
+                    // `r` borrows from `obj` (a HashMap<String, ValueWord>);
+                    // retain so `results` owns a distinct ref.
+                    results.push(shape_value::vw_clone(r.raw_bits()));
                 }
             }
             if collect_event_log {
@@ -199,7 +203,7 @@ pub(crate) fn handle_simulate(
                             slots: vec![slot0, slot1, slot2].into_boxed_slice(),
                             heap_mask,
                         },
-                    ));
+                    ).into_raw_bits());
                 }
             }
             continue;
@@ -211,12 +215,13 @@ pub(crate) fn handle_simulate(
     // Build return object using builtin SimulateReturn schema (6 slots)
     let sim_schema = vm.builtin_schemas.simulate_return;
     let event_log_val = if collect_event_log {
-        ValueWord::from_array(shape_value::vmarray_from_vec(event_log))
+        ValueWord::from_array(shape_value::vmarray_from_vec(event_log.into_inner()))
     } else {
+        drop(event_log);
         ValueWord::none()
     };
     let seed_val = seed.unwrap_or_else(ValueWord::none);
-    let results_val = ValueWord::from_array(shape_value::vmarray_from_vec(results));
+    let results_val = ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner()));
     let processed_val = ValueWord::from_i64(row_count as i64);
     let completed_val = ValueWord::from_bool(true);
 

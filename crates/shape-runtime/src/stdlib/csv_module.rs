@@ -4,7 +4,7 @@
 //!          csv.read_file, csv.is_valid
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `csv` module with CSV parsing and serialization functions.
@@ -25,17 +25,17 @@ pub fn create_csv_module() -> ModuleExports {
                 .has_headers(false)
                 .from_reader(text.as_bytes());
 
-            let mut rows: Vec<ValueWord> = Vec::new();
+            let mut rows: ArgVec = ArgVec::new();
             for result in reader.records() {
                 let record = result.map_err(|e| format!("csv.parse() failed: {}", e))?;
-                let row: Vec<ValueWord> = record
+                let row: ArgVec = ArgVec::from_vec(record
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
-                    .collect();
-                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row)));
+                    .collect());
+                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row.into_inner())));
             }
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows.into_inner())))
         },
         ModuleFunction {
             description: "Parse CSV text into an array of rows (each row is an array of strings)"
@@ -71,21 +71,21 @@ pub fn create_csv_module() -> ModuleExports {
                 .map(|h| h.to_string())
                 .collect();
 
-            let mut records: Vec<ValueWord> = Vec::new();
+            let mut records: ArgVec = ArgVec::new();
             for result in reader.records() {
                 let record = result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
-                let mut keys = Vec::with_capacity(headers.len());
-                let mut values = Vec::with_capacity(headers.len());
+                let mut keys: ArgVec = ArgVec::with_capacity(headers.len());
+                let mut values: ArgVec = ArgVec::with_capacity(headers.len());
                 for (i, field) in record.iter().enumerate() {
                     if i < headers.len() {
                         keys.push(ValueWord::from_string(Arc::new(headers[i].clone())));
                         values.push(ValueWord::from_string(Arc::new(field.to_string())));
                     }
                 }
-                records.push(ValueWord::from_hashmap_pairs(keys, values));
+                records.push(ValueWord::from_hashmap_pairs(keys.into_inner(), values.into_inner()));
             }
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(records)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(records.into_inner())))
         },
         ModuleFunction {
             description:
@@ -297,17 +297,17 @@ pub fn create_csv_module() -> ModuleExports {
                 .has_headers(false)
                 .from_reader(text.as_bytes());
 
-            let mut rows: Vec<ValueWord> = Vec::new();
+            let mut rows: ArgVec = ArgVec::new();
             for result in reader.records() {
                 let record = result.map_err(|e| format!("csv.read_file() parse error: {}", e))?;
-                let row: Vec<ValueWord> = record
+                let row: ArgVec = ArgVec::from_vec(record
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
-                    .collect();
-                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row)));
+                    .collect());
+                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row.into_inner())));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows.into_inner()))))
         },
         ModuleFunction {
             description: "Read and parse a CSV file into an array of rows".to_string(),

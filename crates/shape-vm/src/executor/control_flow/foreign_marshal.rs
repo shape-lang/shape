@@ -4,7 +4,7 @@ use crate::executor::objects::object_creation::read_slot_nb;
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Serialize a slice of ValueWord args to msgpack bytes (as an array).
@@ -133,17 +133,17 @@ fn typed_msgpack_to_nanboxed(
             let elem_type = &s[4..s.len() - 1];
             match val {
                 rmpv::Value::Array(arr) => {
-                    let items: Result<Vec<ValueWord>, VMError> = arr
-                        .iter()
-                        .enumerate()
-                        .map(|(i, item)| {
-                            // For arrays of objects, pass the schema_id through
-                            typed_msgpack_to_nanboxed(item, elem_type, schema_id, schemas).map_err(
-                                |e| VMError::RuntimeError(format!("Vec element [{}]: {}", i, e)),
-                            )
-                        })
-                        .collect();
-                    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items?)))
+                    // Build into an ArgVec so an error on any element drops
+                    // the already-converted owned refs cleanly.
+                    let mut items: ArgVec = ArgVec::with_capacity(arr.len());
+                    for (i, item) in arr.iter().enumerate() {
+                        let elem = typed_msgpack_to_nanboxed(item, elem_type, schema_id, schemas)
+                            .map_err(|e| {
+                                VMError::RuntimeError(format!("Vec element [{}]: {}", i, e))
+                            })?;
+                        items.push(elem);
+                    }
+                    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner())))
                 }
                 _ => Err(marshal_error(format!(
                     "expected Vec, got {}",
@@ -489,8 +489,9 @@ fn untyped_msgpack_to_nanboxed(val: &rmpv::Value) -> ValueWord {
             }
         }
         rmpv::Value::Array(arr) => {
-            let items: Vec<ValueWord> = arr.iter().map(untyped_msgpack_to_nanboxed).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(items))
+            let items: ArgVec =
+                ArgVec::from_vec(arr.iter().map(untyped_msgpack_to_nanboxed).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
         }
         rmpv::Value::Map(entries) => {
             let mut keys = Vec::with_capacity(entries.len());

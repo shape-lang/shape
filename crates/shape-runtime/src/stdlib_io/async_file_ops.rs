@@ -3,7 +3,7 @@
 //! Provides non-blocking file read/write using tokio's async file API.
 //! These integrate with the VM's async/await system via `AsyncModuleFn`.
 
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// io.read_file_async(path: string) -> string
@@ -100,11 +100,11 @@ pub async fn io_read_bytes_async(args: Vec<ValueWord>) -> Result<ValueWord, Stri
         .await
         .map_err(|e| format!("io.read_bytes_async(\"{}\"): {}", path, e))?;
 
-    let arr: Vec<ValueWord> = bytes
+    let arr: ArgVec = ArgVec::from_vec(bytes
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
+        .collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr.into_inner())))
 }
 
 /// io.exists_async(path: string) -> bool

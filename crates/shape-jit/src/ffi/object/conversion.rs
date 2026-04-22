@@ -148,7 +148,7 @@ impl IntoTyped<f64> for f64 { fn into_typed(self) -> f64 { self } }
 
 /// Convert JIT NaN-boxed bits directly to ValueWord (no intermediate Value/VMValue).
 pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
-    use shape_value::{ValueWord, ValueWordExt};
+    use shape_value::{ArgVec, ValueWord, ValueWordExt};
 
     // NOTE: Unified heap values (bit-47 set) are NOT passed through directly.
     // The VM's as_heap_ref() returns None for unified heap, so we must convert // cold-path
@@ -213,8 +213,9 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         }
         Some(HK_ARRAY) => {
             let arr = unsafe { JitArray::from_heap_bits(bits) };
-            let values: Vec<ValueWord> = arr.iter().map(|&b| jit_bits_to_nanboxed(b)).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(values))
+            let values: ArgVec =
+                ArgVec::from_vec(arr.iter().map(|&b| jit_bits_to_nanboxed(b)).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(values.into_inner()))
         }
         Some(HK_CLOSURE) => {
             let closure = unsafe { unified_unbox::<super::super::super::context::JITClosure>(bits) };
@@ -321,7 +322,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
     bits: u64,
     ctx: *const super::super::super::context::JITContext,
 ) -> shape_value::ValueWord {
-    use shape_value::{ValueWord, ValueWordExt};
+    use shape_value::{ArgVec, ValueWord, ValueWordExt};
 
     // VM-format heap values (TAG_HEAP, bit-47 clear) are Arc<HeapValue> pointers.
     // Recover them directly — no conversion needed.
@@ -348,11 +349,11 @@ pub fn jit_bits_to_nanboxed_with_ctx(
 
     if is_heap_kind(bits, HK_ARRAY) {
         let arr = unsafe { JitArray::from_heap_bits(bits) };
-        let values: Vec<ValueWord> = arr
+        let values: ArgVec = ArgVec::from_vec(arr
             .iter()
             .map(|&b| jit_bits_to_nanboxed_with_ctx(b, ctx))
-            .collect();
-        return ValueWord::from_array(shape_value::vmarray_from_vec(values));
+            .collect());
+        return ValueWord::from_array(shape_value::vmarray_from_vec(values.into_inner()));
     }
 
     // For other types, delegate to the basic converter

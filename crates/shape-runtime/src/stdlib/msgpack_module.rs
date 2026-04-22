@@ -4,7 +4,7 @@
 //!          msgpack.encode_bytes(value), msgpack.decode_bytes(data)
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_json::Value` into an untyped `ValueWord`.
@@ -23,8 +23,9 @@ fn json_value_to_valueword(value: serde_json::Value) -> ValueWord {
         }
         serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_json::Value::Array(arr) => {
-            let items: Vec<ValueWord> = arr.into_iter().map(json_value_to_valueword).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(items))
+            let items: ArgVec =
+                ArgVec::from_vec(arr.into_iter().map(json_value_to_valueword).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
         }
         serde_json::Value::Object(map) => {
             let mut keys = Vec::with_capacity(map.len());
@@ -117,12 +118,12 @@ pub fn create_msgpack_module() -> ModuleExports {
             let bytes = rmp_serde::to_vec(&json_value)
                 .map_err(|e| format!("msgpack.encode_bytes() failed: {}", e))?;
 
-            let items: Vec<ValueWord> = bytes
+            let items: ArgVec = ArgVec::from_vec(bytes
                 .iter()
                 .map(|&b| ValueWord::from_i64(b as i64))
-                .collect();
+                .collect());
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(items))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))))
         },
         ModuleFunction {
             description: "Encode a value to MessagePack as a byte array".to_string(),

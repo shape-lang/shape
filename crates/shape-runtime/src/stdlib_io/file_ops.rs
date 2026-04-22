@@ -1,6 +1,6 @@
 //! File operation implementations for the io module.
 
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoResource};
 use std::io::{Read, Seek, Write};
 
@@ -181,11 +181,11 @@ pub fn io_read_bytes(
         buf
     };
 
-    let arr: Vec<ValueWord> = bytes
+    let arr: ArgVec = ArgVec::from_vec(bytes
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
+        .collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr.into_inner())))
 }
 
 /// io.write(handle, data) -> int (bytes written)
@@ -407,16 +407,16 @@ pub fn io_read_dir(
         .ok_or_else(|| "io.read_dir() requires a string path".to_string())?;
     crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
 
-    let entries: Vec<ValueWord> = std::fs::read_dir(path)
+    let entries: ArgVec = ArgVec::from_vec(std::fs::read_dir(path)
         .map_err(|e| format!("io.read_dir(\"{}\"): {}", path, e))?
         .filter_map(|entry| {
             entry.ok().map(|e| {
                 ValueWord::from_string(std::sync::Arc::new(e.path().to_string_lossy().to_string()))
             })
         })
-        .collect();
+        .collect());
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries.into_inner())))
 }
 
 /// io.read_gzip(path: string) -> string

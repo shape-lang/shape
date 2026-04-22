@@ -9,7 +9,7 @@ use arrow_select::filter::filter_record_batch;
 use arrow_select::take::take;
 use shape_runtime::type_schema::FieldType;
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::common::{
@@ -229,7 +229,7 @@ pub(crate) fn handle_group_by(
 
             key_row_pairs.sort_by(|a, b| cmp_nb_values(&a.0, &b.0));
 
-            let mut groups: Vec<ValueWord> = Vec::new();
+            let mut groups: ArgVec = ArgVec::new();
             let mut group_start = 0;
             for i in 1..=key_row_pairs.len() {
                 let boundary = i == key_row_pairs.len()
@@ -277,13 +277,13 @@ pub(crate) fn handle_group_by(
                             slots: vec![key_slot, table_slot].into_boxed_slice(),
                             heap_mask,
                         },
-                    ));
+                    ).into_raw_bits());
 
                     group_start = i;
                 }
             }
 
-            return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups)).into_raw_bits());
+            return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups.into_inner())).into_raw_bits());
         }
     }
 
@@ -321,7 +321,7 @@ pub(crate) fn handle_group_by(
         return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())).into_raw_bits());
     }
 
-    let mut groups: Vec<ValueWord> = Vec::new();
+    let mut groups: ArgVec = ArgVec::new();
     let mut group_start = 0;
     let group_schema = vm.builtin_schemas.group_result;
 
@@ -350,13 +350,13 @@ pub(crate) fn handle_group_by(
                     slots: vec![key_slot, table_slot].into_boxed_slice(),
                     heap_mask,
                 },
-            ));
+            ).into_raw_bits());
 
             group_start = i;
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups.into_inner())).into_raw_bits())
 }
 
 /// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.
@@ -416,11 +416,11 @@ pub(crate) fn handle_map(
         ))).into_raw_bits());
     }
 
-    let mut rows: Vec<ValueWord> = Vec::with_capacity(row_count);
+    let mut rows: ArgVec = ArgVec::with_capacity(row_count);
     for row_idx in 0..row_count {
         let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
         let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-        rows.push(ValueWord::from_raw_bits(result_bits));
+        rows.push(result_bits);
     }
 
     Ok(build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits())

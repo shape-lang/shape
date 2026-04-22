@@ -3,7 +3,7 @@
 //! Used by both `compress` and `archive` modules for converting between
 //! Shape's `Array<int>` representation and Rust `Vec<u8>`.
 
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Extract a byte array (`Array<int>`) from a ValueWord into a `Vec<u8>`.
@@ -30,9 +30,9 @@ pub fn bytes_from_array(val: &ValueWord) -> Result<Vec<u8>, String> {
 
 /// Convert a `Vec<u8>` into a ValueWord `Array<int>`.
 pub fn bytes_to_array(bytes: &[u8]) -> ValueWord {
-    let items: Vec<ValueWord> = bytes
+    let items: ArgVec = ArgVec::from_vec(bytes
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
-        .collect();
-    ValueWord::from_array(shape_value::vmarray_from_vec(items))
+        .collect());
+    ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
 }

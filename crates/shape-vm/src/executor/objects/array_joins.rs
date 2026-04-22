@@ -3,7 +3,7 @@
 //! Handles: inner_join, left_join, cross_join
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -51,7 +51,7 @@ pub(crate) fn handle_inner_join_v2(
     let right_key_fn = (*borrow_vw(args[3])).clone();
     let result_selector = (*borrow_vw(args[4])).clone();
 
-    let mut results: Vec<ValueWord> = Vec::new();
+    let mut results: ArgVec = ArgVec::new();
 
     for (l_idx, left_nb) in left.iter().enumerate() {
         // Compute left key
@@ -78,12 +78,13 @@ pub(crate) fn handle_inner_join_v2(
                 vm.push_raw_u64(ValueWord::from_f64(2.0))?;
                 vm.op_call_value()?;
                 let result = vm.pop_raw_u64()?;
+                // `result` is a call-return ref owned by this frame.
                 results.push(result);
             }
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }
 
 /// v2 `leftJoin` — left join two arrays with key functions
@@ -123,7 +124,7 @@ pub(crate) fn handle_left_join_v2(
     let right_key_fn = (*borrow_vw(args[3])).clone();
     let result_selector = (*borrow_vw(args[4])).clone();
 
-    let mut results: Vec<ValueWord> = Vec::new();
+    let mut results: ArgVec = ArgVec::new();
 
     for (l_idx, left_nb) in left.iter().enumerate() {
         vm.push_raw_u64(left_key_fn.clone())?;
@@ -166,7 +167,7 @@ pub(crate) fn handle_left_join_v2(
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }
 
 /// v2 `crossJoin` — cross join two arrays (Cartesian product)
@@ -203,7 +204,7 @@ pub(crate) fn handle_cross_join_v2(
 
     let result_selector = (*borrow_vw(args[2])).clone();
 
-    let mut results: Vec<ValueWord> = Vec::new();
+    let mut results: ArgVec = ArgVec::new();
 
     for left_nb in left.iter() {
         for right_nb in right.iter() {
@@ -217,5 +218,5 @@ pub(crate) fn handle_cross_join_v2(
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }

@@ -13,7 +13,7 @@
 //! and reassembled using Rayon when no callback is involved.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// parallel.map(array, fn) -> Array
@@ -110,11 +110,11 @@ fn parallel_chunks(args: &[ValueWord], _ctx: &ModuleContext) -> Result<ValueWord
     let size = size as usize;
 
     let items = arr.to_generic();
-    let chunks: Vec<ValueWord> = items
+    let chunks: ArgVec = ArgVec::from_vec(items
         .chunks(size)
         .map(|chunk| ValueWord::from_array(shape_value::vmarray_from_vec(chunk.to_vec())))
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(chunks)))
+        .collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(chunks.into_inner())))
 }
 
 /// parallel.reduce(array, fn, initial) -> any

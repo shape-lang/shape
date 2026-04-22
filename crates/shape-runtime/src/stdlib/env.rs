@@ -5,7 +5,7 @@
 //! Policy gated: requires Env permission at runtime.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `env` module with environment variable and system info functions.
@@ -94,10 +94,10 @@ pub fn create_env_module() -> ModuleExports {
         "args",
         |_args: &[ValueWord], ctx: &ModuleContext| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
-            let args: Vec<ValueWord> = std::env::args()
+            let args: ArgVec = ArgVec::from_vec(std::env::args()
                 .map(|a| ValueWord::from_string(Arc::new(a)))
-                .collect();
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(args)))
+                .collect());
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(args.into_inner())))
         },
         ModuleFunction {
             description: "Get command-line arguments as an array of strings".to_string(),

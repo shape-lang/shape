@@ -1,5 +1,5 @@
 use shape_runtime::module_exports::ModuleContext;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // ===========================================================================
@@ -70,11 +70,12 @@ pub(crate) fn state_capture_all_stub(
         .vm_state
         .ok_or("state.capture_all: VM state not available")?;
     let frames = vm_state.all_frames();
-    let frame_nbs: Vec<ValueWord> = frames.iter().map(frame_info_to_nb).collect();
-    let frames_arr = ValueWord::from_array(shape_value::vmarray_from_vec(frame_nbs));
+    let frame_nbs: ArgVec =
+        ArgVec::from_vec(frames.iter().map(frame_info_to_nb).collect());
+    let frames_arr = ValueWord::from_array(shape_value::vmarray_from_vec(frame_nbs.into_inner()));
 
     let bindings = vm_state.module_bindings();
-    let pairs: Vec<ValueWord> = bindings
+    let pairs: ArgVec = ArgVec::from_vec(bindings
         .into_iter()
         .map(|(name, value)| {
             ValueWord::from_array(shape_value::vmarray_from_vec(vec![
@@ -82,8 +83,8 @@ pub(crate) fn state_capture_all_stub(
                 value,
             ]))
         })
-        .collect();
-    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs));
+        .collect());
+    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs.into_inner()));
     let ic = ValueWord::from_i64(vm_state.instruction_count() as i64);
 
     Ok(shape_runtime::type_schema::typed_object_from_pairs(&[
@@ -104,7 +105,7 @@ pub(crate) fn state_capture_module_stub(
         .vm_state
         .ok_or("state.capture_module: VM state not available")?;
     let bindings = vm_state.module_bindings();
-    let pairs: Vec<ValueWord> = bindings
+    let pairs: ArgVec = ArgVec::from_vec(bindings
         .into_iter()
         .map(|(name, value)| {
             ValueWord::from_array(shape_value::vmarray_from_vec(vec![
@@ -112,8 +113,8 @@ pub(crate) fn state_capture_module_stub(
                 value,
             ]))
         })
-        .collect();
-    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs));
+        .collect());
+    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs.into_inner()));
 
     Ok(shape_runtime::type_schema::typed_object_from_pairs(&[(
         "bindings",
@@ -373,7 +374,7 @@ pub(crate) fn state_locals_stub(
 ) -> Result<ValueWord, String> {
     let vm_state = ctx.vm_state.ok_or("state.locals: VM state not available")?;
     let locals = vm_state.current_locals();
-    let pairs: Vec<ValueWord> = locals
+    let pairs: ArgVec = ArgVec::from_vec(locals
         .into_iter()
         .map(|(name, value)| {
             ValueWord::from_array(shape_value::vmarray_from_vec(vec![
@@ -381,8 +382,8 @@ pub(crate) fn state_locals_stub(
                 value,
             ]))
         })
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs)))
+        .collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs.into_inner())))
 }
 
 // ===========================================================================
