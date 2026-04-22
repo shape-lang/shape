@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word::ValueWord;
 use crate::value_word_drop::{vw_clone, vw_drop};
 
 /// Inline capacity for small VMArrays (≤ 8 elements stored inline, no heap buffer).

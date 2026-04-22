@@ -1385,6 +1385,130 @@ impl fmt::Display for TableViewData {
 // All generated from the single source of truth in define_heap_types!().
 crate::define_heap_types!();
 
+// ── Manual Clone / Drop for HeapValue (Wave 4 WC.3) ─────────────────────────
+//
+// Why this is manual, not `#[derive(Clone)]` + no Drop:
+//
+// The `Some(Box<ValueWord>)` / `Ok(Box<ValueWord>)` / `Err(Box<ValueWord>)`
+// variants hold a NaN-boxed `u64` inside a `Box`. A derived `Clone` would
+// copy the `u64` bits into a fresh `Box` **without calling `vw_clone`**,
+// so any heap tag encoded in the bits would be unreachable from the refcount
+// pipeline. Likewise, an automatic `Drop` of `Box<ValueWord>` would free
+// only the Box allocation and leak the underlying Arc / owned box.
+//
+// This impl pairs the two: `Clone` routes the inner bits through
+// `vw_clone` (shared-heap refcount bump / owned-heap deep clone) and `Drop`
+// routes them through `vw_drop`. Every other variant delegates to its
+// inner type's own `Clone` / `Drop` exactly as the auto-derive would
+// have generated.
+impl Clone for HeapValue {
+    fn clone(&self) -> Self {
+        match self {
+            // Tuple variants
+            HeapValue::String(v) => HeapValue::String(v.clone()),
+            HeapValue::Array(v) => HeapValue::Array(v.clone()),
+            HeapValue::Decimal(v) => HeapValue::Decimal(*v),
+            HeapValue::BigInt(v) => HeapValue::BigInt(*v),
+            HeapValue::HostClosure(v) => HeapValue::HostClosure(v.clone()),
+            HeapValue::DataTable(v) => HeapValue::DataTable(v.clone()),
+            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
+            HeapValue::Set(v) => HeapValue::Set(v.clone()),
+            HeapValue::Deque(v) => HeapValue::Deque(v.clone()),
+            HeapValue::PriorityQueue(v) => HeapValue::PriorityQueue(v.clone()),
+            HeapValue::Content(v) => HeapValue::Content(v.clone()),
+            HeapValue::Instant(v) => HeapValue::Instant(v.clone()),
+            HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
+            HeapValue::Enum(v) => HeapValue::Enum(v.clone()),
+            // The three ValueWord-bearing variants route through vw_clone
+            // so heap refcounts stay paired with the matching Drop below.
+            HeapValue::Some(inner) => HeapValue::Some(Box::new(vw_clone(**inner))),
+            HeapValue::Ok(inner) => HeapValue::Ok(Box::new(vw_clone(**inner))),
+            HeapValue::Err(inner) => HeapValue::Err(Box::new(vw_clone(**inner))),
+            HeapValue::Future(v) => HeapValue::Future(*v),
+            HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
+            HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
+            HeapValue::Iterator(v) => HeapValue::Iterator(v.clone()),
+            HeapValue::Generator(v) => HeapValue::Generator(v.clone()),
+            HeapValue::Char(v) => HeapValue::Char(*v),
+            HeapValue::ProjectedRef(v) => HeapValue::ProjectedRef(v.clone()),
+            // Struct variants
+            HeapValue::TypedObject {
+                schema_id,
+                slots,
+                heap_mask,
+            } => HeapValue::TypedObject {
+                schema_id: *schema_id,
+                slots: slots.clone(),
+                heap_mask: *heap_mask,
+            },
+            HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
+            HeapValue::Range {
+                start,
+                end,
+                inclusive,
+            } => HeapValue::Range {
+                // `start` / `end` carry `Box<ValueWord>` bits; route each
+                // through `vw_clone` so heap-tagged endpoints stay
+                // refcount-paired with the matching Drop below.
+                start: start.as_deref().map(|&b| Box::new(vw_clone(b))),
+                end: end.as_deref().map(|&b| Box::new(vw_clone(b))),
+                inclusive: *inclusive,
+            },
+            HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
+                kind: *kind,
+                task_ids: task_ids.clone(),
+            },
+            HeapValue::TraitObject { value, vtable } => HeapValue::TraitObject {
+                // `value` is a `Box<ValueWord>` holding NaN-boxed bits.
+                value: Box::new(vw_clone(**value)),
+                vtable: vtable.clone(),
+            },
+            HeapValue::FunctionRef { name, closure } => HeapValue::FunctionRef {
+                name: name.clone(),
+                closure: closure.as_deref().map(|&b| Box::new(vw_clone(b))),
+            },
+            HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
+            HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
+            HeapValue::Rare(v) => HeapValue::Rare(v.clone()),
+            HeapValue::Concurrency(v) => HeapValue::Concurrency(v.clone()),
+            HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
+        }
+    }
+}
+
+impl Drop for HeapValue {
+    fn drop(&mut self) {
+        // Only the variants that hold raw `ValueWord` (u64) bits inside
+        // a `Box` / `Option<Box>` need the vw_drop hop; every other
+        // variant owns fields whose `Drop` already reclaims the
+        // resource (Arc refcount, Box allocation, etc.).
+        //
+        // Rust runs this impl first, then auto-drops the enum's fields;
+        // `vw_drop` decrements the heap refcount, and the surrounding
+        // `Box<ValueWord>` is then freed by the default drop glue.
+        match self {
+            HeapValue::Some(inner) | HeapValue::Ok(inner) | HeapValue::Err(inner) => {
+                vw_drop(**inner)
+            }
+            HeapValue::Range { start, end, .. } => {
+                if let Some(b) = start {
+                    vw_drop(**b);
+                }
+                if let Some(b) = end {
+                    vw_drop(**b);
+                }
+            }
+            HeapValue::TraitObject { value, .. } => vw_drop(**value),
+            HeapValue::FunctionRef { closure, .. } => {
+                if let Some(b) = closure {
+                    vw_drop(**b);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // ── Shared comparison helpers ────────────────────────────────────────────────
 
 /// Cross-type numeric equality: BigInt vs Decimal.
