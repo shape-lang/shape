@@ -116,9 +116,13 @@ impl ShapeArray {
             alloc::handle_alloc_error(layout);
         }
         // Clone each element (bumps Arc refcounts for heap-tagged values).
+        // Note: `ValueWord = u64` is `Copy`; `elem.clone()` is a bit-copy, not
+        // a refcount bump. We explicitly call `vw_clone` to retain each heap
+        // ref.
         for (i, elem) in elements.iter().enumerate() {
+            let retained = crate::value_word_drop::vw_clone(*elem);
             unsafe {
-                std::ptr::write(data.add(i), elem.clone());
+                std::ptr::write(data.add(i), retained);
             }
         }
         Self {
@@ -317,11 +321,12 @@ impl ShapeArray {
 impl Drop for ShapeArray {
     fn drop(&mut self) {
         if !self.data.is_null() && self.cap > 0 {
-            // Drop each ValueWord element (decrements Arc refcounts for heap-tagged values).
+            // Release each element's heap ref. With `ValueWord = u64`,
+            // `drop_in_place` would be a no-op — we must explicitly call
+            // `vw_drop` to decrement Arc/unified refcounts.
             for i in 0..self.len as usize {
-                unsafe {
-                    std::ptr::drop_in_place(self.data.add(i));
-                }
+                let bits = unsafe { std::ptr::read(self.data.add(i) as *const u64) };
+                crate::value_word_drop::vw_drop(bits);
             }
             let layout = Layout::array::<ValueWord>(self.cap as usize).unwrap();
             unsafe {
@@ -503,10 +508,13 @@ mod tests {
     #[test]
     fn test_clone() {
         let mut arr = ShapeArray::new();
+        // `from_string` returns a freshly-owned heap ref (rc=1). Pushing
+        // transfers that ownership into `arr`.
         arr.push(ValueWord::from_string(std::sync::Arc::new(
             "hello".to_string(),
         )));
         arr.push(ValueWord::from_f64(42.0));
+        // `arr.clone()` retains each element (bumps the string's Arc rc to 2).
         let cloned = arr.clone();
         assert_eq!(cloned.len(), 2);
         assert_eq!(cloned[0].as_str(), Some("hello"));
@@ -600,23 +608,28 @@ mod tests {
     #[test]
     fn test_heap_values_cloned_correctly() {
         use std::sync::Arc;
+        use crate::value_word_drop::vw_clone;
         let s = Arc::new("test".to_string());
+
+        // Each push transfers ownership of one heap ref into the array.
+        // `vw_clone` bumps the refcount so the two array slots each have
+        // their own logical ref.
         let nb = ValueWord::from_string(s.clone());
 
         let mut arr = ShapeArray::new();
-        arr.push(nb.clone());
-        arr.push(nb.clone());
+        arr.push(vw_clone(nb));
+        arr.push(nb); // final transfer — nb is no longer a logical owner
 
-        // Clone the array - should bump refcounts
+        // Clone the array — should bump refcounts on each element.
         let arr2 = arr.clone();
         assert_eq!(arr2.len(), 2);
         assert_eq!(arr2[0].as_str(), Some("test"));
 
-        // Drop both - no double-free
+        // Drop both — element Drops decrement the Arc refcounts cleanly.
         drop(arr);
         drop(arr2);
 
-        // Original string arc should still be valid
+        // Original string arc should still be valid (s still owns one ref).
         assert_eq!(&*s, "test");
     }
 

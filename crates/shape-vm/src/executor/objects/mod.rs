@@ -297,7 +297,7 @@ impl VirtualMachine {
             }
             // Reuse existing type resolution path (typed-object schema lookup included).
             self.push_raw_u64(ValueWord::from_raw_bits(receiver_bits))?;
-            let result = self.builtin_type_of(vec![])?;
+            let result = self.builtin_type_of(shape_value::ArgVec::new())?;
             self.push_raw_u64(result)?;
             // Drop the popped args to release refcounts
             for bits in raw_args {

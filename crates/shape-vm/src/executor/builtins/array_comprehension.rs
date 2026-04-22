@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, HeapKind, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Check that a ValueWord value is callable
@@ -28,7 +28,7 @@ impl VirtualMachine {
     /// Map: Transform array elements via callback function
     pub(in crate::executor) fn builtin_map(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -76,7 +76,7 @@ impl VirtualMachine {
     /// Filter: Keep array elements matching predicate
     pub(in crate::executor) fn builtin_filter(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -112,7 +112,7 @@ impl VirtualMachine {
     /// Reduce: Fold array to single value
     pub(in crate::executor) fn builtin_reduce(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() < 2 || args.len() > 3 {
@@ -154,7 +154,7 @@ impl VirtualMachine {
     /// ForEach: Execute function for each element (side effects)
     pub(in crate::executor) fn builtin_for_each(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -180,7 +180,7 @@ impl VirtualMachine {
     /// Find: Return first element matching predicate
     pub(in crate::executor) fn builtin_find(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -210,7 +210,7 @@ impl VirtualMachine {
     /// FindIndex: Return index of first element matching predicate
     pub(in crate::executor) fn builtin_find_index(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -240,7 +240,7 @@ impl VirtualMachine {
     /// Some: Check if any element matches predicate
     pub(in crate::executor) fn builtin_some(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
@@ -270,7 +270,7 @@ impl VirtualMachine {
     /// Every: Check if all elements match predicate
     pub(in crate::executor) fn builtin_every(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {

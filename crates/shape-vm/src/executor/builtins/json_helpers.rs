@@ -7,7 +7,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -15,7 +15,7 @@ impl VirtualMachine {
     /// Returns the Json value, or constructs Json::Null for missing keys.
     pub(in crate::executor) fn builtin_json_object_get(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::ArityMismatch {
@@ -49,7 +49,7 @@ impl VirtualMachine {
     /// Returns the Json value, or Json::Null for out-of-range indices.
     pub(in crate::executor) fn builtin_json_array_at(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::ArityMismatch {
@@ -77,7 +77,7 @@ impl VirtualMachine {
     /// `__json_object_keys(obj)` — return the string keys of a Json Object payload.
     pub(in crate::executor) fn builtin_json_object_keys(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::ArityMismatch {
@@ -96,7 +96,7 @@ impl VirtualMachine {
     /// `__json_array_len(arr)` — return the length of a Json Array payload.
     pub(in crate::executor) fn builtin_json_array_len(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::ArityMismatch {
@@ -115,7 +115,7 @@ impl VirtualMachine {
     /// `__json_object_len(obj)` — return the number of keys in a Json Object payload.
     pub(in crate::executor) fn builtin_json_object_len(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::ArityMismatch {

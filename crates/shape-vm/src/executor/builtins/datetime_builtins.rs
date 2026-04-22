@@ -3,14 +3,14 @@
 //! Handles: DateTimeParse, DateTimeFromEpoch
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// Parse a datetime string. Supports ISO 8601, RFC 2822, RFC 3339,
     /// and common date formats.
     pub(in crate::executor) fn builtin_datetime_parse(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         let s = args
             .first()
@@ -79,7 +79,7 @@ impl VirtualMachine {
     /// Create a DateTime from milliseconds since Unix epoch.
     pub(in crate::executor) fn builtin_datetime_from_epoch(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         let ms = args
             .first()
@@ -98,7 +98,7 @@ impl VirtualMachine {
     /// All times are interpreted as UTC.
     pub(in crate::executor) fn builtin_datetime_from_parts(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         let year = args
             .first()
@@ -160,7 +160,7 @@ impl VirtualMachine {
     /// Create a DateTime from seconds since Unix epoch (not milliseconds).
     pub(in crate::executor) fn builtin_datetime_from_unix_secs(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         let secs = args
             .first()

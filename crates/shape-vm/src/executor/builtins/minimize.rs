@@ -7,7 +7,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::collections::VecDeque;
 
 impl VirtualMachine {
@@ -20,7 +20,7 @@ impl VirtualMachine {
     /// Returns: Array<number> — optimized point
     pub(in crate::executor) fn builtin_minimize(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() < 2 {

@@ -3,13 +3,13 @@
 //! Handles: objectRest
 
 use crate::executor::VirtualMachine;
-use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, HeapValue, VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// ObjectRest: Create new object excluding specified keys
     pub(in crate::executor) fn builtin_object_rest(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError(

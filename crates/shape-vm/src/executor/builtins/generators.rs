@@ -3,7 +3,7 @@
 //! Handles: range, slice
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -14,7 +14,7 @@ impl VirtualMachine {
     /// - range(start, end, step) => [start, start+step, ..., end-step]
     pub(in crate::executor) fn builtin_range(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         // Check if all arguments are integers — if so, produce Int output
         let all_int = args.iter().all(|a| a.is_i64());
@@ -132,7 +132,7 @@ impl VirtualMachine {
     /// Slice: Extract subarray from start to end indices
     pub(in crate::executor) fn builtin_slice(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() < 2 || args.len() > 3 {
             return Err(VMError::RuntimeError(
