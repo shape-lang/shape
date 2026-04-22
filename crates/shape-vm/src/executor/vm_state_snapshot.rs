@@ -12,6 +12,12 @@ use super::VirtualMachine;
 
 /// Snapshot of VM state captured at a point during execution.
 /// Implements `VmStateAccessor` for use in `ModuleContext`.
+///
+/// **WB2.4 retain-on-read.** Every `ValueWord` collected from the
+/// live VM (stack slots, module bindings, upvalues) is cloned via
+/// `vw_clone` so the snapshot holds an independent owning share per
+/// heap-tagged value. The `Drop` impl releases those shares via
+/// `vw_drop_slice` / `vw_drop`, keeping the snapshot refcount-neutral.
 pub(crate) struct VmStateSnapshot {
     frames: Vec<FrameInfo>,
     current_args: Vec<ValueWord>,
@@ -19,6 +25,19 @@ pub(crate) struct VmStateSnapshot {
     module_binding_names: Vec<String>,
     module_binding_values: Vec<ValueWord>,
     instruction_count: usize,
+}
+
+impl Drop for VmStateSnapshot {
+    fn drop(&mut self) {
+        use shape_value::value_word_drop::{vw_drop, vw_drop_slice};
+        // `frames: Vec<FrameInfo>` auto-drops — FrameInfo has its own
+        // retain-on-read Drop (shape-runtime/module_exports.rs).
+        vw_drop_slice(&self.current_args);
+        for (_, bits) in &self.current_locals {
+            vw_drop(*bits);
+        }
+        vw_drop_slice(&self.module_binding_values);
+    }
 }
 
 /// Construction via `VirtualMachine::capture_vm_state()`.
@@ -53,22 +72,27 @@ impl VirtualMachine {
             };
 
             // Extract locals from the unified stack for this frame.
+            // WB2.4 retain-on-read: use the owning read so each
+            // snapshot slot holds its own refcount bump.
             let locals: Vec<ValueWord> = if frame.locals_count > 0 {
                 let start = frame.base_pointer;
                 let end = (start + frame.locals_count).min(self.sp);
-                (start..end).map(|i| self.stack_read_raw(i)).collect()
+                (start..end).map(|i| self.stack_read_owned(i)).collect()
             } else {
                 Vec::new()
             };
 
-            // Extract upvalue values if present.
+            // Extract upvalue values if present. `Upvalue::get` already
+            // returns an owning share (WB2.2) — each collected bit
+            // pattern is an independent retain.
             let upvalues = frame
                 .upvalues
                 .as_ref()
                 .map(|ups| ups.iter().map(|u| u.get()).collect());
 
             // Extract args: the first `arity` locals in the frame's register
-            // window are the arguments.
+            // window are the arguments. Owning reads, same rationale as
+            // `locals` above.
             let args: Vec<ValueWord> = frame
                 .function_id
                 .and_then(|fid| self.program.functions.get(fid as usize))
@@ -79,7 +103,7 @@ impl VirtualMachine {
                         .saturating_add(arity)
                         .min(frame.base_pointer + frame.locals_count)
                         .min(self.sp);
-                    (start..end).map(|i| self.stack_read_raw(i)).collect()
+                    (start..end).map(|i| self.stack_read_owned(i)).collect()
                 })
                 .unwrap_or_default();
 
@@ -95,7 +119,14 @@ impl VirtualMachine {
         }
 
         // Extract current args and locals from the topmost frame.
-        let current_args = frames.last().map(|f| f.args.clone()).unwrap_or_default();
+        // WB2.4: `Vec<ValueWord>::clone()` is a plain `u64` bit-copy
+        // that aliases refcounts; explicit `vw_clone` per slot keeps
+        // the refcount invariant.
+        use shape_value::value_word_drop::vw_clone;
+        let current_args = frames
+            .last()
+            .map(|f| f.args.iter().map(|&b| vw_clone(b)).collect())
+            .unwrap_or_default();
 
         let current_locals = frames
             .last()
@@ -107,7 +138,7 @@ impl VirtualMachine {
                             .iter()
                             .enumerate()
                             .filter_map(|(i, name)| {
-                                f.locals.get(i).map(|val| (name.clone(), val.clone()))
+                                f.locals.get(i).map(|val| (name.clone(), vw_clone(*val)))
                             })
                             .collect::<Vec<_>>()
                     })
@@ -119,8 +150,9 @@ impl VirtualMachine {
             current_args,
             current_locals,
             module_binding_names: self.program.module_binding_names.clone(),
+            // WB2.4: module binding values need owning shares.
             module_binding_values: (0..self.module_bindings.len())
-                .map(|i| self.binding_read_raw(i))
+                .map(|i| self.binding_read_owned(i))
                 .collect(),
             instruction_count: self.instruction_count,
         }
@@ -145,18 +177,26 @@ impl VmStateAccessor for VmStateSnapshot {
     }
 
     fn current_args(&self) -> Vec<ValueWord> {
-        self.current_args.clone()
+        // WB2.4: return owning shares so the caller can drop them
+        // independently of our `current_args` storage.
+        use shape_value::value_word_drop::vw_clone;
+        self.current_args.iter().map(|&b| vw_clone(b)).collect()
     }
 
     fn current_locals(&self) -> Vec<(String, ValueWord)> {
-        self.current_locals.clone()
+        use shape_value::value_word_drop::vw_clone;
+        self.current_locals
+            .iter()
+            .map(|(name, bits)| (name.clone(), vw_clone(*bits)))
+            .collect()
     }
 
     fn module_bindings(&self) -> Vec<(String, ValueWord)> {
+        use shape_value::value_word_drop::vw_clone;
         self.module_binding_names
             .iter()
             .zip(self.module_binding_values.iter())
-            .map(|(name, val)| (name.clone(), val.clone()))
+            .map(|(name, val)| (name.clone(), vw_clone(*val)))
             .collect()
     }
 
