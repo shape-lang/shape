@@ -588,6 +588,14 @@ pub fn drop_raw_bits(bits: u64) {
 /// returns the raw `*mut ValueWord` / `*const SharedCell` pointer bits
 /// so the `LoadOwnedMutableCapture` / `LoadSharedCapture` opcodes can
 /// recover the cell.
+///
+/// **WB2.3 retain-on-read.** `capture_execution_bits` is a plain bit
+/// read — the closure block retains the underlying share. Each
+/// returned `Upvalue` needs its own refcount bump via `vw_clone` so
+/// the Upvalue's owning `Drop` does not double-free when the closure
+/// block is released (e.g. by the caller's `vw_drop` on the callee
+/// stack slot). Raw pointer captures (`OwnedMutable` / `Shared`) are
+/// not heap-tagged; `vw_clone` is a no-op for them.
 #[inline]
 pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>)> {
     unsafe {
@@ -597,7 +605,9 @@ pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>
         let n = handle.capture_count();
         let mut upvalues: Vec<shape_value::Upvalue> = Vec::with_capacity(n);
         for i in 0..n {
-            upvalues.push(shape_value::Upvalue::new(handle.capture_execution_bits(i)));
+            let raw = handle.capture_execution_bits(i);
+            let owned = shape_value::value_word_drop::vw_clone(raw);
+            upvalues.push(shape_value::Upvalue::new(owned));
         }
         Some((fid, upvalues))
     }

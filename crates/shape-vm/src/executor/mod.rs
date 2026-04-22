@@ -174,6 +174,18 @@ pub struct CallFrame {
     /// Content hash of the function blob being executed (for content-addressed state capture).
     /// `None` for programs compiled without content-addressed metadata.
     pub blob_hash: Option<FunctionHash>,
+    /// WB2.3 retain-on-read: optional owning `ValueWord` bits for the
+    /// closure HeapValue that backs this frame's `upvalues`. When the
+    /// frame is a closure call, `CaptureKind::OwnedMutable` / `Shared`
+    /// captures in `upvalues` are raw `*mut ValueWord` / `*const
+    /// SharedCell` pointer bits into this block's allocation — the
+    /// frame must hold this share so the block outlives the callee's
+    /// pointer dereferences.
+    ///
+    /// `None` for regular function calls and host-closure calls.
+    /// Released via `vw_drop` on frame-pop (see `op_return` /
+    /// `op_return_value` cleanup).
+    pub closure_heap_bits: Option<u64>,
 }
 
 /// Function pointer type for JIT-compiled functions.

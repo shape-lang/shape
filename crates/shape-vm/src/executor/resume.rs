@@ -191,6 +191,13 @@ impl VirtualMachine {
                     function_id: Some(func_id),
                     upvalues,
                     blob_hash,
+                    // Resumed frame: the original closure HeapValue is
+                    // not part of the snapshot. Upvalues were
+                    // reconstructed from serialized captures, which
+                    // do not carry raw pointers for the pre-A.1C.3
+                    // SharedCell path — so the frame does not own a
+                    // closure block keep-alive share here.
+                    closure_heap_bits: None,
                 });
             }
         }

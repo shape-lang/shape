@@ -12,6 +12,7 @@ use crate::{
     executor::{ForeignFunctionHandle, VirtualMachine},
 };
 use shape_value::tag_bits::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN};
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
@@ -277,6 +278,7 @@ impl VirtualMachine {
                                     function_id: Some(func_id_u16),
                                     upvalues: None,
                                     blob_hash,
+                                    closure_heap_bits: None,
                                 });
 
                                 self.deopt_with_info(info, &ctx_buf)?;
@@ -441,7 +443,9 @@ impl VirtualMachine {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);
-                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                // WB2.3: function-id callees are inline (no heap share), so
+                // `vw_drop` is a no-op here — kept for contract uniformity.
+                vw_drop(self.stack[callee_idx]);
                 for i in callee_idx..callee_idx + arg_count {
                     self.stack[i] = self.stack[i + 1];
                     self.stack[i + 1] = Self::NONE_BITS;
@@ -461,7 +465,9 @@ impl VirtualMachine {
                 for i in 0..arg_count {
                     args_nb.push(self.stack_take_raw(args_base + i));
                 }
-                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                // WB2.3: module-fn callees are inline, `vw_drop` is a no-op
+                // for the tag but the clear preserves NONE_BITS invariant.
+                vw_drop(self.stack[callee_idx]);
                 self.stack[callee_idx] = Self::NONE_BITS;
                 self.sp = callee_idx;
                 let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
@@ -486,7 +492,15 @@ impl VirtualMachine {
                     for i in 0..arg_count {
                         args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    // WB2.3 retain-on-read: move ownership of the
+                    // closure HeapValue bits off the caller stack slot
+                    // and onto the callee `CallFrame.closure_heap_bits`
+                    // keep-alive. This guarantees the block outlives
+                    // the callee's `OwnedMutable` / `Shared` pointer
+                    // captures (which dereference raw `*mut` / `*const`
+                    // into the block's allocation) and is released on
+                    // frame pop via `op_return` / `op_return_value`.
+                    let closure_bits = self.stack[callee_idx];
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
                     // Closure spec Phase G §5.4: record monomorphic target.
@@ -499,7 +513,12 @@ impl VirtualMachine {
                     if let Some(fv) = self.current_feedback_vector() {
                         fv.record_call(call_ip, function_id);
                     }
-                    self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
+                    self.call_closure_with_nb_args_keepalive(
+                        function_id,
+                        upvalues,
+                        &args_nb,
+                        Some(closure_bits),
+                    )
                 } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
                     callee_nb.as_heap_ref()
                 {
@@ -510,7 +529,11 @@ impl VirtualMachine {
                     for i in 0..arg_count {
                         args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    // WB2.3: release the HostClosure HeapValue. The
+                    // `callable.clone()` above retained an independent
+                    // `Arc<dyn Fn>` share so the call survives the slot
+                    // release.
+                    vw_drop(self.stack[callee_idx]);
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
                     let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
@@ -550,9 +573,8 @@ impl VirtualMachine {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);
-                // Swap-down: shift args down by one to overwrite the callee slot.
-                // Drop the callee slot first, then move each arg down.
-                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                // WB2.3: inline function-id callee — `vw_drop` no-op.
+                vw_drop(self.stack[callee_idx]);
                 for i in callee_idx..callee_idx + arg_count {
                     self.stack[i] = self.stack[i + 1];
                     // The source slot is now duplicated; clear it so we don't double-own.
@@ -569,8 +591,8 @@ impl VirtualMachine {
                 for i in 0..arg_count {
                     args_nb.push(self.stack_take_raw(args_base + i));
                 }
-                // Clear the callee slot.
-                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                // WB2.3: inline module-fn callee — `vw_drop` no-op.
+                vw_drop(self.stack[callee_idx]);
                 self.stack[callee_idx] = Self::NONE_BITS;
                 self.sp = callee_idx;
                 let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
@@ -597,10 +619,19 @@ impl VirtualMachine {
                     for i in 0..arg_count {
                         args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    // WB2.3 retain-on-read: move ownership of the closure
+                    // HeapValue onto the callee frame keep-alive (see
+                    // `dispatch_call_closure_like` for the rationale — raw
+                    // pointer captures must outlive the callee).
+                    let closure_bits = self.stack[callee_idx];
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
-                    self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
+                    self.call_closure_with_nb_args_keepalive(
+                        function_id,
+                        upvalues,
+                        &args_nb,
+                        Some(closure_bits),
+                    )
                 // cold-path: as_heap_ref retained — HostClosure fallback (no typed extractor)
                 } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
                     callee_nb.as_heap_ref()
@@ -613,7 +644,9 @@ impl VirtualMachine {
                     for i in 0..arg_count {
                         args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    // WB2.3: release the HostClosure HeapValue; the
+                    // `callable.clone()` retained the underlying Fn Arc.
+                    vw_drop(self.stack[callee_idx]);
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
                     let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
@@ -1047,6 +1080,12 @@ impl VirtualMachine {
                 self.stack[i] = Self::NONE_BITS;
             }
             self.sp = bp;
+            // WB2.3 retain-on-read: release the closure keep-alive (if any)
+            // now that the callee's `OwnedMutable` / `Shared` pointer
+            // captures are no longer in scope.
+            if let Some(bits) = frame.closure_heap_bits {
+                vw_drop(bits);
+            }
         } else {
             // Return from main
             self.ip = self.program.instructions.len();
@@ -1068,6 +1107,11 @@ impl VirtualMachine {
                 self.stack[i] = Self::NONE_BITS;
             }
             self.sp = bp;
+
+            // WB2.3 retain-on-read: release the closure keep-alive.
+            if let Some(bits) = frame.closure_heap_bits {
+                vw_drop(bits);
+            }
 
             // Push return value
             self.push_raw_u64(return_value)?;

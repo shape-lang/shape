@@ -2660,6 +2660,7 @@ mod tests {
             function_id: None,
             upvalues: Some(upvalues),
             blob_hash: None,
+            closure_heap_bits: None,
         });
     }
 
@@ -3012,6 +3013,7 @@ mod tests {
             function_id: None,
             upvalues: None,
             blob_hash: None,
+            closure_heap_bits: None,
         });
     }
 

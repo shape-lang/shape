@@ -42,6 +42,15 @@ pub type VMArray = Arc<VMArrayBuf>;
 /// `vw_clone`), and dropping releases it (`vw_drop`). `Upvalue` is
 /// therefore a proper owning handle — two `Upvalue`s that point at
 /// the same heap-tagged share hold two independent refcounts.
+///
+/// Raw-pointer captures (`CaptureKind::OwnedMutable` — `*mut ValueWord`
+/// from `Box::into_raw` — and `CaptureKind::Shared` —
+/// `*const SharedCell` from `Arc::into_raw`) are stored as unboxed
+/// pointer bits, which are **not** heap-tagged. `vw_clone` / `vw_drop`
+/// are both no-ops on those bit patterns; the lifetime of the
+/// underlying `Box` / `SharedCell` is managed by the originating
+/// closure block and `op_alloc_shared_module_binding`, not by the
+/// `Upvalue` handle itself.
 #[derive(Debug)]
 pub struct Upvalue(ValueWord);
 
@@ -119,7 +128,8 @@ impl Upvalue {
     /// is already correct.
     ///
     /// For `OwnedMutable` / `Shared` captures the A.1B capture opcodes
-    /// write through the pointer directly; they do not call `set()`.
+    /// write through the pointer directly; they do not call `set()`,
+    /// so the release here is a no-op on the raw pointer bits.
     pub fn set(&mut self, value: ValueWord) {
         let old = self.0;
         self.0 = value;
