@@ -1737,7 +1737,9 @@ fn snapshot_to_print_result(
                     raw_value: Box::new(serializable_to_nanboxed(raw_value, store)?.clone()),
                     type_name: type_name.clone(),
                     current_format: current_format.clone(),
-                    format_params: params,
+                    // Wrap the rebuilt HashMap as a ValueMap that owns the
+                    // reconstructed parameter heap refs.
+                    format_params: shape_value::ValueMap::from(params),
                 });
             }
         }

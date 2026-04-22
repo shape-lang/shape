@@ -106,10 +106,14 @@ pub struct GeneratorState {
 }
 
 /// Data for SimulationCall variant (boxed to keep HeapValue small).
+///
+/// Wave 4 WD.4: `params` is a `ValueMap` so heap-tagged argument values
+/// release their refs when the call record drops. `ValueMap`'s custom
+/// `Clone` keeps `derive(Clone)` correct on this type.
 #[derive(Debug, Clone)]
 pub struct SimulationCallData {
     pub name: String,
-    pub params: HashMap<String, ValueWord>,
+    pub params: crate::value_word_drop::ValueMap,
 }
 
 /// Data for DataReference variant (boxed to keep HeapValue small).

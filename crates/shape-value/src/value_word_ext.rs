@@ -617,7 +617,12 @@ impl ValueWordExt for u64 {
         ValueWord::heap_box(HeapValue::Rare(RareHeapData::TypeAnnotation(Box::new(ta))))
     }
     #[inline] fn from_simulation_call(name: String, params: HashMap<String, ValueWord>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Rare(RareHeapData::SimulationCall(Box::new(crate::heap_value::SimulationCallData { name, params }))))
+        // Wrap caller-owned HashMap into a ValueMap that owns the
+        // parameters' heap refs for the lifetime of the call record.
+        ValueWord::heap_box(HeapValue::Rare(RareHeapData::SimulationCall(Box::new(crate::heap_value::SimulationCallData {
+            name,
+            params: crate::value_word_drop::ValueMap::from(params),
+        }))))
     }
     #[inline] fn from_data_reference(datetime: DateTime<FixedOffset>, id: String, timeframe: Timeframe) -> ValueWord {
         ValueWord::heap_box(HeapValue::Rare(RareHeapData::DataReference(Box::new(crate::heap_value::DataReferenceData { datetime, id, timeframe }))))
