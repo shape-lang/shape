@@ -17,7 +17,7 @@ pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Check if a type string looks like `Option<T>` or `T?`.
@@ -204,22 +204,22 @@ impl ComptimeTarget {
         };
 
         // fields: array of {name, type, annotations, optional} TypedObjects
-        let fields_arr: Vec<ValueWord> = self
+        let fields_arr: ArgVec = ArgVec::from_vec(self
             .fields
             .iter()
             .map(|(fname, ftype, fanns)| {
                 // Each annotation becomes {name, args} where args is an array of strings
-                let anns_arr: Vec<ValueWord> = fanns
+                let anns_arr: ArgVec = ArgVec::from_vec(fanns
                     .iter()
                     .map(|(aname, aargs)| {
-                        let args_arr: Vec<ValueWord> =
-                            aargs.iter().map(|a| nb_string(a.clone())).collect();
+                        let args_arr: ArgVec = ArgVec::from_vec(
+                            aargs.iter().map(|a| nb_string(a.clone())).collect());
                         typed_object_from_nb_pairs(&[
                             ("name", nb_string(aname.clone())),
-                            ("args", ValueWord::from_array(shape_value::vmarray_from_vec(args_arr))),
+                            ("args", ValueWord::from_array(shape_value::vmarray_from_vec(args_arr.into_inner()))),
                         ])
                     })
-                    .collect();
+                    .collect());
                 // Detect Option<T> types and expose an `optional` flag + unwrapped inner type
                 let is_optional = is_option_type(ftype);
                 let effective_type = if is_optional {
@@ -230,14 +230,14 @@ impl ComptimeTarget {
                 typed_object_from_nb_pairs(&[
                     ("name", nb_string(fname.clone())),
                     ("type", nb_string(effective_type)),
-                    ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(anns_arr))),
+                    ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(anns_arr.into_inner()))),
                     ("optional", ValueWord::from_bool(is_optional)),
                 ])
             })
-            .collect();
+            .collect());
 
         // params: array of {name, type} TypedObjects
-        let params_arr: Vec<ValueWord> = self
+        let params_arr: ArgVec = ArgVec::from_vec(self
             .params
             .iter()
             .map(|(pname, ptype, is_const)| {
@@ -247,7 +247,7 @@ impl ComptimeTarget {
                     ("const", ValueWord::from_bool(*is_const)),
                 ])
             })
-            .collect();
+            .collect());
 
         // return_type
         let ret = self
@@ -257,24 +257,24 @@ impl ComptimeTarget {
             .unwrap_or_else(ValueWord::none);
 
         // annotations
-        let ann_arr: Vec<ValueWord> = self
+        let ann_arr: ArgVec = ArgVec::from_vec(self
             .annotations
             .iter()
             .map(|a| nb_string(a.clone()))
-            .collect();
+            .collect());
 
         // captures: array of captured variable names
-        let captures_arr: Vec<ValueWord> =
-            self.captures.iter().map(|c| nb_string(c.clone())).collect();
+        let captures_arr: ArgVec = ArgVec::from_vec(
+            self.captures.iter().map(|c| nb_string(c.clone())).collect());
 
         typed_object_from_nb_pairs(&[
             ("kind", nb_str(kind_str)),
             ("name", nb_string(self.name.clone())),
-            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(fields_arr))),
-            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(params_arr))),
+            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(fields_arr.into_inner()))),
+            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(params_arr.into_inner()))),
             ("return_type", ret),
-            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(ann_arr))),
-            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(captures_arr))),
+            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(ann_arr.into_inner()))),
+            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(captures_arr.into_inner()))),
         ])
     }
 }

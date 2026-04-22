@@ -45,12 +45,15 @@ pub fn clear_current_program() {
 
 /// Build a Shape HashMap from string key-value pairs.
 fn make_object(fields: Vec<(&str, ValueWord)>) -> ValueWord {
-    let keys: Vec<ValueWord> = fields
+    // Keys are freshly-constructed owned string ValueWords.
+    let keys: shape_value::ArgVec = shape_value::ArgVec::from_vec(fields
         .iter()
         .map(|(k, _)| ValueWord::from_string(Arc::new(k.to_string())))
-        .collect();
-    let values: Vec<ValueWord> = fields.into_iter().map(|(_, v)| v).collect();
-    ValueWord::from_hashmap_pairs(keys, values)
+        .collect());
+    // Values are moved out of `fields` — their heap refs transfer verbatim.
+    let values: shape_value::ArgVec = shape_value::ArgVec::from_vec(
+        fields.into_iter().map(|(_, v)| v).collect());
+    ValueWord::from_hashmap_pairs(keys.into_inner(), values.into_inner())
 }
 
 /// Create the `remote` module with remote execution functions.
