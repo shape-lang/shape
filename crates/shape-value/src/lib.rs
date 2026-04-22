@@ -30,6 +30,7 @@ pub mod string_intern;
 pub mod tag_bits;
 pub mod value_bits;
 pub mod value_word;
+pub mod value_word_drop;
 pub mod value_word_ext;
 /// Backward-compatibility alias for the renamed module.
 pub mod nanboxed {
@@ -77,6 +78,7 @@ pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
 pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay};
+pub use value_word_drop::{ArgVec, ValueMap, vw_clone, vw_clone_slice, vw_drop, vw_drop_slice};
 pub use value_word_ext::ValueWordExt;
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
