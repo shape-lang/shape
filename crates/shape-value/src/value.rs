@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word_drop::{vw_clone, vw_drop};
 
 /// Inline capacity for small VMArrays (≤ 8 elements stored inline, no heap buffer).
 pub const VMARRAY_INLINE_CAP: usize = 8;
@@ -36,8 +37,30 @@ pub type VMArray = Arc<VMArrayBuf>;
 /// The retired-in-A.1C.3 legacy path (SharedCell-wrapped upvalue
 /// populated by `BoxLocal` / `BoxModuleBinding`) is gone. `get()` and
 /// `set()` no longer run any auto-deref.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.2: the inner `ValueWord` bit pattern may carry a heap
+/// tag for `CaptureKind::Immutable` captures, in which case the
+/// refcount must be paired — the manual `Clone` runs `vw_clone` to
+/// bump the ref and the manual `Drop` runs `vw_drop` to release it.
+/// For `OwnedMutable` / `Shared` captures the inner bits are raw
+/// pointer values (`Box::into_raw` / `Arc::into_raw`) and are not
+/// NaN-box tagged, so `vw_clone` / `vw_drop` both short-circuit to
+/// no-ops; ownership of those Box/Arc allocations is tracked
+/// separately through the capture opcodes.
+#[derive(Debug)]
 pub struct Upvalue(ValueWord);
+
+impl Clone for Upvalue {
+    fn clone(&self) -> Self {
+        Upvalue(vw_clone(self.0))
+    }
+}
+
+impl Drop for Upvalue {
+    fn drop(&mut self) {
+        vw_drop(self.0);
+    }
+}
 
 impl Upvalue {
     /// Create a new upvalue carrying `value`.
