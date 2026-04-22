@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -68,7 +68,7 @@ pub(crate) fn handle_where_v2(
 
     let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
 
-    let mut filtered: Vec<ValueWord> = Vec::new();
+    let mut filtered: ArgVec = ArgVec::new();
     for (i, nb) in array.iter().enumerate() {
         let result_bits = if predicate_arity >= 2 {
             vm.call_value_immediate_raw(
@@ -80,11 +80,13 @@ pub(crate) fn handle_where_v2(
             vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
         };
         if is_bool_true_raw(result_bits)? {
-            filtered.push(nb.clone());
+            // Retain `nb` before transferring into `filtered` so ArgVec::drop
+            // on error releases refs we actually own.
+            filtered.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_select_v2(
@@ -116,7 +118,7 @@ pub(crate) fn handle_select_v2(
 
     let mapper_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
 
-    let mut results: Vec<ValueWord> = Vec::with_capacity(array.len());
+    let mut results: ArgVec = ArgVec::with_capacity(array.len());
     for (i, nb) in array.iter().enumerate() {
         let result_bits = if mapper_arity >= 2 {
             vm.call_value_immediate_raw(
@@ -127,10 +129,11 @@ pub(crate) fn handle_select_v2(
         } else {
             vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
         };
-        results.push(ValueWord::from_raw_bits(result_bits));
+        // Call return is already owned; transfer ownership to ArgVec.
+        results.push(result_bits);
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_find_v2(
@@ -467,18 +470,18 @@ pub(crate) fn handle_take_while_v2(
         ));
     }
 
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter() {
         let result_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
         if is_bool_true_raw(result_bits)? {
-            result.push(nb.clone());
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         } else {
             break;
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_skip_while_v2(
@@ -508,7 +511,7 @@ pub(crate) fn handle_skip_while_v2(
         ));
     }
 
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
     let mut skipping = true;
 
     for nb in array.iter() {
@@ -519,14 +522,14 @@ pub(crate) fn handle_skip_while_v2(
                 continue;
             } else {
                 skipping = false;
-                result.push(nb.clone());
+                result.push(shape_value::vw_clone(nb.raw_bits()));
             }
         } else {
-            result.push(nb.clone());
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_for_each_v2(

@@ -3,7 +3,7 @@
 //! Handles: union, intersect, except, unique, distinct, distinct_by
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -33,17 +33,19 @@ pub(crate) fn handle_union_v2(
     let other_vw = borrow_vw(args[1]);
     let other = other_vw.as_any_array().ok_or_else(|| VMError::type_mismatch("array", "other"))?.to_generic();
 
+    // `seen` only tracks bit-identities for dedup; it doesn't need to own refs.
     let mut seen: Vec<ValueWord> = Vec::new();
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter().chain(other.iter()) {
         if !seen.iter().any(|v| v.vw_equals(nb)) {
             seen.push(nb.clone());
-            result.push(nb.clone());
+            // Retain into `result` so ArgVec owns each element.
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_intersect_v2(
@@ -63,17 +65,17 @@ pub(crate) fn handle_intersect_v2(
     let other = other_vw.as_any_array().ok_or_else(|| VMError::type_mismatch("array", "other"))?.to_generic();
 
     let mut seen: Vec<ValueWord> = Vec::new();
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter() {
         let other_has = other.iter().any(|o| o.vw_equals(nb));
         if other_has && !seen.iter().any(|v| v.vw_equals(nb)) {
             seen.push(nb.clone());
-            result.push(nb.clone());
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_except_v2(
@@ -93,17 +95,17 @@ pub(crate) fn handle_except_v2(
     let other = other_vw.as_any_array().ok_or_else(|| VMError::type_mismatch("array", "other"))?.to_generic();
 
     let mut seen: Vec<ValueWord> = Vec::new();
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter() {
         let other_has = other.iter().any(|o| o.vw_equals(nb));
         if !other_has && !seen.iter().any(|v| v.vw_equals(nb)) {
             seen.push(nb.clone());
-            result.push(nb.clone());
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_unique_v2(
@@ -124,16 +126,16 @@ pub(crate) fn handle_unique_v2(
     })?.to_generic();
 
     let mut seen: Vec<ValueWord> = Vec::new();
-    let mut result: Vec<ValueWord> = Vec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter() {
         if !seen.iter().any(|v| v.vw_equals(nb)) {
             seen.push(nb.clone());
-            result.push(nb.clone());
+            result.push(shape_value::vw_clone(nb.raw_bits()));
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_distinct_v2(
@@ -161,17 +163,22 @@ pub(crate) fn handle_distinct_by_v2(
         got: "other",
     })?.to_generic();
 
-    let mut seen_keys: Vec<ValueWord> = Vec::new();
-    let mut result: Vec<ValueWord> = Vec::new();
+    // `seen_keys` owns call-return refs from the key function.
+    let mut seen_keys: ArgVec = ArgVec::new();
+    let mut result: ArgVec = ArgVec::new();
 
     for nb in array.iter() {
         let key_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
         let key = ValueWord::from_raw_bits(key_bits);
         if !seen_keys.iter().any(|k| k.vw_equals(&key)) {
-            seen_keys.push(key);
-            result.push(nb.clone());
+            // Transfer the call-return ref into `seen_keys`.
+            seen_keys.push(key_bits);
+            result.push(shape_value::vw_clone(nb.raw_bits()));
+        } else {
+            // Duplicate key — release the extra call-return ref.
+            shape_value::vw_drop(key_bits);
         }
     }
 
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
 }

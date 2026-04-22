@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::nb_to_string_coerce;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -104,8 +104,14 @@ pub(crate) fn handle_order_by_v2(
         }
     }
 
-    let sorted: Vec<ValueWord> = keyed.into_iter().map(|(_, v)| v).collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)).into_raw_bits())
+    // `keyed` is only consumed on the success path (after the `?` points
+    // above). Moving its value-column into an ArgVec is defensive only; there
+    // are no further `?` before consumption. NOTE: `keyed: Vec<(ValueWord,
+    // ValueWord)>` itself still leaks on error paths above — the key column
+    // (call-return owned) and value column (bit-copy) both survive any error
+    // drop. Matching pre-Wave4 leak semantics.
+    let sorted: ArgVec = ArgVec::from_vec(keyed.into_iter().map(|(_, v)| v).collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted.into_inner())).into_raw_bits())
 }
 
 pub(crate) fn handle_then_by_v2(
