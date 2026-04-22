@@ -7,7 +7,7 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use wide::f64x4;
 
@@ -170,7 +170,7 @@ fn float_array_sum_squares(arr: &Arc<AlignedTypedBuffer>) -> f64 {
 
 pub fn handle_float_sum(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -180,7 +180,7 @@ pub fn handle_float_sum(
 
 pub fn handle_int_sum(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
@@ -195,7 +195,7 @@ pub fn handle_int_sum(
 
 pub fn handle_float_avg(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -208,7 +208,7 @@ pub fn handle_float_avg(
 
 pub fn handle_int_avg(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
@@ -221,7 +221,7 @@ pub fn handle_int_avg(
 
 pub fn handle_float_min(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -233,7 +233,7 @@ pub fn handle_float_min(
 
 pub fn handle_int_min(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
@@ -246,7 +246,7 @@ pub fn handle_int_min(
 
 pub fn handle_float_max(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -258,7 +258,7 @@ pub fn handle_float_max(
 
 pub fn handle_int_max(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
@@ -284,7 +284,7 @@ fn float_array_variance(arr: &Arc<AlignedTypedBuffer>) -> f64 {
 
 pub fn handle_float_variance(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -294,7 +294,7 @@ pub fn handle_float_variance(
 
 pub fn handle_float_std(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -306,7 +306,7 @@ pub fn handle_float_std(
 
 pub fn handle_float_dot(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let a = extract_float_array(&args)?;
@@ -347,7 +347,7 @@ pub fn handle_float_dot(
 
 pub fn handle_float_norm(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
@@ -359,7 +359,7 @@ pub fn handle_float_norm(
 
 pub fn handle_float_len(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
@@ -368,7 +368,7 @@ pub fn handle_float_len(
 
 pub fn handle_int_len(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
@@ -379,7 +379,7 @@ pub fn handle_int_len(
 
 pub fn handle_bool_len(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
@@ -388,7 +388,7 @@ pub fn handle_bool_len(
 
 pub fn handle_bool_count_true(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
@@ -401,7 +401,7 @@ pub fn handle_bool_count_true(
 
 pub fn handle_bool_any(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
@@ -413,7 +413,7 @@ pub fn handle_bool_any(
 
 pub fn handle_bool_all(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: ArgVec,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
