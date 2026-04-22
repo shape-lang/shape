@@ -54,6 +54,24 @@ fn jit_expect_int(source: &str, expected: i64) {
     }
 }
 
+fn jit_expect_number(source: &str, expected: f64) {
+    match jit_eval(source) {
+        WireValue::Number(n) => assert!(
+            (n - expected).abs() < 1e-9,
+            "Expected number {}, got {}",
+            expected,
+            n
+        ),
+        WireValue::Integer(n) => assert!(
+            (n as f64 - expected).abs() < 1e-9,
+            "Expected number {} (got Integer {})",
+            expected,
+            n
+        ),
+        other => panic!("Expected Number({}), got {:?}", expected, other),
+    }
+}
+
 /// Primary fix-jit regression gate.
 ///
 /// `|x| x + 1` applied to `5` must return `Integer(6)`. The fix-jit
@@ -101,6 +119,60 @@ times_two(7)
 /// while still needing captures to produce the right answer. The
 /// pre-fix code returned `Null`; the fix dispatches through
 /// `jit_trampoline_call_closure` with the captures threaded through.
+/// F4 Option / null-coalescing regression: the bytecode compiler's
+/// `FrameDescriptor.slots` seeding of `MirToIR` used incompatible slot
+/// numbering. MIR reserves `SlotId(0)` for the implicit return value
+/// and numbers parameters starting at 1; the bytecode compiler puts
+/// the first parameter at slot 0. Seeding via the bytecode layout
+/// mis-declared MIR's return slot with the first param's `SlotKind`,
+/// so e.g. a `bool` parameter forced slot 0 (the F64 return) to be
+/// declared as `Bool` in Cranelift. Writing `return 7.0` then went
+/// through `ensure_kind(F64, Bool) → ireduce I8` which truncated the
+/// F64 bit pattern to zero, and `result ?? 42.0` evaluated to 42.0 for
+/// every branch of the caller.
+///
+/// Case 1: function returns `number?`, two `return` paths (literal F64
+/// and `None`). Pre-fix: returns 42.0 (None-ness was forced). Post-fix:
+/// returns 7.0.
+#[test]
+fn option_return_conditional_number_some() {
+    jit_expect_number(
+        r#"
+fn get_val(flag: bool) -> number? {
+    if flag {
+        return 7.0
+    }
+    return None
+}
+let x = get_val(true)
+x ?? 42.0
+"#,
+        7.0,
+    );
+}
+
+/// F4 Option / null-coalescing regression (None branch). Pre-fix the
+/// None branch also returned 42.0 — but so did the Some branch, so this
+/// passes both before and after the fix. Kept for symmetry with the
+/// Some-returning case above so the two sides of the conditional stay
+/// pinned together if one regresses in isolation.
+#[test]
+fn option_return_conditional_number_none() {
+    jit_expect_number(
+        r#"
+fn get_val(flag: bool) -> number? {
+    if flag {
+        return 7.0
+    }
+    return None
+}
+let x = get_val(false)
+x ?? 42.0
+"#,
+        42.0,
+    );
+}
+
 #[test]
 fn closure_non_jit_compiled_dispatches_through_trampoline_vm() {
     // `|| { x = x + base; x }` with `let base` (immutable capture) and
