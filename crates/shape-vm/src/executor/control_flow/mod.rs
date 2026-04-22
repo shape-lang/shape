@@ -1073,11 +1073,18 @@ impl VirtualMachine {
             // Restore instruction pointer
             self.ip = frame.return_ip;
 
-            // Clean up register window: clear slots and restore sp to base_pointer
+            // Clean up register window: release each slot's share then
+            // clear to NONE_BITS, finally restore sp to base_pointer.
+            //
+            // WB2.6 Phase 3: with retain-on-read in force across WB2.1–WB2.5,
+            // every slot in `[bp..sp)` holds an **owning** share; releasing
+            // per slot is now required to avoid leaks and is safe because no
+            // caller aliases these bits without its own retain.
             let bp = frame.base_pointer;
             for i in bp..self.sp {
-                drop(ValueWord::from_raw_bits(self.stack[i]));
+                let bits = self.stack[i];
                 self.stack[i] = Self::NONE_BITS;
+                shape_value::value_word_drop::vw_drop(bits);
             }
             self.sp = bp;
             // WB2.3 retain-on-read: release the closure keep-alive (if any)
@@ -1100,11 +1107,14 @@ impl VirtualMachine {
             // Restore instruction pointer
             self.ip = frame.return_ip;
 
-            // Clean up register window: clear slots and restore sp to base_pointer
+            // Clean up register window (see `op_return` for the
+            // retain-on-read rationale). WB2.6 Phase 3 releases each
+            // slot via `vw_drop`.
             let bp = frame.base_pointer;
             for i in bp..self.sp {
-                drop(ValueWord::from_raw_bits(self.stack[i]));
+                let bits = self.stack[i];
                 self.stack[i] = Self::NONE_BITS;
+                shape_value::value_word_drop::vw_drop(bits);
             }
             self.sp = bp;
 

@@ -442,10 +442,10 @@ impl VirtualMachine {
     /// preserves the loaded program, module bindings, module_fn_table,
     /// and registered extensions.
     pub fn reset_for_trampoline(&mut self) {
-        // WB: stack release is blocked on the retain-on-read coordination
-        // tracked in `VirtualMachine::drop` — see that comment for
-        // rationale. Clear slots to NONE_BITS for deterministic state but
-        // do not `vw_drop` them yet.
+        // WB2.6 Phase 3: release each live slot's owning share before
+        // clearing to NONE_BITS. The retain-on-read contract (WB2.1–WB2.5)
+        // guarantees no caller aliases these slots without its own retain.
+        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
         for i in 0..self.sp {
             self.stack[i] = Self::NONE_BITS;
         }
@@ -464,8 +464,8 @@ impl VirtualMachine {
 
     pub fn reset(&mut self) {
         self.ip = self.program_entry_ip;
-        // WB: stack release is blocked on the retain-on-read coordination
-        // tracked in `VirtualMachine::drop` — see that comment for rationale.
+        // WB2.6 Phase 3: release each live slot's owning share.
+        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
         for i in 0..self.sp {
             self.stack[i] = Self::NONE_BITS;
         }
@@ -487,8 +487,8 @@ impl VirtualMachine {
     /// Keeps program, module_bindings, and GC state intact - only clears execution state
     pub fn reset_stack(&mut self) {
         self.ip = self.program_entry_ip;
-        // WB: stack release is blocked on the retain-on-read coordination
-        // tracked in `VirtualMachine::drop` — see that comment for rationale.
+        // WB2.6 Phase 3: release each live slot's owning share.
+        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
         for i in 0..self.sp {
             self.stack[i] = Self::NONE_BITS;
         }
@@ -508,8 +508,8 @@ impl VirtualMachine {
     #[inline]
     pub fn reset_minimal(&mut self) {
         self.ip = self.program_entry_ip;
-        // WB: stack release is blocked on the retain-on-read coordination
-        // tracked in `VirtualMachine::drop` — see that comment for rationale.
+        // WB2.6 Phase 3: release each live slot's owning share.
+        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
         for i in 0..self.sp {
             self.stack[i] = Self::NONE_BITS;
         }
