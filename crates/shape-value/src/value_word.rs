@@ -29,8 +29,26 @@ pub enum RefTarget {
 // ArrayView and ArrayViewMut are in crate::array_view
 pub use crate::array_view::{ArrayView, ArrayViewMut};
 
-/// An 8-byte value word for the VM stack (NaN-boxed encoding).
-/// Type alias for u64.
+/// An 8-byte VM value word — a **bare `u64` type alias**, no wrapper.
+///
+/// This is an intentional documentation-only alias. `ValueWord` has no
+/// runtime cost, no `Drop`, no `Clone` ceremony beyond the bit-copy
+/// semantics of a primitive `u64`. Every site that needs to release the
+/// Arc refcount embedded in a heap-tagged share must call the
+/// [`crate::value_word_drop::vw_drop`] helper explicitly; every site that
+/// needs to retain a share must call [`crate::value_word_drop::vw_clone`].
+///
+/// The refcount-correctness invariant is enforced at container boundaries
+/// via the [`ArgVec`] / [`ValueMap`] wrappers (wave 4) and via the
+/// manual `Clone` + `Drop` impls on `HashMapData`, `SetData`, `DequeData`,
+/// `PriorityQueueData`, `EnumPayload`, `CapturedBinding`, `Upvalue`,
+/// `IteratorState`, `GeneratorState`, `ChannelData`, `VmStateSnapshot`,
+/// `FrameInfo`, `VmSnapshot`, and `SuspensionState`, plus by the stack
+/// `vw_drop_slice` teardown in `VirtualMachine::drop`, `reset_*`, and the
+/// frame-pop path in `op_return` / `op_return_value`.
+///
+/// [`ArgVec`]: crate::value_word_drop::ArgVec
+/// [`ValueMap`]: crate::value_word_drop::ValueMap
 pub type ValueWord = u64;
 
 /// Wrapper for Display/Debug formatting of ValueWord values.
