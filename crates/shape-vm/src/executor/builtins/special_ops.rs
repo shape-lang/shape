@@ -12,7 +12,7 @@ use arrow_array::{
 use arrow_schema::DataType;
 use shape_ast::interpolation::{FormatAlignment, FormatColor, TableFormatSpec};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{DataTable, PrintResult, PrintSpan, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
+use shape_value::{ArgVec, DataTable, PrintResult, PrintSpan, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 
 const FORMAT_SPEC_FIXED: i64 = 1;
 const FORMAT_SPEC_TABLE: i64 = 2;
@@ -23,7 +23,7 @@ impl VirtualMachine {
     /// This is an explicit suspension point for resumability/time-travel.
     pub(in crate::executor) fn builtin_snapshot(
         &mut self,
-        _args: Vec<ValueWord>,
+        _args: ArgVec,
         _ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         Err(VMError::Suspended {
@@ -41,7 +41,7 @@ impl VirtualMachine {
     /// For type-annotated values, calls the compiled meta format function if available.
     pub(in crate::executor) fn builtin_print(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         let mut rendered = String::new();
@@ -273,7 +273,7 @@ impl VirtualMachine {
     /// regular values.
     pub(in crate::executor) fn builtin_format_with_meta(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         use std::sync::Arc;
@@ -295,7 +295,7 @@ impl VirtualMachine {
     /// - Table: [value, 2, max_rows, align, precision, color, border]
     pub(in crate::executor) fn builtin_format_with_spec(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         use std::sync::Arc;
@@ -456,7 +456,7 @@ impl VirtualMachine {
     /// Format: concatenate string representations of all arguments
     pub(in crate::executor) fn builtin_format(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use std::sync::Arc;
         let result: Vec<String> = args
@@ -471,7 +471,7 @@ impl VirtualMachine {
     /// Exit: Terminate the process with an optional exit code
     pub(in crate::executor) fn builtin_exit(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         let code = if !args.is_empty() {
             args[0]
@@ -490,7 +490,7 @@ impl VirtualMachine {
     /// Args: [string_value]
     pub(in crate::executor) fn builtin_make_content_text(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use shape_value::content::ContentNode;
 
@@ -515,7 +515,7 @@ impl VirtualMachine {
     /// The count is the last arg, nodes precede it.
     pub(in crate::executor) fn builtin_make_content_fragment(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use shape_value::content::ContentNode;
 
@@ -551,7 +551,7 @@ impl VirtualMachine {
     /// Color encoding: -1 = none, 0-7 = named colors, 256+ = RGB
     pub(in crate::executor) fn builtin_apply_content_style(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use shape_value::content::ContentNode;
 
@@ -603,7 +603,7 @@ impl VirtualMachine {
     /// Args: [value, chart_type_str, x_column_str, y_count, y_col1, y_col2, ...]
     pub(in crate::executor) fn builtin_make_content_chart_from_value(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use shape_value::content::{ChartChannel, ChartSpec, ChartType, ContentNode};
 
@@ -868,7 +868,7 @@ impl VirtualMachine {
     /// ControlFold: Fold operation with accumulator
     pub(in crate::executor) fn builtin_control_fold(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
         mut ctx: Option<&mut ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 3 {
@@ -904,7 +904,7 @@ impl VirtualMachine {
     /// Values are in row-major order (all fields of row 0, then row 1, etc.).
     pub(in crate::executor) fn builtin_make_table_from_rows(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         use arrow_array::RecordBatch;
         use arrow_schema::{Field, Schema};

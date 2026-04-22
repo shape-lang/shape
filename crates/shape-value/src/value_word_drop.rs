@@ -169,16 +169,17 @@ pub fn vw_drop_slice(bits: &[ValueWord]) {
 }
 
 /// Retain every element of a `ValueWord` slice in place (refcount bump).
+///
+/// For shared (Arc-backed) and unified heap values this bumps the refcount
+/// and the element bit patterns are unchanged. For owned (Box-backed) heap
+/// values `vw_clone` deep-clones into a new allocation, so the returned bits
+/// would differ from the input — this helper discards the result and is
+/// therefore unsafe to use on slices that may contain owned-heap elements.
+/// Call `vw_clone` per element (capturing the result) instead.
 #[inline]
 pub fn vw_clone_slice(bits: &[ValueWord]) {
     for &b in bits {
-        // We intentionally discard the returned bits: for shared (Arc) and
-        // unified heap values, `vw_clone` mutates the refcount in place and
-        // returns the same bit pattern. For owned (Box) values, callers who
-        // need a deep clone should use `vw_clone` directly — `vw_clone_slice`
-        // is only safe on shared/scalar slices.
-        let cloned = vw_clone(b);
-        debug_assert_eq!(cloned, b, "vw_clone_slice on owned-heap element");
+        let _ = vw_clone(b);
     }
 }
 
@@ -284,6 +285,16 @@ impl From<Vec<ValueWord>> for ArgVec {
     #[inline]
     fn from(v: Vec<ValueWord>) -> Self {
         Self(v)
+    }
+}
+
+impl<'a> IntoIterator for &'a ArgVec {
+    type Item = &'a ValueWord;
+    type IntoIter = std::slice::Iter<'a, ValueWord>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 

@@ -6,7 +6,7 @@ use crate::bytecode::{BuiltinFunction, Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
 use rust_decimal::prelude::ToPrimitive;
 use shape_ast::ast::TypeAnnotation;
-use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
+use shape_value::{ArgVec, HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use std::sync::Arc;
 
@@ -690,7 +690,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_number(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_number", &args, 1)?;
         let result = if args[0].is_f64() || args[0].is_i64() {
@@ -710,7 +710,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_string(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_string", &args, 1)?;
         Ok(ValueWord::from_bool(args[0].as_str().is_some()))
@@ -720,7 +720,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_bool(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_bool", &args, 1)?;
         Ok(ValueWord::from_bool(args[0].is_bool()))
@@ -730,7 +730,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_array(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_array", &args, 1)?;
         Ok(ValueWord::from_bool(args[0].as_any_array().is_some()))
@@ -740,7 +740,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_object(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_object", &args, 1)?;
         Ok(ValueWord::from_bool(matches!(
@@ -753,7 +753,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_is_data_row(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_data_row", &args, 1)?;
         Ok(ValueWord::from_bool(false)) // DataRow type no longer exists
@@ -763,7 +763,7 @@ impl VirtualMachine {
     pub(in crate::executor) fn dispatch_conversion_builtin(
         &mut self,
         builtin: BuiltinFunction,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         match builtin {
             BuiltinFunction::ToString => self.builtin_to_string(args),
@@ -792,7 +792,7 @@ impl VirtualMachine {
     pub(in crate::executor) fn dispatch_native_interop_builtin(
         &mut self,
         builtin: BuiltinFunction,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         match builtin {
             BuiltinFunction::NativePtrSize => self.builtin_native_ptr_size(args),
@@ -815,7 +815,7 @@ impl VirtualMachine {
     /// Return native pointer width in bytes.
     pub(in crate::executor) fn builtin_native_ptr_size(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_ptr_size", &args, 0)?;
         Ok(ValueWord::from_native_usize(std::mem::size_of::<usize>()))
@@ -824,7 +824,7 @@ impl VirtualMachine {
     /// Allocate a pointer-sized native cell initialized to null.
     pub(in crate::executor) fn builtin_native_ptr_new_cell(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_ptr_new_cell", &args, 0)?;
         let cell = Box::new(0usize);
@@ -835,7 +835,7 @@ impl VirtualMachine {
     /// Free a pointer-sized native cell allocated by `__native_ptr_new_cell`.
     pub(in crate::executor) fn builtin_native_ptr_free_cell(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_ptr_free_cell", &args, 1)?;
         let addr = ptr_arg_as_usize(&args[0], "__native_ptr_free_cell", "cell")?;
@@ -850,7 +850,7 @@ impl VirtualMachine {
     /// Read a pointer-sized value from a raw memory address.
     pub(in crate::executor) fn builtin_native_ptr_read_ptr(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_ptr_read_ptr", &args, 1)?;
         let addr = ptr_arg_as_usize(&args[0], "__native_ptr_read_ptr", "addr")?;
@@ -864,7 +864,7 @@ impl VirtualMachine {
     /// Write a pointer-sized value to a raw memory address.
     pub(in crate::executor) fn builtin_native_ptr_write_ptr(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_ptr_write_ptr", &args, 2)?;
         let addr = ptr_arg_as_usize(&args[0], "__native_ptr_write_ptr", "addr")?;
@@ -884,7 +884,7 @@ impl VirtualMachine {
     /// Import Arrow C pointers as `Result<Table<any>, AnyError>`.
     pub(in crate::executor) fn builtin_native_table_from_arrow_c(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_table_from_arrow_c", &args, 2)?;
 
@@ -912,7 +912,7 @@ impl VirtualMachine {
     /// Import Arrow C pointers and bind to a named row type in one step.
     pub(in crate::executor) fn builtin_native_table_from_arrow_c_typed(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_table_from_arrow_c_typed", &args, 3)?;
 
@@ -961,7 +961,7 @@ impl VirtualMachine {
     /// Validate/bind a table to a named row type.
     pub(in crate::executor) fn builtin_native_table_bind_type(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_table_bind_type", &args, 2)?;
 
@@ -1010,7 +1010,7 @@ impl VirtualMachine {
     /// ToString: Convert value to string
     pub(in crate::executor) fn builtin_to_string(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("to_string", &args, 1)?;
         // Fast path for inline types
@@ -1038,7 +1038,7 @@ impl VirtualMachine {
     /// ToNumber: Convert value to number
     pub(in crate::executor) fn builtin_to_number(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("to_number", &args, 1)?;
 
@@ -1069,7 +1069,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_to_bool(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("to_bool", &args, 1)?;
         Ok(ValueWord::from_bool(args[0].is_truthy()))
@@ -1079,7 +1079,7 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_type_of(
         &mut self,
-        _args: Vec<ValueWord>,
+        _args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         // Note: TypeOf uses self.pop_raw_u64() directly, not args
         let nb = self.pop_raw_u64()?;
@@ -1091,20 +1091,25 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_some_ctor(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("Some", &args, 1)?;
-        Ok(args[0].clone())
+        // The ArgVec retains ownership of args[0]'s heap ref and releases it
+        // on drop. Retain an independent ref for the returned value so the
+        // caller's bits stay valid after return.
+        Ok(shape_value::vw_clone(args[0]))
     }
 
     /// OkCtor: Result::Ok constructor
     #[inline]
     pub(in crate::executor) fn builtin_ok_ctor(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("Ok", &args, 1)?;
-        Ok(ValueWord::from_ok(args[0].clone()))
+        // Retain an independent ref for the boxed payload — ArgVec still owns
+        // the arg slot ref and will release it on drop.
+        Ok(ValueWord::from_ok(shape_value::vw_clone(args[0])))
     }
 
     /// ErrCtor: Result::Err constructor
@@ -1115,10 +1120,10 @@ impl VirtualMachine {
     #[inline]
     pub(in crate::executor) fn builtin_err_ctor(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         check_arity("Err", &args, 1)?;
-        Ok(ValueWord::from_err(args[0].clone()))
+        Ok(ValueWord::from_err(shape_value::vw_clone(args[0])))
     }
 }
 
