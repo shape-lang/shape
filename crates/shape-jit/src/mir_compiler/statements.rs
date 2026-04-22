@@ -78,6 +78,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 container_slot,
                 operands,
             } => {
+                // v2 fast path: when the container slot is a v2 `Array<scalar>`,
+                // the preceding `Assign(Aggregate)` has already allocated a real
+                // `*mut TypedArray<T>` and populated it. The legacy `ArrayStore`
+                // shape here would overwrite that pointer with a NaN-boxed
+                // `JitArray` built from `Move`d (and thus now-nulled) source
+                // slots — corrupting both the container and the element values.
+                // Skip the legacy build entirely in that case. The MIR ownership
+                // transfer has already been observed by the preceding Aggregate.
+                let container_place = Place::Local(*container_slot);
+                if self.v2_typed_array_elem_kind(&container_place).is_some() {
+                    return Ok(());
+                }
+
                 let zero = self.builder.ins().iconst(
                     cranelift::prelude::types::I64,
                     0i64,
@@ -91,21 +104,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // R4.2B: FFI signatures accept plain u64 bit-patterns — no
                 // box wrap needed at call site. Array elements reach
                 // `array_push_elem` as ValueWord-encoded I64 slots. Native
-                // F64/I32/I8 operands from `compile_operand` must be widened
-                // to I64 before the FFI call so the Cranelift verifier
-                // accepts the parameter types.
+                // F64/I32/I8 operands from `compile_operand` must be
+                // NaN-boxed (not raw-widened) so that the legacy array-read
+                // path decodes each element's original type rather than
+                // treating raw bool/int bits as a denormal `Number`.
                 for op in operands {
+                    let hint = self.operand_slot_kind(op);
                     let val_raw = self.compile_operand(op)?;
-                    let val = self.widen_to_i64(val_raw);
+                    let val = self.nan_box_for_value_word(val_raw, hint);
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, val]);
                     arr = self.builder.inst_results(inst)[0];
                 }
 
-                let place = Place::Local(*container_slot);
-                self.release_old_value_if_heap(&place)?;
-                self.write_place(&place, arr)?;
+                self.release_old_value_if_heap(&container_place)?;
+                self.write_place(&container_place, arr)?;
                 Ok(())
             }
 

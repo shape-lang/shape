@@ -128,11 +128,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // box wrap needed at call site. Operands reaching
                 // `jit_array_push_elem` are ValueWord-encoded I64 slots. Native
                 // F64/I32/I8 constants flowing in from `compile_operand_raw`
-                // must be widened/bitcast to I64 first so the Cranelift
-                // verifier accepts the call's `i64` parameter types.
+                // must be NaN-boxed (not raw-widened) so that the legacy
+                // array-read path decodes the element's original type rather
+                // than treating raw bits as a denormal `Number`.
                 for operand in operands {
+                    let hint = self.operand_slot_kind(operand);
                     let elem_raw = self.compile_operand_raw(operand)?;
-                    let elem = self.widen_to_i64(elem_raw);
+                    let elem = self.nan_box_for_value_word(elem_raw, hint);
                     let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, elem]);
@@ -147,7 +149,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     // ── Operand kind helpers ───────────────────────────────────────
 
     /// Get the SlotKind of an operand's source (before compilation).
-    fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::SlotKind> {
+    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::SlotKind> {
         match operand {
             Operand::Constant(MirConstant::Int(_)) => {
                 Some(shape_vm::type_tracking::SlotKind::Int64)
