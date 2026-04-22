@@ -520,17 +520,64 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         }
 
         // Read result from ctx.stack[0] (callee stores it there)
-        let result = if ctx_ref.stack_ptr > 0 {
+        let raw_result = if ctx_ref.stack_ptr > 0 {
             ctx_ref.stack_ptr -= 1;
             ctx_ref.stack[ctx_ref.stack_ptr]
         } else {
             ctx_ref.stack[0]
         };
+
+        // F7: Re-NaN-box native-typed returns.
+        //
+        // JIT-compiled Return terminators write raw native values (I8 bool,
+        // F64, I64) into ctx.stack[0] and set `return_type_tag` to indicate
+        // the encoding. The outer executor decodes this tag directly. But
+        // callers that receive the result through `jit_call_value` (e.g.
+        // higher-order FFI helpers like `jit_control_filter`/`map`/`reduce`
+        // and any MIR-level `CallValue` site) read `ctx.stack[0]` as a
+        // NaN-boxed ValueWord and compare with `TAG_BOOL_TRUE` etc.
+        //
+        // Without this conversion a closure `|x| x % 2 == 0` returns raw
+        // `0`/`1` which never match `TAG_BOOL_TRUE = 0xFFFA_.._01`, so
+        // every filter predicate looks false and the result is empty.
+        //
+        // Reset the tag to NANBOXED (0) so stale raw encodings don't leak
+        // into subsequent calls.
+        let tag = ctx_ref.return_type_tag;
+        ctx_ref.return_type_tag = crate::context::RETURN_TAG_NANBOXED;
+        let result = match tag {
+            crate::context::RETURN_TAG_BOOL => box_bool(raw_result != 0),
+            crate::context::RETURN_TAG_F64 => {
+                // Raw f64 bits → NaN-boxed number (identity in our encoding).
+                raw_result
+            }
+            crate::context::RETURN_TAG_I64 => {
+                // Raw i64 → i48-tagged int if in range, else NaN-boxed number.
+                let as_i64 = raw_result as i64;
+                if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
+                    shape_value::ValueBits::make_tagged(
+                        shape_value::tag_bits::TAG_INT,
+                        (as_i64 as u64) & shape_value::tag_bits::PAYLOAD_MASK,
+                    )
+                    .raw()
+                } else {
+                    box_number(as_i64 as f64)
+                }
+            }
+            crate::context::RETURN_TAG_I32 => {
+                let as_i32 = raw_result as i32;
+                shape_value::ValueBits::make_tagged(
+                    shape_value::tag_bits::TAG_INT,
+                    ((as_i32 as i64) as u64) & shape_value::tag_bits::PAYLOAD_MASK,
+                )
+                .raw()
+            }
+            _ => raw_result, // RETURN_TAG_NANBOXED and unknown: already NaN-boxed
+        };
         if debug {
             eprintln!(
-                "[jit-call-value] result: stack_ptr={} after pop, result={:#x} (f64={})",
-                ctx_ref.stack_ptr, result,
-                f64::from_bits(result)
+                "[jit-call-value] result: stack_ptr={} after pop, tag={} raw={:#x} boxed={:#x}",
+                ctx_ref.stack_ptr, tag, raw_result, result,
             );
         }
         result

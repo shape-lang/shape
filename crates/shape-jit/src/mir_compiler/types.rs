@@ -155,6 +155,47 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
         }
     }
 
+    // F7.c — build the set of "opaque-source" slots: slots whose Rvalue
+    // reads from a heap projection (`Field` / `Index`) or another
+    // non-trivial source (calls, borrows, aggregates). The runtime value
+    // of such a slot is determined by the projection — its Cranelift
+    // width is not guaranteed to match anything derivable from later uses.
+    //
+    // Example: `for i in 0..arr.length { ... }` lowers the `arr.length`
+    // read to `Assign(SlotId(4), Use(Copy(Field(Local(1), FieldIdx(0)))))`.
+    // The backward pass below would otherwise see `SlotId(5) < SlotId(4)`
+    // with `SlotId(5): Int64`, conclude `SlotId(4)` is also `Int64`, and
+    // the `compile_binop_int64` fast path would then unpack the
+    // `box_number(f64)` bits as a TAG_INT payload — silently reading 0
+    // from an f64 `4.0` and making the loop skip every iteration.
+    //
+    // By excluding these slots from backward propagation, the comparison
+    // falls back to `compile_binop_dynamic_cmp`, which traps on a true
+    // mixed-tag operand pair (deopt) — but in the common case where the
+    // field happens to carry a number (e.g. `arr.length` returns
+    // `box_number(len as f64)`), the `both_num` path fires correctly by
+    // inspecting the tag bits at runtime rather than trusting an
+    // unsound compile-time inference.
+    let mut opaque_slots: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for block in &mir.blocks {
+        for stmt in &block.statements {
+            if let StatementKind::Assign(Place::Local(slot), rvalue) = &stmt.kind {
+                let opaque = match rvalue {
+                    Rvalue::Use(operand) => is_opaque_operand(operand),
+                    // Binary / unary / clone / borrow / aggregate: their
+                    // result type comes from the compiler's inference, not
+                    // from the destination slot's later uses. We only care
+                    // about bare projections here — `Use(Copy(Field))` is
+                    // the canonical case.
+                    _ => false,
+                };
+                if opaque {
+                    opaque_slots.insert(slot.0 as usize);
+                }
+            }
+        }
+    }
+
     // Backward pass: propagate types from typed operands to Unknown slots
     // used as the other operand in a binop. This picks up closure-param slots
     // like `x` in `|x| x + 1`, where the forward pass leaves `x` Unknown because
@@ -182,14 +223,18 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
                     match (lk, rk) {
                         (Some(k), None) => {
                             if let Some(slot) = operand_local_slot(rhs) {
-                                if set_kind_if_unknown(&mut kinds, slot, k) {
+                                if !opaque_slots.contains(&slot)
+                                    && set_kind_if_unknown(&mut kinds, slot, k)
+                                {
                                     changed = true;
                                 }
                             }
                         }
                         (None, Some(k)) => {
                             if let Some(slot) = operand_local_slot(lhs) {
-                                if set_kind_if_unknown(&mut kinds, slot, k) {
+                                if !opaque_slots.contains(&slot)
+                                    && set_kind_if_unknown(&mut kinds, slot, k)
+                                {
                                     changed = true;
                                 }
                             }
@@ -213,6 +258,29 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
     }
 
     kinds
+}
+
+/// F7.c — `true` when `operand` reads through a heap projection
+/// (`Place::Field` / `Place::Index` / `Place::Deref`). The runtime type
+/// of such a read is opaque to the compiler; backward type propagation
+/// must not invent a `SlotKind` for the destination slot from unrelated
+/// uses of that slot in later binops.
+fn is_opaque_operand(operand: &Operand) -> bool {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            is_opaque_place(place)
+        }
+        Operand::Constant(_) => false,
+    }
+}
+
+/// Walk a `Place` — `true` if any projection in the chain is a field
+/// read, index read, or deref. Pure `Place::Local` chains stay typed.
+fn is_opaque_place(place: &Place) -> bool {
+    match place {
+        Place::Local(_) => false,
+        Place::Field(_, _) | Place::Index(_, _) | Place::Deref(_) => true,
+    }
 }
 
 /// If `operand` is a direct `Copy`/`Move` of a local, return the slot's index.

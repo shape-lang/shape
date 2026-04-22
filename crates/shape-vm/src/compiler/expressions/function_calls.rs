@@ -576,7 +576,14 @@ impl BytecodeCompiler {
         if let Some(ref prefix) = module_prefix {
             self.module_scope_stack.push(prefix.clone());
         }
+        // F7: save/restore closure_function_ids across the recursive
+        // `compile_function` so the outer caller's MIR back-patcher does
+        // not see its list wiped by the specialized body's end-of-function
+        // `.clear()`.
+        let saved_closure_function_ids =
+            std::mem::take(&mut self.closure_function_ids);
         let compile_result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
         if module_prefix.is_some() {
             self.module_scope_stack.pop();
         }
