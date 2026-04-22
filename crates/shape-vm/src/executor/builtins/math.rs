@@ -3,7 +3,7 @@
 //! Direct builtin methods — no string-based dispatch.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 
 /// Extract a number (f64) from a ValueWord
 fn nb_to_f64(nb: &ValueWord) -> Result<f64, VMError> {
@@ -20,7 +20,7 @@ fn nb_to_f64(nb: &ValueWord) -> Result<f64, VMError> {
 impl VirtualMachine {
     pub(in crate::executor) fn builtin_abs(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("abs() requires 1 argument".into()));
@@ -38,7 +38,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_sqrt(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("sqrt() requires 1 argument".into()));
@@ -48,7 +48,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_floor(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("floor() requires 1 argument".into()));
@@ -58,7 +58,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_ceil(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("ceil() requires 1 argument".into()));
@@ -68,7 +68,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_round(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("round() requires 1 argument".into()));
@@ -78,7 +78,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_ln(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("ln() requires 1 argument".into()));
@@ -88,7 +88,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_exp(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("exp() requires 1 argument".into()));
@@ -98,7 +98,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_log(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         match args.len() {
             1 => Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.log10())),
@@ -115,7 +115,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_pow(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError("pow() requires 2 arguments".into()));
@@ -127,7 +127,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_sin(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("sin() requires 1 argument".into()));
@@ -137,7 +137,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_cos(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("cos() requires 1 argument".into()));
@@ -147,7 +147,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_tan(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("tan() requires 1 argument".into()));
@@ -157,7 +157,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_asin(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("asin() requires 1 argument".into()));
@@ -167,7 +167,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_acos(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("acos() requires 1 argument".into()));
@@ -177,7 +177,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_atan(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("atan() requires 1 argument".into()));
@@ -187,7 +187,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_min(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() == 2 {
             let a = nb_to_f64(&args[0])?;
@@ -218,7 +218,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_max(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() == 2 {
             let a = nb_to_f64(&args[0])?;
@@ -249,7 +249,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_sign(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("sign() requires 1 argument".into()));
@@ -279,7 +279,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_gcd(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError("gcd() requires 2 arguments".into()));
@@ -298,7 +298,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_lcm(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError("lcm() requires 2 arguments".into()));
@@ -324,7 +324,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_hypot(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 2 {
             return Err(VMError::RuntimeError("hypot() requires 2 arguments".into()));
@@ -336,7 +336,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_clamp(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 3 {
             return Err(VMError::RuntimeError(
@@ -351,7 +351,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_is_nan(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("isNaN() requires 1 argument".into()));
@@ -366,7 +366,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_is_finite(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError(
@@ -386,7 +386,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn builtin_stddev(
         &mut self,
-        args: Vec<ValueWord>,
+        args: ArgVec,
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError(
