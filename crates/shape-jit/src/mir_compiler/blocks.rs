@@ -111,6 +111,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if self.shared_local_slots.is_empty() {
             return;
         }
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            eprintln!(
+                "[jit-init-shared] shared_local_slots.len()={} slots={:?}",
+                self.shared_local_slots.len(),
+                self.shared_local_slots.iter().copied().collect::<Vec<_>>()
+            );
+        }
         // Collect into a Vec to avoid borrowing self across the loop.
         let slots: Vec<_> = self.shared_local_slots.iter().copied().collect();
         for slot in slots {

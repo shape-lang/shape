@@ -446,6 +446,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Param slots (captures) are further excluded because they
         // are governed by the capture-side-tables
         // `owned_mutable_capture_slots` / `shared_capture_slots`.
+        //
+        // cell-identity #1: the storage-plan scan alone is NOT
+        // sufficient. The MIR's storage planner classifies a slot's
+        // ownership from `binding_semantics`, and on some pipelines
+        // a `var` binding arrives at the planner as
+        // `BindingOwnershipClass::OwnedImmutable` rather than
+        // `Flexible` — so Rule 1b (`SHAPE_V2_VAR_SHAREDCOW` +
+        // Flexible → SharedCow) does not fire and the slot lands as
+        // `Direct` / `LocalMutablePtr` even though the bytecode
+        // emits the `AllocSharedLocal` lifecycle against it. The
+        // second scan below covers the gap by picking up every slot
+        // that is an operand of a `ClosureCapture` whose layout
+        // declares a `CaptureKind::Shared` capture at that position.
         use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
         let param_slot_set: HashSet<SlotId> =
             mir_data.mir.param_slots.iter().copied().collect();
@@ -472,6 +485,73 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 continue;
             }
             shared_local_slots.insert(*slot);
+        }
+
+        // cell-identity #1: augment `shared_local_slots` by scanning
+        // `ClosureCapture` statements whose `function_id` resolves to a
+        // `ClosureLayout` with `CaptureKind::Shared` captures. The MIR
+        // storage planner sometimes classifies `var` bindings as
+        // `LocalMutablePtr` (not `SharedCow`) when the ownership class
+        // for the slot is stored as `OwnedImmutable` in the MIR's
+        // `binding_semantics` table, so the storage-plan scan above
+        // misses them. The bytecode compiler still emits `AllocSharedLocal`
+        // / `LoadSharedLocal` / `StoreSharedLocal` / `DropSharedLocal`
+        // for those slots — and the closure body's JIT compilation
+        // treats its capture param slot as `shared_capture_slots`
+        // (it expects a `*const SharedCell` pointer). If the declaring
+        // frame's JIT doesn't allocate an `Arc<SharedCell>` and doesn't
+        // lock-gated route reads/writes through it, the closure gets a
+        // plain scalar bit pattern as its "cell pointer" — and the
+        // closure's first `jit_arc_shared_retain` on that value
+        // segfaults. Driving the side-table off the layout's
+        // `CaptureKind::Shared` mask closes the gap: any slot that is
+        // an operand of a Shared capture in a call to a layout-carrying
+        // function is promoted to the Arc<SharedCell> lowering path.
+        use shape_value::v2::closure_layout::CaptureKind;
+        use shape_vm::mir::types::{Operand as MirOperand, Place as MirPlace, StatementKind};
+        for block in &mir_data.mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::ClosureCapture {
+                    operands,
+                    function_id,
+                    ..
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                let Some(fid) = *function_id else {
+                    continue;
+                };
+                let Some(layout) = closure_function_layouts.get(&fid) else {
+                    continue;
+                };
+                for (i, op) in operands.iter().enumerate() {
+                    if i >= layout.capture_count() {
+                        break;
+                    }
+                    if !matches!(layout.capture_storage_kind(i), CaptureKind::Shared) {
+                        continue;
+                    }
+                    let root = match op {
+                        MirOperand::Copy(p)
+                        | MirOperand::Move(p)
+                        | MirOperand::MoveExplicit(p) => match p {
+                            MirPlace::Local(s) => Some(*s),
+                            _ => None,
+                        },
+                        MirOperand::Constant(_) => None,
+                    };
+                    if let Some(slot) = root {
+                        if param_slot_set.contains(&slot) {
+                            // Capture-side slot: handled by the
+                            // `shared_capture_slots` side-table via
+                            // `register_owned_mutable_capture_slots`.
+                            continue;
+                        }
+                        shared_local_slots.insert(slot);
+                    }
+                }
+            }
         }
 
         Self {

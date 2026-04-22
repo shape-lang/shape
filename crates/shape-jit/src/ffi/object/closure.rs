@@ -243,8 +243,25 @@ pub unsafe extern "C" fn jit_alloc_owned_mut_cell(initial: u64) -> *mut u64 {
 pub unsafe extern "C" fn jit_arc_shared_retain(ptr: u64) -> u64 {
     use shape_value::v2::closure_layout::SharedCell;
     use std::sync::Arc;
+    if ptr == 0 {
+        // cell-identity #1: a zero pointer indicates the operand's root
+        // slot was not flagged as a `SharedCow` local by the MirToIR
+        // side-table — i.e. `initialize_shared_local_slots` never
+        // installed an Arc<SharedCell> for this slot. Previously this
+        // would segfault inside `Arc::increment_strong_count(null)`.
+        // Return 0 so the caller stores a null pointer and the
+        // downstream dispatch path can report a clean error rather
+        // than corrupting memory.
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            eprintln!("[jit-shared-cell] retain null (no-op)");
+        }
+        return 0;
+    }
     unsafe {
         Arc::<SharedCell>::increment_strong_count(ptr as *const SharedCell);
+    }
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        eprintln!("[jit-shared-cell] retain ptr={:#x}", ptr);
     }
     ptr
 }
@@ -364,7 +381,14 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64) -> u64 {
     use shape_value::v2::closure_layout::SharedCell;
     use std::sync::Arc;
     let arc: Arc<SharedCell> = Arc::new(SharedCell::new(initial_bits));
-    Arc::into_raw(arc) as u64
+    let ptr = Arc::into_raw(arc) as u64;
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        eprintln!(
+            "[jit-shared-cell] alloc ptr={:#x} initial_bits={:#x}",
+            ptr, initial_bits
+        );
+    }
+    ptr
 }
 
 /// Release exactly one strong share of an `Arc<SharedCell>` at
@@ -387,6 +411,9 @@ pub unsafe extern "C" fn jit_arc_shared_release(ptr: u64) {
     use std::sync::Arc;
     if ptr == 0 {
         return;
+    }
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        eprintln!("[jit-shared-cell] release ptr={:#x}", ptr);
     }
     // SAFETY: the caller contract (see SAFETY docs above) guarantees
     // `ptr` is a live Arc-from-raw pointer. Reconstructing the Arc
