@@ -36,13 +36,3 @@ shape-gc = { workspace = true, optional = true }
 [features]
 default = []
 gc = ["shape-gc"]
-
-# Register the `jit_v2_unstable_tests` cfg so `rustc` does not warn on the
-# `#[cfg(jit_v2_unstable_tests)]` gates scattered through the crate. The
-# gate is enabled at build time via
-#   RUSTFLAGS='--cfg jit_v2_unstable_tests' cargo test -p shape-jit --lib
-# It guards integration_tests / v2_array_tests / a1d2_tests / a1e_tests
-# modules that exercise JIT end-to-end paths with pre-existing
-# heap-corruption regressions on jit-v2-phase1.
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(jit_v2_unstable_tests)'] }

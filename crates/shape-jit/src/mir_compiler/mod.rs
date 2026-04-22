@@ -33,18 +33,10 @@ pub(crate) mod v2_refcount;
 pub(crate) mod v2_string;
 pub(crate) mod v2_typed_map;
 
-// integration_tests and v2_array_tests are gated behind a non-default cfg
-// because they currently exercise JIT executor paths that have heap-corruption
-// regressions on the jit-v2-phase1 branch (closure capture, array element
-// allocation, etc.) — fixing those JIT runtime bugs is tracked separately
-// from the BytecodeToIR-removal regression that this branch closed out.
-//
-// Re-enable by passing `--cfg jit_v2_unstable_tests` to rustc, e.g.
-//   RUSTFLAGS='--cfg jit_v2_unstable_tests' cargo test -p shape-jit --lib
-#[cfg(all(test, jit_v2_unstable_tests))]
+#[cfg(test)]
 mod integration_tests;
 
-#[cfg(all(test, jit_v2_unstable_tests))]
+#[cfg(test)]
 mod v2_array_tests;
 
 // Un-gated: pins the fix-jit-lead arg_count ABI / closure-param typing

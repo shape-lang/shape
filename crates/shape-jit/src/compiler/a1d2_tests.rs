@@ -240,7 +240,6 @@ fn a1d2_closure_layout_capture_kinds_classify_correctly() {
     assert_eq!(layout.shared_capture_mask, 0);
 }
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1d2_jit_let_mut_counter_increments() {
     // Three calls to an incrementing closure; final read should be 3.
@@ -279,7 +278,6 @@ fn a1d2_jit_let_mut_counter_increments() {
     }
 }
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1d2_jit_let_mut_mixed_immutable() {
     // Closure captures one `let` (immutable, read-only) and one `let mut`
@@ -310,7 +308,6 @@ fn a1d2_jit_let_mut_mixed_immutable() {
     }
 }
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1d2_jit_let_mut_closure_release_drops_box() {
     // Construct a `let mut` closure, invoke it, then let it drop at

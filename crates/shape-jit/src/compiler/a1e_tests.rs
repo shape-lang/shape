@@ -68,7 +68,6 @@ fn has_native_closure(
 
 /// End-to-end runner used only by the gated tests — same shape as
 /// `a1d2_tests::jit_run`.
-#[cfg(jit_v2_unstable_tests)]
 fn jit_run(source: &str) -> shape_wire::WireValue {
     use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
     shape_runtime::initialize_shared_runtime().ok();
@@ -164,7 +163,6 @@ fn a1e_closure_layout_shared_kind_classifies() {
 // regression tests for when the dispatch fix lands in a follow-up.
 // ---------------------------------------------------------------------------
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1e_jit_var_counter_e2e() {
     // Three calls to an incrementing `var` closure; final read should be 3.
@@ -194,7 +192,6 @@ fn a1e_jit_var_counter_e2e() {
     }
 }
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1e_jit_var_two_closures_share_cell() {
     // Two closures capture the SAME `var x`. Both Arcs point at the
@@ -360,7 +357,6 @@ fn a1e_jit_var_counter_repeated_calls() {
     }
 }
 
-#[cfg(jit_v2_unstable_tests)]
 #[test]
 fn a1e_jit_mixed_let_letmut_var() {
     // Closure captures one of each kind — immutable `base` (let),
