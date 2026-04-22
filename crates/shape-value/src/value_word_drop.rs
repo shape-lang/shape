@@ -308,6 +308,11 @@ impl<'a> IntoIterator for &'a ArgVec {
 ///
 /// Removing a value via [`ValueMap::remove`] transfers ownership back to the
 /// caller — the returned bits are no longer released by the map.
+///
+/// `ValueMap` is `Clone`: cloning retains every value's heap ref via
+/// `vw_clone`, producing an independent map whose Drop also runs
+/// per-element release. This preserves `derive(Clone)` ergonomics on
+/// enclosing structs.
 #[derive(Debug, Default)]
 pub struct ValueMap(HashMap<String, ValueWord>);
 
@@ -333,6 +338,12 @@ impl ValueMap {
     #[inline]
     pub fn into_inner(self) -> HashMap<String, ValueWord> {
         std::mem::take(&mut std::mem::ManuallyDrop::new(self).0)
+    }
+
+    /// Borrow the inner `HashMap` for read-only access.
+    #[inline]
+    pub fn as_map(&self) -> &HashMap<String, ValueWord> {
+        &self.0
     }
 
     /// Insert a value under `key`. If a previous value existed, it is released
@@ -395,6 +406,14 @@ impl ValueMap {
     pub fn values(&self) -> std::collections::hash_map::Values<'_, String, ValueWord> {
         self.0.values()
     }
+
+    /// Release every element via `vw_drop` and clear the map.
+    #[inline]
+    pub fn clear(&mut self) {
+        for (_, bits) in self.0.drain() {
+            vw_drop(bits);
+        }
+    }
 }
 
 impl Drop for ValueMap {
@@ -405,10 +424,30 @@ impl Drop for ValueMap {
     }
 }
 
+impl Clone for ValueMap {
+    fn clone(&self) -> Self {
+        let mut out = HashMap::with_capacity(self.0.len());
+        for (k, &v) in &self.0 {
+            out.insert(k.clone(), vw_clone(v));
+        }
+        Self(out)
+    }
+}
+
 impl From<HashMap<String, ValueWord>> for ValueMap {
     #[inline]
     fn from(m: HashMap<String, ValueWord>) -> Self {
         Self(m)
+    }
+}
+
+impl<'a> IntoIterator for &'a ValueMap {
+    type Item = (&'a String, &'a ValueWord);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, ValueWord>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -467,5 +506,36 @@ mod tests {
         m.insert("k".to_string(), <ValueWord as ValueWordExt>::from_i64(1));
         m.insert("k".to_string(), <ValueWord as ValueWordExt>::from_i64(2));
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn value_map_clone_preserves_scalars() {
+        let mut m = ValueMap::new();
+        m.insert("a".to_string(), <ValueWord as ValueWordExt>::from_i64(1));
+        m.insert("b".to_string(), <ValueWord as ValueWordExt>::from_bool(true));
+        let c = m.clone();
+        assert_eq!(c.len(), 2);
+        // Both drop cleanly (no double-free, no leak).
+    }
+
+    #[test]
+    fn value_map_clear_drops_elements() {
+        let mut m = ValueMap::new();
+        m.insert("x".to_string(), <ValueWord as ValueWordExt>::from_i64(42));
+        assert_eq!(m.len(), 1);
+        m.clear();
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn value_map_into_iterator_for_ref() {
+        let mut m = ValueMap::new();
+        m.insert("k".to_string(), <ValueWord as ValueWordExt>::from_i64(5));
+        let mut count = 0;
+        for (_k, _v) in &m {
+            count += 1;
+        }
+        assert_eq!(count, 1);
     }
 }
