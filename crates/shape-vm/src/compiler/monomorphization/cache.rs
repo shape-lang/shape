@@ -288,10 +288,23 @@ impl BytecodeCompiler {
             .insert(mono_key, specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
 
+        // F7: save/restore `closure_function_ids` across the recursive
+        // `compile_function` call. The specialized body's own
+        // `compile_function` ends with a `.clear()` that would otherwise
+        // wipe the OUTER function's accumulated `("__closure_N", fid)`
+        // list — for example, when `__main__`'s body is still being walked
+        // between two closure literals that sandwich an `arr.map(|x| ...)`
+        // call. Without this guard the outer back-patcher pairs the wrong
+        // `ClosureCapture` with the wrong `function_id`, tripping the
+        // MIR-to-IR `capture-count mismatch` assertion.
+        let saved_closure_function_ids =
+            std::mem::take(&mut self.closure_function_ids);
         // Compile the specialized body. On failure, surface the error — the
         // caller is responsible for falling through to the generic path on
         // any failure mode it wants to tolerate.
-        self.compile_function(&specialized_def)?;
+        let result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
+        result?;
 
         Ok(specialization_idx)
     }
@@ -450,7 +463,12 @@ impl BytecodeCompiler {
             .insert(mono_key, specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
 
-        self.compile_function(&specialized_def)?;
+        // F7: see note in `ensure_monomorphic_function` above.
+        let saved_closure_function_ids =
+            std::mem::take(&mut self.closure_function_ids);
+        let result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
+        result?;
 
         Ok(specialization_idx)
     }
@@ -581,7 +599,12 @@ impl BytecodeCompiler {
         self.closure_specialization_count =
             self.closure_specialization_count.saturating_add(1);
 
-        if self.compile_function(&specialized_def).is_err() {
+        // F7: see note in `ensure_monomorphic_function`.
+        let saved_closure_function_ids =
+            std::mem::take(&mut self.closure_function_ids);
+        let compile_result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
+        if compile_result.is_err() {
             // Compilation failed — we already inserted the cache entry; the
             // caller will fall back to the generic path anyway. Returning
             // Ok(None) keeps the error surface clean.
