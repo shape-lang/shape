@@ -35,7 +35,7 @@
 //! - `emit(event, data)` - Event emission for alerts, logging
 //! - `data` - Data range manipulation (extend/restore for warmup)
 
-use shape_value::ValueWord;
+use shape_value::{ValueMap, ValueWord};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -242,13 +242,15 @@ impl AnnotationCache {
 /// Used for annotations that need to maintain state across calls
 #[derive(Debug, Clone, Default)]
 pub struct AnnotationState {
-    values: HashMap<String, ValueWord>,
+    /// `ValueMap` ensures each per-annotation persistent value's heap ref
+    /// is released when the state is cleared or dropped.
+    values: ValueMap,
 }
 
 impl AnnotationState {
     pub fn new() -> Self {
         Self {
-            values: HashMap::new(),
+            values: ValueMap::new(),
         }
     }
 
@@ -283,13 +285,15 @@ impl AnnotationState {
 /// Used by custom annotations (e.g. @strategy, @feature)
 #[derive(Debug, Clone, Default)]
 pub struct NamedRegistry {
-    entries: HashMap<String, ValueWord>,
+    /// `ValueMap` releases each registered heap ref when the registry is
+    /// dropped or a key is overwritten.
+    entries: ValueMap,
 }
 
 impl NamedRegistry {
     pub fn new() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: ValueMap::new(),
         }
     }
 

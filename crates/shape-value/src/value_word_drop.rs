@@ -464,6 +464,22 @@ impl<'a> IntoIterator for &'a ValueMap {
     }
 }
 
+/// Consuming `IntoIterator`: yields `(String, ValueWord)` tuples,
+/// transferring ownership of each value's heap ref to the iterator.
+/// The `ValueMap` is consumed without running the per-element release
+/// path in `Drop` — the caller becomes responsible for dropping each
+/// yielded value.
+impl IntoIterator for ValueMap {
+    type Item = (String, ValueWord);
+    type IntoIter = std::collections::hash_map::IntoIter<String, ValueWord>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        // Bypass `Drop` — the iterator now owns the elements.
+        self.into_inner().into_iter()
+    }
+}
+
 /// `FromIterator<(String, ValueWord)>` wraps an iterator of key/value pairs
 /// as a `ValueMap`, taking ownership of any heap refs attached to the
 /// yielded values. Dropping the resulting map releases each value via
