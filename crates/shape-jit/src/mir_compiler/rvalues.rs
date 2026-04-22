@@ -388,30 +388,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// fallthroughs from `compile_binop_f64`, `compile_binop_int64`,
     /// and `compile_binop_bool` where the logical op mixes with a
     /// NaN-boxed bool encoding (TAG_BOOL_TRUE / TAG_BOOL_FALSE).
+    ///
+    /// Session 2: Dynamic arithmetic binops from CallValue-returned
+    /// slots (closure calls whose return type isn't provable at MIR
+    /// level) are lowered via an inline NaN-box dispatch — `Both-Number`
+    /// (hot path: `!is_tagged(l) && !is_tagged(r)` → native fadd/etc.) or
+    /// `Both-Int` (`is_tagged_int(l) && is_tagged_int(r)` → i48 math).
+    /// Mixed or heap operands trap the JIT function, triggering an
+    /// error-signal return that the caller observes via the deopt
+    /// pathway. This preserves `no generic_* FFI` while keeping
+    /// closure-return-arith JIT-compilable.
     fn compile_binop(
         &mut self,
         op: &BinOp,
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
-        let l = lhs;
-        let r = rhs;
+        // Widen native-typed operands into their NaN-boxed I64 bit-pattern so
+        // the dynamic dispatch helpers can treat both uniformly. This handles
+        // the mixed cases (e.g. F64 literal vs I64 NaN-boxed heap handle)
+        // that `compile_rvalue` routes here after the typed fast paths.
+        let l = self.to_i64_bits(lhs);
+        let r = self.to_i64_bits(rhs);
         match op {
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
             | BinOp::Div
-            | BinOp::Mod
-            | BinOp::Eq
+            | BinOp::Mod => self.compile_binop_dynamic_arith(op, l, r),
+
+            BinOp::Eq
             | BinOp::Ne
             | BinOp::Lt
             | BinOp::Le
             | BinOp::Gt
-            | BinOp::Ge => Err(format!(
-                "JIT: dynamic arithmetic/comparison binop {:?} reached compile_binop; \
-                 MIR should emit a typed opcode or route through CallMethod after R5",
-                op
-            )),
+            | BinOp::Ge => self.compile_binop_dynamic_cmp(op, l, r),
 
             // v2-boundary: logical ops on NaN-boxed values use TAG_BOOL_TRUE/FALSE
             BinOp::And => {
@@ -443,6 +454,294 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().select(either, tag_true, false_val))
             }
         }
+    }
+
+    // ── Session 2: Dynamic arith / cmp inline NaN-box dispatch ────────
+
+    /// Widen an operand Value to its NaN-boxed I64 bit-pattern.
+    ///
+    /// - `F64` → bitcast to `I64` (the f64 bit-pattern *is* the NaN-box payload
+    ///   because plain numbers have sign=0).
+    /// - `I32` / `I16` → sign-extend to `I64`. NaN-boxed int slots use
+    ///   `TAG_INT | (i48_payload_mask & value)` upstream; narrow-int slots
+    ///   reaching `compile_binop` are rare (the native-I32 fast path catches
+    ///   both-I32 already), so this conservative sign-extend keeps the raw
+    ///   integer value visible to the dynamic dispatch's `int` branch.
+    /// - `I8` (native bool) → zero-extend to `I64`. The logical-op branches of
+    ///   `compile_binop` compare against the literal `1i64` ⇔ `TAG_BOOL_TRUE`
+    ///   encoding, so widening to I64 preserves truth semantics.
+    /// - `I64` → passed through unchanged.
+    fn to_i64_bits(&mut self, v: Value) -> Value {
+        let ty = self.builder.func.dfg.value_type(v);
+        if ty == types::I64 {
+            v
+        } else if ty == types::F64 {
+            self.builder.ins().bitcast(types::I64, MemFlags::new(), v)
+        } else if ty == types::I32 || ty == types::I16 {
+            self.builder.ins().sextend(types::I64, v)
+        } else if ty == types::I8 {
+            self.builder.ins().uextend(types::I64, v)
+        } else {
+            v
+        }
+    }
+
+
+    /// Compile a dynamic-operand arithmetic binop (Add/Sub/Mul/Div/Mod).
+    ///
+    /// Both operands arrive as NaN-boxed `I64` bit-patterns. The emitted
+    /// IR branches on the tag bits:
+    ///
+    /// - Both numbers (`sign==0` ⇒ `!is_tagged`): `bitcast→fadd→bitcast`
+    ///   to stay in the f64 domain.
+    /// - Both i48-tagged ints: sign-extend 48-bit payload, native i64 op,
+    ///   re-box with `TAG_INT`.
+    /// - Otherwise: trap (caller's deopt path converts to an error).
+    ///
+    /// This is the JIT analogue of the VM's `AddDynamic` IC fast path —
+    /// in practice the operands come from closure calls whose return
+    /// value the MIR couldn't type-prove, and are always `Number` or
+    /// `Int` at runtime for the tests in the closure test set.
+    fn compile_binop_dynamic_arith(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // Tagged-test masks.
+        let tag_base = self.builder.ins().iconst(
+            types::I64,
+            shape_value::tag_bits::TAG_BASE as i64,
+        );
+        let l_masked = self.builder.ins().band(lhs, tag_base);
+        let r_masked = self.builder.ins().band(rhs, tag_base);
+
+        // Is each operand a plain f64 (sign bit zero ⇒ NaN-box prefix absent)?
+        let l_is_num = self.builder.ins().icmp(IntCC::NotEqual, l_masked, tag_base);
+        let r_is_num = self.builder.ins().icmp(IntCC::NotEqual, r_masked, tag_base);
+        let both_num = self.builder.ins().band(l_is_num, r_is_num);
+
+        // Is each operand a TAG_INT tagged value?
+        let int_prefix = self.builder.ins().iconst(
+            types::I64,
+            (shape_value::tag_bits::TAG_BASE
+                | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
+                as i64,
+        );
+        let tag_mask_full = self.builder.ins().iconst(
+            types::I64,
+            (shape_value::tag_bits::TAG_BASE | shape_value::tag_bits::TAG_MASK) as i64,
+        );
+        let l_tag_only = self.builder.ins().band(lhs, tag_mask_full);
+        let r_tag_only = self.builder.ins().band(rhs, tag_mask_full);
+        let l_is_int = self.builder.ins().icmp(IntCC::Equal, l_tag_only, int_prefix);
+        let r_is_int = self.builder.ins().icmp(IntCC::Equal, r_tag_only, int_prefix);
+        let both_int = self.builder.ins().band(l_is_int, r_is_int);
+
+        // Block layout:
+        //   current    -> brif both_num, num_block, maybe_int_block
+        //   num_block  -> fadd etc.; jump merge(f_result_as_i64)
+        //   maybe_int_block -> brif both_int, int_block, trap_block
+        //   int_block  -> i48 math; jump merge(int_result)
+        //   trap_block -> trap
+        //   merge      -> block-param result
+        let num_block = self.builder.create_block();
+        let maybe_int_block = self.builder.create_block();
+        let int_block = self.builder.create_block();
+        let trap_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+
+        self.builder
+            .ins()
+            .brif(both_num, num_block, &[], maybe_int_block, &[]);
+
+        // ── Both-number path ──────────────────────────────────────────
+        self.builder.switch_to_block(num_block);
+        self.builder.seal_block(num_block);
+        let lf = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
+        let rf = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
+        let nres = match op {
+            BinOp::Add => self.builder.ins().fadd(lf, rf),
+            BinOp::Sub => self.builder.ins().fsub(lf, rf),
+            BinOp::Mul => self.builder.ins().fmul(lf, rf),
+            BinOp::Div => self.builder.ins().fdiv(lf, rf),
+            BinOp::Mod => {
+                let div = self.builder.ins().fdiv(lf, rf);
+                let truncated = self.builder.ins().trunc(div);
+                let product = self.builder.ins().fmul(truncated, rf);
+                self.builder.ins().fsub(lf, product)
+            }
+            _ => unreachable!("compile_binop_dynamic_arith: non-arith op {:?}", op),
+        };
+        let nres_bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), nres);
+        self.builder.ins().jump(merge_block, &[nres_bits]);
+
+        // ── Both-int path ─────────────────────────────────────────────
+        self.builder.switch_to_block(maybe_int_block);
+        self.builder.seal_block(maybe_int_block);
+        self.builder
+            .ins()
+            .brif(both_int, int_block, &[], trap_block, &[]);
+
+        self.builder.switch_to_block(int_block);
+        self.builder.seal_block(int_block);
+        // Extract 48-bit signed int payload: shift left 16, asr 16.
+        let li = self.builder.ins().ishl_imm(lhs, 16);
+        let li = self.builder.ins().sshr_imm(li, 16);
+        let ri = self.builder.ins().ishl_imm(rhs, 16);
+        let ri = self.builder.ins().sshr_imm(ri, 16);
+        let ires = match op {
+            BinOp::Add => self.builder.ins().iadd(li, ri),
+            BinOp::Sub => self.builder.ins().isub(li, ri),
+            BinOp::Mul => self.builder.ins().imul(li, ri),
+            BinOp::Div => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, ri, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                self.builder.ins().sdiv(li, ri)
+            }
+            BinOp::Mod => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, ri, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                self.builder.ins().srem(li, ri)
+            }
+            _ => unreachable!("compile_binop_dynamic_arith: non-arith op {:?}", op),
+        };
+        let payload_mask = self.builder.ins().iconst(
+            types::I64,
+            shape_value::tag_bits::PAYLOAD_MASK as i64,
+        );
+        let ipayload = self.builder.ins().band(ires, payload_mask);
+        let iboxed = self.builder.ins().bor(int_prefix, ipayload);
+        self.builder.ins().jump(merge_block, &[iboxed]);
+
+        // ── Trap path ─────────────────────────────────────────────────
+        // Emit a negative error signal return so the caller observes a JIT
+        // deopt rather than an illegal-instruction trap. This matches the
+        // error-signal convention used by direct-call terminators.
+        self.builder.switch_to_block(trap_block);
+        self.builder.seal_block(trap_block);
+        let signal = self.builder.ins().iconst(types::I32, 0xFFFF_FFFFu64 as i64);
+        self.builder.ins().return_(&[signal]);
+
+        // ── Merge ─────────────────────────────────────────────────────
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        Ok(self.builder.block_params(merge_block)[0])
+    }
+
+    /// Compile a dynamic-operand comparison binop (Eq/Ne/Lt/Le/Gt/Ge).
+    ///
+    /// Branches by tag exactly like `compile_binop_dynamic_arith`, with
+    /// result type `I8` (native bool). Eq/Ne on mixed-tag operands are
+    /// routed through the `icmp.Equal` on the raw bits — two values with
+    /// different tags are never equal so the bitwise compare is correct.
+    /// Lt/Le/Gt/Ge on mixed-tag operands trap.
+    fn compile_binop_dynamic_cmp(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // Bitwise Eq/Ne: any mismatched tag also means values are not equal.
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            let cc = if matches!(op, BinOp::Eq) {
+                IntCC::Equal
+            } else {
+                IntCC::NotEqual
+            };
+            return Ok(self.builder.ins().icmp(cc, lhs, rhs));
+        }
+
+        // Tagged-test masks (same as arith).
+        let tag_base = self.builder.ins().iconst(
+            types::I64,
+            shape_value::tag_bits::TAG_BASE as i64,
+        );
+        let l_masked = self.builder.ins().band(lhs, tag_base);
+        let r_masked = self.builder.ins().band(rhs, tag_base);
+        let l_is_num = self.builder.ins().icmp(IntCC::NotEqual, l_masked, tag_base);
+        let r_is_num = self.builder.ins().icmp(IntCC::NotEqual, r_masked, tag_base);
+        let both_num = self.builder.ins().band(l_is_num, r_is_num);
+
+        let int_prefix = self.builder.ins().iconst(
+            types::I64,
+            (shape_value::tag_bits::TAG_BASE
+                | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
+                as i64,
+        );
+        let tag_mask_full = self.builder.ins().iconst(
+            types::I64,
+            (shape_value::tag_bits::TAG_BASE | shape_value::tag_bits::TAG_MASK) as i64,
+        );
+        let l_tag_only = self.builder.ins().band(lhs, tag_mask_full);
+        let r_tag_only = self.builder.ins().band(rhs, tag_mask_full);
+        let l_is_int = self.builder.ins().icmp(IntCC::Equal, l_tag_only, int_prefix);
+        let r_is_int = self.builder.ins().icmp(IntCC::Equal, r_tag_only, int_prefix);
+        let both_int = self.builder.ins().band(l_is_int, r_is_int);
+
+        let num_block = self.builder.create_block();
+        let maybe_int_block = self.builder.create_block();
+        let int_block = self.builder.create_block();
+        let trap_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I8);
+
+        self.builder
+            .ins()
+            .brif(both_num, num_block, &[], maybe_int_block, &[]);
+
+        // Both-number path.
+        self.builder.switch_to_block(num_block);
+        self.builder.seal_block(num_block);
+        let lf = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
+        let rf = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
+        let fcc = match op {
+            BinOp::Lt => FloatCC::LessThan,
+            BinOp::Le => FloatCC::LessThanOrEqual,
+            BinOp::Gt => FloatCC::GreaterThan,
+            BinOp::Ge => FloatCC::GreaterThanOrEqual,
+            _ => unreachable!("compile_binop_dynamic_cmp: non-cmp op {:?}", op),
+        };
+        let ncmp = self.builder.ins().fcmp(fcc, lf, rf);
+        self.builder.ins().jump(merge_block, &[ncmp]);
+
+        // Both-int path.
+        self.builder.switch_to_block(maybe_int_block);
+        self.builder.seal_block(maybe_int_block);
+        self.builder
+            .ins()
+            .brif(both_int, int_block, &[], trap_block, &[]);
+
+        self.builder.switch_to_block(int_block);
+        self.builder.seal_block(int_block);
+        let li = self.builder.ins().ishl_imm(lhs, 16);
+        let li = self.builder.ins().sshr_imm(li, 16);
+        let ri = self.builder.ins().ishl_imm(rhs, 16);
+        let ri = self.builder.ins().sshr_imm(ri, 16);
+        let icc = match op {
+            BinOp::Lt => IntCC::SignedLessThan,
+            BinOp::Le => IntCC::SignedLessThanOrEqual,
+            BinOp::Gt => IntCC::SignedGreaterThan,
+            BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+            _ => unreachable!("compile_binop_dynamic_cmp: non-cmp op {:?}", op),
+        };
+        let icmp = self.builder.ins().icmp(icc, li, ri);
+        self.builder.ins().jump(merge_block, &[icmp]);
+
+        // Trap path: emit a negative error signal return (same convention as
+        // the arith helper) so deopt is observed as a JIT compile/run error
+        // rather than an illegal instruction.
+        self.builder.switch_to_block(trap_block);
+        self.builder.seal_block(trap_block);
+        let signal = self.builder.ins().iconst(types::I32, 0xFFFF_FFFFu64 as i64);
+        self.builder.ins().return_(&[signal]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        Ok(self.builder.block_params(merge_block)[0])
     }
 
     /// Compile a unary operation.
