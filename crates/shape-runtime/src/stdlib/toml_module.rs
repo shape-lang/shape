@@ -3,7 +3,7 @@
 //! Exports: toml.parse(text), toml.stringify(value), toml.is_valid(text)
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `toml::Value` into a `ValueWord`.
@@ -15,8 +15,9 @@ fn toml_value_to_nanboxed(value: toml::Value) -> ValueWord {
         toml::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         toml::Value::Datetime(dt) => ValueWord::from_string(Arc::new(dt.to_string())),
         toml::Value::Array(arr) => {
-            let items: Vec<ValueWord> = arr.into_iter().map(toml_value_to_nanboxed).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(items))
+            let items: ArgVec =
+                ArgVec::from_vec(arr.into_iter().map(toml_value_to_nanboxed).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
         }
         toml::Value::Table(map) => {
             let mut keys = Vec::with_capacity(map.len());

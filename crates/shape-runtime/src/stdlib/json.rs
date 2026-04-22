@@ -5,7 +5,7 @@
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
 use shape_value::heap_value::HeapValue;
-use shape_value::{ValueSlot, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_json::Value` into an untyped `ValueWord` (legacy fallback).
@@ -16,8 +16,9 @@ fn json_value_to_nanboxed(value: serde_json::Value) -> ValueWord {
         serde_json::Value::Number(n) => ValueWord::from_f64(n.as_f64().unwrap_or(0.0)),
         serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_json::Value::Array(arr) => {
-            let items: Vec<ValueWord> = arr.into_iter().map(json_value_to_nanboxed).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(items))
+            let items: ArgVec =
+                ArgVec::from_vec(arr.into_iter().map(json_value_to_nanboxed).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
         }
         serde_json::Value::Object(map) => {
             let mut keys = Vec::with_capacity(map.len());
@@ -75,14 +76,14 @@ fn json_value_to_enum(value: serde_json::Value, schema_id: u64) -> ValueWord {
             Some(ValueWord::from_string(Arc::new(s))),
         ),
         serde_json::Value::Array(arr) => {
-            let items: Vec<ValueWord> = arr
+            let items: ArgVec = ArgVec::from_vec(arr
                 .into_iter()
                 .map(|v| json_value_to_enum(v, schema_id))
-                .collect();
+                .collect());
             make_json_enum(
                 schema_id,
                 JSON_VARIANT_ARRAY,
-                Some(ValueWord::from_array(shape_value::vmarray_from_vec(items))),
+                Some(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))),
             )
         }
         serde_json::Value::Object(map) => {
@@ -172,11 +173,11 @@ fn json_value_to_typed_nb(
         (serde_json::Value::Number(n), _) => Ok(ValueWord::from_f64(n.as_f64().unwrap_or(0.0))),
         (serde_json::Value::String(s), _) => Ok(ValueWord::from_string(Arc::new(s.clone()))),
         (serde_json::Value::Array(arr), _) => {
-            let items: Vec<ValueWord> = arr
-                .iter()
-                .map(|v| json_value_to_typed_nb(v, &FieldType::Any, registry))
-                .collect::<Result<_, _>>()?;
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items)))
+            let mut items: ArgVec = ArgVec::with_capacity(arr.len());
+            for v in arr.iter() {
+                items.push(json_value_to_typed_nb(v, &FieldType::Any, registry)?);
+            }
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner())))
         }
         (serde_json::Value::Object(obj), FieldType::Object(type_name)) => {
             if let Some(nested_schema) = registry.get(type_name) {

@@ -4,7 +4,7 @@
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use serde::Deserialize;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_yaml::Value` into a `ValueWord`.
@@ -21,8 +21,9 @@ fn yaml_value_to_nanboxed(value: serde_yaml::Value) -> ValueWord {
         }
         serde_yaml::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_yaml::Value::Sequence(arr) => {
-            let items: Vec<ValueWord> = arr.into_iter().map(yaml_value_to_nanboxed).collect();
-            ValueWord::from_array(shape_value::vmarray_from_vec(items))
+            let items: ArgVec =
+                ArgVec::from_vec(arr.into_iter().map(yaml_value_to_nanboxed).collect());
+            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
         }
         serde_yaml::Value::Mapping(map) => {
             let mut keys = Vec::with_capacity(map.len());

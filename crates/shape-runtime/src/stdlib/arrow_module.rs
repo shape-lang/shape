@@ -7,7 +7,7 @@
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use arrow_ipc::reader::FileReader;
 use shape_value::datatable::DataTable;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -72,7 +72,7 @@ pub fn create_arrow_module() -> ModuleExports {
             let reader = FileReader::try_new(cursor, None)
                 .map_err(|e| format!("arrow.read_tables() invalid IPC file: {}", e))?;
 
-            let mut tables: Vec<ValueWord> = Vec::new();
+            let mut tables: ArgVec = ArgVec::new();
             for batch_result in reader {
                 let batch = batch_result
                     .map_err(|e| format!("arrow.read_tables() failed reading batch: {}", e))?;
@@ -80,7 +80,7 @@ pub fn create_arrow_module() -> ModuleExports {
                 tables.push(ValueWord::from_datatable(Arc::new(dt)));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(tables))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(tables.into_inner()))))
         },
         ModuleFunction {
             description: "Read all record batches from an Arrow IPC file".to_string(),
@@ -120,17 +120,17 @@ pub fn create_arrow_module() -> ModuleExports {
             let schema = reader.schema();
             let meta = schema.metadata();
 
-            let keys: Vec<ValueWord> = meta
+            let keys: ArgVec = ArgVec::from_vec(meta
                 .keys()
                 .map(|k| ValueWord::from_string(Arc::new(k.clone())))
-                .collect();
-            let values: Vec<ValueWord> = meta
+                .collect());
+            let values: ArgVec = ArgVec::from_vec(meta
                 .values()
                 .map(|v| ValueWord::from_string(Arc::new(v.clone())))
-                .collect();
+                .collect());
 
             Ok(ValueWord::from_ok(ValueWord::from_hashmap_pairs(
-                keys, values,
+                keys.into_inner(), values.into_inner(),
             )))
         },
         ModuleFunction {
