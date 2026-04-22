@@ -728,6 +728,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let num_block = self.builder.create_block();
         let maybe_int_block = self.builder.create_block();
         let int_block = self.builder.create_block();
+        // F7.c — mixed num/int path: one operand is a NaN-boxed f64, the
+        // other is a NaN-boxed TAG_INT. This arises from comparisons like
+        // `i < arr.length` where `arr.length` reads `box_number(len as f64)`
+        // via the legacy FFI get-prop path but the loop counter is a
+        // TAG_INT NaN-boxed int. Promote the TAG_INT payload to f64 and
+        // compare as float.
+        let mixed_l_num_block = self.builder.create_block();
+        let mixed_r_num_block = self.builder.create_block();
         let trap_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
         self.builder.append_block_param(merge_block, types::I8);
@@ -751,12 +759,38 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let ncmp = self.builder.ins().fcmp(fcc, lf, rf);
         self.builder.ins().jump(merge_block, &[ncmp]);
 
-        // Both-int path.
+        // Both-int path (first, since it's the most common mixed case).
         self.builder.switch_to_block(maybe_int_block);
         self.builder.seal_block(maybe_int_block);
+        // If both are TAG_INT, go to int_block.
+        // Otherwise, if one is num + one is int, try the mixed paths.
+        let not_both_int = self.builder.ins().bxor_imm(both_int, 1);
+        // both-int: go int_block; else: check mixed.
+        let mixed_check_block = self.builder.create_block();
         self.builder
             .ins()
-            .brif(both_int, int_block, &[], trap_block, &[]);
+            .brif(both_int, int_block, &[], mixed_check_block, &[]);
+        self.builder.switch_to_block(mixed_check_block);
+        self.builder.seal_block(mixed_check_block);
+        // l is num, r is int → promote r to f64.
+        let l_num_r_int = self.builder.ins().band(l_is_num, r_is_int);
+        // l is int, r is num → promote l to f64.
+        let l_int_r_num = self.builder.ins().band(l_is_int, r_is_num);
+        let dispatch_mixed_r_block = self.builder.create_block();
+        self.builder.ins().brif(
+            l_num_r_int,
+            mixed_r_num_block,
+            &[],
+            dispatch_mixed_r_block,
+            &[],
+        );
+        self.builder.switch_to_block(dispatch_mixed_r_block);
+        self.builder.seal_block(dispatch_mixed_r_block);
+        self.builder
+            .ins()
+            .brif(l_int_r_num, mixed_l_num_block, &[], trap_block, &[]);
+        // suppress unused warning for the helper
+        let _ = not_both_int;
 
         self.builder.switch_to_block(int_block);
         self.builder.seal_block(int_block);
@@ -773,6 +807,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         };
         let icmp = self.builder.ins().icmp(icc, li, ri);
         self.builder.ins().jump(merge_block, &[icmp]);
+
+        // Mixed l:num, r:int — sign-extend r's i48 payload and convert to f64.
+        self.builder.switch_to_block(mixed_r_num_block);
+        self.builder.seal_block(mixed_r_num_block);
+        let lf_a = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
+        let ri_a = self.builder.ins().ishl_imm(rhs, 16);
+        let ri_a = self.builder.ins().sshr_imm(ri_a, 16);
+        let rf_a = self.builder.ins().fcvt_from_sint(types::F64, ri_a);
+        let cmp_a = self.builder.ins().fcmp(fcc, lf_a, rf_a);
+        self.builder.ins().jump(merge_block, &[cmp_a]);
+
+        // Mixed l:int, r:num — sign-extend l's i48 payload and convert to f64.
+        self.builder.switch_to_block(mixed_l_num_block);
+        self.builder.seal_block(mixed_l_num_block);
+        let li_b = self.builder.ins().ishl_imm(lhs, 16);
+        let li_b = self.builder.ins().sshr_imm(li_b, 16);
+        let lf_b = self.builder.ins().fcvt_from_sint(types::F64, li_b);
+        let rf_b = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
+        let cmp_b = self.builder.ins().fcmp(fcc, lf_b, rf_b);
+        self.builder.ins().jump(merge_block, &[cmp_b]);
 
         // Trap path: emit a negative error signal return (same convention as
         // the arith helper) so deopt is observed as a JIT compile/run error
