@@ -1321,6 +1321,58 @@ impl VirtualMachine {
                 self.push_raw_u64(ValueWord::from_native_ptr(new_ptr as usize))?;
                 Ok(true)
             }
+            // ── PC.2: SIMD-vectorized unary element-wise transforms on F64 ──
+            //
+            // These mirror the FLOAT_ARRAY_METHODS handlers (`handle_float_*`)
+            // but operate directly on the v2 `TypedArray<f64>` layout, so a
+            // literal `[1.0, 2.0, ...].sqrt()` no longer has to materialize
+            // through the legacy Arc-backed FloatArray. `wide::f64x4` lanes
+            // deliver ~4x throughput on AVX2; non-F64 receivers fall through
+            // (`Ok(false)`) to the legacy path.
+            "abs" => {
+                if let Some(ptr) =
+                    v2::unary_f64_transform(view, |v| v.abs(), f64::abs)
+                {
+                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            "sqrt" => {
+                if let Some(ptr) =
+                    v2::unary_f64_transform(view, |v| v.sqrt(), f64::sqrt)
+                {
+                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            "ln" => {
+                if let Some(ptr) = v2::unary_f64_transform(view, |v| v.ln(), f64::ln) {
+                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            "exp" => {
+                if let Some(ptr) = v2::unary_f64_transform(view, |v| v.exp(), f64::exp) {
+                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            "diff" => {
+                if let Some(ptr) = v2::diff_f64(view) {
+                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
             "push" => {
                 if raw_args.len() != 2 {
                     return Err(VMError::ArityMismatch {

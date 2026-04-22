@@ -876,6 +876,165 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
     }
 }
 
+// ── PC.2: SIMD-vectorized unary element-wise transforms on F64 views ────────
+//
+// These helpers produce a fresh v2 `TypedArray<f64>` by applying a pure
+// element-wise function to each f64 element of `view`. The allocation stamps
+// `ELEM_TYPE_F64` so the result is a first-class v2 typed array recognizable
+// by downstream `.sum()` / `.map()` / etc.
+//
+// `simd_op`/`scalar_op` mirror the pattern used in the shape-runtime
+// `intrinsic_vec_*` helpers. Arrays at or above `SIMD_UNARY_THRESHOLD` take
+// the `wide::f64x4` fast path; smaller arrays fall back to scalar to avoid
+// SIMD setup overhead.
+//
+// Callers use these via `dispatch_v2_typed_array_method` to implement
+// `.abs()`, `.sqrt()`, `.ln()`, `.exp()` on v2 typed arrays. For non-F64
+// element types the helper returns `None`, triggering the caller's legacy
+// fallback.
+
+/// Minimum F64 element count at which unary SIMD transforms beat scalar.
+/// Matches [`SIMD_SUM_THRESHOLD`]; determined empirically.
+const SIMD_UNARY_THRESHOLD: u32 = 16;
+
+/// Apply a unary element-wise f64 transform to `view`, returning a newly
+/// allocated v2 `TypedArray<f64>` pointer with `ELEM_TYPE_F64` stamped.
+///
+/// `simd_op` must be the `wide::f64x4` form of `scalar_op`; this is checked
+/// by the parity tests in `typed_array_methods::tests`.
+///
+/// Returns `None` for non-F64 element types — the caller should fall back to
+/// the legacy FLOAT_ARRAY_METHODS handler after materializing.
+pub fn unary_f64_transform(
+    view: &V2TypedArrayView,
+    simd_op: fn(wide::f64x4) -> wide::f64x4,
+    scalar_op: fn(f64) -> f64,
+) -> Option<*mut u8> {
+    use wide::f64x4;
+
+    if view.elem_type != V2ElemType::F64 {
+        return None;
+    }
+    let len = view.len;
+    let out = TypedArray::<f64>::with_capacity(len);
+    if len == 0 {
+        unsafe {
+            (*out).len = 0;
+            let p = out as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            return Some(p);
+        }
+    }
+
+    unsafe {
+        let src_arr = view.ptr as *const TypedArray<f64>;
+        let src = (*src_arr).data as *const f64;
+        let dst = (*out).data as *mut f64;
+
+        if len >= SIMD_UNARY_THRESHOLD {
+            let chunks = (len / 4) as usize;
+            for i in 0..chunks {
+                let base = i * 4;
+                let v = f64x4::from([
+                    *src.add(base),
+                    *src.add(base + 1),
+                    *src.add(base + 2),
+                    *src.add(base + 3),
+                ]);
+                let r = simd_op(v);
+                let arr = r.to_array();
+                *dst.add(base) = arr[0];
+                *dst.add(base + 1) = arr[1];
+                *dst.add(base + 2) = arr[2];
+                *dst.add(base + 3) = arr[3];
+            }
+            for i in (chunks * 4)..(len as usize) {
+                *dst.add(i) = scalar_op(*src.add(i));
+            }
+        } else {
+            for i in 0..(len as usize) {
+                *dst.add(i) = scalar_op(*src.add(i));
+            }
+        }
+
+        (*out).len = len;
+        let p = out as *mut u8;
+        stamp_elem_type(p, ELEM_TYPE_F64);
+        Some(p)
+    }
+}
+
+/// Stride-1 consecutive differences (`out[i] = src[i+1] - src[i]`) over a
+/// v2 F64 typed array. Returns a fresh v2 `TypedArray<f64>` of length
+/// `view.len - 1` (empty for `len < 2`). SIMD-accelerated via `f64x4` for
+/// sufficiently large inputs (PC.2).
+///
+/// Returns `None` for non-F64 element types.
+pub fn diff_f64(view: &V2TypedArrayView) -> Option<*mut u8> {
+    use wide::f64x4;
+
+    if view.elem_type != V2ElemType::F64 {
+        return None;
+    }
+    let len = view.len;
+    if len < 2 {
+        let out = TypedArray::<f64>::with_capacity(0);
+        unsafe {
+            (*out).len = 0;
+            let p = out as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            return Some(p);
+        }
+    }
+
+    let out_len = len - 1;
+    let out = TypedArray::<f64>::with_capacity(out_len);
+    unsafe {
+        let src_arr = view.ptr as *const TypedArray<f64>;
+        let src = (*src_arr).data as *const f64;
+        let dst = (*out).data as *mut f64;
+
+        if out_len >= SIMD_UNARY_THRESHOLD {
+            let mut i: usize = 0;
+            // While we can still load `src[i+1 .. i+5]`, step 4 at a time.
+            while i + 4 < (len as usize) {
+                let prev = f64x4::from([
+                    *src.add(i),
+                    *src.add(i + 1),
+                    *src.add(i + 2),
+                    *src.add(i + 3),
+                ]);
+                let next = f64x4::from([
+                    *src.add(i + 1),
+                    *src.add(i + 2),
+                    *src.add(i + 3),
+                    *src.add(i + 4),
+                ]);
+                let d = next - prev;
+                let arr = d.to_array();
+                *dst.add(i) = arr[0];
+                *dst.add(i + 1) = arr[1];
+                *dst.add(i + 2) = arr[2];
+                *dst.add(i + 3) = arr[3];
+                i += 4;
+            }
+            // Scalar tail: remaining `out_len - i` differences.
+            for j in i..(out_len as usize) {
+                *dst.add(j) = *src.add(j + 1) - *src.add(j);
+            }
+        } else {
+            for i in 0..(out_len as usize) {
+                *dst.add(i) = *src.add(i + 1) - *src.add(i);
+            }
+        }
+
+        (*out).len = out_len;
+        let p = out as *mut u8;
+        stamp_elem_type(p, ELEM_TYPE_F64);
+        Some(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

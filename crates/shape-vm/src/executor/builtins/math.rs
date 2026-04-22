@@ -17,6 +17,67 @@ fn nb_to_f64(nb: &ValueWord) -> Result<f64, VMError> {
     }
 }
 
+// ── PC.3: broadcasted-math helpers for `arr.sqrt()` / `.ln()` / `.exp()` ────
+//
+// Because `sqrt`/`ln`/`exp` are NOT listed in `is_known_builtin_method`, the
+// compiler lowers `arr.sqrt()` to a `BuiltinCall(Sqrt)` instead of a typed
+// `CallMethod`. Without the broadcasting path below that would turn the
+// array into `nb_to_f64` → "expected a number, got ptr". To keep the
+// single-element `(2.5).sqrt()` path bit-exact while enabling SIMD when
+// the receiver is an array, each builtin first checks for a v2 F64 typed
+// array (fast path) or a legacy FloatArray (fallback), and only then
+// coerces to `f64` for the scalar case.
+
+/// Try to apply a SIMD element-wise `f64` transform if `arg` is either a v2
+/// typed F64 array or a legacy FloatArray. Returns `Some(result)` on a hit,
+/// `None` when the argument isn't an F64 array — the caller then takes the
+/// scalar f64 path.
+#[inline]
+fn try_broadcast_f64_unary(
+    arg: &ValueWord,
+    simd_op: fn(wide::f64x4) -> wide::f64x4,
+    scalar_op: fn(f64) -> f64,
+) -> Option<ValueWord> {
+    use crate::executor::v2_handlers::v2_array_detect as v2;
+
+    // Fast path: v2 typed array pointer.
+    if let Some(view) = v2::as_v2_typed_array(arg) {
+        if let Some(ptr) = v2::unary_f64_transform(&view, simd_op, scalar_op) {
+            return Some(ValueWord::from_native_ptr(ptr as usize));
+        }
+    }
+    // Legacy Arc-backed FloatArray — preserves pre-v2 behaviour when a
+    // higher-level op produced a FloatArray rather than a v2 typed array.
+    if let Some(arr) = arg.as_float_array() {
+        use shape_value::aligned_vec::AlignedVec;
+        use std::sync::Arc;
+        use wide::f64x4;
+        const SIMD_THRESHOLD: usize = 16;
+        let len = arr.len();
+        let mut result = AlignedVec::with_capacity(len);
+        if len >= SIMD_THRESHOLD {
+            let chunks = len / 4;
+            for i in 0..chunks {
+                let idx = i * 4;
+                let v = f64x4::from(&arr[idx..idx + 4]);
+                let r = simd_op(v);
+                for &x in r.to_array().iter() {
+                    result.push(x);
+                }
+            }
+            for i in (chunks * 4)..len {
+                result.push(scalar_op(arr[i]));
+            }
+        } else {
+            for &v in arr.iter() {
+                result.push(scalar_op(v));
+            }
+        }
+        return Some(ValueWord::from_float_array(Arc::new(result.into())));
+    }
+    None
+}
+
 impl VirtualMachine {
     pub(in crate::executor) fn builtin_abs(
         &mut self,
@@ -24,6 +85,11 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("abs() requires 1 argument".into()));
+        }
+        // PC.3: `arr.abs()` lands here when UFCS rewrites the method call
+        // to a builtin. Broadcast via SIMD before falling back to scalar.
+        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.abs(), f64::abs) {
+            return Ok(result);
         }
         if let Some(i) = args[0].as_i64() {
             Ok(ValueWord::from_i64(i.abs()))
@@ -42,6 +108,10 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("sqrt() requires 1 argument".into()));
+        }
+        // PC.3: broadcast over F64 arrays via SIMD; scalar path is preserved.
+        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.sqrt(), f64::sqrt) {
+            return Ok(result);
         }
         Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.sqrt()))
     }
@@ -83,6 +153,10 @@ impl VirtualMachine {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("ln() requires 1 argument".into()));
         }
+        // PC.3: broadcast over F64 arrays via SIMD.
+        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.ln(), f64::ln) {
+            return Ok(result);
+        }
         Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.ln()))
     }
 
@@ -92,6 +166,10 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         if args.len() != 1 {
             return Err(VMError::RuntimeError("exp() requires 1 argument".into()));
+        }
+        // PC.3: broadcast over F64 arrays via SIMD.
+        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.exp(), f64::exp) {
+            return Ok(result);
         }
         Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.exp()))
     }
