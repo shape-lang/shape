@@ -332,10 +332,9 @@ impl JITExecutor {
     }
 
     fn value_word_to_wire(&self, bits: u64) -> WireValue {
-        use crate::ffi::jit_kinds::jit_unbox;
         use crate::ffi::value_ffi::{
             HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
-            unbox_number,
+            unbox_number, unbox_string,
         };
         use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
@@ -352,8 +351,21 @@ impl JITExecutor {
             let int_val = sign_extend_i48(get_payload(bits));
             WireValue::Integer(int_val)
         } else if is_heap_kind(bits, HK_STRING) {
-            let s = unsafe { jit_unbox::<String>(bits) };
-            WireValue::String(s.clone())
+            // `box_string` in the MIR-compile path routes string-literal
+            // constants through `UnifiedString` (unified-heap, bit-47 set),
+            // whereas legacy JIT heap strings use the `JitAlloc<String>`
+            // layout (bit-47 clear). The two have incompatible in-memory
+            // representations — `UnifiedString` carries `data: *const u8 +
+            // len: u64 + cap: u64` starting at offset 8, but
+            // `jit_unbox::<String>` would reinterpret those bytes as a Rust
+            // `String` (Vec<u8>, 3 words) and then `s.clone()` would read
+            // nonsense len/cap fields and segfault on alloc.
+            //
+            // `unbox_string` branches on `ValueBits::is_unified_heap()` and
+            // decodes either format correctly, returning a `&str` we clone
+            // into the WireValue.
+            let s = unsafe { unbox_string(bits) };
+            WireValue::String(s.to_owned())
         } else {
             // Default to interpreting as a number for unknown tags
             WireValue::Number(f64::from_bits(bits))
