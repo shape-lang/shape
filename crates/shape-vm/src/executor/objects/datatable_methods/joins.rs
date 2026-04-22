@@ -1,7 +1,7 @@
 //! DataTable join methods: innerJoin, leftJoin.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
 
@@ -65,7 +65,7 @@ pub(crate) fn handle_inner_join(
     let left_arc = Arc::new(left_dt.as_ref().clone());
     let right_arc = Arc::new(right_dt.as_ref().clone());
 
-    let mut rows: Vec<ValueWord> = Vec::new();
+    let mut rows: ArgVec = ArgVec::new();
 
     for l_idx in 0..left_arc.row_count() {
         let left_rv_bits = ValueWord::from_row_view(left_schema_id, left_arc.clone(), l_idx).into_raw_bits();
@@ -85,7 +85,7 @@ pub(crate) fn handle_inner_join(
                     &[left_rv_bits, right_rv_bits],
                     ctx.as_deref_mut(),
                 )?;
-                rows.push(ValueWord::from_raw_bits(result_bits));
+                rows.push(result_bits);
             }
         }
     }
@@ -118,7 +118,7 @@ pub(crate) fn handle_left_join(
     let left_arc = Arc::new(left_dt.as_ref().clone());
     let right_arc = Arc::new(right_dt.as_ref().clone());
 
-    let mut rows: Vec<ValueWord> = Vec::new();
+    let mut rows: ArgVec = ArgVec::new();
 
     for l_idx in 0..left_arc.row_count() {
         let left_rv_bits = ValueWord::from_row_view(left_schema_id, left_arc.clone(), l_idx).into_raw_bits();
@@ -140,7 +140,7 @@ pub(crate) fn handle_left_join(
                     &[left_rv_bits, right_rv_bits],
                     ctx.as_deref_mut(),
                 )?;
-                rows.push(ValueWord::from_raw_bits(result_bits));
+                rows.push(result_bits);
                 found_match = true;
             }
         }
@@ -158,7 +158,7 @@ pub(crate) fn handle_left_join(
                 &[left_rv_bits, empty_right.into_raw_bits()],
                 ctx.as_deref_mut(),
             )?;
-            rows.push(ValueWord::from_raw_bits(result_bits));
+            rows.push(result_bits);
         }
     }
 

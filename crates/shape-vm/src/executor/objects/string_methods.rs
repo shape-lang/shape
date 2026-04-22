@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -334,8 +334,9 @@ pub fn v2_string_split(
     let sep = raw_helpers::extract_str(args[1]).ok_or_else(|| VMError::InvalidArgument {
         function: "split".to_string(), message: "requires a separator argument".to_string(),
     })?;
-    let parts: Vec<ValueWord> = s.split(sep).map(|part| ValueWord::from_string(Arc::new(part.to_string()))).collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts)).raw_bits())
+    let parts: ArgVec =
+        ArgVec::from_vec(s.split(sep).map(|part| ValueWord::from_string(Arc::new(part.to_string()))).collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts.into_inner())).raw_bits())
 }
 
 /// replace
@@ -411,8 +412,9 @@ pub fn v2_string_graphemes(
     use unicode_segmentation::UnicodeSegmentation;
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let clusters: Vec<ValueWord> = s.graphemes(true).map(|g| ValueWord::from_string(Arc::new(g.to_string()))).collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters)).into_raw_bits())
+    let clusters: ArgVec =
+        ArgVec::from_vec(s.graphemes(true).map(|g| ValueWord::from_string(Arc::new(g.to_string()))).collect());
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters.into_inner())).into_raw_bits())
 }
 
 /// normalize
