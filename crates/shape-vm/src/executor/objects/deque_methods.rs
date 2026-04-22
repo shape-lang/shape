@@ -25,7 +25,9 @@ pub fn v2_push_back(
     if let Some(deque_data) = extract_deque(args[0]) {
         let mut new_data = deque_data.clone();
         new_data.items.push_back(item);
-        Ok(ValueWord::from_deque(new_data.items.into()).into_raw_bits())
+        // `DequeData` has a custom Drop (Wave 4 WC.1), so move
+        // `items` out via `take_items()` before dropping `new_data`.
+        Ok(ValueWord::from_deque(new_data.take_items().into()).into_raw_bits())
     } else {
         Err(type_mismatch_error("pushBack", "Deque"))
     }
@@ -41,7 +43,7 @@ pub fn v2_push_front(
     if let Some(deque_data) = extract_deque(args[0]) {
         let mut new_data = deque_data.clone();
         new_data.items.push_front(item);
-        Ok(ValueWord::from_deque(new_data.items.into()).into_raw_bits())
+        Ok(ValueWord::from_deque(new_data.take_items().into()).into_raw_bits())
     } else {
         Err(type_mismatch_error("pushFront", "Deque"))
     }

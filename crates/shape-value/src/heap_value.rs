@@ -12,6 +12,7 @@
 
 use crate::aligned_vec::AlignedVec;
 use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word_drop::{vw_clone, vw_drop, vw_drop_slice};
 use chrono::{DateTime, FixedOffset};
 use shape_ast::data::Timeframe;
 use std::collections::HashMap;
@@ -155,7 +156,11 @@ pub struct ProjectedRefData {
 /// Uses bucket chaining (`HashMap<u64, Vec<usize>>`) so that hash collisions
 /// are handled correctly — each bucket stores all indices whose key hashes
 /// to the same u64.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `keys` and
+/// `values` vectors via `vw_drop_slice`. `Clone` mirrors that via
+/// `vw_clone` per element so refcounts stay paired with drops.
+#[derive(Debug)]
 pub struct HashMapData {
     pub keys: Vec<ValueWord>,
     pub values: Vec<ValueWord>,
@@ -163,6 +168,29 @@ pub struct HashMapData {
     /// Optional shape (hidden class) for O(1) index-based access.
     /// None means "dictionary mode" (fallback to hash-based lookup).
     pub shape_id: Option<crate::shape_graph::ShapeId>,
+}
+
+impl Clone for HashMapData {
+    fn clone(&self) -> Self {
+        // Per-element `vw_clone` bumps refcounts for shared heap values
+        // and deep-clones owned heap values so the new vectors become
+        // independent logical owners of their entries.
+        let keys = self.keys.iter().map(|&b| vw_clone(b)).collect();
+        let values = self.values.iter().map(|&b| vw_clone(b)).collect();
+        HashMapData {
+            keys,
+            values,
+            index: self.index.clone(),
+            shape_id: self.shape_id,
+        }
+    }
+}
+
+impl Drop for HashMapData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.keys);
+        vw_drop_slice(&self.values);
+    }
 }
 
 impl HashMapData {
@@ -221,10 +249,30 @@ impl HashMapData {
 /// Data for Set variant (boxed to keep HeapValue small).
 ///
 /// Uses bucket chaining for collision-safe O(1) membership tests.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
+/// per element.
+#[derive(Debug)]
 pub struct SetData {
     pub items: Vec<ValueWord>,
     pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl Clone for SetData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        SetData {
+            items,
+            index: self.index.clone(),
+        }
+    }
+}
+
+impl Drop for SetData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.items);
+    }
 }
 
 impl SetData {
@@ -288,15 +336,42 @@ impl SetData {
         }
         set
     }
+
+    /// Move the inner `items` vector out, leaving an empty one behind.
+    /// Used when transferring ownership of heap refs into a new
+    /// container (e.g. constructing a fresh `Set` value word).
+    /// `self`'s Drop becomes a no-op on the items vector after this.
+    #[inline]
+    pub fn take_items(&mut self) -> Vec<ValueWord> {
+        self.index.clear();
+        std::mem::take(&mut self.items)
+    }
 }
 
 /// Data for PriorityQueue variant — binary min-heap.
 ///
 /// Items are ordered by their numeric value (via `as_number_coerce()`).
 /// For non-numeric items, insertion order is preserved as a FIFO fallback.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
+/// per element.
+#[derive(Debug)]
 pub struct PriorityQueueData {
     pub items: Vec<ValueWord>,
+}
+
+impl Clone for PriorityQueueData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        PriorityQueueData { items }
+    }
+}
+
+impl Drop for PriorityQueueData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.items);
+    }
 }
 
 impl PriorityQueueData {
@@ -401,10 +476,23 @@ impl PriorityQueueData {
             self.sift_down(i);
         }
     }
+
+    /// Move the inner `items` vector out, leaving an empty one behind.
+    /// Used when transferring ownership of heap refs into a new
+    /// container. `self`'s Drop becomes a no-op on the items vector
+    /// after this.
+    #[inline]
+    pub fn take_items(&mut self) -> Vec<ValueWord> {
+        std::mem::take(&mut self.items)
+    }
 }
 
 /// Data for Deque variant — double-ended queue backed by VecDeque.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// VecDeque via `vw_drop` per element; `Clone` mirrors that via
+/// `vw_clone` per element.
+#[derive(Debug)]
 pub struct DequeData {
     pub items: std::collections::VecDeque<ValueWord>,
 }
@@ -419,6 +507,34 @@ impl DequeData {
     pub fn from_items(items: Vec<ValueWord>) -> Self {
         DequeData {
             items: items.into(),
+        }
+    }
+
+    /// Move the inner `items` VecDeque out, leaving an empty one
+    /// behind. The returned deque takes ownership of the heap-refs;
+    /// `self`'s Drop becomes a no-op since the VecDeque is empty.
+    ///
+    /// Use this when transferring `items` into a new owner
+    /// (e.g. constructing a fresh `DequeData` or value wrapper) —
+    /// ownership of each element's heap ref transfers with the move,
+    /// so no refcount adjustments are needed.
+    #[inline]
+    pub fn take_items(&mut self) -> std::collections::VecDeque<ValueWord> {
+        std::mem::take(&mut self.items)
+    }
+}
+
+impl Clone for DequeData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        DequeData { items }
+    }
+}
+
+impl Drop for DequeData {
+    fn drop(&mut self) {
+        for &b in self.items.iter() {
+            vw_drop(b);
         }
     }
 }

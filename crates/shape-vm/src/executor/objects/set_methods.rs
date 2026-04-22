@@ -41,7 +41,9 @@ pub fn v2_add(
     if let Some(set_data) = extract_set(args[0]) {
         let mut new_data = set_data.clone();
         new_data.insert(item);
-        Ok(ValueWord::from_set(new_data.items).into_raw_bits())
+        // `SetData` has a custom Drop (Wave 4 WC.1), so move `items`
+        // out via `take_items()` before dropping `new_data`.
+        Ok(ValueWord::from_set(new_data.take_items()).into_raw_bits())
     } else {
         Err(type_mismatch_error("add", "Set"))
     }
@@ -79,7 +81,7 @@ pub fn v2_delete(
     if let Some(set_data) = extract_set(args[0]) {
         let mut new_data = set_data.clone();
         new_data.remove(&item);
-        Ok(ValueWord::from_set(new_data.items).into_raw_bits())
+        Ok(ValueWord::from_set(new_data.take_items()).into_raw_bits())
     } else {
         Err(type_mismatch_error("delete", "Set"))
     }
@@ -139,7 +141,7 @@ pub fn v2_union(
     for item in &b.items {
         result.insert(item.clone());
     }
-    Ok(ValueWord::from_set(result.items).into_raw_bits())
+    Ok(ValueWord::from_set(result.take_items()).into_raw_bits())
 }
 
 /// Set.intersection(other: Set) -> Set [v2]
