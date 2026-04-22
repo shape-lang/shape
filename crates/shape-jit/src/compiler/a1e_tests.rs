@@ -364,8 +364,11 @@ fn a1e_jit_var_counter_repeated_calls() {
 #[test]
 fn a1e_jit_mixed_let_letmut_var() {
     // Closure captures one of each kind — immutable `base` (let),
-    // OwnedMutable `accum` (let mut), Shared `shared` (var). All
-    // three lowering paths must coexist in a single closure layout.
+    // OwnedMutable `accum` (let mut, moved into closure), Shared
+    // `shared` (var). All three lowering paths must coexist in a
+    // single closure layout. Under Rust-move semantics, outer reads
+    // of `accum` after capture are a compile error — so the closure
+    // folds accum into shared, which stays outer-accessible.
     let source = r#"
         fn main() -> int {
             let base: int = 100
@@ -373,20 +376,22 @@ fn a1e_jit_mixed_let_letmut_var() {
             var shared: int = 7
             let f = || {
                 accum = accum + base
-                shared = shared + 1
+                shared = shared + accum
             }
             f()
             f()
-            accum + shared
+            shared
         }
         main()
     "#;
     match jit_run(source) {
-        // accum = 0 + 100 + 100 = 200; shared = 7 + 1 + 1 = 9; sum = 209.
-        shape_wire::WireValue::Integer(n) => assert_eq!(n, 209),
+        // f() #1: accum = 0 + 100 = 100, shared = 7 + 100 = 107
+        // f() #2: accum = 100 + 100 = 200, shared = 107 + 200 = 307
+        // outer returns shared = 307.
+        shape_wire::WireValue::Integer(n) => assert_eq!(n, 307),
         shape_wire::WireValue::Number(n) => {
-            assert!((n - 209.0).abs() < 1e-9, "expected 209, got Number {}", n)
+            assert!((n - 307.0).abs() < 1e-9, "expected 307, got Number {}", n)
         }
-        other => panic!("expected Integer(209), got {:?}", other),
+        other => panic!("expected Integer(307), got {:?}", other),
     }
 }
