@@ -1043,6 +1043,15 @@ impl LazyData {
 /// A `Channel()` call creates a sender/receiver pair. Both share the same
 /// underlying `mpsc::channel`. The sender can be cloned (multi-producer),
 /// while the receiver is wrapped in a Mutex for shared access.
+///
+/// Wave 4 WC.5: the channel's buffered payload is `ValueWord` bits that
+/// may carry a heap tag. Rust's default `Drop` for `mpsc::Receiver` would
+/// release each buffered message as a bare `u64`, leaking the
+/// underlying Arc / owned-box refcounts. On `Drop`, `ChannelData`
+/// detects the final-owner case on the receiver side (strong count of
+/// the `Arc<Mutex<_>>` reaches 1) and drains any remaining buffered
+/// messages through `vw_drop`. The sender side holds no buffered
+/// values, so its drop stays a no-op beyond the normal Arc release.
 #[derive(Debug, Clone)]
 pub enum ChannelData {
     Sender {
@@ -1053,6 +1062,29 @@ pub enum ChannelData {
         rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ValueWord>>>,
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
+}
+
+impl Drop for ChannelData {
+    fn drop(&mut self) {
+        if let ChannelData::Receiver { rx, .. } = self {
+            // Only the final owner needs to drain; non-final owners
+            // just relinquish a reference and let the eventual final
+            // owner handle the buffered messages. Checking
+            // `strong_count == 1` here is a best-effort shortcut —
+            // if a concurrent `Arc::clone` races us, we may skip the
+            // drain and the other owner will run the Drop path
+            // instead. The `try_lock` + `try_recv` loop is harmless
+            // either way (on failure we simply leak the buffered
+            // values, matching the pre-WC.5 behavior).
+            if Arc::strong_count(rx) == 1 {
+                if let Ok(guard) = rx.try_lock() {
+                    while let Ok(bits) = guard.try_recv() {
+                        vw_drop(bits);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ChannelData {
