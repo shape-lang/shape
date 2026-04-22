@@ -8,7 +8,7 @@
 use crate::context::ExecutionContext;
 use shape_ast::ast::{Expr, SortDirection, WindowBound, WindowExpr, WindowFrame, WindowFunction};
 use shape_ast::error::Result;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt, vw_clone};
 use std::collections::HashMap;
 
 /// Execute window functions over a dataset
@@ -21,8 +21,9 @@ pub struct WindowExecutor {
 struct RowData {
     /// Original row index in the input dataset
     original_index: usize,
-    /// Row values by field name
-    values: HashMap<String, ValueWord>,
+    /// Row values by field name. `ValueMap` releases heap refs when
+    /// the executor's partition data is cleared.
+    values: ValueMap,
 }
 
 /// Wrapper for ValueWord that implements Eq + Hash for partition keys
@@ -148,13 +149,16 @@ impl WindowExecutor {
         ctx: &mut ExecutionContext,
     ) -> Result<()> {
         if partition_by.is_empty() {
-            // Single partition with all rows
+            // Single partition with all rows. `ValueMap::from_ref_map`
+            // bumps each cell's heap refcount so the source row keeps
+            // its own ownership (the RowData's `ValueMap` releases on
+            // its own drop).
             let all_rows: Vec<_> = rows
                 .iter()
                 .enumerate()
                 .map(|(idx, row)| RowData {
                     original_index: idx,
-                    values: row.clone(),
+                    values: ValueMap::from_ref_map(row),
                 })
                 .collect();
             self.partitions.insert(vec![], all_rows);
@@ -163,8 +167,10 @@ impl WindowExecutor {
 
         for (idx, row) in rows.iter().enumerate() {
             ctx.push_scope();
+            // vw_clone bumps heap refs so the source row retains its
+            // ownership while the VM context owns an independent ref.
             for (key, value) in row {
-                let _ = ctx.set_variable_nb(key, value.clone());
+                let _ = ctx.set_variable_nb(key, vw_clone(*value));
             }
 
             let mut key = Vec::with_capacity(partition_by.len());
@@ -181,7 +187,7 @@ impl WindowExecutor {
 
             self.partitions.entry(key).or_default().push(RowData {
                 original_index: idx,
-                values: row.clone(),
+                values: ValueMap::from_ref_map(row),
             });
         }
 
@@ -436,10 +442,15 @@ fn get_frame_bounds(
     }
 }
 
-/// Extract sort value from expression
-fn extract_sort_value(row: &HashMap<String, ValueWord>, expr: &Expr) -> ValueWord {
+/// Extract sort value from expression.
+///
+/// Returns a borrowed bit-copy of the cell value (without bumping the
+/// heap refcount). Callers use the result only for read-only comparison
+/// before the source row is dropped, so the lifetime of the bit pattern
+/// is always strictly shorter than the row's ownership.
+fn extract_sort_value(row: &ValueMap, expr: &Expr) -> ValueWord {
     if let Expr::Identifier(name, _) = expr {
-        return row.get(name).cloned().unwrap_or(ValueWord::none());
+        return row.get(name).copied().unwrap_or(ValueWord::none());
     }
     ValueWord::none()
 }
