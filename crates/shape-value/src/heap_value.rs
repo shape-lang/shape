@@ -12,6 +12,7 @@
 
 use crate::aligned_vec::AlignedVec;
 use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word_drop::{vw_clone, vw_drop, vw_drop_slice};
 use chrono::{DateTime, FixedOffset};
 use shape_ast::data::Timeframe;
 use std::collections::HashMap;
@@ -78,7 +79,12 @@ impl MatrixData {
 }
 
 /// Lazy iterator state — supports chained transforms without materializing intermediates.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `source` is a `ValueWord` bit pattern and `transforms`
+/// is a chain of per-transform closures; each of those slots can
+/// carry a heap tag. Manual `Clone` / `Drop` keep the refcount
+/// bookkeeping paired with `vw_clone` / `vw_drop`.
+#[derive(Debug)]
 pub struct IteratorState {
     pub source: ValueWord,
     pub position: usize,
@@ -86,8 +92,30 @@ pub struct IteratorState {
     pub done: bool,
 }
 
+impl Clone for IteratorState {
+    fn clone(&self) -> Self {
+        IteratorState {
+            source: vw_clone(self.source),
+            position: self.position,
+            transforms: self.transforms.clone(),
+            done: self.done,
+        }
+    }
+}
+
+impl Drop for IteratorState {
+    fn drop(&mut self) {
+        vw_drop(self.source);
+    }
+}
+
 /// A lazy transform in an iterator chain.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `Map` / `Filter` / `FlatMap` each hold a closure
+/// `ValueWord` whose heap tag must be refcount-paired via manual
+/// `Clone` / `Drop`. `Take` / `Skip` carry only scalar `usize`
+/// counts and are no-ops for heap bookkeeping.
+#[derive(Debug)]
 pub enum IteratorTransform {
     Map(ValueWord),
     Filter(ValueWord),
@@ -96,13 +124,64 @@ pub enum IteratorTransform {
     FlatMap(ValueWord),
 }
 
+impl Clone for IteratorTransform {
+    fn clone(&self) -> Self {
+        match self {
+            IteratorTransform::Map(b) => IteratorTransform::Map(vw_clone(*b)),
+            IteratorTransform::Filter(b) => IteratorTransform::Filter(vw_clone(*b)),
+            IteratorTransform::Take(n) => IteratorTransform::Take(*n),
+            IteratorTransform::Skip(n) => IteratorTransform::Skip(*n),
+            IteratorTransform::FlatMap(b) => IteratorTransform::FlatMap(vw_clone(*b)),
+        }
+    }
+}
+
+impl Drop for IteratorTransform {
+    fn drop(&mut self) {
+        match self {
+            IteratorTransform::Map(b)
+            | IteratorTransform::Filter(b)
+            | IteratorTransform::FlatMap(b) => vw_drop(*b),
+            IteratorTransform::Take(_) | IteratorTransform::Skip(_) => {}
+        }
+    }
+}
+
 /// Generator function state machine.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `locals` and `result` carry `ValueWord` bits that
+/// may be heap-tagged. Manual `Clone` / `Drop` refcount-pair them.
+#[derive(Debug)]
 pub struct GeneratorState {
     pub function_id: u16,
     pub state: u16,
     pub locals: Box<[ValueWord]>,
     pub result: Option<Box<ValueWord>>,
+}
+
+impl Clone for GeneratorState {
+    fn clone(&self) -> Self {
+        let locals: Vec<ValueWord> = self.locals.iter().map(|&b| vw_clone(b)).collect();
+        let result = self
+            .result
+            .as_deref()
+            .map(|&b| Box::new(vw_clone(b)));
+        GeneratorState {
+            function_id: self.function_id,
+            state: self.state,
+            locals: locals.into_boxed_slice(),
+            result,
+        }
+    }
+}
+
+impl Drop for GeneratorState {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.locals);
+        if let Some(b) = &self.result {
+            vw_drop(**b);
+        }
+    }
 }
 
 /// Data for SimulationCall variant (boxed to keep HeapValue small).
@@ -155,7 +234,11 @@ pub struct ProjectedRefData {
 /// Uses bucket chaining (`HashMap<u64, Vec<usize>>`) so that hash collisions
 /// are handled correctly — each bucket stores all indices whose key hashes
 /// to the same u64.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `keys` and
+/// `values` vectors via `vw_drop_slice`. `Clone` mirrors that via
+/// `vw_clone` per element so refcounts stay paired with drops.
+#[derive(Debug)]
 pub struct HashMapData {
     pub keys: Vec<ValueWord>,
     pub values: Vec<ValueWord>,
@@ -163,6 +246,29 @@ pub struct HashMapData {
     /// Optional shape (hidden class) for O(1) index-based access.
     /// None means "dictionary mode" (fallback to hash-based lookup).
     pub shape_id: Option<crate::shape_graph::ShapeId>,
+}
+
+impl Clone for HashMapData {
+    fn clone(&self) -> Self {
+        // Per-element `vw_clone` bumps refcounts for shared heap values
+        // and deep-clones owned heap values so the new vectors become
+        // independent logical owners of their entries.
+        let keys = self.keys.iter().map(|&b| vw_clone(b)).collect();
+        let values = self.values.iter().map(|&b| vw_clone(b)).collect();
+        HashMapData {
+            keys,
+            values,
+            index: self.index.clone(),
+            shape_id: self.shape_id,
+        }
+    }
+}
+
+impl Drop for HashMapData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.keys);
+        vw_drop_slice(&self.values);
+    }
 }
 
 impl HashMapData {
@@ -221,10 +327,30 @@ impl HashMapData {
 /// Data for Set variant (boxed to keep HeapValue small).
 ///
 /// Uses bucket chaining for collision-safe O(1) membership tests.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
+/// per element.
+#[derive(Debug)]
 pub struct SetData {
     pub items: Vec<ValueWord>,
     pub index: HashMap<u64, Vec<usize>>,
+}
+
+impl Clone for SetData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        SetData {
+            items,
+            index: self.index.clone(),
+        }
+    }
+}
+
+impl Drop for SetData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.items);
+    }
 }
 
 impl SetData {
@@ -288,15 +414,42 @@ impl SetData {
         }
         set
     }
+
+    /// Move the inner `items` vector out, leaving an empty one behind.
+    /// Used when transferring ownership of heap refs into a new
+    /// container (e.g. constructing a fresh `Set` value word).
+    /// `self`'s Drop becomes a no-op on the items vector after this.
+    #[inline]
+    pub fn take_items(&mut self) -> Vec<ValueWord> {
+        self.index.clear();
+        std::mem::take(&mut self.items)
+    }
 }
 
 /// Data for PriorityQueue variant — binary min-heap.
 ///
 /// Items are ordered by their numeric value (via `as_number_coerce()`).
 /// For non-numeric items, insertion order is preserved as a FIFO fallback.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
+/// per element.
+#[derive(Debug)]
 pub struct PriorityQueueData {
     pub items: Vec<ValueWord>,
+}
+
+impl Clone for PriorityQueueData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        PriorityQueueData { items }
+    }
+}
+
+impl Drop for PriorityQueueData {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.items);
+    }
 }
 
 impl PriorityQueueData {
@@ -401,10 +554,23 @@ impl PriorityQueueData {
             self.sift_down(i);
         }
     }
+
+    /// Move the inner `items` vector out, leaving an empty one behind.
+    /// Used when transferring ownership of heap refs into a new
+    /// container. `self`'s Drop becomes a no-op on the items vector
+    /// after this.
+    #[inline]
+    pub fn take_items(&mut self) -> Vec<ValueWord> {
+        std::mem::take(&mut self.items)
+    }
 }
 
 /// Data for Deque variant — double-ended queue backed by VecDeque.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
+/// VecDeque via `vw_drop` per element; `Clone` mirrors that via
+/// `vw_clone` per element.
+#[derive(Debug)]
 pub struct DequeData {
     pub items: std::collections::VecDeque<ValueWord>,
 }
@@ -419,6 +585,34 @@ impl DequeData {
     pub fn from_items(items: Vec<ValueWord>) -> Self {
         DequeData {
             items: items.into(),
+        }
+    }
+
+    /// Move the inner `items` VecDeque out, leaving an empty one
+    /// behind. The returned deque takes ownership of the heap-refs;
+    /// `self`'s Drop becomes a no-op since the VecDeque is empty.
+    ///
+    /// Use this when transferring `items` into a new owner
+    /// (e.g. constructing a fresh `DequeData` or value wrapper) —
+    /// ownership of each element's heap ref transfers with the move,
+    /// so no refcount adjustments are needed.
+    #[inline]
+    pub fn take_items(&mut self) -> std::collections::VecDeque<ValueWord> {
+        std::mem::take(&mut self.items)
+    }
+}
+
+impl Clone for DequeData {
+    fn clone(&self) -> Self {
+        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
+        DequeData { items }
+    }
+}
+
+impl Drop for DequeData {
+    fn drop(&mut self) {
+        for &b in self.items.iter() {
+            vw_drop(b);
         }
     }
 }
@@ -849,6 +1043,15 @@ impl LazyData {
 /// A `Channel()` call creates a sender/receiver pair. Both share the same
 /// underlying `mpsc::channel`. The sender can be cloned (multi-producer),
 /// while the receiver is wrapped in a Mutex for shared access.
+///
+/// Wave 4 WC.5: the channel's buffered payload is `ValueWord` bits that
+/// may carry a heap tag. Rust's default `Drop` for `mpsc::Receiver` would
+/// release each buffered message as a bare `u64`, leaking the
+/// underlying Arc / owned-box refcounts. On `Drop`, `ChannelData`
+/// detects the final-owner case on the receiver side (strong count of
+/// the `Arc<Mutex<_>>` reaches 1) and drains any remaining buffered
+/// messages through `vw_drop`. The sender side holds no buffered
+/// values, so its drop stays a no-op beyond the normal Arc release.
 #[derive(Debug, Clone)]
 pub enum ChannelData {
     Sender {
@@ -859,6 +1062,29 @@ pub enum ChannelData {
         rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ValueWord>>>,
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
+}
+
+impl Drop for ChannelData {
+    fn drop(&mut self) {
+        if let ChannelData::Receiver { rx, .. } = self {
+            // Only the final owner needs to drain; non-final owners
+            // just relinquish a reference and let the eventual final
+            // owner handle the buffered messages. Checking
+            // `strong_count == 1` here is a best-effort shortcut —
+            // if a concurrent `Arc::clone` races us, we may skip the
+            // drain and the other owner will run the Drop path
+            // instead. The `try_lock` + `try_recv` loop is harmless
+            // either way (on failure we simply leak the buffered
+            // values, matching the pre-WC.5 behavior).
+            if Arc::strong_count(rx) == 1 {
+                if let Ok(guard) = rx.try_lock() {
+                    while let Ok(bits) = guard.try_recv() {
+                        vw_drop(bits);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ChannelData {
@@ -1268,6 +1494,130 @@ impl fmt::Display for TableViewData {
 //
 // All generated from the single source of truth in define_heap_types!().
 crate::define_heap_types!();
+
+// ── Manual Clone / Drop for HeapValue (Wave 4 WC.3) ─────────────────────────
+//
+// Why this is manual, not `#[derive(Clone)]` + no Drop:
+//
+// The `Some(Box<ValueWord>)` / `Ok(Box<ValueWord>)` / `Err(Box<ValueWord>)`
+// variants hold a NaN-boxed `u64` inside a `Box`. A derived `Clone` would
+// copy the `u64` bits into a fresh `Box` **without calling `vw_clone`**,
+// so any heap tag encoded in the bits would be unreachable from the refcount
+// pipeline. Likewise, an automatic `Drop` of `Box<ValueWord>` would free
+// only the Box allocation and leak the underlying Arc / owned box.
+//
+// This impl pairs the two: `Clone` routes the inner bits through
+// `vw_clone` (shared-heap refcount bump / owned-heap deep clone) and `Drop`
+// routes them through `vw_drop`. Every other variant delegates to its
+// inner type's own `Clone` / `Drop` exactly as the auto-derive would
+// have generated.
+impl Clone for HeapValue {
+    fn clone(&self) -> Self {
+        match self {
+            // Tuple variants
+            HeapValue::String(v) => HeapValue::String(v.clone()),
+            HeapValue::Array(v) => HeapValue::Array(v.clone()),
+            HeapValue::Decimal(v) => HeapValue::Decimal(*v),
+            HeapValue::BigInt(v) => HeapValue::BigInt(*v),
+            HeapValue::HostClosure(v) => HeapValue::HostClosure(v.clone()),
+            HeapValue::DataTable(v) => HeapValue::DataTable(v.clone()),
+            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
+            HeapValue::Set(v) => HeapValue::Set(v.clone()),
+            HeapValue::Deque(v) => HeapValue::Deque(v.clone()),
+            HeapValue::PriorityQueue(v) => HeapValue::PriorityQueue(v.clone()),
+            HeapValue::Content(v) => HeapValue::Content(v.clone()),
+            HeapValue::Instant(v) => HeapValue::Instant(v.clone()),
+            HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
+            HeapValue::Enum(v) => HeapValue::Enum(v.clone()),
+            // The three ValueWord-bearing variants route through vw_clone
+            // so heap refcounts stay paired with the matching Drop below.
+            HeapValue::Some(inner) => HeapValue::Some(Box::new(vw_clone(**inner))),
+            HeapValue::Ok(inner) => HeapValue::Ok(Box::new(vw_clone(**inner))),
+            HeapValue::Err(inner) => HeapValue::Err(Box::new(vw_clone(**inner))),
+            HeapValue::Future(v) => HeapValue::Future(*v),
+            HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
+            HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
+            HeapValue::Iterator(v) => HeapValue::Iterator(v.clone()),
+            HeapValue::Generator(v) => HeapValue::Generator(v.clone()),
+            HeapValue::Char(v) => HeapValue::Char(*v),
+            HeapValue::ProjectedRef(v) => HeapValue::ProjectedRef(v.clone()),
+            // Struct variants
+            HeapValue::TypedObject {
+                schema_id,
+                slots,
+                heap_mask,
+            } => HeapValue::TypedObject {
+                schema_id: *schema_id,
+                slots: slots.clone(),
+                heap_mask: *heap_mask,
+            },
+            HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
+            HeapValue::Range {
+                start,
+                end,
+                inclusive,
+            } => HeapValue::Range {
+                // `start` / `end` carry `Box<ValueWord>` bits; route each
+                // through `vw_clone` so heap-tagged endpoints stay
+                // refcount-paired with the matching Drop below.
+                start: start.as_deref().map(|&b| Box::new(vw_clone(b))),
+                end: end.as_deref().map(|&b| Box::new(vw_clone(b))),
+                inclusive: *inclusive,
+            },
+            HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
+                kind: *kind,
+                task_ids: task_ids.clone(),
+            },
+            HeapValue::TraitObject { value, vtable } => HeapValue::TraitObject {
+                // `value` is a `Box<ValueWord>` holding NaN-boxed bits.
+                value: Box::new(vw_clone(**value)),
+                vtable: vtable.clone(),
+            },
+            HeapValue::FunctionRef { name, closure } => HeapValue::FunctionRef {
+                name: name.clone(),
+                closure: closure.as_deref().map(|&b| Box::new(vw_clone(b))),
+            },
+            HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
+            HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
+            HeapValue::Rare(v) => HeapValue::Rare(v.clone()),
+            HeapValue::Concurrency(v) => HeapValue::Concurrency(v.clone()),
+            HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
+        }
+    }
+}
+
+impl Drop for HeapValue {
+    fn drop(&mut self) {
+        // Only the variants that hold raw `ValueWord` (u64) bits inside
+        // a `Box` / `Option<Box>` need the vw_drop hop; every other
+        // variant owns fields whose `Drop` already reclaims the
+        // resource (Arc refcount, Box allocation, etc.).
+        //
+        // Rust runs this impl first, then auto-drops the enum's fields;
+        // `vw_drop` decrements the heap refcount, and the surrounding
+        // `Box<ValueWord>` is then freed by the default drop glue.
+        match self {
+            HeapValue::Some(inner) | HeapValue::Ok(inner) | HeapValue::Err(inner) => {
+                vw_drop(**inner)
+            }
+            HeapValue::Range { start, end, .. } => {
+                if let Some(b) = start {
+                    vw_drop(**b);
+                }
+                if let Some(b) = end {
+                    vw_drop(**b);
+                }
+            }
+            HeapValue::TraitObject { value, .. } => vw_drop(**value),
+            HeapValue::FunctionRef { closure, .. } => {
+                if let Some(b) = closure {
+                    vw_drop(**b);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 // ── Shared comparison helpers ────────────────────────────────────────────────
 

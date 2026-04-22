@@ -24,7 +24,9 @@ pub fn v2_push(
     if let Some(pq_data) = extract_priority_queue(args[0]) {
         let mut new_data = pq_data.clone();
         new_data.push(item);
-        Ok(ValueWord::from_priority_queue(new_data.items).into_raw_bits())
+        // `PriorityQueueData` has a custom Drop (Wave 4 WC.1), so
+        // move `items` out via `take_items()` before dropping.
+        Ok(ValueWord::from_priority_queue(new_data.take_items()).into_raw_bits())
     } else {
         Err(type_mismatch_error("push", "PriorityQueue"))
     }

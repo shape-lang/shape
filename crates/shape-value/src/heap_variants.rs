@@ -116,7 +116,14 @@ macro_rules! define_heap_types {
         /// Every type that cannot be inlined in ValueWord has a dedicated variant here.
         /// Inline ValueWord types (f64, i48, bool, None, Unit, Function, ModuleFunction)
         /// are never stored in HeapValue.
-        #[derive(Debug, Clone)]
+        ///
+        /// `Clone` / `Drop` are implemented manually (not `#[derive]`) in
+        /// `heap_value.rs` so the `Some` / `Ok` / `Err` variants, which hold
+        /// `Box<ValueWord>` bits that may carry a heap tag, can pair
+        /// `vw_clone` with `vw_drop`. All other variants delegate to their
+        /// inner type's own `Clone` / `Drop` exactly as the auto-derive
+        /// would have.
+        #[derive(Debug)]
         pub enum HeapValue {
             // ===== Tuple variants =====
             String(std::sync::Arc<String>),
