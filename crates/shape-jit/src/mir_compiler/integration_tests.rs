@@ -1652,16 +1652,26 @@ f(5)
 
 #[test]
 fn phase_e_captured_closure_in_loop() {
-    // Sum of 0..10 using a stack-allocated mutable accumulator capture.
-    // Exercises Phase D's LocalMutablePtr path + Phase E's stack slot.
+    // Sum of 0..10 using a var-scoped mutable accumulator capture.
+    //
+    // Session 2: the original fixture used `let mut s` + post-capture
+    // outer reads, which Rust-move semantics (enforced in session 1)
+    // now reject at compile time. Wrapping in a function keeps `s`
+    // as a local `var` binding (routed through `AllocSharedLocal`,
+    // which the JIT lowers) rather than a top-level `SharedModuleBinding`
+    // (which the JIT preflight still gates). The semantics exercised
+    // are the same: captured mutable accumulator + for-loop invocation.
     jit_expect_int(
         r#"
-let mut s = 0
-let f = |x| { s = s + x }
-for x in 0..10 {
-    f(x)
+fn sum_range() -> int {
+    var s = 0
+    let f = |x| { s = s + x }
+    for x in 0..10 {
+        f(x)
+    }
+    return s
 }
-s
+sum_range()
 "#,
         45,
     );
