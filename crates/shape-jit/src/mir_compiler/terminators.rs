@@ -309,10 +309,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                         // R4.2B: FFI signatures accept plain u64 bit-patterns
                         // — no box wrap needed at call site. Enum payload args
-                        // are already ValueWord-encoded I64 slots when they
-                        // reach `array_push_elem`.
+                        // reach `array_push_elem` as ValueWord-encoded I64
+                        // slots. Native F64/I32/I8 operands from
+                        // `compile_operand` must be widened to I64 before the
+                        // FFI call so the Cranelift verifier accepts the
+                        // parameter types.
                         for arg in args.iter() {
-                            let val = self.compile_operand(arg)?;
+                            let val_raw = self.compile_operand(arg)?;
+                            let val = self.widen_to_i64(val_raw);
                             let inst = self.builder.ins().call(
                                 self.ffi.array_push_elem,
                                 &[arr, val],
