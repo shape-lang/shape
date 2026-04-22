@@ -81,6 +81,9 @@ impl VirtualMachine {
     pub fn push_raw_u64_slow(&mut self, bits: u64) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
             // Reconstruct ValueWord so its Drop runs (releases any heap ref).
+            // WB note: with `ValueWord = u64`, this `drop` is a no-op. A real
+            // release (`vw_drop(bits)`) is blocked on the retain-on-read
+            // audit described on `VirtualMachine::drop`.
             drop(ValueWord::from_raw_bits(bits));
             return Err(VMError::StackOverflow);
         }
@@ -101,25 +104,42 @@ impl VirtualMachine {
 
     // === Indexed stack access helpers (ValueWord ↔ u64) ===
 
-    /// Read a clone of the `ValueWord` at `stack[idx]` **without** removing it.
+    /// Read a bit-copy of the `ValueWord` at `stack[idx]` without removing it.
     ///
-    /// This bumps the Arc refcount for heap-tagged values (clone semantics).
+    /// **WB NOTE (Wave 4, Category 4).** Because `ValueWord` is a `u64`
+    /// alias and `u64: Copy`, this is a plain bit copy — the returned bits
+    /// share the same Arc ref (if any) as the stack slot. The caller must
+    /// treat the value as a borrow of the slot: valid only while the slot
+    /// remains live, and the caller must NOT invoke `vw_drop` on the
+    /// returned bits. If the caller needs an independent owning share it
+    /// must call `shape_value::vw_clone` or `ValueWord::clone_from_bits`
+    /// explicitly (see `op_load_local`, which does).
     #[inline(always)]
     pub(crate) fn stack_read_raw(&self, idx: usize) -> ValueWord {
         let bits = self.stack[idx];
-        // Construct a temporary to call `.clone()`, which bumps the refcount,
-        // then forget the temporary so its Drop doesn't decrement.
+        // Construct a temporary to call `.clone()`, which would bump the
+        // refcount if `ValueWord` were a proper `Clone` type. Under the
+        // `u64` alias this is equivalent to `bits`, but we keep the shape
+        // so callers that are later audited for retain-on-read can flip
+        // this into a real `vw_clone` without chasing every call site.
         let tmp = ValueWord::from_raw_bits(bits);
         let c = tmp.clone();
         std::mem::forget(tmp);
         c
     }
 
-    /// Write a `ValueWord` into `stack[idx]`, dropping the previous occupant
-    /// and transferring ownership of `value` into the slot.
+    /// Write a `ValueWord` into `stack[idx]`.
+    ///
+    /// **WB NOTE.** Historically this release-drops the previous occupant
+    /// via `drop(ValueWord::from_raw_bits(old_bits))`. With `ValueWord = u64`
+    /// that drop is a no-op. Converting to a real `vw_drop(old_bits)` is
+    /// blocked on the retain-on-read audit (see `VirtualMachine::drop`):
+    /// until reads bump the Arc refcount, releasing the old occupant here
+    /// would double-free any outstanding bit-copy.
     #[inline(always)]
     pub(crate) fn stack_write_raw(&mut self, idx: usize, value: ValueWord) {
-        // Drop the old occupant (may decrement Arc refcount).
+        // No-op drop preserved intentionally; see the struct-level note
+        // above for the upgrade path.
         let old_bits = self.stack[idx];
         drop(ValueWord::from_raw_bits(old_bits));
         self.stack[idx] = value.into_raw_bits();
@@ -197,7 +217,9 @@ impl VirtualMachine {
 
     // === Module binding helpers (same pattern as stack) ===
 
-    /// Read a clone of the `ValueWord` at `module_bindings[idx]`.
+    /// Read a bit-copy of the `ValueWord` at `module_bindings[idx]` without
+    /// bumping any Arc refcount. Same borrow semantics as `stack_read_raw`
+    /// (see that comment).
     #[inline(always)]
     pub(crate) fn binding_read_raw(&self, idx: usize) -> ValueWord {
         let bits = self.module_bindings[idx];
@@ -207,7 +229,10 @@ impl VirtualMachine {
         c
     }
 
-    /// Write a `ValueWord` into `module_bindings[idx]`, dropping the old value.
+    /// Write a `ValueWord` into `module_bindings[idx]`.
+    ///
+    /// **WB NOTE.** Same leak-over-double-free tradeoff as
+    /// `stack_write_raw` — see that comment.
     #[inline(always)]
     pub(crate) fn binding_write_raw(&mut self, idx: usize, value: ValueWord) {
         let old_bits = self.module_bindings[idx];

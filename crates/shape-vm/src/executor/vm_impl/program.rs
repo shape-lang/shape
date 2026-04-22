@@ -442,8 +442,11 @@ impl VirtualMachine {
     /// preserves the loaded program, module bindings, module_fn_table,
     /// and registered extensions.
     pub fn reset_for_trampoline(&mut self) {
+        // WB: stack release is blocked on the retain-on-read coordination
+        // tracked in `VirtualMachine::drop` — see that comment for
+        // rationale. Clear slots to NONE_BITS for deterministic state but
+        // do not `vw_drop` them yet.
         for i in 0..self.sp {
-            drop(ValueWord::from_raw_bits(self.stack[i]));
             self.stack[i] = Self::NONE_BITS;
         }
         self.sp = 0;
@@ -461,8 +464,9 @@ impl VirtualMachine {
 
     pub fn reset(&mut self) {
         self.ip = self.program_entry_ip;
+        // WB: stack release is blocked on the retain-on-read coordination
+        // tracked in `VirtualMachine::drop` — see that comment for rationale.
         for i in 0..self.sp {
-            drop(ValueWord::from_raw_bits(self.stack[i]));
             self.stack[i] = Self::NONE_BITS;
         }
         // Advance sp past top-level locals so expression evaluation
@@ -483,8 +487,9 @@ impl VirtualMachine {
     /// Keeps program, module_bindings, and GC state intact - only clears execution state
     pub fn reset_stack(&mut self) {
         self.ip = self.program_entry_ip;
+        // WB: stack release is blocked on the retain-on-read coordination
+        // tracked in `VirtualMachine::drop` — see that comment for rationale.
         for i in 0..self.sp {
-            drop(ValueWord::from_raw_bits(self.stack[i]));
             self.stack[i] = Self::NONE_BITS;
         }
         let tl = self.program.top_level_locals_count as usize;
@@ -503,8 +508,9 @@ impl VirtualMachine {
     #[inline]
     pub fn reset_minimal(&mut self) {
         self.ip = self.program_entry_ip;
+        // WB: stack release is blocked on the retain-on-read coordination
+        // tracked in `VirtualMachine::drop` — see that comment for rationale.
         for i in 0..self.sp {
-            drop(ValueWord::from_raw_bits(self.stack[i]));
             self.stack[i] = Self::NONE_BITS;
         }
         let tl = self.program.top_level_locals_count as usize;
