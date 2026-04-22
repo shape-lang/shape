@@ -344,6 +344,140 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     _ => None,
                 };
 
+                // ── Session 2: STACK-CLOSURE DIRECT-DISPATCH FAST PATH ──
+                // When the callee operand loads from a slot that was
+                // populated by `emit_stack_closure`, the stored value is a
+                // raw `StackClosure*` — not NaN-boxed, not `HK_CLOSURE` —
+                // so `jit_call_value` can't dispatch it. Instead, use the
+                // slot's side-table (`stack_closure_call_info`) to look up
+                // the function_id and per-capture offsets, load captures
+                // from the `StackSlot` at their native width, and call the
+                // corresponding user_func_ref with captures prepended to the
+                // user arg list. This matches the calling convention of
+                // closure bodies (first N params are captures).
+                let stack_closure_info: Option<(
+                    super::StackClosureCallInfo,
+                    cranelift::codegen::ir::StackSlot,
+                )> = match func {
+                    Operand::Copy(Place::Local(slot))
+                    | Operand::Move(Place::Local(slot))
+                    | Operand::MoveExplicit(Place::Local(slot)) => self
+                        .stack_closure_call_info
+                        .get(slot)
+                        .cloned()
+                        .and_then(|info| {
+                            self.stack_closure_slots
+                                .get(slot)
+                                .copied()
+                                .map(|ss| (info, ss))
+                        }),
+                    _ => None,
+                };
+
+                if let Some((info, stack_slot)) = stack_closure_info {
+                    if let Some(func_ref) =
+                        self.user_func_refs.get(&info.function_id).copied()
+                    {
+                        // Prepend captures as args. Each capture is loaded
+                        // from the stack slot at its recorded offset with
+                        // its recorded native type, then widened to I64 for
+                        // the uniform callee ABI.
+                        let mut arg_vals = Vec::with_capacity(
+                            info.capture_offsets.len() + args.len() + 1,
+                        );
+                        arg_vals.push(self.ctx_ptr);
+                        for (off, ty) in info
+                            .capture_offsets
+                            .iter()
+                            .zip(info.capture_types.iter())
+                        {
+                            let raw = self
+                                .builder
+                                .ins()
+                                .stack_load(*ty, stack_slot, *off);
+                            let widened = if *ty == types::I64 {
+                                raw
+                            } else if *ty == types::F64 {
+                                self.builder
+                                    .ins()
+                                    .bitcast(types::I64, MemFlags::new(), raw)
+                            } else if *ty == types::I32 || *ty == types::I16 {
+                                self.builder.ins().sextend(types::I64, raw)
+                            } else if *ty == types::I8 {
+                                self.builder.ins().uextend(types::I64, raw)
+                            } else {
+                                raw
+                            };
+                            arg_vals.push(widened);
+                        }
+                        // User args follow, widened uniformly.
+                        for arg in args.iter() {
+                            let val = self.compile_operand(arg)?;
+                            let val_ty = self.builder.func.dfg.value_type(val);
+                            let boxed = if val_ty == types::I64 {
+                                val
+                            } else if val_ty == types::F64 {
+                                self.builder
+                                    .ins()
+                                    .bitcast(types::I64, MemFlags::new(), val)
+                            } else if val_ty == types::I32 || val_ty == types::I16 {
+                                self.builder.ins().sextend(types::I64, val)
+                            } else if val_ty == types::I8 {
+                                self.builder.ins().uextend(types::I64, val)
+                            } else {
+                                val
+                            };
+                            arg_vals.push(boxed);
+                        }
+
+                        let inst = self.builder.ins().call(func_ref, &arg_vals);
+                        let signal = self.builder.inst_results(inst)[0];
+
+                        // Deopt: if signal < 0, propagate the error.
+                        let zero = self.builder.ins().iconst(types::I32, 0);
+                        let is_error = self.builder.ins().icmp(
+                            IntCC::SignedLessThan,
+                            signal,
+                            zero,
+                        );
+                        let deopt_block = self.builder.create_block();
+                        let continue_block = self.builder.create_block();
+                        self.builder.ins().brif(
+                            is_error,
+                            deopt_block,
+                            &[],
+                            continue_block,
+                            &[],
+                        );
+                        self.builder.switch_to_block(deopt_block);
+                        self.builder.seal_block(deopt_block);
+                        self.builder.ins().return_(&[signal]);
+
+                        self.builder.switch_to_block(continue_block);
+                        self.builder.seal_block(continue_block);
+                        let stack_offset = crate::context::STACK_OFFSET as i32;
+                        let result = self.builder.ins().load(
+                            types::I64,
+                            MemFlags::new(),
+                            self.ctx_ptr,
+                            stack_offset,
+                        );
+
+                        self.release_old_value_if_heap(destination)?;
+                        self.write_place(destination, result)?;
+                        self.reload_referenced_locals();
+
+                        let next_block = self.block_map.get(next).ok_or_else(|| {
+                            format!(
+                                "MirToIR: unknown call continuation block {}",
+                                next
+                            )
+                        })?;
+                        self.builder.ins().jump(*next_block, &[]);
+                        return Ok(());
+                    }
+                }
+
                 // Check if we have a direct FuncRef for the callee.
                 let func_ref = func_id.and_then(|fid| self.user_func_refs.get(&fid).copied());
 

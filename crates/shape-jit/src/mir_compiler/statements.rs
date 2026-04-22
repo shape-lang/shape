@@ -34,6 +34,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
+                // Session 2: propagate stack-closure call metadata on simple
+                // local→local moves/copies. MIR frequently shuffles a closure
+                // handle between slots (e.g. `let f = <closure>; f(x)` lowers
+                // to `SlotId(X) <- ClosureCapture; SlotId(Y) <- Move SlotId(X);
+                // Call Copy(SlotId(Y))`). Without this copy the Call
+                // terminator's stack-closure fast path can't find the side-
+                // table entry keyed on the original slot.
+                if let (
+                    Place::Local(dst),
+                    Rvalue::Use(
+                        Operand::Move(Place::Local(src))
+                        | Operand::Copy(Place::Local(src))
+                        | Operand::MoveExplicit(Place::Local(src)),
+                    ),
+                ) = (place, rvalue)
+                {
+                    if let Some(info) =
+                        self.stack_closure_call_info.get(src).cloned()
+                    {
+                        self.stack_closure_call_info.insert(*dst, info);
+                    }
+                    if let Some(ss) = self.stack_closure_slots.get(src).copied() {
+                        self.stack_closure_slots.insert(*dst, ss);
+                    }
+                }
+
                 // Release old value if overwriting a heap local.
                 self.release_old_value_if_heap(place)?;
                 // Compile the rvalue.
@@ -478,6 +504,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Track the stack slot so drop/release paths know to skip
         // arc_release on this slot.
         self.stack_closure_slots.insert(closure_slot, slot);
+        // Session 2: also record the function_id + per-capture byte
+        // offsets + native Cranelift types so the indirect-call path
+        // can dispatch this stack closure without going through the
+        // `jit_call_value` FFI (which can't recognise a raw
+        // stack-slot pointer — it isn't NaN-boxed).
+        self.stack_closure_call_info.insert(
+            closure_slot,
+            super::StackClosureCallInfo {
+                function_id,
+                capture_offsets: offsets.clone(),
+                capture_types: capture_types.clone(),
+            },
+        );
 
         // Write to the closure slot. We deliberately do NOT call
         // `release_old_value_if_heap` here — a stack closure cannot

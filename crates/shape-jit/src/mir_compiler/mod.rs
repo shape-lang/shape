@@ -65,6 +65,24 @@ use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::SlotKind;
 
+/// Session 2: side-table entry for a non-escaping stack closure call.
+///
+/// Carries the function_id, per-capture byte offset, and per-capture
+/// Cranelift type recorded at `emit_stack_closure` time. The indirect
+/// `Call` terminator consults this when the callee operand resolves to
+/// a slot in `MirToIR::stack_closure_call_info` and emits a direct
+/// `user_func_refs[function_id]` call with captures loaded from the
+/// stack slot instead of routing through the `jit_call_value` FFI.
+#[derive(Debug, Clone)]
+pub(crate) struct StackClosureCallInfo {
+    /// Target function_id (matches the `StackClosure.function_id` field).
+    pub(crate) function_id: u16,
+    /// Per-capture byte offset inside the `StackSlot`.
+    pub(crate) capture_offsets: Vec<i32>,
+    /// Per-capture native Cranelift type (F64 / I64 / I32 / I16 / I8 / Bool).
+    pub(crate) capture_types: Vec<cranelift::prelude::Type>,
+}
+
 /// MIR-to-Cranelift IR compiler.
 ///
 /// Each instance compiles a single MIR function. Reuses the JIT's existing
@@ -145,6 +163,19 @@ pub struct MirToIR<'a, 'b> {
     /// paths to skip `arc_release` on stack-resident closure handles
     /// and by other consumers that need to know the slot is stack-resident.
     pub(crate) stack_closure_slots: HashMap<SlotId, StackSlot>,
+
+    /// Session 2: per-slot stack-closure call metadata captured alongside
+    /// `stack_closure_slots`. When an indirect `Call` whose `func` operand
+    /// resolves to a slot in this map dispatches the closure, the
+    /// terminator can bypass `jit_call_value` entirely — the function_id
+    /// and capture byte offsets/Cranelift types are baked into codegen.
+    ///
+    /// This closes the hole where a stack closure's callee bits are a raw
+    /// stack pointer (no NaN-box tag, no `HK_CLOSURE` header) that the
+    /// FFI dispatcher can't recognise — the fix is to not dispatch through
+    /// the FFI at all when the JIT itself built the closure.
+    pub(crate) stack_closure_call_info:
+        HashMap<SlotId, StackClosureCallInfo>,
 
     // ── Closure Spec Phase H1: heap-allocated closure codegen ──────
     /// Map from closure body `function_id` to its `ClosureLayout`.
@@ -575,6 +606,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             field_byte_offsets: HashMap::new(),
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
+            stack_closure_call_info: HashMap::new(),
             closure_function_layouts,
             owned_mutable_capture_slots: HashSet::new(),
             shared_capture_slots: HashSet::new(),
