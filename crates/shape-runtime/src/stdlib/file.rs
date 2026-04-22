@@ -10,7 +10,7 @@
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use crate::stdlib::runtime_policy::{FileSystemProvider, RealFileSystem};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -135,12 +135,12 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 let text = String::from_utf8(bytes)
                     .map_err(|e| format!("file.read_lines() invalid UTF-8: {}", e))?;
 
-                let lines: Vec<ValueWord> = text
+                let lines: ArgVec = ArgVec::from_vec(text
                     .lines()
                     .map(|l| ValueWord::from_string(Arc::new(l.to_string())))
-                    .collect();
+                    .collect());
 
-                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(lines))))
+                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(lines.into_inner()))))
             },
             ModuleFunction {
                 description: "Read a file and return its lines as an array of strings".to_string(),
@@ -228,12 +228,12 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                     .read(Path::new(path_str))
                     .map_err(|e| format!("file.read_bytes() failed: {}", e))?;
 
-                let arr: Vec<ValueWord> = bytes
+                let arr: ArgVec = ArgVec::from_vec(bytes
                     .iter()
                     .map(|&b| ValueWord::from_f64(b as f64))
-                    .collect();
+                    .collect());
 
-                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr))))
+                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr.into_inner()))))
             },
             ModuleFunction {
                 description: "Read the entire contents of a file as an array of byte values"

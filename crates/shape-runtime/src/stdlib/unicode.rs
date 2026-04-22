@@ -3,7 +3,7 @@
 //! Exports: unicode.normalize, unicode.category, unicode.is_letter, unicode.is_digit, unicode.graphemes
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `unicode` module.
@@ -164,12 +164,12 @@ pub fn create_unicode_module() -> ModuleExports {
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "unicode.graphemes() requires a string argument".to_string())?;
 
-            let clusters: Vec<ValueWord> = text
+            let clusters: ArgVec = ArgVec::from_vec(text
                 .graphemes(true)
                 .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
-                .collect();
+                .collect());
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters.into_inner())))
         },
         ModuleFunction {
             description: "Split a string into Unicode grapheme clusters".to_string(),
