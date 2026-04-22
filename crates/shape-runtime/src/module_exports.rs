@@ -39,7 +39,15 @@ impl RawCallableInvoker {
 }
 
 /// Information about a single VM call frame, captured at a point in time.
-#[derive(Debug, Clone)]
+///
+/// **WB2.4 retain-on-read.** The `locals`, `upvalues`, and `args`
+/// vectors hold owning shares of heap-tagged `ValueWord`s. Since
+/// `ValueWord = u64`, the derived `Clone` on `Vec<ValueWord>` would
+/// produce aliasing bit copies and the default `Vec` drop would leak
+/// refcounts. The manual impls below `vw_clone` on copy and
+/// `vw_drop_slice` on drop so each `FrameInfo` carries its own
+/// refcount bumps.
+#[derive(Debug)]
 pub struct FrameInfo {
     pub function_id: Option<u16>,
     pub function_name: String,
@@ -48,6 +56,38 @@ pub struct FrameInfo {
     pub locals: Vec<ValueWord>,
     pub upvalues: Option<Vec<ValueWord>>,
     pub args: Vec<ValueWord>,
+}
+
+impl Clone for FrameInfo {
+    fn clone(&self) -> Self {
+        use shape_value::value_word_drop::vw_clone;
+        let locals = self.locals.iter().map(|&b| vw_clone(b)).collect();
+        let upvalues = self
+            .upvalues
+            .as_ref()
+            .map(|v| v.iter().map(|&b| vw_clone(b)).collect());
+        let args = self.args.iter().map(|&b| vw_clone(b)).collect();
+        FrameInfo {
+            function_id: self.function_id,
+            function_name: self.function_name.clone(),
+            blob_hash: self.blob_hash,
+            local_ip: self.local_ip,
+            locals,
+            upvalues,
+            args,
+        }
+    }
+}
+
+impl Drop for FrameInfo {
+    fn drop(&mut self) {
+        use shape_value::value_word_drop::vw_drop_slice;
+        vw_drop_slice(&self.locals);
+        if let Some(ref ups) = self.upvalues {
+            vw_drop_slice(ups);
+        }
+        vw_drop_slice(&self.args);
+    }
 }
 
 /// Trait providing read access to VM state for state module functions.

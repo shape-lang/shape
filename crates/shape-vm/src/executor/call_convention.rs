@@ -232,7 +232,12 @@ impl VirtualMachine {
                 let n = handle.capture_count();
                 let mut upvalues: Vec<Upvalue> = Vec::with_capacity(n);
                 for i in 0..n {
-                    upvalues.push(Upvalue::new(handle.capture_execution_bits(i)));
+                    // WB2.3 retain-on-read: retain each capture so the
+                    // `Upvalue` owns an independent share, matching
+                    // `Upvalue`'s owning-Drop contract.
+                    let raw = handle.capture_execution_bits(i);
+                    let owned = shape_value::value_word_drop::vw_clone(raw);
+                    upvalues.push(Upvalue::new(owned));
                 }
                 drop(handle);
                 let saved_ip = self.ip;
@@ -313,12 +318,24 @@ impl VirtualMachine {
         // beyond locals_count, then replace the param slot with a TAG_REF
         // pointing to the shadow slot. This way DerefLoad follows the ref
         // to the actual value (not a circular self-reference).
+        //
+        // WB2.3 retain-on-read: the shadow slot needs an independent
+        // owning share of the param value because the param slot is
+        // subsequently overwritten with a TAG_REF. Without the retain,
+        // the two heap-tagged slots would alias the same refcount and
+        // Phase 3's drop-on-release of the param slot (on future
+        // teardown / overwrite) would free the share still held by the
+        // shadow slot. Use `stack_read_owned` to clone the bits and
+        // `stack_take_raw` to transfer ownership out of the param slot.
         let mut shadow_idx = 0;
         for (i, &is_ref) in ref_params.iter().enumerate() {
             if is_ref && i < param_count && i < locals_count {
                 let shadow_slot = bp + locals_count + shadow_idx;
-                let cloned = self.stack_read_raw(bp + i);
-                self.stack_write_raw(shadow_slot, cloned);
+                // Transfer ownership of the original param bits to the
+                // shadow slot (no retain needed — we take the slot).
+                let moved = self.stack_take_raw(bp + i);
+                self.stack_write_raw(shadow_slot, moved);
+                // Overwrite the param slot with a TAG_REF (inline).
                 self.stack_write_raw(bp + i, ValueWord::from_ref(shadow_slot));
                 shadow_idx += 1;
             }
@@ -334,6 +351,7 @@ impl VirtualMachine {
             function_id: Some(func_id),
             upvalues: None,
             blob_hash,
+            closure_heap_bits: None,
         };
         self.call_stack.push(frame);
         self.ip = entry_point;
@@ -341,11 +359,32 @@ impl VirtualMachine {
     }
 
     /// ValueWord-host closure call: takes ValueWord args directly.
+    ///
+    /// `closure_heap_bits` is an optional **owning** share of the
+    /// closure HeapValue backing `upvalues`. The frame pushed by this
+    /// call stashes the share so the block outlives the callee's
+    /// `OwnedMutable` / `Shared` pointer captures; it is released via
+    /// `vw_drop` on frame-pop. Pass `None` for synthetic frames where
+    /// the caller has already guaranteed block lifetime (e.g.,
+    /// trampoline callers that keep a separate Arc alive).
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
         func_id: u16,
         upvalues: Vec<Upvalue>,
         args: &[ValueWord],
+    ) -> Result<(), VMError> {
+        self.call_closure_with_nb_args_keepalive(func_id, upvalues, args, None)
+    }
+
+    /// WB2.3 variant of [`call_closure_with_nb_args`] that takes an
+    /// optional keep-alive `closure_heap_bits`. Stored on the pushed
+    /// `CallFrame` and released on frame pop.
+    pub(crate) fn call_closure_with_nb_args_keepalive(
+        &mut self,
+        func_id: u16,
+        upvalues: Vec<Upvalue>,
+        args: &[ValueWord],
+        closure_heap_bits: Option<u64>,
     ) -> Result<(), VMError> {
         let function = self
             .program
@@ -398,6 +437,7 @@ impl VirtualMachine {
             function_id: Some(func_id),
             upvalues: Some(upvalues),
             blob_hash,
+            closure_heap_bits,
         });
 
         self.ip = entry_point;
@@ -454,7 +494,11 @@ impl VirtualMachine {
                     let n = handle.capture_count();
                     let mut upvalues: Vec<Upvalue> = Vec::with_capacity(n);
                     for i in 0..n {
-                        upvalues.push(Upvalue::new(handle.capture_execution_bits(i)));
+                        // WB2.3 retain-on-read: see extract_closure_info
+                        // (objects/raw_helpers.rs) for the rationale.
+                        let raw = handle.capture_execution_bits(i);
+                        let owned = shape_value::value_word_drop::vw_clone(raw);
+                        upvalues.push(Upvalue::new(owned));
                     }
                     self.call_closure_with_nb_args(fid, upvalues, args)?;
                 } else if let Some(shape_value::HeapValue::HostClosure(callable)) = heap_ref {
@@ -497,7 +541,14 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         let target_depth = self.call_stack.len();
-        let upvalues: Vec<Upvalue> = upvalue_bits.iter().map(|&b| Upvalue::new(b)).collect();
+        // WB2.3 retain-on-read: the JIT handed us bit patterns that
+        // alias the callee closure's captures. Each `Upvalue` must own
+        // an independent refcount so dropping the Vec after the call
+        // does not double-free against the source closure block.
+        let upvalues: Vec<Upvalue> = upvalue_bits
+            .iter()
+            .map(|&b| Upvalue::new(shape_value::value_word_drop::vw_clone(b)))
+            .collect();
         self.call_closure_with_nb_args(func_id, upvalues, args)?;
         self.execute_until_call_depth(target_depth, ctx)?;
         self.pop_raw_u64()
@@ -635,6 +686,7 @@ impl VirtualMachine {
             function_id: Some(func_id),
             upvalues: None,
             blob_hash,
+            closure_heap_bits: None,
         });
         self.ip = entry_point;
         Ok(())
@@ -700,6 +752,7 @@ impl VirtualMachine {
             function_id: Some(func_id),
             upvalues: Some(upvalues.to_vec()),
             blob_hash,
+            closure_heap_bits: None,
         });
 
         self.ip = entry_point;
@@ -760,6 +813,7 @@ impl VirtualMachine {
             function_id: Some(func_id),
             upvalues: None,
             blob_hash,
+            closure_heap_bits: None,
         });
         self.ip = entry_point;
         Ok(())

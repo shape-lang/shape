@@ -186,7 +186,10 @@ impl super::VirtualMachine {
         for frame in &self.call_stack {
             if let Some(ref upvalues) = frame.upvalues {
                 for upvalue in upvalues {
-                    let nb = upvalue.get();
+                    // WB2 retain-on-read: `get()` now bumps the refcount —
+                    // use `get_raw()` here because this is a read-only
+                    // root scan that discards the bits without releasing.
+                    let nb = upvalue.get_raw();
                     shape_gc::roots::trace_nanboxed_bits(nb.raw_bits(), &mut |ptr| {
                         roots.push(ptr);
                     });
@@ -326,7 +329,8 @@ impl super::VirtualMachine {
             for frame in call_stack {
                 if let Some(ref upvalues) = frame.upvalues {
                     for upvalue in upvalues {
-                        let nb = upvalue.get();
+                        // WB2 retain-on-read: read-only root scan.
+                        let nb = upvalue.get_raw();
                         shape_gc::roots::trace_nanboxed_bits(nb.raw_bits(), visitor);
                     }
                 }

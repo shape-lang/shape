@@ -23,12 +23,16 @@ impl VirtualMachine {
                 self.pop_raw_u64()?;
             }
             Dup => {
-                // Clone the ValueWord directly from the stack, avoiding ValueWord round-trip
+                // WB2.2 retain-on-read: `Dup` produces an independent
+                // owning share of the top-of-stack. Without the
+                // `stack_read_owned` refcount bump, the duplicated bits
+                // would alias the original slot and Phase 3's
+                // `vw_drop_slice` on stack teardown would double-free.
                 let index = self.sp.checked_sub(1).ok_or(VMError::StackUnderflow)?;
                 if index >= self.stack.len() {
                     return Err(VMError::StackUnderflow);
                 }
-                let val = self.stack_read_raw(index);
+                let val = self.stack_read_owned(index);
                 self.push_raw_u64(val)?;
             }
             Swap => {

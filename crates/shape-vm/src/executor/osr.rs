@@ -345,6 +345,7 @@ impl VirtualMachine {
                 function_id: Some(iframe.function_id),
                 upvalues: None,
                 blob_hash,
+                closure_heap_bits: None,
             });
 
             current_bp += locals_count + iframe.stack_depth as usize;
@@ -379,6 +380,7 @@ impl VirtualMachine {
             function_id: Some(innermost_id),
             upvalues: None,
             blob_hash,
+            closure_heap_bits: None,
         });
 
         // Restore innermost frame's locals + operand stack via deopt_with_info.

@@ -179,8 +179,14 @@ impl VirtualMachine {
                 if self.stack.len() < needed {
                     self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
                 }
+                // WB2.5: the `locals` Vec owns retained shares over its
+                // elements. Hand each slot an independent `vw_clone`
+                // so both the Vec (which drops its shares as it goes
+                // out of scope below) and the stack slot carry their
+                // own refcount.
                 for (i, local) in locals.iter().enumerate() {
-                    self.stack_write_raw(bp + i, local.clone());
+                    let owned = shape_value::value_word_drop::vw_clone(*local);
+                    self.stack_write_raw(bp + i, owned);
                 }
                 self.sp = bp + locals_count;
 
@@ -191,6 +197,13 @@ impl VirtualMachine {
                     function_id: Some(func_id),
                     upvalues,
                     blob_hash,
+                    // Resumed frame: the original closure HeapValue is
+                    // not part of the snapshot. Upvalues were
+                    // reconstructed from serialized captures, which
+                    // do not carry raw pointers for the pre-A.1C.3
+                    // SharedCell path — so the frame does not own a
+                    // closure block keep-alive share here.
+                    closure_heap_bits: None,
                 });
             }
         }
@@ -217,7 +230,13 @@ impl VirtualMachine {
                                 {
                                     if idx < self.module_bindings.len() {
                                         // BARRIER: heap write site — restores module binding from snapshot
-                                        self.binding_write_raw(idx, pair[1].clone());
+                                        // WB2.5: retain the snapshot's
+                                        // share before transferring
+                                        // ownership into the binding
+                                        // slot.
+                                        let owned =
+                                            shape_value::value_word_drop::vw_clone(pair[1]);
+                                        self.binding_write_raw(idx, owned);
                                     }
                                 }
                             }
@@ -264,8 +283,11 @@ impl VirtualMachine {
         if self.stack.len() < needed {
             self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
+        // WB2.5: `resume_data.locals` owns retained shares over its
+        // elements; hand each stack slot an independent `vw_clone`.
         for (i, local) in resume_data.locals.iter().enumerate() {
-            self.stack_write_raw(bp + i, local.clone());
+            let owned = shape_value::value_word_drop::vw_clone(*local);
+            self.stack_write_raw(bp + i, owned);
         }
 
         Ok(())

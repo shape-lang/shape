@@ -321,6 +321,13 @@ impl VirtualMachine {
                     function_id: resolved_function_id,
                     upvalues,
                     blob_hash,
+                    // Snapshot deserialization: upvalues are
+                    // reconstructed from serialized captures — the
+                    // originating closure HeapValue is not part of
+                    // the snapshot. Use `None`; OwnedMutable / Shared
+                    // pointer captures are not representable
+                    // post-snapshot anyway.
+                    closure_heap_bits: None,
                 })
             })
             .collect::<Result<Vec<_>, VMError>>()?;

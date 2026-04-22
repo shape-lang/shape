@@ -106,26 +106,35 @@ impl VirtualMachine {
 
     /// Read a bit-copy of the `ValueWord` at `stack[idx]` without removing it.
     ///
-    /// **WB NOTE (Wave 4, Category 4).** Because `ValueWord` is a `u64`
-    /// alias and `u64: Copy`, this is a plain bit copy — the returned bits
-    /// share the same Arc ref (if any) as the stack slot. The caller must
-    /// treat the value as a borrow of the slot: valid only while the slot
-    /// remains live, and the caller must NOT invoke `vw_drop` on the
-    /// returned bits. If the caller needs an independent owning share it
-    /// must call `shape_value::vw_clone` or `ValueWord::clone_from_bits`
-    /// explicitly (see `op_load_local`, which does).
+    /// **WB2 NOTE (retain-on-read contract).** Because `ValueWord` is a
+    /// `u64` alias and `u64: Copy`, this is a plain bit copy — the
+    /// returned bits share the same Arc ref (if any) as the stack slot.
+    /// The caller must treat the value as a **borrow** of the slot:
+    /// valid only while the slot remains live, and the caller must NOT
+    /// invoke `vw_drop` on the returned bits.
+    ///
+    /// If the caller needs an independent **owning share** (to push back
+    /// onto the stack, hand to a collector, etc.), use
+    /// [`stack_read_owned`] instead, which bumps the refcount via
+    /// `vw_clone`.
     #[inline(always)]
     pub(crate) fn stack_read_raw(&self, idx: usize) -> ValueWord {
-        let bits = self.stack[idx];
-        // Construct a temporary to call `.clone()`, which would bump the
-        // refcount if `ValueWord` were a proper `Clone` type. Under the
-        // `u64` alias this is equivalent to `bits`, but we keep the shape
-        // so callers that are later audited for retain-on-read can flip
-        // this into a real `vw_clone` without chasing every call site.
-        let tmp = ValueWord::from_raw_bits(bits);
-        let c = tmp.clone();
-        std::mem::forget(tmp);
-        c
+        self.stack[idx]
+    }
+
+    /// Read an **owning share** of the `ValueWord` at `stack[idx]`.
+    ///
+    /// WB2.1 (retain-on-read): returns `vw_clone(bits)` so the caller
+    /// owns an independent refcount on any heap-tagged payload. Use
+    /// this at every site that pushes the read value back onto the
+    /// stack, stores it into a local, or otherwise transfers it to a
+    /// consumer that expects to own the share.
+    ///
+    /// Scalars (int / float / bool / unit / function-id) pass through
+    /// unchanged — `vw_clone` is a no-op on non-heap tags.
+    #[inline(always)]
+    pub(crate) fn stack_read_owned(&self, idx: usize) -> ValueWord {
+        shape_value::value_word_drop::vw_clone(self.stack[idx])
     }
 
     /// Write a `ValueWord` into `stack[idx]`.
@@ -222,11 +231,15 @@ impl VirtualMachine {
     /// (see that comment).
     #[inline(always)]
     pub(crate) fn binding_read_raw(&self, idx: usize) -> ValueWord {
-        let bits = self.module_bindings[idx];
-        let tmp = ValueWord::from_raw_bits(bits);
-        let c = tmp.clone();
-        std::mem::forget(tmp);
-        c
+        self.module_bindings[idx]
+    }
+
+    /// Read an **owning share** of the `ValueWord` at
+    /// `module_bindings[idx]`. WB2.1 companion to [`stack_read_owned`]
+    /// — see that comment for the retain-on-read rationale.
+    #[inline(always)]
+    pub(crate) fn binding_read_owned(&self, idx: usize) -> ValueWord {
+        shape_value::value_word_drop::vw_clone(self.module_bindings[idx])
     }
 
     /// Write a `ValueWord` into `module_bindings[idx]`.

@@ -38,25 +38,31 @@ pub type VMArray = Arc<VMArrayBuf>;
 /// populated by `BoxLocal` / `BoxModuleBinding`) is gone. `get()` and
 /// `set()` no longer run any auto-deref.
 ///
-/// Wave 4 WC.2: the inner `ValueWord` bit pattern may carry a heap
-/// tag for `CaptureKind::Immutable` captures, in which case the
-/// refcount must be paired — the manual `Clone` runs `vw_clone` to
-/// bump the ref and the manual `Drop` runs `vw_drop` to release it.
-/// For `OwnedMutable` / `Shared` captures the inner bits are raw
-/// pointer values (`Box::into_raw` / `Arc::into_raw`) and are not
-/// NaN-box tagged, so `vw_clone` / `vw_drop` both short-circuit to
-/// no-ops; ownership of those Box/Arc allocations is tracked
-/// separately through the capture opcodes.
+/// **WB2.1 retain-on-read contract (combined with WC.2 capture-kind notes).**
+/// `Clone` and `Drop` are manual: cloning bumps the Arc refcount of any
+/// heap-tagged share (via `vw_clone`), and dropping releases it (`vw_drop`).
+/// `Upvalue` is therefore a proper owning handle — two `Upvalue`s that point
+/// at the same heap-tagged share hold two independent refcounts.
+///
+/// Raw-pointer captures (`CaptureKind::OwnedMutable` — `*mut ValueWord`
+/// from `Box::into_raw` — and `CaptureKind::Shared` — `*const SharedCell`
+/// from `Arc::into_raw`) are stored as unboxed pointer bits, which are
+/// **not** heap-tagged. `vw_clone` / `vw_drop` are both no-ops on those
+/// bit patterns; the lifetime of the underlying `Box` / `SharedCell` is
+/// managed by the originating closure block and
+/// `op_alloc_shared_module_binding`, not by the `Upvalue` handle itself.
 #[derive(Debug)]
 pub struct Upvalue(ValueWord);
 
 impl Clone for Upvalue {
+    #[inline]
     fn clone(&self) -> Self {
         Upvalue(vw_clone(self.0))
     }
 }
 
 impl Drop for Upvalue {
+    #[inline]
     fn drop(&mut self) {
         vw_drop(self.0);
     }
@@ -76,21 +82,58 @@ impl Upvalue {
         Upvalue(value)
     }
 
-    /// Read the captured value. Returns the stored `ValueWord`
-    /// unchanged. For `OwnedMutable` / `Shared` captures this is the
-    /// raw pointer bits and callers must dereference via the A.1B
-    /// capture opcodes — plain `get()` is appropriate only for
+    /// Read the captured value, returning an **owning share** of the
+    /// stored `ValueWord`.
+    ///
+    /// WB2.1 (retain-on-read): `ValueWord` is a `u64` alias, so a plain
+    /// bit-copy does not bump the Arc refcount held by a heap-tagged
+    /// capture. Every `get()` now calls `vw_clone` on the stored bits
+    /// so callers receive a share they own outright. Callers that push
+    /// the returned value onto the VM stack, store it into a local
+    /// slot, or hand it to any other retain-owning sink are correct
+    /// without further bookkeeping.
+    ///
+    /// For `OwnedMutable` / `Shared` captures the stored bits are raw
+    /// pointer bits (not heap-tagged ValueWords); `vw_clone` is a
+    /// no-op on those tag patterns and the A.1B capture opcodes
+    /// continue to use `clone_inner_bits_for_raw_pointer_access` to
+    /// recover the raw pointer. Plain `get()` is appropriate only for
     /// `Immutable` captures.
     #[inline]
     pub fn get(&self) -> ValueWord {
-        self.0.clone()
+        crate::value_word_drop::vw_clone(self.0)
     }
 
-    /// Write the captured ValueWord. Replaces the stored bits. For
-    /// `OwnedMutable` / `Shared` captures the A.1B capture opcodes
-    /// write through the pointer directly; they do not call `set()`.
+    /// Read the captured value as a plain bit-copy, WITHOUT bumping
+    /// the refcount of a heap-tagged share.
+    ///
+    /// Use this only in read-only inspection paths where the caller
+    /// will not hand the returned bits to any consumer that expects to
+    /// own a share (no push-onto-stack, no store-into-slot, no
+    /// hand-off to another container). The returned bits are valid
+    /// only for as long as the `Upvalue` remains live.
+    #[inline]
+    pub fn get_raw(&self) -> ValueWord {
+        self.0
+    }
+
+    /// Write the captured ValueWord.
+    ///
+    /// WB2.1: releases the previously stored bits via `vw_drop` before
+    /// installing the new value. The caller must transfer an
+    /// **owning share** of `value`; `set` takes ownership. Because
+    /// `Upvalue::get` bumps the refcount on read and stack-pop of a
+    /// heap-tagged value returns an owning share, the natural usage
+    /// in `op_store_closure` (pop from stack, install into upvalue)
+    /// is already correct.
+    ///
+    /// For `OwnedMutable` / `Shared` captures the A.1B capture opcodes
+    /// write through the pointer directly; they do not call `set()`,
+    /// so the release here is a no-op on the raw pointer bits.
     pub fn set(&mut self, value: ValueWord) {
+        let old = self.0;
         self.0 = value;
+        crate::value_word_drop::vw_drop(old);
     }
 
     /// Track A.1B: return the raw inner bits of the upvalue's

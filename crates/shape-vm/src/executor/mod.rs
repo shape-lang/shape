@@ -174,6 +174,18 @@ pub struct CallFrame {
     /// Content hash of the function blob being executed (for content-addressed state capture).
     /// `None` for programs compiled without content-addressed metadata.
     pub blob_hash: Option<FunctionHash>,
+    /// WB2.3 retain-on-read: optional owning `ValueWord` bits for the
+    /// closure HeapValue that backs this frame's `upvalues`. When the
+    /// frame is a closure call, `CaptureKind::OwnedMutable` / `Shared`
+    /// captures in `upvalues` are raw `*mut ValueWord` / `*const
+    /// SharedCell` pointer bits into this block's allocation — the
+    /// frame must hold this share so the block outlives the callee's
+    /// pointer dereferences.
+    ///
+    /// `None` for regular function calls and host-closure calls.
+    /// Released via `vw_drop` on frame-pop (see `op_return` /
+    /// `op_return_value` cleanup).
+    pub closure_heap_bits: Option<u64>,
 }
 
 /// Function pointer type for JIT-compiled functions.
@@ -446,40 +458,21 @@ mod vm_impl;
 /// frees only the backing buffer without releasing any Arc refcounts held
 /// by heap-tagged slots.
 ///
-/// **WB.1 status**: Introducing `vw_drop_slice` here is blocked on a
-/// coordinated retain-on-read pass across the executor. Several load
-/// paths — notably `op_load_module_binding`, `op_dup`, the
-/// `stack_read_raw`/`binding_read_raw` helpers, and every `LoadClosure`
-/// that reads upvalues — currently push bit-copies of stack/binding slots
-/// without bumping the Arc refcount. As long as those paths transfer
-/// unowned bits, releasing stack slots on VM drop would double-free: the
-/// stack slot and every live bit-copy would each see the Arc reach zero
-/// and `drop_raw_bits`/`vw_drop` the same allocation twice. See the
-/// W1.8 callout in `docs/wave4-container-migration.md` and the WB escalation
-/// report for the push-site inventory.
+/// **WB2.6 Phase 3**: the retain-on-read contract landed in WB2.1–WB2.5
+/// means every live stack slot and every module-binding slot holds an
+/// **owning** share of any heap-tagged `ValueWord` they carry. Consumers
+/// (load opcodes, snapshots, time-travel captures, closure-call
+/// dispatch, …) now take `vw_clone` copies rather than aliasing these
+/// slots, so this `Drop` can release each slot via `vw_drop_slice` /
+/// `vw_drop` without double-freeing any outstanding bit-copy.
 ///
-/// Until those reads are converted to `vw_clone` / `clone_from_bits`-equivalent
-/// retain semantics, VM shutdown leaks heap refcounts rather than risk UB.
-/// This matches the pre-Wave-4 behaviour where the explicit
-/// `drop(ValueWord::from_raw_bits(bits))` calls inside the hot paths were
-/// also no-ops (because `ValueWord` became a `u64` alias and `u64: Copy`
-/// has no destructor).
-///
-/// The `shared_module_bindings` Arc reclamation is safe and necessary
+/// The `shared_module_bindings` Arc reclamation still runs first
 /// because those slots hold raw `Arc::into_raw` pointer bits (not
-/// ValueWord-tagged values) and the producer is the unique strong owner.
+/// ValueWord-tagged values) and the producer is the unique strong
+/// owner — `vw_drop_slice` on the surrounding `module_bindings` skips
+/// them because `vw_drop` is a no-op on non-heap-tagged bits.
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
-        // No-op stack/module_binding release. See the module-level comment
-        // for the double-free hazard that blocks `vw_drop_slice` here.
-        //
-        // Clear the live region so downstream drop order is deterministic
-        // and doesn't surface stale bit patterns to debuggers.
-        let live = self.sp.min(self.stack.len());
-        for i in 0..live {
-            self.stack[i] = Self::NONE_BITS;
-        }
-
         // Track A.1C.3: release Shared module-binding Arcs before
         // draining the ValueWord-encoded bindings. These slots hold raw
         // `Arc::into_raw(Arc::new(parking_lot::Mutex<ValueWord>))`
@@ -508,9 +501,21 @@ impl Drop for VirtualMachine {
             }
         }
         self.shared_module_bindings.clear();
-        // Clear remaining module binding values to NONE sentinels for
-        // deterministic teardown.  (WB: no `vw_drop_slice` here — see
-        // the top-of-file explanation.)
+
+        // WB2.6 Phase 3: release the live stack window. `self.sp` is the
+        // high-water mark of owned slots; everything above is already
+        // NONE_BITS sentinels (per-opcode cleanup invariant).
+        let live = self.sp.min(self.stack.len());
+        shape_value::value_word_drop::vw_drop_slice(&self.stack[..live]);
+        for i in 0..live {
+            self.stack[i] = Self::NONE_BITS;
+        }
+
+        // WB2.6 Phase 3: release every module binding. Non-shared slots
+        // hold owning `ValueWord` shares; shared slots were already
+        // zeroed above, and `vw_drop` is a no-op on the zero bit
+        // pattern.
+        shape_value::value_word_drop::vw_drop_slice(&self.module_bindings);
         for slot in self.module_bindings.iter_mut() {
             *slot = Self::NONE_BITS;
         }
