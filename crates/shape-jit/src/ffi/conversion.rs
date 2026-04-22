@@ -251,6 +251,45 @@ pub extern "C" fn jit_print(value_bits: u64) {
     println!("{}", format_value_word(value_bits));
 }
 
+/// Concatenate two NaN-boxed string values into a freshly boxed
+/// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
+/// operands have `SlotKind::String`.
+///
+/// ## Operand decoding
+///
+/// Handles both the legacy `JitAlloc<String>` and the unified-heap
+/// `UnifiedString` string layouts by routing through
+/// `value_ffi::unbox_string` (F0's fix) — callers may mix the two freely,
+/// e.g. an f-string that interpolates a runtime-produced string captured
+/// in a legacy-layout slot with a compile-time literal boxed through
+/// `box_string` (unified).
+///
+/// If either operand is NOT an `HK_STRING` heap value, we format it via
+/// `format_value_word`. This matches interpreter semantics for
+/// `str + <anything>` — the MIR's `lower_formatted_string` emits
+/// `BinaryOp::Add` on whatever an interpolation expression returns, so the
+/// operand may legitimately be a number, bool, null, etc.
+///
+/// ## Return value
+///
+/// The result is a freshly allocated `UnifiedString` with refcount 1,
+/// NaN-boxed via `box_string`. Neither input refcount is modified — the
+/// caller's `emit_drop` handles the operand lifetimes per MIR ownership.
+pub extern "C" fn jit_string_concat(a_bits: u64, b_bits: u64) -> u64 {
+    use super::value_ffi::unbox_string;
+
+    fn stringify(bits: u64) -> String {
+        match heap_kind(bits) {
+            Some(HK_STRING) => unsafe { unbox_string(bits) }.to_owned(),
+            _ => format_value_word(bits),
+        }
+    }
+
+    let mut out = stringify(a_bits);
+    out.push_str(&stringify(b_bits));
+    super::value_ffi::box_string(out)
+}
+
 /// Convert value to number
 pub extern "C" fn jit_to_number(value_bits: u64) -> u64 {
     if is_number(value_bits) {

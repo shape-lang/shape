@@ -10,7 +10,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print, jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -35,6 +35,8 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_type_check", jit_type_check as *const u8);
     builder.symbol("jit_to_string", jit_to_string as *const u8);
     builder.symbol("jit_to_number", jit_to_number as *const u8);
+    // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
+    builder.symbol("jit_string_concat", jit_string_concat as *const u8);
     builder.symbol("jit_print", jit_print as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
@@ -205,6 +207,20 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_to_number", Linkage::Import, &sig)
             .expect("Failed to declare jit_to_number");
         ffi_funcs.insert("jit_to_number".to_string(), func_id);
+    }
+
+    // F5.a/F5.b: jit_string_concat(a_bits: u64, b_bits: u64) -> u64
+    // Signature matches the two-operand MIR BinaryOp::Add lowering for
+    // string slots. Result is a fresh unified-heap string (refcount 1).
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_string_concat", Linkage::Import, &sig)
+            .expect("Failed to declare jit_string_concat");
+        ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
     // jit_print(value_bits: u64) -> void

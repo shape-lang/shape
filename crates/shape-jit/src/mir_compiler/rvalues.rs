@@ -31,6 +31,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let l_type = self.builder.func.dfg.value_type(l);
                 let r_type = self.builder.func.dfg.value_type(r);
 
+                // F5.a/F5.b: string `+` — concat via FFI. Either operand being a
+                // `SlotKind::String` is enough; the FFI handles `str + <any>` by
+                // falling back to `format_value_word` on non-string operands,
+                // which matches the lowering emitted by f-string interpolation.
+                if matches!(op, BinOp::Add) && self.either_string(lhs_kind, rhs_kind) {
+                    return self.compile_string_concat(l, r);
+                }
+
                 if l_type == types::F64 && r_type == types::F64 {
                     // Both operands are native F64 — inline float ops.
                     self.compile_binop_f64(op, l, r)
@@ -176,6 +184,37 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Some(shape_vm::type_tracking::SlotKind::Int64)
             )
         )
+    }
+
+    /// F5.a/F5.b: true if either operand kind is `SlotKind::String`. The MIR
+    /// emits `BinOp::Add` on heterogeneous operand types for f-string
+    /// interpolation (e.g. `str + number + str`) — the FFI's non-string
+    /// fallback (`format_value_word`) does the rest.
+    fn either_string(
+        &self,
+        lhs: Option<shape_vm::type_tracking::SlotKind>,
+        rhs: Option<shape_vm::type_tracking::SlotKind>,
+    ) -> bool {
+        matches!(lhs, Some(shape_vm::type_tracking::SlotKind::String))
+            || matches!(rhs, Some(shape_vm::type_tracking::SlotKind::String))
+    }
+
+    /// F5.a/F5.b: emit a call to `jit_string_concat(a_bits, b_bits) -> bits`.
+    ///
+    /// Both operand `Value`s must be widened to I64 bit-patterns (the FFI
+    /// signature expects two `i64` params). This handles the cases where the
+    /// MIR lowering produced a native-typed constant for one side — e.g.
+    /// `f"x={n}"` where `n: int` is `SlotKind::Int64` (I64 bits already) or
+    /// a plain number constant (F64, must bitcast to I64).
+    fn compile_string_concat(
+        &mut self,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        let a = self.to_i64_bits(lhs);
+        let b = self.to_i64_bits(rhs);
+        let inst = self.builder.ins().call(self.ffi.string_concat, &[a, b]);
+        Ok(self.builder.inst_results(inst)[0])
     }
 
     // ── Inline Float64 arithmetic and comparisons ──────────────────

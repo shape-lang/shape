@@ -113,6 +113,14 @@ pub struct FFIFuncRefs {
     pub(crate) v2_array_add_f64: FuncRef,
     pub(crate) v2_array_mul_f64: FuncRef,
 
+    // F5.a/F5.b: string `+` lowering.
+    //   `string_concat` — takes two NaN-boxed string operands (`u64`) and
+    //   returns a fresh unified-heap string (`u64`). Called from
+    //   `mir_compiler::rvalues::compile_rvalue` when both operand slots
+    //   carry `SlotKind::String` under `BinOp::Add`. Covers the desugared
+    //   chain emitted by `f"..."` formatted strings as well.
+    pub(crate) string_concat: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     pub(crate) v2_map_get_str_i64: FuncRef,
     pub(crate) v2_map_get_str_f64: FuncRef,
