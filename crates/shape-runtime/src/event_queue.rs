@@ -202,7 +202,12 @@ impl EventQueue for TokioEventQueue {
 ///
 /// When a Shape program yields or awaits, this state captures
 /// everything needed to resume execution later.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **WB2.5 retain-on-read.** `saved_locals` / `saved_stack` hold
+/// owning shares of heap-tagged `ValueWord`s. The manual `Clone`
+/// bumps each element's refcount via `vw_clone`; `Drop` releases
+/// via `vw_drop_slice`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SuspensionState {
     /// What condition we're waiting for
     pub waiting_for: WaitCondition,
@@ -216,6 +221,26 @@ pub struct SuspensionState {
     #[serde(skip)]
     #[serde(default)]
     pub saved_stack: Vec<ValueWord>,
+}
+
+impl Clone for SuspensionState {
+    fn clone(&self) -> Self {
+        use shape_value::value_word_drop::vw_clone;
+        SuspensionState {
+            waiting_for: self.waiting_for.clone(),
+            resume_pc: self.resume_pc,
+            saved_locals: self.saved_locals.iter().map(|&b| vw_clone(b)).collect(),
+            saved_stack: self.saved_stack.iter().map(|&b| vw_clone(b)).collect(),
+        }
+    }
+}
+
+impl Drop for SuspensionState {
+    fn drop(&mut self) {
+        use shape_value::value_word_drop::vw_drop_slice;
+        vw_drop_slice(&self.saved_locals);
+        vw_drop_slice(&self.saved_stack);
+    }
 }
 
 impl SuspensionState {
@@ -356,7 +381,7 @@ mod tests {
         assert_eq!(state.resume_pc, 42);
         assert_eq!(state.saved_locals.len(), 2);
         assert!(matches!(
-            state.waiting_for,
+            &state.waiting_for,
             WaitCondition::NextBar { source } if source == "data"
         ));
     }

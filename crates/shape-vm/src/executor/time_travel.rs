@@ -27,7 +27,13 @@ impl Default for CaptureMode {
 }
 
 /// A snapshot of VM state at a point in time.
-#[derive(Debug, Clone)]
+///
+/// **WB2.5 retain-on-read.** `stack_snapshot` / `module_bindings`
+/// hold owning shares of the live VM slots at capture time. The
+/// manual `Clone` bumps each element's refcount via `vw_clone`;
+/// `Drop` releases via `vw_drop_slice` so replaying / evicting a
+/// snapshot is refcount-neutral.
+#[derive(Debug)]
 pub struct VmSnapshot {
     /// Monotonically increasing snapshot index.
     pub index: u64,
@@ -49,6 +55,32 @@ pub struct VmSnapshot {
     pub module_bindings: Vec<ValueWord>,
     /// Capture reason for display/debugging.
     pub reason: CaptureReason,
+}
+
+impl Clone for VmSnapshot {
+    fn clone(&self) -> Self {
+        use shape_value::value_word_drop::vw_clone;
+        VmSnapshot {
+            index: self.index,
+            ip: self.ip,
+            sp: self.sp,
+            call_depth: self.call_depth,
+            function_id: self.function_id,
+            function_name: self.function_name.clone(),
+            instruction_count: self.instruction_count,
+            stack_snapshot: self.stack_snapshot.iter().map(|&b| vw_clone(b)).collect(),
+            module_bindings: self.module_bindings.iter().map(|&b| vw_clone(b)).collect(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+impl Drop for VmSnapshot {
+    fn drop(&mut self) {
+        use shape_value::value_word_drop::vw_drop_slice;
+        vw_drop_slice(&self.stack_snapshot);
+        vw_drop_slice(&self.module_bindings);
+    }
 }
 
 /// Why a snapshot was captured.
@@ -237,6 +269,10 @@ impl TimeTravel {
     }
 
     /// Build a snapshot from raw VM state.
+    ///
+    /// WB2.5 retain-on-read: `stack` and `module_bindings` are views
+    /// over live VM slots. Each captured element is `vw_clone`d so the
+    /// snapshot owns an independent share per heap-tagged value.
     pub fn build_snapshot(
         &self,
         ip: usize,
@@ -249,6 +285,12 @@ impl TimeTravel {
         module_bindings: &[ValueWord],
         reason: CaptureReason,
     ) -> VmSnapshot {
+        use shape_value::value_word_drop::vw_clone;
+        let live = sp.min(stack.len());
+        let stack_snapshot: Vec<ValueWord> =
+            stack[..live].iter().map(|&b| vw_clone(b)).collect();
+        let module_bindings: Vec<ValueWord> =
+            module_bindings.iter().map(|&b| vw_clone(b)).collect();
         VmSnapshot {
             index: self.next_index,
             ip,
@@ -257,8 +299,8 @@ impl TimeTravel {
             function_id,
             function_name,
             instruction_count,
-            stack_snapshot: stack[..sp.min(stack.len())].to_vec(),
-            module_bindings: module_bindings.to_vec(),
+            stack_snapshot,
+            module_bindings,
             reason,
         }
     }
@@ -403,8 +445,9 @@ mod tests {
         });
 
         for i in 0..5 {
-            let snap = make_snapshot(&tt, i, CaptureReason::FunctionEntry(format!("fn_{i}")));
-            tt.capture(VmSnapshot { index: i, ..snap });
+            let mut snap = make_snapshot(&tt, i, CaptureReason::FunctionEntry(format!("fn_{i}")));
+            snap.index = i;
+            tt.capture(snap);
             tt.next_index = i + 1;
         }
 
