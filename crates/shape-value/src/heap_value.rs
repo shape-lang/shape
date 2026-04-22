@@ -79,7 +79,12 @@ impl MatrixData {
 }
 
 /// Lazy iterator state — supports chained transforms without materializing intermediates.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `source` is a `ValueWord` bit pattern and `transforms`
+/// is a chain of per-transform closures; each of those slots can
+/// carry a heap tag. Manual `Clone` / `Drop` keep the refcount
+/// bookkeeping paired with `vw_clone` / `vw_drop`.
+#[derive(Debug)]
 pub struct IteratorState {
     pub source: ValueWord,
     pub position: usize,
@@ -87,8 +92,30 @@ pub struct IteratorState {
     pub done: bool,
 }
 
+impl Clone for IteratorState {
+    fn clone(&self) -> Self {
+        IteratorState {
+            source: vw_clone(self.source),
+            position: self.position,
+            transforms: self.transforms.clone(),
+            done: self.done,
+        }
+    }
+}
+
+impl Drop for IteratorState {
+    fn drop(&mut self) {
+        vw_drop(self.source);
+    }
+}
+
 /// A lazy transform in an iterator chain.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `Map` / `Filter` / `FlatMap` each hold a closure
+/// `ValueWord` whose heap tag must be refcount-paired via manual
+/// `Clone` / `Drop`. `Take` / `Skip` carry only scalar `usize`
+/// counts and are no-ops for heap bookkeeping.
+#[derive(Debug)]
 pub enum IteratorTransform {
     Map(ValueWord),
     Filter(ValueWord),
@@ -97,13 +124,64 @@ pub enum IteratorTransform {
     FlatMap(ValueWord),
 }
 
+impl Clone for IteratorTransform {
+    fn clone(&self) -> Self {
+        match self {
+            IteratorTransform::Map(b) => IteratorTransform::Map(vw_clone(*b)),
+            IteratorTransform::Filter(b) => IteratorTransform::Filter(vw_clone(*b)),
+            IteratorTransform::Take(n) => IteratorTransform::Take(*n),
+            IteratorTransform::Skip(n) => IteratorTransform::Skip(*n),
+            IteratorTransform::FlatMap(b) => IteratorTransform::FlatMap(vw_clone(*b)),
+        }
+    }
+}
+
+impl Drop for IteratorTransform {
+    fn drop(&mut self) {
+        match self {
+            IteratorTransform::Map(b)
+            | IteratorTransform::Filter(b)
+            | IteratorTransform::FlatMap(b) => vw_drop(*b),
+            IteratorTransform::Take(_) | IteratorTransform::Skip(_) => {}
+        }
+    }
+}
+
 /// Generator function state machine.
-#[derive(Debug, Clone)]
+///
+/// Wave 4 WC.4: `locals` and `result` carry `ValueWord` bits that
+/// may be heap-tagged. Manual `Clone` / `Drop` refcount-pair them.
+#[derive(Debug)]
 pub struct GeneratorState {
     pub function_id: u16,
     pub state: u16,
     pub locals: Box<[ValueWord]>,
     pub result: Option<Box<ValueWord>>,
+}
+
+impl Clone for GeneratorState {
+    fn clone(&self) -> Self {
+        let locals: Vec<ValueWord> = self.locals.iter().map(|&b| vw_clone(b)).collect();
+        let result = self
+            .result
+            .as_deref()
+            .map(|&b| Box::new(vw_clone(b)));
+        GeneratorState {
+            function_id: self.function_id,
+            state: self.state,
+            locals: locals.into_boxed_slice(),
+            result,
+        }
+    }
+}
+
+impl Drop for GeneratorState {
+    fn drop(&mut self) {
+        vw_drop_slice(&self.locals);
+        if let Some(b) = &self.result {
+            vw_drop(**b);
+        }
+    }
 }
 
 /// Data for SimulationCall variant (boxed to keep HeapValue small).
