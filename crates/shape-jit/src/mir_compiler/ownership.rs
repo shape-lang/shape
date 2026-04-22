@@ -163,8 +163,34 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::ClosurePlaceholder => {
-                // Should have been patched to Function(name) during bytecode compilation.
-                // If we reach here, it means the patching didn't happen — return TAG_NULL.
+                // Canonical path: the bytecode compiler's back-patcher rewrites
+                // this to `Function(name)` during final MIR assembly
+                // (`shape-vm/src/compiler/functions.rs` + `compiler_impl_reference_model.rs`).
+                //
+                // JIT-side fallback: monomorphization-triggered
+                // `compile_function` clears `closure_function_ids` before the
+                // top-level MIR patching runs, so unpatched placeholders leak
+                // into the MIR we receive for top-level code. `scan_closure_placeholder_fids`
+                // (called at MirToIR construction time) replays the same scan the
+                // bytecode patcher would have run and resolves the N-th unpaired
+                // placeholder to `__closure_<N>` via `function_indices`. We
+                // consume that pairing here in statement-visit order.
+                let idx = self.next_closure_placeholder_idx.get();
+                self.next_closure_placeholder_idx.set(idx + 1);
+                let fid_opt = self.closure_placeholder_fids.get(idx).copied();
+                if let Some(fid) = fid_opt {
+                    if fid != u16::MAX {
+                        let boxed =
+                            shape_value::ValueWord::from_function(fid).raw_bits();
+                        return Ok(self.builder.ins().iconst(types::I64, boxed as i64));
+                    }
+                }
+                // Exhausted side-table or sentinel (capture-paired placeholder,
+                // whose closure allocation is handled by `emit_heap_closure` /
+                // `emit_stack_closure`; this Assign is a dead store the caller
+                // discards). Preserve the legacy "return null bits" behaviour
+                // so the JIT's error path still matches the pre-fix contract
+                // if the scan misses.
                 Ok(self.builder.ins().iconst(types::I64, 0i64))
             }
         }
