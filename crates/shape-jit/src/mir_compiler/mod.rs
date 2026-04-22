@@ -286,6 +286,34 @@ pub struct MirToIR<'a, 'b> {
     /// of a closure BODY; `shared_local_slots` is a declaring-scope
     /// slot in the outer function.
     pub(crate) shared_local_slots: HashSet<SlotId>,
+
+    // ── JIT-side back-patch for unresolved ClosurePlaceholder ──────
+    /// Per-placeholder function_id, populated at construction by scanning the
+    /// MIR in block/statement order. Each entry corresponds to a
+    /// `ClosurePlaceholder` assign that the bytecode compiler's back-patcher
+    /// did NOT replace with `Function(name)` — typically because
+    /// `closure_function_ids` got cleared by a monomorphization-triggered
+    /// `compile_function` call before the top-level-MIR patching ran.
+    ///
+    /// When `compile_constant(MirConstant::ClosurePlaceholder)` is invoked,
+    /// we pop the head of this queue (via `next_closure_placeholder_idx`)
+    /// and NaN-box the corresponding function id so the stack carries a
+    /// proper `TAG_FUNCTION` bit pattern instead of literal 0. Without this
+    /// the JIT's `jit_call_value` sees `0x0` for a no-capture closure and
+    /// bails out with "callee is neither function nor closure", which is
+    /// the root cause of the gated `parity_array_map/filter/reduce`
+    /// failures.
+    ///
+    /// Empty for MIRs that have no unresolved placeholders, for closure
+    /// bodies themselves (their `ClosureCapture` statements carry the
+    /// resolved `function_id` directly), and for functions whose
+    /// back-patching already succeeded.
+    pub(crate) closure_placeholder_fids: Vec<u16>,
+    /// Cursor into `closure_placeholder_fids`. Incremented once per call to
+    /// `compile_constant(ClosurePlaceholder)`. Statement visit order during
+    /// `compile_body` matches the scan order used by
+    /// `scan_closure_placeholder_fids`, so this is a stable pairing.
+    pub(crate) next_closure_placeholder_idx: std::cell::Cell<usize>,
 }
 
 /// Result of MIR preflight check.
@@ -585,6 +613,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
+        // JIT-side fallback for unresolved `ClosurePlaceholder` constants.
+        // See the `closure_placeholder_fids` doc-comment on `MirToIR` for
+        // why this is needed; in short, monomorphization's `compile_function`
+        // clears `closure_function_ids` in the bytecode compiler before the
+        // top-level MIR back-patching runs, so some placeholders leak into
+        // the MIR we receive. This scan produces the same pairing the
+        // bytecode's back-patcher would have, keyed on MIR traversal order.
+        let closure_placeholder_fids =
+            scan_closure_placeholder_fids(&mir_data.mir, function_indices);
+
         Self {
             builder,
             ctx_ptr,
@@ -611,6 +649,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             owned_mutable_capture_slots: HashSet::new(),
             shared_capture_slots: HashSet::new(),
             shared_local_slots,
+            closure_placeholder_fids,
+            next_closure_placeholder_idx: std::cell::Cell::new(0),
         }
     }
 
@@ -799,3 +839,107 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 }
 
 pub(crate) mod v2_call_abi;
+
+/// Reconstruct the bytecode compiler's back-patch pairing for unresolved
+/// `ClosurePlaceholder` constants in a MIR function, keyed on statement
+/// traversal order.
+///
+/// # Why this exists
+///
+/// The bytecode compiler's `closure_function_ids` vector — the list of
+/// `("__closure_N", function_id)` pairs used to patch
+/// `MirConstant::ClosurePlaceholder` into `MirConstant::Function(name)` —
+/// is cleared by `compile_function` (see
+/// `shape-vm/src/compiler/functions.rs:510`). Monomorphization triggered
+/// during a top-level call (e.g. `arr.map(|x| x*2)`) goes through
+/// `ensure_monomorphic_function` → `compile_function`, clearing the
+/// vector even though the top-level MIR's back-patching hasn't yet run.
+/// The result: any no-capture closure literal in top-level code leaks
+/// into the top-level MIR as a raw `ClosurePlaceholder`.
+///
+/// The downstream effect is that `compile_constant` lowers the
+/// placeholder to a literal `iconst 0`, the callsite pushes `0x0` as the
+/// callee, and `jit_call_value` BAILs with "callee is neither function
+/// nor closure". The gated `parity_array_map/filter/reduce` tests all
+/// hit this exact path.
+///
+/// # Scan semantics
+///
+/// Mirrors the bytecode compiler's loop in
+/// `functions.rs::compile_function` (and the top-level analogue in
+/// `compiler_impl_reference_model.rs`): walk every block's statement
+/// list; a `ClosureCapture` with a resolved `function_id` "claims" the
+/// immediately-following `ClosurePlaceholder` (which the patcher rewrites
+/// to `Nop`), so the placeholder does NOT need independent resolution.
+/// An unpaired placeholder consumes the next `__closure_<idx>` name.
+///
+/// # Name-to-id lookup
+///
+/// We can't consult `closure_function_ids` from the JIT, but
+/// `function_indices` (built from `BytecodeProgram::functions`) has every
+/// `__closure_N` entry in the same global ordering the bytecode compiler
+/// assigned. Looking up `__closure_<idx>` directly produces the correct
+/// function_id for each unpaired placeholder, in the same sequence the
+/// unpatched back-patcher would have produced.
+///
+/// # Graceful degradation
+///
+/// If the lookup misses (e.g. a malformed program where `__closure_<idx>`
+/// is absent), we push `u16::MAX` as a sentinel. `compile_constant`'s
+/// fallback path then emits the legacy `iconst 0` so behaviour is no
+/// worse than before this scan.
+fn scan_closure_placeholder_fids(
+    mir: &shape_vm::mir::types::MirFunction,
+    function_indices: &std::collections::HashMap<String, u16>,
+) -> Vec<u16> {
+    use shape_vm::mir::types::{MirConstant, Operand, Rvalue, StatementKind};
+
+    let mut result: Vec<u16> = Vec::new();
+    let mut closure_idx: u32 = 0;
+    let mut has_capture = false;
+    for block in &mir.blocks {
+        for stmt in &block.statements {
+            let is_placeholder = matches!(
+                &stmt.kind,
+                StatementKind::Assign(
+                    _,
+                    Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder))
+                )
+            );
+            if is_placeholder {
+                if has_capture {
+                    // Paired with a preceding ClosureCapture — the
+                    // bytecode back-patcher would have turned this into
+                    // a Nop. compile_constant still receives the
+                    // placeholder for this slot (the patched MIR would
+                    // not), so we record u16::MAX and let the fallback
+                    // iconst(0) fire; ClosureCapture's function_id
+                    // drives the actual closure allocation in
+                    // `emit_heap_closure` / `emit_stack_closure`, and
+                    // the subsequent Assign(slot, placeholder) is a
+                    // dead store that write_place discards.
+                    result.push(u16::MAX);
+                    has_capture = false;
+                } else {
+                    let name = format!("__closure_{}", closure_idx);
+                    let fid = function_indices.get(&name).copied().unwrap_or(u16::MAX);
+                    result.push(fid);
+                    closure_idx = closure_idx.saturating_add(1);
+                }
+                continue;
+            }
+            if let StatementKind::ClosureCapture {
+                function_id: Some(_),
+                ..
+            } = &stmt.kind
+            {
+                // The bytecode patcher consumes one closure_id for the
+                // capture itself — advance the counter so the unpaired
+                // placeholder counter stays aligned with the compiler's.
+                closure_idx = closure_idx.saturating_add(1);
+                has_capture = true;
+            }
+        }
+    }
+    result
+}
