@@ -388,6 +388,12 @@ impl VirtualMachine {
             if let Some(frame) = self.call_stack.last() {
                 if let Some(upvalues) = &frame.upvalues {
                     if let Some(upvalue) = upvalues.get(upvalue_idx as usize) {
+                        // WB2.2 retain-on-read: `Upvalue::get()` bumps the
+                        // refcount of heap-tagged captures, so the stack
+                        // push receives an independent owning share. For
+                        // raw pointer captures (`OwnedMutable` / `Shared`)
+                        // the bits are not heap-tagged and `vw_clone` in
+                        // `get()` is a no-op.
                         let value_nb = upvalue.get();
                         self.push_raw_u64(value_nb)?;
                         return Ok(());
@@ -414,7 +420,12 @@ impl VirtualMachine {
                 if let Some(upvalues) = &mut frame.upvalues {
                     if let Some(upvalue) = upvalues.get_mut(upvalue_idx as usize) {
                         record_heap_write();
-                        write_barrier_vw(&upvalue.get(), &value_nb);
+                        // WB2 retain-on-read: the write barrier reads the
+                        // old value for inspection only — use `get_raw()`
+                        // to avoid leaking a retain that has no matching
+                        // release.
+                        let old_raw = upvalue.get_raw();
+                        write_barrier_vw(&old_raw, &value_nb);
                         upvalue.set(value_nb);
                         return Ok(());
                     }
@@ -1474,8 +1485,14 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::ModuleBinding(idx)) = instruction.operand {
+            // WB2.2 retain-on-read: push an owning share onto the stack
+            // so heap-tagged bindings are not aliased across the stack
+            // slot and the binding slot. Phase 3 enables stack
+            // `vw_drop_slice` on teardown; without this retain, the
+            // stack's release would decrement an Arc the binding still
+            // holds.
             let nb = if (idx as usize) < self.module_bindings.len() {
-                self.binding_read_raw(idx as usize)
+                self.binding_read_owned(idx as usize)
             } else {
                 ValueWord::none()
             };

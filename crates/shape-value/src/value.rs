@@ -36,8 +36,28 @@ pub type VMArray = Arc<VMArrayBuf>;
 /// The retired-in-A.1C.3 legacy path (SharedCell-wrapped upvalue
 /// populated by `BoxLocal` / `BoxModuleBinding`) is gone. `get()` and
 /// `set()` no longer run any auto-deref.
-#[derive(Debug, Clone)]
+///
+/// **WB2.1 retain-on-read contract.** `Clone` and `Drop` are manual:
+/// cloning bumps the Arc refcount of any heap-tagged share (via
+/// `vw_clone`), and dropping releases it (`vw_drop`). `Upvalue` is
+/// therefore a proper owning handle — two `Upvalue`s that point at
+/// the same heap-tagged share hold two independent refcounts.
+#[derive(Debug)]
 pub struct Upvalue(ValueWord);
+
+impl Clone for Upvalue {
+    #[inline]
+    fn clone(&self) -> Self {
+        Upvalue(crate::value_word_drop::vw_clone(self.0))
+    }
+}
+
+impl Drop for Upvalue {
+    #[inline]
+    fn drop(&mut self) {
+        crate::value_word_drop::vw_drop(self.0);
+    }
+}
 
 impl Upvalue {
     /// Create a new upvalue carrying `value`.
@@ -88,11 +108,22 @@ impl Upvalue {
         self.0
     }
 
-    /// Write the captured ValueWord. Replaces the stored bits. For
-    /// `OwnedMutable` / `Shared` captures the A.1B capture opcodes
+    /// Write the captured ValueWord.
+    ///
+    /// WB2.1: releases the previously stored bits via `vw_drop` before
+    /// installing the new value. The caller must transfer an
+    /// **owning share** of `value`; `set` takes ownership. Because
+    /// `Upvalue::get` bumps the refcount on read and stack-pop of a
+    /// heap-tagged value returns an owning share, the natural usage
+    /// in `op_store_closure` (pop from stack, install into upvalue)
+    /// is already correct.
+    ///
+    /// For `OwnedMutable` / `Shared` captures the A.1B capture opcodes
     /// write through the pointer directly; they do not call `set()`.
     pub fn set(&mut self, value: ValueWord) {
+        let old = self.0;
         self.0 = value;
+        crate::value_word_drop::vw_drop(old);
     }
 
     /// Track A.1B: return the raw inner bits of the upvalue's
