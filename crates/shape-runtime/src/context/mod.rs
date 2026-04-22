@@ -37,7 +37,7 @@ use crate::snapshot::{
 };
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use shape_value::ValueWord;
+use shape_value::{ValueMap, ValueWord};
 
 /// Execution context for evaluating expressions
 #[derive(Clone)]
@@ -120,8 +120,9 @@ pub struct ExecutionContext {
 pub struct TypeAliasRuntimeEntry {
     /// The base type name (e.g., "Percent" for `type Percent4 = Percent { decimals: 4 }`)
     pub base_type: String,
-    /// Meta parameter overrides as runtime values
-    pub overrides: Option<HashMap<String, ValueWord>>,
+    /// Meta parameter overrides as runtime values. Stored as a
+    /// `ValueMap` so heap-tagged override values are released on drop.
+    pub overrides: Option<ValueMap>,
 }
 
 /// Registry for enum definitions
@@ -403,7 +404,8 @@ impl ExecutionContext {
     /// Register a type alias for runtime meta resolution
     ///
     /// Used when loading stdlib to make type aliases available for formatting.
-    /// Example: `type Percent4 = Percent { decimals: 4 }`
+    /// Example: `type Percent4 = Percent { decimals: 4 }`. Caller-owned
+    /// overrides are wrapped into a `ValueMap` that owns the heap refs.
     pub fn register_type_alias(
         &mut self,
         alias_name: &str,
@@ -414,7 +416,7 @@ impl ExecutionContext {
             alias_name.to_string(),
             TypeAliasRuntimeEntry {
                 base_type: base_type.to_string(),
-                overrides,
+                overrides: overrides.map(ValueMap::from),
             },
         );
     }
@@ -429,11 +431,12 @@ impl ExecutionContext {
     /// Resolve a type name, following aliases if needed
     ///
     /// If the type is an alias, returns (base_type, Some(overrides))
-    /// If not an alias, returns (type_name, None)
+    /// If not an alias, returns (type_name, None). The returned `ValueMap`
+    /// is a cloned snapshot with refcounts bumped via `ValueMap::clone`.
     pub fn resolve_type_for_format(
         &self,
         type_name: &str,
-    ) -> (String, Option<HashMap<String, ValueWord>>) {
+    ) -> (String, Option<ValueMap>) {
         if let Some(entry) = self.type_alias_registry.get(type_name) {
             (entry.base_type.clone(), entry.overrides.clone())
         } else {
@@ -593,13 +596,15 @@ impl ExecutionContext {
             let mut restored = HashMap::new();
             for (name, var) in scope.into_iter() {
                 let value = serializable_to_nanboxed(&var.value, store)?;
+                // Wrap the reconstructed HashMap in a ValueMap so the
+                // variable owns its override values' heap refs.
                 let format_overrides = match var.format_overrides {
                     Some(map) => {
                         let mut out = HashMap::new();
                         for (k, v) in map.into_iter() {
                             out.insert(k, serializable_to_nanboxed(&v, store)?);
                         }
-                        Some(out)
+                        Some(ValueMap::from(out))
                     }
                     None => None,
                 };
@@ -620,13 +625,15 @@ impl ExecutionContext {
 
         self.type_alias_registry.clear();
         for (name, entry) in snapshot.type_alias_registry.into_iter() {
+            // Wrap the rebuilt HashMap in a ValueMap so the type alias
+            // registry releases override values on drop.
             let overrides = match entry.overrides {
                 Some(map) => {
                     let mut out = HashMap::new();
                     for (k, v) in map.into_iter() {
                         out.insert(k, serializable_to_nanboxed(&v, store)?);
                     }
-                    Some(out)
+                    Some(ValueMap::from(out))
                 }
                 None => None,
             };

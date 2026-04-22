@@ -821,9 +821,12 @@ pub struct BytecodeCompiler {
     /// Extension registry for comptime execution
     pub(crate) extension_registry: Option<Arc<Vec<shape_runtime::module_exports::ModuleExports>>>,
 
-    /// Comptime field values per type: type_name -> (field_name -> ValueWord)
-    /// These are type-level constants baked at compile time with zero runtime cost.
-    pub(crate) comptime_fields: HashMap<String, HashMap<String, shape_value::ValueWord>>,
+    /// Comptime field values per type: type_name -> (field_name -> ValueWord).
+    /// These are type-level constants baked at compile time with zero
+    /// runtime cost. Inner map is a `ValueMap` so heap-tagged comptime
+    /// values (strings via `Arc<String>`, etc.) are released when a type's
+    /// entry is removed or the compiler is dropped.
+    pub(crate) comptime_fields: HashMap<String, shape_value::ValueMap>,
     /// Type diagnostic mode for shared analyzer diagnostics.
     pub(crate) type_diagnostic_mode: TypeDiagnosticMode,
     /// Expression compilation diagnostic mode.

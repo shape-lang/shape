@@ -2399,8 +2399,9 @@ impl BytecodeCompiler {
             builder.register(self.type_tracker.schema_registry_mut());
         }
 
-        // Bake comptime field values
-        let mut comptime_values = std::collections::HashMap::new();
+        // Bake comptime field values. `ValueMap` ensures string-backed
+        // comptime values drop their Arc refs when the compiler tears down.
+        let mut comptime_values = shape_value::ValueMap::new();
         for field in &struct_def.fields {
             if !field.is_comptime {
                 continue;

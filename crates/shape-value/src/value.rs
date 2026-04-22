@@ -124,7 +124,11 @@ pub enum PrintSpan {
         span_id: String,
     },
 
-    /// Value span with formatting metadata
+    /// Value span with formatting metadata.
+    ///
+    /// Wave 4 WD.4: `format_params` is a `ValueMap` so heap-tagged
+    /// formatting overrides release their refs when the span drops;
+    /// `ValueMap::clone` keeps `derive(Clone)` correct.
     Value {
         text: String,
         start: usize,
@@ -134,7 +138,7 @@ pub enum PrintSpan {
         raw_value: Box<ValueWord>,
         type_name: String,
         current_format: String,
-        format_params: HashMap<String, ValueWord>,
+        format_params: crate::value_word_drop::ValueMap,
     },
 }
 

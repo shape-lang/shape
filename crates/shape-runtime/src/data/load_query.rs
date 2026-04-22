@@ -5,7 +5,7 @@
 
 use super::{DataQuery, Timeframe};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Generic data load request (industry-agnostic)
@@ -37,8 +37,10 @@ pub struct LoadQuery {
     /// If None, uses default provider
     pub provider: Option<String>,
 
-    /// Generic parameters (arbitrary key-value)
-    pub params: HashMap<String, ValueWord>,
+    /// Generic parameters (arbitrary key-value). `ValueMap` drops each
+    /// heap-tagged value on teardown so parameter strings/arrays don't
+    /// leak their refcounts.
+    pub params: ValueMap,
 
     /// Target type name for validation (e.g., "Candle", "TickData")
     /// If specified, validates DataFrame has required columns
@@ -54,7 +56,7 @@ impl LoadQuery {
     pub fn new() -> Self {
         Self {
             provider: None,
-            params: HashMap::new(),
+            params: ValueMap::new(),
             target_type: None,
             column_mapping: None,
         }

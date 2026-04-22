@@ -4,7 +4,7 @@
 
 use shape_ast::ast::VarKind;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -22,8 +22,11 @@ pub struct Variable {
     pub is_function_scoped: bool,
     /// Optional format hint for display (e.g., "Percent" for meta lookup)
     pub format_hint: Option<String>,
-    /// Optional format parameter overrides from type alias (e.g., { decimals: 4 } from type Percent4 = Percent { decimals: 4 })
-    pub format_overrides: Option<HashMap<String, ValueWord>>,
+    /// Optional format parameter overrides from type alias (e.g.,
+    /// `{ decimals: 4 }` from `type Percent4 = Percent { decimals: 4 }`).
+    /// Stored as `Option<ValueMap>` so heap-tagged override values
+    /// (strings, etc.) are released on drop.
+    pub format_overrides: Option<ValueMap>,
 }
 
 impl Variable {
@@ -32,7 +35,9 @@ impl Variable {
         Self::with_format(kind, value, None, None)
     }
 
-    /// Create a new variable with format hint and parameter overrides
+    /// Create a new variable with format hint and parameter overrides.
+    /// The caller-owned `HashMap` is wrapped in a `ValueMap`, transferring
+    /// ownership of its values' heap refs to the variable.
     pub fn with_format(
         kind: VarKind,
         value: Option<ValueWord>,
@@ -51,7 +56,7 @@ impl Variable {
             is_initialized,
             is_function_scoped,
             format_hint,
-            format_overrides,
+            format_overrides: format_overrides.map(ValueMap::from),
         }
     }
 
@@ -207,8 +212,11 @@ impl super::ExecutionContext {
     /// Get the format overrides for a variable (if any)
     ///
     /// Returns parameter overrides from type alias, e.g., { "decimals": 4 }
-    /// for a variable declared as `let x: Percent4` where `type Percent4 = Percent { decimals: 4 }`
-    pub fn get_variable_format_overrides(&self, name: &str) -> Option<HashMap<String, ValueWord>> {
+    /// for a variable declared as `let x: Percent4` where
+    /// `type Percent4 = Percent { decimals: 4 }`. The returned `ValueMap`
+    /// bumps each override value's heap refcount so the original variable
+    /// keeps its own ownership.
+    pub fn get_variable_format_overrides(&self, name: &str) -> Option<ValueMap> {
         // Search from innermost to outermost scope
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
@@ -222,7 +230,7 @@ impl super::ExecutionContext {
     pub fn get_variable_format_info(
         &self,
         name: &str,
-    ) -> (Option<String>, Option<HashMap<String, ValueWord>>) {
+    ) -> (Option<String>, Option<ValueMap>) {
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
                 return (

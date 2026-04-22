@@ -61,7 +61,7 @@
 
 use shape_ast::ast::{Expr, Literal, ObjectEntry};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{ValueMap, ValueWord, ValueWordExt, vw_clone};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -69,22 +69,23 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ConstEvaluator {
     /// Annotation parameters available during evaluation
-    /// Maps parameter name → const value
-    params: HashMap<String, ValueWord>,
+    /// Maps parameter name → const value. Stored as a `ValueMap` so heap
+    /// refs on parameter values are released when the evaluator is dropped.
+    params: ValueMap,
 }
 
 impl ConstEvaluator {
     /// Create a new const evaluator with annotation parameters
     pub fn new() -> Self {
         Self {
-            params: HashMap::new(),
+            params: ValueMap::new(),
         }
     }
 
     /// Create a const evaluator with annotation parameters
     pub fn with_params(params: HashMap<String, ValueWord>) -> Self {
         Self {
-            params: params.into_iter().map(|(k, v)| (k, v)).collect(),
+            params: ValueMap::from(params),
         }
     }
 
@@ -173,11 +174,13 @@ impl ConstEvaluator {
                 Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
             }
 
-            // Identifiers - only allowed if they're annotation parameters
+            // Identifiers - only allowed if they're annotation parameters.
+            // vw_clone bumps the heap refcount so the caller owns an
+            // independent ref and the evaluator's map keeps its own.
             Expr::Identifier(name, _span) => {
                 self.params
                     .get(name)
-                    .cloned()
+                    .map(|v| vw_clone(*v))
                     .ok_or_else(|| ShapeError::RuntimeError {
                         message: format!(
                             "Cannot reference variable '{}' in const context (metadata()). \
