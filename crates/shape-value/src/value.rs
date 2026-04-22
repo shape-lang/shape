@@ -53,14 +53,39 @@ impl Upvalue {
         Upvalue(value)
     }
 
-    /// Read the captured value. Returns the stored `ValueWord`
-    /// unchanged. For `OwnedMutable` / `Shared` captures this is the
-    /// raw pointer bits and callers must dereference via the A.1B
-    /// capture opcodes — plain `get()` is appropriate only for
+    /// Read the captured value, returning an **owning share** of the
+    /// stored `ValueWord`.
+    ///
+    /// WB2.1 (retain-on-read): `ValueWord` is a `u64` alias, so a plain
+    /// bit-copy does not bump the Arc refcount held by a heap-tagged
+    /// capture. Every `get()` now calls `vw_clone` on the stored bits
+    /// so callers receive a share they own outright. Callers that push
+    /// the returned value onto the VM stack, store it into a local
+    /// slot, or hand it to any other retain-owning sink are correct
+    /// without further bookkeeping.
+    ///
+    /// For `OwnedMutable` / `Shared` captures the stored bits are raw
+    /// pointer bits (not heap-tagged ValueWords); `vw_clone` is a
+    /// no-op on those tag patterns and the A.1B capture opcodes
+    /// continue to use `clone_inner_bits_for_raw_pointer_access` to
+    /// recover the raw pointer. Plain `get()` is appropriate only for
     /// `Immutable` captures.
     #[inline]
     pub fn get(&self) -> ValueWord {
-        self.0.clone()
+        crate::value_word_drop::vw_clone(self.0)
+    }
+
+    /// Read the captured value as a plain bit-copy, WITHOUT bumping
+    /// the refcount of a heap-tagged share.
+    ///
+    /// Use this only in read-only inspection paths where the caller
+    /// will not hand the returned bits to any consumer that expects to
+    /// own a share (no push-onto-stack, no store-into-slot, no
+    /// hand-off to another container). The returned bits are valid
+    /// only for as long as the `Upvalue` remains live.
+    #[inline]
+    pub fn get_raw(&self) -> ValueWord {
+        self.0
     }
 
     /// Write the captured ValueWord. Replaces the stored bits. For
