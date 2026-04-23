@@ -317,6 +317,12 @@ impl ShapeEngine {
         semantic: SemanticSnapshot,
         context: ContextSnapshot,
     ) -> Result<()> {
+        // B1.5: snapshot replay can materialise TypedObjects whose layouts
+        // are resolved via the current ambient registry. Install this
+        // runtime's registry for the duration of the restore so the
+        // decoder does not fall back to the legacy global static.
+        let _scope = self.runtime.enter_schema_scope();
+
         self.exported_symbols = semantic.exported_symbols;
         if let Some(ctx) = self.runtime.persistent_context_mut() {
             let store = self
