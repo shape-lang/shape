@@ -397,8 +397,9 @@ pub fn v2_range_iter(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-        let receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
-    let owned = (*receiver).clone();
+    // B6.2: IteratorState::source owns its share (vw_drop on drop);
+    // retain args[0] so the source is independent of the caller's share.
+    let owned = shape_value::value_word_drop::vw_clone(args[0]);
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: owned,
         position: 0,
@@ -433,7 +434,11 @@ pub(crate) fn handle_map(
             "Iterator.map() argument must be a function".to_string(),
         ));
     }
-    let result = with_transform(state, IteratorTransform::Map((*closure_vw).clone()));
+    // B6.2: `IteratorTransform::Map` takes ownership (its Drop calls
+    // vw_drop). `(*closure_vw).clone()` is a u64 bit-copy that aliases
+    // args[1]; retain so the stored transform owns an independent share.
+    let closure_bits = shape_value::value_word_drop::vw_clone(*closure_vw);
+    let result = with_transform(state, IteratorTransform::Map(closure_bits));
     Ok(result.into_raw_bits())
 }
 
@@ -459,7 +464,9 @@ pub(crate) fn handle_filter(
             "Iterator.filter() argument must be a function".to_string(),
         ));
     }
-    let result = with_transform(state, IteratorTransform::Filter((*closure_vw).clone()));
+    // B6.2: retain the predicate for `IteratorTransform::Filter` ownership.
+    let closure_bits = shape_value::value_word_drop::vw_clone(*closure_vw);
+    let result = with_transform(state, IteratorTransform::Filter(closure_bits));
     Ok(result.into_raw_bits())
 }
 
@@ -533,7 +540,9 @@ pub(crate) fn handle_flat_map(
             "Iterator.flatMap() argument must be a function".to_string(),
         ));
     }
-    let result = with_transform(state, IteratorTransform::FlatMap((*closure_vw).clone()));
+    // B6.2: retain the function for `IteratorTransform::FlatMap` ownership.
+    let closure_bits = shape_value::value_word_drop::vw_clone(*closure_vw);
+    let result = with_transform(state, IteratorTransform::FlatMap(closure_bits));
     Ok(result.into_raw_bits())
 }
 
@@ -859,7 +868,8 @@ pub(crate) fn handle_array_iter(
             "iter() requires a receiver".to_string(),
         ));
     }
-    let receiver = (*borrow_vw(args[0])).clone();
+    // B6.2: IteratorState::source owns its share; retain args[0].
+    let receiver = shape_value::value_word_drop::vw_clone(args[0]);
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: receiver,
         position: 0,
@@ -880,7 +890,8 @@ pub(crate) fn handle_string_iter(
             "iter() requires a receiver".to_string(),
         ));
     }
-    let receiver = (*borrow_vw(args[0])).clone();
+    // B6.2: IteratorState::source owns its share; retain args[0].
+    let receiver = shape_value::value_word_drop::vw_clone(args[0]);
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: receiver,
         position: 0,
@@ -901,7 +912,8 @@ pub(crate) fn handle_range_iter(
             "iter() requires a receiver".to_string(),
         ));
     }
-    let receiver = (*borrow_vw(args[0])).clone();
+    // B6.2: IteratorState::source owns its share; retain args[0].
+    let receiver = shape_value::value_word_drop::vw_clone(args[0]);
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: receiver,
         position: 0,
@@ -922,7 +934,8 @@ pub(crate) fn handle_hashmap_iter(
             "iter() requires a receiver".to_string(),
         ));
     }
-    let receiver = (*borrow_vw(args[0])).clone();
+    // B6.2: IteratorState::source owns its share; retain args[0].
+    let receiver = shape_value::value_word_drop::vw_clone(args[0]);
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: receiver,
         position: 0,

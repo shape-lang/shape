@@ -199,18 +199,12 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         let result = handler(self, &mut raw_args, ctx)?;
-        // FR.7: the prior `drop(ValueWord::from_raw_bits(bits))` was a
-        // silent no-op on Copy u64, which several v2 method handlers
-        // (e.g. `set_methods::v2_add`, `hashmap_methods::v2_set`) rely
-        // on — they return the receiver's bits directly without
-        // calling `vw_clone`, so the released arg share would free the
-        // Arc out from under the caller's consumer. Until those
-        // handlers are audited to bump their return value's refcount,
-        // keep the arg release as a documented no-op. This re-leaks 1
-        // share per method call on heap-tagged args — the same leak
-        // present before FR.4, no regression relative to `@2a600ab`.
+        // B6.2: release each arg's heap share now that the handlers have
+        // been audited to return an independent owning share (via
+        // `vw_clone` on the in-place receiver fast paths that used to
+        // alias args[0]). Re-enables the real release FR.8 had gated out.
         for bits in raw_args {
-            let _ = bits;
+            shape_value::value_word_drop::vw_drop(bits);
         }
         self.push_raw_u64(result)?;
         Ok(())
@@ -309,11 +303,10 @@ impl VirtualMachine {
             self.push_raw_u64(ValueWord::from_raw_bits(receiver_bits))?;
             let result = self.builtin_type_of(shape_value::ArgVec::new())?;
             self.push_raw_u64(result)?;
-            // FR.8: same treatment as `dispatch_method_handler` — the
-            // no-op preserves compatibility with handlers that return
-            // raw-bits aliases of their args.
+            // B6.2: release each arg's heap share — handlers now return
+            // independent owning shares (see `dispatch_method_handler`).
             for bits in raw_args {
-                let _ = bits;
+                shape_value::value_word_drop::vw_drop(bits);
             }
             return Ok(());
         }

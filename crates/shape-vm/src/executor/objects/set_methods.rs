@@ -35,7 +35,11 @@ pub fn v2_add(
         data.insert(item);
         // Update args[0] — as_heap_mut may have reallocated via Arc::make_mut
         args[0] = receiver.raw_bits();
-        return Ok((*receiver).clone().into_raw_bits());
+        // B6.2: the return aliases args[0]; retain so the caller owns
+        // a distinct refcount share. Without this, the dispatch-site
+        // arg release would free the Arc out from under the caller's
+        // consumer.
+        return Ok(shape_value::value_word_drop::vw_clone(receiver.raw_bits()));
     }
 
     // COW slow path: clone the set data
@@ -76,7 +80,8 @@ pub fn v2_delete(
     if let Some(data) = receiver.as_set_mut() {
         data.remove(&item);
         args[0] = receiver.raw_bits();
-        return Ok((*receiver).clone().into_raw_bits());
+        // B6.2: the return aliases args[0]; retain for caller ownership.
+        return Ok(shape_value::value_word_drop::vw_clone(receiver.raw_bits()));
     }
 
     if let Some(set_data) = extract_set(args[0]) {

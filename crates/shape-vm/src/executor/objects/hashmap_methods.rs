@@ -301,27 +301,36 @@ pub fn v2_merge(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
+    use shape_value::value_word_drop::vw_clone;
+
     let (base_keys, base_values, _) = raw_helpers::extract_hashmap(args[0])
         .ok_or_else(|| type_mismatch_error("merge", "HashMap"))?;
     let (other_keys, other_values, _) = raw_helpers::extract_hashmap(args[1])
         .ok_or_else(|| VMError::RuntimeError("merge argument must be a HashMap".to_string()))?;
 
-    let mut keys = base_keys.clone();
-    let mut values = base_values.clone();
+    // B6.2: `Vec<ValueWord>::clone` on `Vec<u64>` is a bit-copy — the new
+    // Vec aliases the old Vec's heap-ref shares. Use `vw_clone` per
+    // element so the returned HashMap owns independent shares.
+    let mut keys: Vec<ValueWord> = base_keys.iter().map(|&b| vw_clone(b)).collect();
+    let mut values: Vec<ValueWord> = base_values.iter().map(|&b| vw_clone(b)).collect();
     let mut index = HashMapData::rebuild_index(&keys);
 
     for (ok, ov) in other_keys.iter().zip(other_values.iter()) {
         let hash = ok.vw_hash();
         if let Some(bucket) = index.get(&hash) {
             if let Some(idx) = bucket_find(&keys, bucket, ok) {
-                keys[idx] = ok.clone();
-                values[idx] = ov.clone();
+                // Replacing an existing entry: release the current share
+                // before overwriting, and retain from the other map.
+                shape_value::value_word_drop::vw_drop(keys[idx]);
+                shape_value::value_word_drop::vw_drop(values[idx]);
+                keys[idx] = vw_clone(*ok);
+                values[idx] = vw_clone(*ov);
                 continue;
             }
         }
         let idx = keys.len();
-        keys.push(ok.clone());
-        values.push(ov.clone());
+        keys.push(vw_clone(*ok));
+        values.push(vw_clone(*ov));
         index.entry(hash).or_default().push(idx);
     }
 

@@ -293,7 +293,13 @@ impl VirtualMachine {
                     HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(Box::new(type_annotation.clone())))
                 }
                 crate::bytecode::Constant::Value(val) => {
-                    return self.push_raw_u64(val.clone());
+                    // B6.2: the constants table owns its share. `val.clone()`
+                    // on `ValueWord = u64` is a bit-copy, so the pushed stack
+                    // slot would alias the constant's heap refcount. Retain
+                    // via `vw_clone` so the stack slot has an independent
+                    // owning share that can be released without freeing the
+                    // constant.
+                    return self.push_raw_u64(shape_value::value_word_drop::vw_clone(*val));
                 }
                 // Simple types and String/Decimal already handled above
                 _ => unreachable!(),
