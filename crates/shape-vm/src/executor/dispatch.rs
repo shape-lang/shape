@@ -35,6 +35,14 @@ impl VirtualMachine {
         &mut self,
         mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ExecutionResult, VMError> {
+        // Install this VM's ShapeTableHandle as the ambient current
+        // shape table for the duration of this execution. Mirrors B1's
+        // pattern for TypeSchemaRegistry. The guard restores any outer
+        // scope (e.g. a host-installed async scope) on drop, so nested
+        // or re-entrant VM execution composes correctly.
+        let _shape_scope =
+            shape_value::SyncShapeTableScope::enter(self.shape_table.clone());
+
         self.clear_last_uncaught_exception();
 
         // Fast path: when no debugger is attached and tracing is off, use the
