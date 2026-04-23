@@ -457,6 +457,51 @@ fn test_hashmap_integer_keys() {
     assert_eq!(result.as_str().unwrap(), "two");
 }
 
+// ===== B5: per-VM shape table =====
+
+/// Each VirtualMachine owns its own ShapeTableHandle; shape transitions
+/// triggered during HashMap operations land in *that* VM's table, not
+/// in a shared global. Verifies the per-VM isolation promise of the
+/// post-B5 architecture.
+#[test]
+fn test_hashmap_shape_table_is_per_vm() {
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    use shape_value::{SyncShapeTableScope, hash_property_name, shape_transition};
+
+    let vm_a = VirtualMachine::new(VMConfig::default());
+    let vm_b = VirtualMachine::new(VMConfig::default());
+
+    // Each VM starts with a fresh root-only transition table.
+    assert_eq!(vm_a.shape_table.table().lock().unwrap().shape_count(), 1);
+    assert_eq!(vm_b.shape_table.table().lock().unwrap().shape_count(), 1);
+
+    // Install VM A's handle as the ambient shape table and drive a
+    // transition through the public free-function API. This is the
+    // exact code path that HashMapData::compute_shape,
+    // HashMapData::shape_get, and the JIT FFI's jit_v2_map_set_str_i64
+    // go through at runtime.
+    {
+        let _scope = SyncShapeTableScope::enter(vm_a.shape_table.clone());
+        let root = shape_value::ShapeTransitionTable::root();
+        let _ = shape_transition(root, hash_property_name("x"));
+        let _ = shape_transition(root, hash_property_name("y"));
+    }
+
+    // VM A's table advanced; VM B's is untouched.
+    let a_count = vm_a.shape_table.table().lock().unwrap().shape_count();
+    let b_count = vm_b.shape_table.table().lock().unwrap().shape_count();
+    assert!(
+        a_count >= 3, // root + x + y
+        "vm_a shape table should have grown via the ambient handle (count={a_count})",
+    );
+    assert_eq!(
+        b_count, 1,
+        "vm_b shape table should be unaffected by transitions made under \
+         vm_a's scope (count={b_count})",
+    );
+}
+
 // ===== Immutability =====
 
 #[test]
