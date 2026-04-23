@@ -27,7 +27,6 @@
 //! - `StorageHint::Unknown`: Type not determined at compile time
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use shape_ast::ast::TypeAnnotation;
@@ -52,8 +51,6 @@ pub enum NumericType {
     Decimal,
 }
 
-/// Counter for generating unique inline object type names
-static INLINE_OBJECT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Describes the storage kind for a single local/parameter slot in a frame.
 ///
@@ -865,6 +862,12 @@ pub struct TypeTracker {
     /// v2: Computed C-compatible struct layouts indexed by SchemaId.
     /// Enables the compiler to look up field offsets at compile time for typed codegen.
     pub v2_layouts: HashMap<SchemaId, StructLayout>,
+
+    /// Per-compiler counter for generating unique names for inline object
+    /// schemas (`__inline_obj_{N}`). Moved off the process-global
+    /// `INLINE_OBJECT_COUNTER` static in B1.8; scoping it to a single
+    /// compile makes the generated names deterministic per compile.
+    inline_object_counter: u64,
 }
 
 impl TypeTracker {
@@ -881,6 +884,7 @@ impl TypeTracker {
             function_return_types: HashMap::new(),
             object_field_contracts: HashMap::new(),
             v2_layouts: HashMap::new(),
+            inline_object_counter: 0,
         }
     }
 
@@ -1190,7 +1194,8 @@ impl TypeTracker {
         }
 
         // Generate a unique name for this inline object type
-        let id = INLINE_OBJECT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let id = self.inline_object_counter;
+        self.inline_object_counter += 1;
         let type_name = format!("__inline_obj_{}", id);
 
         // Create field definitions - all fields are Any (NaN-boxed)
@@ -1232,7 +1237,8 @@ impl TypeTracker {
             return existing;
         }
 
-        let id = INLINE_OBJECT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let id = self.inline_object_counter;
+        self.inline_object_counter += 1;
         let type_name = format!("__inline_obj_{}", id);
         let field_defs: Vec<(String, FieldType)> = fields
             .iter()
@@ -1273,7 +1279,8 @@ impl TypeTracker {
         &mut self,
         field_defs: Vec<(String, FieldType)>,
     ) -> SchemaId {
-        let id = INLINE_OBJECT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let id = self.inline_object_counter;
+        self.inline_object_counter += 1;
         let type_name = format!("__inline_obj_{}", id);
 
         let schema = TypeSchema::new(&type_name, field_defs);
