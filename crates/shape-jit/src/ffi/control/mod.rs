@@ -374,8 +374,9 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             }
             vm_captures = Some(caps);
             // Drop the cloned handle — the captures are already copied.
-            // `vw` goes out of scope here, releasing the +1 share we took.
-            drop(vw);
+            // FR.6: real release of the `clone_from_bits` retain (was
+            // no-op drop of Copy u64).
+            shape_value::value_word_drop::vw_drop(vw);
             fid
         } else {
             if debug { eprintln!("[jit-call-value] BAIL: callee is neither function nor closure: {:#x}", callee_bits); }

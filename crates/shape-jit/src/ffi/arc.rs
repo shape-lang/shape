@@ -14,14 +14,15 @@
 /// Returns the same bits (pass-through for convenience in JIT call sequences).
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_retain(bits: u64) -> u64 {
-    // Reconstruct a ValueWord from raw bits. This is safe because we're only
-    // cloning it (incrementing refcount), then forgetting BOTH the original
-    // and the clone — the net effect is +1 refcount.
-    let vw: shape_value::ValueWord = unsafe { std::mem::transmute(bits) };
-    let _clone = vw.clone(); // +1 refcount
-    std::mem::forget(vw); // Don't decrement (we don't own this)
-    std::mem::forget(_clone); // Don't decrement (caller owns the new ref)
-    bits
+    // FR.6: `ValueWord = u64` is Copy — `vw.clone()` is a bit copy, not
+    // a refcount bump, and `std::mem::forget` on a Copy u64 is a no-op.
+    // Call the real retain helper which bumps the Arc/unified refcount
+    // for heap-tagged bits (no-op for scalars). Returns the same bits
+    // for non-owned heap values; returns a new bit pattern for owned
+    // Box-backed values (deep-cloned). JIT callers must use the
+    // returned value — historically always a pass-through, still
+    // correct for the Arc-backed hot path.
+    shape_value::value_word_drop::vw_clone(bits)
 }
 
 /// Decrement the reference count of a NaN-boxed heap value and free if last reference.
@@ -30,8 +31,9 @@ pub extern "C" fn jit_arc_retain(bits: u64) -> u64 {
 /// For heap values, Drop decrements the Arc refcount and frees if zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_release(bits: u64) {
-    // Reconstruct a ValueWord and let it drop naturally.
-    // This decrements the refcount (and frees if zero).
-    let _vw: shape_value::ValueWord = unsafe { std::mem::transmute(bits) };
-    // _vw drops here, decrementing refcount
+    // FR.6: `ValueWord = u64` is Copy — the prior `let _vw = transmute(...)`
+    // Drop was a silent no-op (refcount never decremented). Call the
+    // real release helper, which decrements Arc/unified refcount for
+    // heap-tagged bits and is a no-op for scalars.
+    shape_value::value_word_drop::vw_drop(bits);
 }

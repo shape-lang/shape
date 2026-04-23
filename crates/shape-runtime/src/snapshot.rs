@@ -1486,8 +1486,13 @@ pub fn serializable_to_nanboxed_with_layouts(
                             // needs its own share so the deserialised
                             // ValueWord's drop doesn't release the slot.
                             if layout_arc.is_heap_capture(i) {
+                                // FR.6: `clone_from_bits` bumped the
+                                // refcount; `ValueWord = u64` is Copy so
+                                // `_dup` falls out of scope without
+                                // releasing — share stays alive for the
+                                // block.
                                 let _dup = shape_value::ValueWord::clone_from_bits(*bits);
-                                std::mem::forget(_dup);
+                                let _ = _dup;
                             }
                             write_capture_typed(ptr, &layout_arc, i, *bits);
                         }

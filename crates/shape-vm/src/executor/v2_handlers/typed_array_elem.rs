@@ -200,7 +200,8 @@ impl VirtualMachine {
             expected: "int",
             got: "non-int value",
         })?;
-        std::mem::forget(value);
+        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
+        let _ = value;
 
         // Take-mutate-write pattern for the local slot.
         let mut arr_vw = self.stack_take_raw(slot);
@@ -266,7 +267,8 @@ impl VirtualMachine {
             expected: "number",
             got: "non-number value",
         })?;
-        std::mem::forget(value);
+        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
+        let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
         let result = if let Some(hv) = arr_vw.as_heap_mut() {
@@ -323,7 +325,8 @@ impl VirtualMachine {
             expected: "int",
             got: "non-int value",
         })?;
-        std::mem::forget(value);
+        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
+        let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
         let result = if let Some(hv) = arr_vw.as_heap_mut() {
@@ -364,7 +367,8 @@ impl VirtualMachine {
             expected: "number",
             got: "non-number value",
         })?;
-        std::mem::forget(value);
+        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
+        let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
         let result = if let Some(hv) = arr_vw.as_heap_mut() {

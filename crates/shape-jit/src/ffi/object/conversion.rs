@@ -688,15 +688,16 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
             Some(HeapValue::TypedArray(TypedArrayData::U64(buf))) => typed_array_to_jit(&buf.data, HK_U64_ARRAY, ArrayElementKind::U64),
             Some(HeapValue::TypedArray(TypedArrayData::F32(buf))) => typed_array_to_jit(&buf.data, HK_F32_ARRAY, ArrayElementKind::F32),
             // Pass through VM-allocated heap values (TypedObject, Closure,
-            // HashMap, DataTable, etc.) as raw bits. Clone first to bump
+            // HashMap, DataTable, etc.) as raw bits. Retain first to bump
             // the Arc refcount so the heap allocation stays alive after
             // the original ValueWord is dropped.
-            _ => {
-                let cloned = nb.clone();
-                let bits = cloned.raw_bits();
-                std::mem::forget(cloned); // Leak the refcount into JIT ownership
-                bits
-            }
+            //
+            // FR.6: with `ValueWord = u64` Copy, `nb.clone()` is a bit
+            // copy — no refcount bump — and the paired `forget` is a
+            // no-op. Call `vw_clone` directly: bumps the Arc/unified
+            // refcount for heap-tagged bits (no-op for scalars) and
+            // returns the same bit pattern for JIT ownership transfer.
+            _ => shape_value::value_word_drop::vw_clone(nb.raw_bits()),
         },
         _ => nb.raw_bits(), // Unknown tag - passthrough
     }
