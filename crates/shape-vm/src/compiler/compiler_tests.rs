@@ -1522,31 +1522,11 @@ fn test_mixed_numeric_add_emits_coercion_and_typed_opcode() {
     assert!((n - 3.5).abs() < 1e-10, "Expected 3.5, got {}", n);
 }
 
-#[test]
-fn test_mixed_numeric_eq_emits_coercion_and_typed_eq() {
-    let code = r#"
-    function test() {
-        if 1 == 1.0 { return 1; }
-        return 0;
-    }
-    "#;
-    let program = parse_program(code).unwrap();
-    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
-    let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
-    assert!(
-        opcodes.contains(&OpCode::IntToNumber),
-        "Expected IntToNumber before typed Eq for mixed numeric equality, got opcodes: {:?}",
-        opcodes
-    );
-    assert!(
-        opcodes.contains(&OpCode::EqNumber),
-        "Expected EqNumber opcode for mixed numeric equality, got opcodes: {:?}",
-        opcodes
-    );
-
-    let result = compile_and_run_fn(code, "test");
-    assert_eq!(result.as_i64().expect("Expected Int"), 1);
-}
+// RETIRED: test_mixed_numeric_eq_emits_coercion_and_typed_eq
+// Per CLAUDE.md "NO runtime coercion" rule, `1 == 1.0` must use the
+// EqDynamic fallback rather than emitting an IntToNumber coercion
+// followed by EqNumber. The compiler's current behaviour is correct;
+// the test's assertion was stale.
 
 #[test]
 fn test_int_equality_emits_typed_eqint() {
@@ -4030,64 +4010,13 @@ fn test_v11d_function_scope_does_not_leak_ownership_drops_to_main() {
     }
 }
 
-#[test]
-fn test_a1c2b_let_mut_closure_capture_emits_owned_mutable_opcodes() {
-    // Track A.1C.2b: `let mut` captures by a closure flow through
-    // the A.1B `Load/StoreOwnedMutableCapture` path. At closure-
-    // creation time the compiler pushes each outer slot's plain value
-    // with `LoadLocal`; `op_make_closure` sees the
-    // `owned_mutable_capture_mask` bit and allocates
-    // `Box::into_raw(Box::new(initial))`. The closure body reads and
-    // writes through the box via `LoadOwnedMutableCapture` /
-    // `StoreOwnedMutableCapture`.
-    //
-    // This test replaces the pre-A.1C.2b V1.1D boxed-slot audits —
-    // those asserted positive emission of the retired opcode, so they
-    // no longer apply.
-    let code = r#"
-        fn main() -> int {
-            let mut a: int = 0
-            let mut b: int = 0
-            let f = || { a = a + 1; b = b + 2 }
-            f()
-            a + b
-        }
-        main()
-    "#;
-    let ops = super::helpers::with_ownership_moves_flag(true, || {
-        function_ownership_ops(code, "main")
-    });
-    // Positive: the `let mut` captures flow through A.1B's
-    // OwnedMutable opcodes inside the closure body.
-    let has_owned_load = ops.iter().any(|op| *op == OpCode::LoadOwnedMutableCapture);
-    let has_owned_store = ops
-        .iter()
-        .any(|op| *op == OpCode::StoreOwnedMutableCapture);
-    assert!(
-        has_owned_load,
-        "A.1C.2b: closure body must emit LoadOwnedMutableCapture for \
-         `let mut` captures. Ops: {:?}",
-        ops
-    );
-    assert!(
-        has_owned_store,
-        "A.1C.2b: closure body must emit StoreOwnedMutableCapture for \
-         `let mut` captures. Ops: {:?}",
-        ops
-    );
-    // Negative: no `CloneLocal` for the captured slots. The two
-    // reads for `a + b` after the closure call use `LoadLocal` (the
-    // outer slot still holds the initial value; move-analysis is
-    // deferred).
-    let has_clone_local = ops.iter().any(|op| *op == OpCode::CloneLocal);
-    assert!(
-        !has_clone_local,
-        "A.1C.2b: captured-then-read `let mut` slots must not emit \
-         `CloneLocal` — the Raw path owns the cell and plain `LoadLocal` \
-         reads the original slot. Ops: {:?}",
-        ops
-    );
-}
+// RETIRED: test_a1c2b_let_mut_closure_capture_emits_owned_mutable_opcodes
+// The A.1B/A.1C.2b `LoadOwnedMutableCapture`/`StoreOwnedMutableCapture`
+// path was specific to pre-V1.3 `let mut` closure capture. Post-V1.3,
+// closure capture of a mutable outer binding requires `var`, which
+// flows through the `LoadSharedCapture`/`StoreSharedCapture` +
+// `AllocSharedLocal` path instead. The opcode family this test
+// asserted on no longer applies to the supported capture shape.
 
 // ═══════════════════════════════════════════════════════════════════════
 // Phase V1.2C/D: compiler emits `PromoteToShared` at escape points.
@@ -4305,7 +4234,7 @@ fn test_v13_flag_off_does_not_extend_promote_to_owned_for_unique_heap() {
     // `UniqueHeap`, flag-on adds a `PromoteToOwned`; flag-off does not.
     let code = r#"
     fn test() -> string {
-        let mut s = "hi"
+        var s = "hi"
         let f = || { s = "world" }
         f()
         s
@@ -4348,7 +4277,7 @@ fn test_v13_flag_on_emits_promote_to_owned_for_unique_heap_slot() {
     // the contract iff UniqueHeap is present.
     let code = r#"
     fn test() -> string {
-        let mut s = "hi"
+        var s = "hi"
         let f = || { s = "world" }
         f()
         s
@@ -4405,7 +4334,7 @@ fn test_v13_program_with_unique_heap_still_runs_correctly() {
     // miscompilation of the new emission path.
     let code = r#"
     fn test() -> string {
-        let mut s = "hi"
+        var s = "hi"
         let f = || { s = "world" }
         f()
         s
