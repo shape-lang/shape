@@ -1,6 +1,7 @@
 //! Main execution methods for Shape engine
 
 use super::types::{ExecutionMetrics, ExecutionResult, ExecutionType};
+use crate::type_schema::with_async_scope;
 use shape_ast::error::Result;
 use shape_ast::parser;
 
@@ -48,6 +49,17 @@ impl super::ShapeEngine {
             ctx.set_data_load_mode(crate::context::DataLoadMode::Async);
         }
 
+        // Install this runtime's TypeSchemaRegistry as the task-local
+        // ambient for the duration of this execution.
+        let schema_registry = self.runtime.schema_registry_arc();
+        with_async_scope(schema_registry, self.execute_async_inner(executor, source)).await
+    }
+
+    async fn execute_async_inner(
+        &mut self,
+        executor: &mut impl super::ProgramExecutor,
+        source: &str,
+    ) -> Result<ExecutionResult> {
         let start_time = std::time::Instant::now();
 
         // Parse the source
@@ -125,6 +137,17 @@ impl super::ShapeEngine {
             ctx.set_data_load_mode(crate::context::DataLoadMode::Async);
         }
 
+        // Install this runtime's TypeSchemaRegistry as the task-local
+        // ambient for the duration of this REPL command.
+        let schema_registry = self.runtime.schema_registry_arc();
+        with_async_scope(schema_registry, self.execute_repl_inner(executor, source)).await
+    }
+
+    async fn execute_repl_inner(
+        &mut self,
+        executor: &mut impl super::ProgramExecutor,
+        source: &str,
+    ) -> Result<ExecutionResult> {
         let start_time = std::time::Instant::now();
 
         // Parse the source
@@ -192,6 +215,10 @@ impl super::ShapeEngine {
     /// Returns the analyzed AST `Program`, ready for compilation.
     /// Used by the recompile-and-resume flow.
     pub fn parse_and_analyze(&mut self, source: &str) -> Result<shape_ast::Program> {
+        // Parse/desugar may touch ambient schema state (e.g. comptime
+        // builtins). Install this runtime's registry for the call.
+        let _scope = self.runtime.enter_schema_scope();
+
         if let Some(ctx) = self.runtime.persistent_context_mut() {
             ctx.reset_for_new_execution();
         }
@@ -208,6 +235,10 @@ impl super::ShapeEngine {
         source: &str,
         _is_stdlib: bool,
     ) -> Result<ExecutionResult> {
+        // Install this runtime's TypeSchemaRegistry as the thread-local
+        // ambient for the duration of synchronous execution.
+        let _scope = self.runtime.enter_schema_scope();
+
         let start_time = std::time::Instant::now();
 
         // Always reset variable scopes before each execution

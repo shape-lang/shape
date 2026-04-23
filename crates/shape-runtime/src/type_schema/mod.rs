@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 // Module declarations
 pub mod builtin_schemas;
+pub mod current;
 pub mod enum_support;
 pub mod field_types;
 pub mod intersection;
@@ -35,6 +36,9 @@ pub mod schema;
 
 // Re-export public types for backward compatibility
 pub use builtin_schemas::BuiltinSchemaIds;
+pub use current::{
+    SyncRegistryScope, current_registry, try_current_registry, with_async_scope,
+};
 pub use enum_support::{EnumInfo, EnumVariantInfo};
 pub use field_types::{FieldAnnotation, FieldDef, FieldType};
 pub use physical_binding::PhysicalSchemaBinding;

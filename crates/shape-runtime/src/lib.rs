@@ -173,11 +173,12 @@ pub struct Runtime {
     ///
     /// Target state for Track B1: owns its own schema-ID counter + stdlib
     /// schemas and replaces the process-global `STDLIB_SCHEMA_REGISTRY` +
-    /// `NEXT_SCHEMA_ID` statics. During the B1 migration window this field
-    /// coexists with the statics; it is populated at construction time and
-    /// will be threaded through decode / wire / printing / executor call
-    /// sites in follow-up sub-commits (B1.3–B1.5). B1.6 deletes the statics.
-    pub schema_registry: type_schema::TypeSchemaRegistry,
+    /// `NEXT_SCHEMA_ID` statics. Stored as `Arc<_>` so execution entry
+    /// points can cheaply install it as the task-local / thread-local
+    /// ambient registry ([`type_schema::current`]); mutations through
+    /// [`Runtime::schema_registry_mut`] use `Arc::make_mut` (copy-on-write
+    /// when the registry has already been scoped elsewhere).
+    pub schema_registry: Arc<type_schema::TypeSchemaRegistry>,
     /// Debug mode flag — enables verbose logging/tracing when true
     debug_mode: bool,
     /// Execution timeout — the executor can check elapsed time against this
@@ -224,7 +225,7 @@ impl Runtime {
                 annotation_context::AnnotationRegistry::new(),
             )),
             module_binding_registry,
-            schema_registry: type_schema::TypeSchemaRegistry::new_with_stdlib(),
+            schema_registry: Arc::new(type_schema::TypeSchemaRegistry::new_with_stdlib()),
             debug_mode: false,
             execution_timeout: None,
             memory_limit: None,
@@ -298,8 +299,32 @@ impl Runtime {
     }
 
     /// Mutable access to the per-runtime type schema registry.
+    ///
+    /// Uses `Arc::make_mut` — if the registry has been cloned elsewhere
+    /// (e.g. installed as the current async-scope ambient registry), this
+    /// performs a copy-on-write clone so the mutation is visible only on
+    /// this `Runtime`. Callers that want the mutation to be visible
+    /// through a live ambient handle must install the new Arc themselves.
     pub fn schema_registry_mut(&mut self) -> &mut type_schema::TypeSchemaRegistry {
-        &mut self.schema_registry
+        Arc::make_mut(&mut self.schema_registry)
+    }
+
+    /// Clone the `Arc<TypeSchemaRegistry>` for installation as the current
+    /// ambient registry (see [`type_schema::current`]).
+    pub fn schema_registry_arc(&self) -> Arc<type_schema::TypeSchemaRegistry> {
+        self.schema_registry.clone()
+    }
+
+    /// Install this runtime's schema registry as the current synchronous
+    /// ambient registry for the returned guard's lifetime.
+    ///
+    /// Synchronous execution entry points (CLI scripts, tests, REPL
+    /// one-shots) should hold the guard for the duration of execution so
+    /// any code path that consults [`type_schema::current_registry`]
+    /// observes this runtime's registry instead of reaching for the legacy
+    /// process-global statics.
+    pub fn enter_schema_scope(&self) -> type_schema::SyncRegistryScope {
+        type_schema::SyncRegistryScope::enter(self.schema_registry_arc())
     }
 
     /// Get the module-binding registry shared with VM/JIT execution.
