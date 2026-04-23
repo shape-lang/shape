@@ -10,6 +10,7 @@ use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use crate::memory::{record_heap_write, write_barrier_vw};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HashMapData;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
@@ -373,7 +374,8 @@ pub fn v2_for_each(
         let values = values.clone();
         for (k, v) in keys.iter().zip(values.iter()) {
             let result_bits = vm.call_value_immediate_raw(args[1], &[k.raw_bits(), v.raw_bits()], ctx.as_deref_mut())?;
-            drop(ValueWord::from_raw_bits(result_bits));
+            // FR.4: real release (was no-op drop of Copy u64).
+            vw_drop(result_bits);
         }
         Ok(ValueWord::unit().raw_bits())
     } else {
@@ -400,7 +402,8 @@ pub fn v2_filter(
                 keys.push(k.clone());
                 values.push(v.clone());
             }
-            drop(ValueWord::from_raw_bits(result_bits));
+            // FR.4: real release (was no-op drop of Copy u64).
+            vw_drop(result_bits);
         }
 
         Ok(ValueWord::from_hashmap_pairs(keys, values).into_raw_bits())
@@ -449,7 +452,8 @@ pub fn v2_reduce(
                 &[acc_bits, k.raw_bits(), v.raw_bits()],
                 ctx.as_deref_mut(),
             )?;
-            drop(ValueWord::from_raw_bits(acc_bits));
+            // FR.4: real release of old accumulator (was no-op).
+            vw_drop(acc_bits);
             acc_bits = result_bits;
         }
         Ok(acc_bits)

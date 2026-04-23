@@ -6,6 +6,7 @@
 use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -194,7 +195,8 @@ pub fn v2_for_each(
         let items = data.items.clone();
         for item in &items {
             let result_bits = vm.call_value_immediate_raw(args[1], &[item.raw_bits()], ctx.as_deref_mut())?;
-            drop(ValueWord::from_raw_bits(result_bits));
+            // FR.4: real release (was no-op drop of Copy u64).
+            vw_drop(result_bits);
         }
         Ok(ValueWord::unit().raw_bits())
     } else {
@@ -239,7 +241,8 @@ pub fn v2_filter(
             if raw_helpers::is_truthy_raw(result_bits) {
                 new_items.push(item.clone());
             }
-            drop(ValueWord::from_raw_bits(result_bits));
+            // FR.4: real release (was no-op drop of Copy u64).
+            vw_drop(result_bits);
         }
         Ok(ValueWord::from_set(new_items).into_raw_bits())
     } else {

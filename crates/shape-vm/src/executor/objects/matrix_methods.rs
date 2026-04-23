@@ -6,6 +6,7 @@ use shape_runtime::intrinsics::matrix_kernels;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::MatrixData;
 use shape_value::typed_buffer::AlignedTypedBuffer;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -373,7 +374,8 @@ pub(crate) fn handle_map(
         let elem_bits = ValueWord::from_f64(v).into_raw_bits();
         let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], None)?;
         let val = extract_number_coerce(result_bits);
-        drop(ValueWord::from_raw_bits(result_bits));
+        // FR.4: real release (was no-op drop of Copy u64).
+        vw_drop(result_bits);
         let val = val.ok_or_else(|| {
             VMError::RuntimeError("Matrix.map callback must return a number".to_string())
         })?;

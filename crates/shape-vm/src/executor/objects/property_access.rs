@@ -8,6 +8,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
 use crate::memory::{record_heap_write, write_barrier_slot, write_barrier_vw};
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{HeapValue, TypedArrayData, TemporalData, RareHeapData, TableViewData, VMError, ValueWord, ValueWordExt, heap_value::NativeScalar};
 use std::sync::Arc;
 
@@ -928,16 +929,22 @@ impl VirtualMachine {
                     let old_bits = *arr.get(index).unwrap();
                     let old = unsafe { ValueWord::clone_from_bits(old_bits) };
                     write_barrier_vw(&old, &value_nb);
-                    drop(old);
+                    // FR.4: vw_drop (was no-op drop of Copy u64) releases
+                    // the write-barrier clone.
+                    vw_drop(old);
                     // Decrement old element refcount
                     if shape_value::tag_bits::is_tagged(old_bits)
                         && shape_value::tag_bits::get_tag(old_bits) == shape_value::tag_bits::TAG_HEAP
                     {
                         let old_vw = unsafe { ValueWord::clone_from_bits(old_bits) };
-                        drop(old_vw); // extra decrement
+                        // FR.4: real release (was no-op drop of Copy u64).
+                        vw_drop(old_vw); // extra decrement
                     }
                     let new_bits = value_nb.raw_bits();
-                    std::mem::forget(value_nb);
+                    // FR.4: ownership of value_nb's heap share transfers to
+                    // `arr.set_boxed(...)` below; the u64 is Copy so nothing
+                    // more to do locally.
+                    let _ = value_nb;
                     arr.set_boxed(index, new_bits);
                 } else {
                     // Extend with none values
@@ -946,7 +953,10 @@ impl VirtualMachine {
                     }
                     record_heap_write();
                     let new_bits = value_nb.raw_bits();
-                    std::mem::forget(value_nb);
+                    // FR.4: ownership of value_nb's heap share transfers to
+                    // `arr.push(...)` below; the u64 is Copy so nothing
+                    // more to do locally.
+                    let _ = value_nb;
                     arr.push(new_bits);
                 }
                 return Ok(());

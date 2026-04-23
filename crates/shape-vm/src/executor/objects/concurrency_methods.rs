@@ -14,12 +14,13 @@ use super::raw_helpers::{extract_heap_ref, extract_number_coerce};
 
 /// Transfer ownership of a `ValueWord` into raw u64 bits.
 ///
-/// The `ValueWord` destructor is suppressed so the refcount is NOT decremented.
-/// The caller (dispatcher) takes ownership of the returned bits via `transmute`.
+/// FR.4: With `ValueWord = u64` Copy, there is no destructor to suppress;
+/// the `let _ = vw;` is kept as a marker that ownership transfers to the
+/// returned bits.
 #[inline]
 fn into_raw(vw: ValueWord) -> u64 {
     let bits = vw.raw_bits();
-    std::mem::forget(vw);
+    let _ = vw;
     bits
 }
 

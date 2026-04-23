@@ -33,7 +33,9 @@ impl VirtualMachine {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(array_nb.raw_bits())
                 };
                 let new_bits = value_nb.raw_bits();
-                std::mem::forget(value_nb);
+                // FR.4: ownership of value_nb's heap share transfers into
+                // `arr.push(...)`; the u64 is Copy — nothing to do locally.
+                let _ = value_nb;
                 arr.push(new_bits);
                 self.push_raw_u64(array_nb)?;
                 return Ok(());
@@ -154,7 +156,9 @@ impl VirtualMachine {
                     let bits = self.module_bindings[slot];
                     let tmp = ValueWord::from_raw_bits(bits);
                     let r = tmp.as_ref_target();
-                    std::mem::forget(tmp);
+                    // FR.4: borrow-only peek — u64 is Copy, no release
+                    // needed; slot still owns the share.
+                    let _ = tmp;
                     r
                 };
                 match ref_target {
@@ -224,7 +228,9 @@ impl VirtualMachine {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(bits)
                 };
                 let new_bits = value.raw_bits();
-                std::mem::forget(value);
+                // FR.4: ownership of value's heap share transfers into
+                // `arr.push(...)`; the u64 is Copy — nothing to do locally.
+                let _ = value;
                 arr.push(new_bits);
                 return Ok(());
             }

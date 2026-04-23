@@ -94,6 +94,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -199,8 +200,9 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         let result = handler(self, &mut raw_args, ctx)?;
         // Drop args: the handler may have updated pointers (e.g. after Arc::make_mut).
+        // FR.4: real release (was no-op drop of Copy u64).
         for bits in raw_args {
-            drop(ValueWord::from_raw_bits(bits));
+            vw_drop(bits);
         }
         self.push_raw_u64(result)?;
         Ok(())
@@ -300,8 +302,9 @@ impl VirtualMachine {
             let result = self.builtin_type_of(shape_value::ArgVec::new())?;
             self.push_raw_u64(result)?;
             // Drop the popped args to release refcounts
+            // FR.4: real release (was no-op drop of Copy u64).
             for bits in raw_args {
-                drop(ValueWord::from_raw_bits(bits));
+                vw_drop(bits);
             }
             return Ok(());
         }
@@ -633,7 +636,8 @@ impl VirtualMachine {
                             aligned.push(v);
                         }
                         // Drop old slice, replace with materialized float array
-                        drop(ValueWord::from_raw_bits(raw_args[0]));
+                        // FR.4: real release (was no-op drop of Copy u64).
+                        vw_drop(raw_args[0]);
                         raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
                     }
                     if let Some(handler) =
@@ -977,7 +981,8 @@ impl VirtualMachine {
                             for &v in data {
                                 aligned.push(v);
                             }
-                            drop(ValueWord::from_raw_bits(raw_args[0]));
+                            // FR.4: real release (was no-op drop of Copy u64).
+                            vw_drop(raw_args[0]);
                             raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
                             if let Some(handler) = method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str()) {
                                 self.dispatch_method_handler(handler, raw_args, ctx)?;
