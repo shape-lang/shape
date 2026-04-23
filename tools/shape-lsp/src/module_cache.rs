@@ -7,9 +7,23 @@ use dashmap::DashMap;
 use shape_ast::ast::{Program, Span};
 #[cfg(test)]
 use shape_ast::parser::parse_program;
+use shape_runtime::extension_context::ExtensionModuleSchemaCache;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Process-local extension module schema cache for the LSP.
+///
+/// Mirrors the B3 migration: shape-runtime no longer owns a process-global
+/// `EXTENSION_MODULE_SCHEMA_CACHE` static, so editor tooling (which creates
+/// fresh [`shape_runtime::module_loader::ModuleLoader`] instances per request
+/// and has no persistent Runtime) keeps its own cache here to avoid
+/// repeatedly `dlopen`-ing the same extension `.so` across completion /
+/// navigation requests.
+pub(crate) fn lsp_extension_schema_cache() -> &'static Arc<ExtensionModuleSchemaCache> {
+    static CACHE: OnceLock<Arc<ExtensionModuleSchemaCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(ExtensionModuleSchemaCache::new()))
+}
 
 fn module_path_segments(path: &str) -> Vec<&str> {
     if path.contains("::") {
@@ -93,7 +107,12 @@ impl ModuleCache {
         current_source: Option<&str>,
     ) -> shape_runtime::module_loader::ModuleLoader {
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        loader.configure_for_context_with_source(current_file, workspace_root, current_source);
+        loader.configure_for_context_with_source(
+            current_file,
+            workspace_root,
+            current_source,
+            lsp_extension_schema_cache(),
+        );
         loader
     }
 
@@ -235,7 +254,12 @@ impl ModuleCache {
         current_source: Option<&str>,
     ) -> Vec<String> {
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        loader.configure_for_context_with_source(current_file, workspace_root, current_source);
+        loader.configure_for_context_with_source(
+            current_file,
+            workspace_root,
+            current_source,
+            lsp_extension_schema_cache(),
+        );
         loader.list_importable_modules_with_context(current_file, workspace_root)
     }
 

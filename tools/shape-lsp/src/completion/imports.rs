@@ -823,7 +823,13 @@ pub(crate) fn extension_module_schema_with_context(
     workspace_root: Option<&Path>,
     current_source: Option<&str>,
 ) -> Option<ParsedModuleSchema> {
-    extension_module_schema_for_context(module_name, current_file, workspace_root, current_source)
+    extension_module_schema_for_context(
+        module_name,
+        current_file,
+        workspace_root,
+        current_source,
+        crate::module_cache::lsp_extension_schema_cache(),
+    )
 }
 
 /// Fetch extension-provided source schema metadata through `shape.module`

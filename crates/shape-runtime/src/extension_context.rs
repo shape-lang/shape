@@ -11,7 +11,7 @@ use crate::project::find_project_root;
 use crate::provider_registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct ExtensionModuleSpec {
@@ -30,12 +30,10 @@ pub struct ExtensionModuleSpec {
 /// [`crate::Runtime::extension_module_schemas`] or the LSP's per-process
 /// cache) — there is no process-global instance.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // temporarily unused in B3.1; wired up in B3.2
 pub struct ExtensionModuleSchemaCache {
     entries: Mutex<HashMap<String, Option<ParsedModuleSchema>>>,
 }
 
-#[allow(dead_code)] // wired up in B3.2
 impl ExtensionModuleSchemaCache {
     /// Create a fresh empty cache.
     pub fn new() -> Self {
@@ -66,9 +64,6 @@ impl ExtensionModuleSchemaCache {
         }
     }
 }
-
-static EXTENSION_MODULE_SCHEMA_CACHE: OnceLock<Mutex<HashMap<String, Option<ParsedModuleSchema>>>> =
-    OnceLock::new();
 
 /// Resolve declared extension module specs for the current context.
 ///
@@ -148,26 +143,20 @@ pub fn declared_extension_spec_for_module(
         .find(|spec| spec.name == module_name)
 }
 
-/// Load one declared extension's `shape.module` schema with process-local caching.
-pub fn extension_module_schema_for_spec(spec: &ExtensionModuleSpec) -> Option<ParsedModuleSchema> {
+/// Load one declared extension's `shape.module` schema, consulting the
+/// provided cache before hitting the provider registry.
+pub fn extension_module_schema_for_spec(
+    spec: &ExtensionModuleSpec,
+    cache: &ExtensionModuleSchemaCache,
+) -> Option<ParsedModuleSchema> {
     if !spec.path.exists() {
         return None;
     }
 
-    let canonical = spec
-        .path
-        .canonicalize()
-        .unwrap_or_else(|_| spec.path.clone())
-        .to_string_lossy()
-        .to_string();
-    let config_key = serde_json::to_string(&spec.config).unwrap_or_default();
-    let key = format!("{}|{}|{}", spec.name, canonical, config_key);
+    let key = ExtensionModuleSchemaCache::key_for(spec);
 
-    let cache = EXTENSION_MODULE_SCHEMA_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock()
-        && let Some(cached) = guard.get(&key)
-    {
-        return cached.clone();
+    if let Some(cached) = cache.get(&key) {
+        return cached;
     }
 
     let schema = {
@@ -185,19 +174,19 @@ pub fn extension_module_schema_for_spec(spec: &ExtensionModuleSpec) -> Option<Pa
         }
     };
 
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(key, schema.clone());
-    }
+    cache.insert(key, schema.clone());
 
     schema
 }
 
-/// Load one declared extension module schema by name for current context.
+/// Load one declared extension module schema by name for current context,
+/// consulting the provided cache.
 pub fn extension_module_schema_for_context(
     module_name: &str,
     current_file: Option<&Path>,
     workspace_root: Option<&Path>,
     current_source: Option<&str>,
+    cache: &ExtensionModuleSchemaCache,
 ) -> Option<ParsedModuleSchema> {
     let spec = declared_extension_spec_for_module(
         module_name,
@@ -205,18 +194,20 @@ pub fn extension_module_schema_for_context(
         workspace_root,
         current_source,
     )?;
-    extension_module_schema_for_spec(&spec)
+    extension_module_schema_for_spec(&spec, cache)
 }
 
-/// Register declared extension module artifacts into the given module loader.
+/// Register declared extension module artifacts into the given module loader,
+/// consulting the provided cache for already-parsed schemas.
 pub fn register_declared_extensions_in_loader(
     loader: &mut ModuleLoader,
     current_file: Option<&Path>,
     workspace_root: Option<&Path>,
     current_source: Option<&str>,
+    cache: &ExtensionModuleSchemaCache,
 ) {
     for spec in declared_extension_specs_for_context(current_file, workspace_root, current_source) {
-        let Some(schema) = extension_module_schema_for_spec(&spec) else {
+        let Some(schema) = extension_module_schema_for_spec(&spec, cache) else {
             continue;
         };
         for artifact in schema.artifacts {

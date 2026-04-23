@@ -266,11 +266,17 @@ impl ModuleLoader {
     ///
     /// This is the canonical context setup path for tooling (LSP/CLI) so
     /// extension module namespaces are resolved through the same loader.
+    ///
+    /// `extension_schema_cache` is the caller-owned schema cache consulted by
+    /// [`crate::extension_context::register_declared_extensions_in_loader`] —
+    /// callers that need cross-request reuse (e.g. the LSP) should pass a
+    /// long-lived cache; one-shot callers may pass a fresh one.
     pub fn configure_for_context_with_source(
         &mut self,
         current_file: &Path,
         workspace_root: Option<&Path>,
         current_source: Option<&str>,
+        extension_schema_cache: &crate::extension_context::ExtensionModuleSchemaCache,
     ) {
         self.configure_for_context(current_file, workspace_root);
 
@@ -300,6 +306,7 @@ impl ModuleLoader {
             Some(current_file),
             workspace_root,
             current_source,
+            extension_schema_cache,
         );
     }
 
@@ -1673,7 +1680,8 @@ pub fn use_answer() { answer() }
         );
 
         let mut loader = ModuleLoader::new();
-        loader.configure_for_context_with_source(&main_path, None, Some(&source));
+        let cache = crate::extension_context::ExtensionModuleSchemaCache::new();
+        loader.configure_for_context_with_source(&main_path, None, Some(&source), &cache);
 
         // Verify that dependency paths were set
         assert!(

@@ -196,9 +196,9 @@ pub struct Runtime {
     keychain: Option<crate::crypto::keychain::Keychain>,
     /// Per-runtime cache of parsed extension module schemas.
     ///
-    /// Replaces the former process-global `EXTENSION_MODULE_SCHEMA_CACHE`
-    /// static. Shared through an `Arc` so execution entry points that load
-    /// extensions can hand the same cache to
+    /// Replaces the former process-global extension-schema static. Shared
+    /// through an `Arc` so execution entry points that load extensions can
+    /// hand the same cache to
     /// [`extension_context::extension_module_schema_for_spec`] /
     /// [`extension_context::register_declared_extensions_in_loader`].
     extension_module_schemas: Arc<extension_context::ExtensionModuleSchemaCache>,
