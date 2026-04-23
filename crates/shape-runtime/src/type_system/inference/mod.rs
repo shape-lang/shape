@@ -180,8 +180,8 @@ impl TypeInferenceEngine {
                 // Known extension/module namespaces are unresolved roots that
                 // should allow member access/call constraints without producing
                 // undefined-variable or concrete-method-not-found errors.
-                self.env
-                    .define(name, TypeScheme::mono(Type::fresh_var()));
+                let fresh = self.fresh_type_var();
+                self.env.define(name, TypeScheme::mono(fresh));
             }
         }
     }
@@ -913,7 +913,7 @@ impl TypeInferenceEngine {
         }
     }
 
-    fn as_generic_components(&self, ty: &Type) -> Option<(Type, Vec<Type>)> {
+    fn as_generic_components(&mut self, ty: &Type) -> Option<(Type, Vec<Type>)> {
         match ty {
             Type::Generic { base, args } => {
                 let mut normalized_args = args.clone();
@@ -922,7 +922,7 @@ impl TypeInferenceEngine {
                     Type::Concrete(ann) if ann.as_type_name_str() == Some("Result")
                 ) && normalized_args.len() == 1
                 {
-                    normalized_args.push(Type::fresh_var());
+                    normalized_args.push(self.fresh_type_var());
                 }
                 Some(((*base.clone()), normalized_args))
             }
@@ -932,7 +932,7 @@ impl TypeInferenceEngine {
                     .map(|arg| Type::Concrete(arg.clone()))
                     .collect::<Vec<_>>();
                 if name == "Result" && normalized_args.len() == 1 {
-                    normalized_args.push(Type::fresh_var());
+                    normalized_args.push(self.fresh_type_var());
                 }
                 Some((
                     Type::Concrete(TypeAnnotation::Reference(name.clone())),
@@ -990,10 +990,10 @@ impl TypeInferenceEngine {
 
             if concrete_candidates.is_empty() {
                 if allow_unresolved_generic_args {
-                    let representative = unresolved_candidates
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| Type::fresh_var());
+                    let representative = match unresolved_candidates.first().cloned() {
+                        Some(c) => c,
+                        None => self.fresh_type_var(),
+                    };
                     for unresolved in unresolved_candidates.iter().skip(1) {
                         self.constraints
                             .push((representative.clone(), unresolved.clone()));

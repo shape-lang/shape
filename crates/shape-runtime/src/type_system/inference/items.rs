@@ -47,19 +47,16 @@ impl TypeInferenceEngine {
         let param_types: Vec<Type> = func
             .params
             .iter()
-            .map(|p| {
-                p.type_annotation
-                    .as_ref()
-                    .map(|ann| self.resolve_type_annotation(ann))
-                    .unwrap_or_else(|| Type::fresh_var())
+            .map(|p| match p.type_annotation.as_ref() {
+                Some(ann) => self.resolve_type_annotation(ann),
+                None => self.fresh_type_var(),
             })
             .collect();
 
-        let return_type = func
-            .return_type
-            .as_ref()
-            .map(|ann| self.resolve_type_annotation(ann))
-            .unwrap_or_else(|| Type::fresh_var());
+        let return_type = match func.return_type.as_ref() {
+            Some(ann) => self.resolve_type_annotation(ann),
+            None => self.fresh_type_var(),
+        };
 
         let scheme =
             self.make_function_scheme(func, BuiltinTypes::function(param_types, return_type));
@@ -71,19 +68,16 @@ impl TypeInferenceEngine {
         let param_types: Vec<Type> = def
             .params
             .iter()
-            .map(|p| {
-                p.type_annotation
-                    .as_ref()
-                    .map(|ann| self.resolve_type_annotation(ann))
-                    .unwrap_or_else(|| Type::fresh_var())
+            .map(|p| match p.type_annotation.as_ref() {
+                Some(ann) => self.resolve_type_annotation(ann),
+                None => self.fresh_type_var(),
             })
             .collect();
 
-        let return_type = def
-            .return_type
-            .as_ref()
-            .map(|ann| self.resolve_type_annotation(ann))
-            .unwrap_or_else(|| Type::fresh_var());
+        let return_type = match def.return_type.as_ref() {
+            Some(ann) => self.resolve_type_annotation(ann),
+            None => self.fresh_type_var(),
+        };
 
         let func_type = BuiltinTypes::function(param_types, return_type);
         let scheme = TypeScheme::mono(func_type);
@@ -140,10 +134,9 @@ impl TypeInferenceEngine {
                     types.insert(name.to_string(), var_type.clone());
                 } else {
                     for name in decl.pattern.get_identifiers() {
-                        let inferred = self
-                            .env
-                            .lookup(&name)
-                            .map(|scheme| scheme.instantiate())
+                        let scheme = self.env.lookup(&name).cloned();
+                        let inferred = scheme
+                            .map(|s| s.instantiate_gen(&mut self.type_var_gen))
                             .unwrap_or_else(|| var_type.clone());
                         types.insert(name, inferred);
                     }
@@ -156,10 +149,9 @@ impl TypeInferenceEngine {
                         types.insert(name.to_string(), var_type.clone());
                     } else {
                         for name in decl.pattern.get_identifiers() {
-                            let inferred = self
-                                .env
-                                .lookup(&name)
-                                .map(|scheme| scheme.instantiate())
+                            let scheme = self.env.lookup(&name).cloned();
+                            let inferred = scheme
+                                .map(|s| s.instantiate_gen(&mut self.type_var_gen))
                                 .unwrap_or_else(|| var_type.clone());
                             types.insert(name, inferred);
                         }
@@ -313,7 +305,7 @@ impl TypeInferenceEngine {
                 param_source_vars.push(None);
                 self.resolve_type_annotation(ann)
             } else {
-                let var = TypeVar::fresh();
+                let var = self.fresh_var();
                 unannotated_param_vars.push(var.clone());
                 param_source_vars.push(Some(var.clone()));
                 Type::Variable(var)
@@ -346,7 +338,7 @@ impl TypeInferenceEngine {
         let declared_return_type = if let Some(ann) = &func.return_type {
             self.resolve_type_annotation(ann)
         } else {
-            Type::fresh_var()
+            self.fresh_type_var()
         };
 
         // Infer callable return type from all explicit returns (or final expression)
@@ -682,29 +674,23 @@ impl TypeInferenceEngine {
             let param_exprs: Vec<TypeParamExpr> = method
                 .params
                 .iter()
-                .map(|p| {
-                    if let Some(ann) = &p.type_annotation {
-                        Self::annotation_to_type_param_expr(
-                            ann,
-                            receiver_type_params,
-                            &method_type_params,
-                        )
-                    } else {
-                        TypeParamExpr::Concrete(Type::fresh_var())
-                    }
-                })
-                .collect();
-            let return_expr = method
-                .return_type
-                .as_ref()
-                .map(|ann| {
-                    Self::annotation_to_type_param_expr(
+                .map(|p| match &p.type_annotation {
+                    Some(ann) => Self::annotation_to_type_param_expr(
                         ann,
                         receiver_type_params,
                         &method_type_params,
-                    )
+                    ),
+                    None => TypeParamExpr::Concrete(self.fresh_type_var()),
                 })
-                .unwrap_or_else(|| TypeParamExpr::Concrete(Type::fresh_var()));
+                .collect();
+            let return_expr = match method.return_type.as_ref() {
+                Some(ann) => Self::annotation_to_type_param_expr(
+                    ann,
+                    receiver_type_params,
+                    &method_type_params,
+                ),
+                None => TypeParamExpr::Concrete(self.fresh_type_var()),
+            };
 
             self.method_table.register_user_generic_method(
                 type_name,
@@ -718,19 +704,15 @@ impl TypeInferenceEngine {
             let param_types: Vec<Type> = method
                 .params
                 .iter()
-                .map(|p| {
-                    if let Some(ann) = &p.type_annotation {
-                        self.resolve_type_annotation(ann)
-                    } else {
-                        Type::fresh_var()
-                    }
+                .map(|p| match &p.type_annotation {
+                    Some(ann) => self.resolve_type_annotation(ann),
+                    None => self.fresh_type_var(),
                 })
                 .collect();
-            let return_type = method
-                .return_type
-                .as_ref()
-                .map(|ann| self.resolve_type_annotation(ann))
-                .unwrap_or_else(|| Type::fresh_var());
+            let return_type = match method.return_type.as_ref() {
+                Some(ann) => self.resolve_type_annotation(ann),
+                None => self.fresh_type_var(),
+            };
 
             self.method_table.register_user_method(
                 type_name,
@@ -805,29 +787,23 @@ impl TypeInferenceEngine {
                 let param_exprs: Vec<TypeParamExpr> = method
                     .params
                     .iter()
-                    .map(|p| {
-                        if let Some(ann) = &p.type_annotation {
-                            Self::annotation_to_type_param_expr(
-                                ann,
-                                &receiver_type_params,
-                                &method_type_params,
-                            )
-                        } else {
-                            TypeParamExpr::Concrete(Type::fresh_var())
-                        }
-                    })
-                    .collect();
-                let return_expr = method
-                    .return_type
-                    .as_ref()
-                    .map(|ann| {
-                        Self::annotation_to_type_param_expr(
+                    .map(|p| match &p.type_annotation {
+                        Some(ann) => Self::annotation_to_type_param_expr(
                             ann,
                             &receiver_type_params,
                             &method_type_params,
-                        )
+                        ),
+                        None => TypeParamExpr::Concrete(self.fresh_type_var()),
                     })
-                    .unwrap_or_else(|| TypeParamExpr::Concrete(Type::fresh_var()));
+                    .collect();
+                let return_expr = match method.return_type.as_ref() {
+                    Some(ann) => Self::annotation_to_type_param_expr(
+                        ann,
+                        &receiver_type_params,
+                        &method_type_params,
+                    ),
+                    None => TypeParamExpr::Concrete(self.fresh_type_var()),
+                };
 
                 // Extract receiver param bounds from method-level type params
                 // that reference receiver type params with trait bounds.
@@ -850,19 +826,15 @@ impl TypeInferenceEngine {
                 let param_types: Vec<Type> = method
                     .params
                     .iter()
-                    .map(|p| {
-                        if let Some(ann) = &p.type_annotation {
-                            self.resolve_type_annotation(ann)
-                        } else {
-                            Type::fresh_var()
-                        }
+                    .map(|p| match &p.type_annotation {
+                        Some(ann) => self.resolve_type_annotation(ann),
+                        None => self.fresh_type_var(),
                     })
                     .collect();
-                let return_type = method
-                    .return_type
-                    .as_ref()
-                    .map(|ann| self.resolve_type_annotation(ann))
-                    .unwrap_or_else(|| Type::fresh_var());
+                let return_type = match method.return_type.as_ref() {
+                    Some(ann) => self.resolve_type_annotation(ann),
+                    None => self.fresh_type_var(),
+                };
 
                 for target in &targets {
                     self.method_table.register_user_method(
@@ -1156,7 +1128,7 @@ impl TypeInferenceEngine {
             // so subsequent expressions can immediately use structural info.
             inferred
         } else {
-            Type::fresh_var()
+            self.fresh_type_var()
         };
 
         if let Some(inferred_type) = inferred_init_type {
@@ -1201,19 +1173,19 @@ impl TypeInferenceEngine {
             }
             DestructurePattern::Array(patterns) => {
                 for pattern in patterns {
-                    self.bind_decl_pattern(pattern, Type::fresh_var());
+                    let fallback = self.fresh_type_var();
+                    self.bind_decl_pattern(pattern, fallback);
                 }
             }
             DestructurePattern::Object(fields) => {
                 for field in fields {
-                    self.bind_decl_pattern(&field.pattern, Type::fresh_var());
+                    let fallback = self.fresh_type_var();
+                    self.bind_decl_pattern(&field.pattern, fallback);
                 }
             }
             DestructurePattern::Rest(pattern) => {
-                self.bind_decl_pattern(
-                    pattern,
-                    BuiltinTypes::array(Type::fresh_var()),
-                );
+                let elem = self.fresh_type_var();
+                self.bind_decl_pattern(pattern, BuiltinTypes::array(elem));
             }
         }
     }

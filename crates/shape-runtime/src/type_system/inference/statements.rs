@@ -100,27 +100,27 @@ impl TypeInferenceEngine {
             Statement::Assignment(assign, span) => {
                 let value_type = self.infer_expr(&assign.value)?;
                 if let Some(name) = assign.pattern.as_identifier() {
-                    let target_type = self
-                        .env
-                        .lookup(name)
-                        .map(|scheme| scheme.instantiate())
-                        .ok_or_else(|| {
+                    let scheme = self.env.lookup(name).cloned();
+                    let target_type = match scheme {
+                        Some(s) => s.instantiate_gen(&mut self.type_var_gen),
+                        None => {
                             self.register_undefined_variable_origin(name, *span);
-                            TypeError::UndefinedVariable(name.to_string())
-                        })?;
+                            return Err(TypeError::UndefinedVariable(name.to_string()));
+                        }
+                    };
                     self.constraints.push((target_type, value_type));
                 } else {
                     // Destructuring assignment: conservatively constrain each bound name
                     // to the assigned value until full pattern assignment inference lands.
                     for name in assign.pattern.get_identifiers() {
-                        let target_type = self
-                            .env
-                            .lookup(&name)
-                            .map(|scheme| scheme.instantiate())
-                            .ok_or_else(|| {
+                        let scheme = self.env.lookup(&name).cloned();
+                        let target_type = match scheme {
+                            Some(s) => s.instantiate_gen(&mut self.type_var_gen),
+                            None => {
                                 self.register_undefined_variable_origin(&name, *span);
-                                TypeError::UndefinedVariable(name.clone())
-                            })?;
+                                return Err(TypeError::UndefinedVariable(name.clone()));
+                            }
+                        };
                         self.constraints.push((target_type, value_type.clone()));
                     }
                 }
@@ -217,7 +217,7 @@ impl TypeInferenceEngine {
 
     /// Extract narrowing info from a condition expression.
     /// For `x != null`, returns `[(x, T)]` where the original type of x is `T?`.
-    fn extract_narrowings(&self, condition: &Expr) -> Vec<(String, Type)> {
+    fn extract_narrowings(&mut self, condition: &Expr) -> Vec<(String, Type)> {
         match condition {
             // x != null  or  x != undefined  →  narrow x from T? to T
             Expr::BinaryOp {
@@ -242,7 +242,7 @@ impl TypeInferenceEngine {
     /// Extract inverse narrowings for else-branch.
     /// For `x == null`, returns `[(x, T)]` (else means x is not null).
     /// For `x != null`, no narrowing in else-branch.
-    fn extract_inverse_narrowings(&self, condition: &Expr) -> Vec<(String, Type)> {
+    fn extract_inverse_narrowings(&mut self, condition: &Expr) -> Vec<(String, Type)> {
         match condition {
             // x == null  →  in the else-branch, x is not null → narrow T? to T
             Expr::BinaryOp {
@@ -274,10 +274,11 @@ impl TypeInferenceEngine {
 
     /// Try to narrow a variable from T? to T.
     /// Returns narrowing if the expression is a variable with an Optional type.
-    fn try_null_narrowing(&self, expr: &Expr) -> Vec<(String, Type)> {
+    fn try_null_narrowing(&mut self, expr: &Expr) -> Vec<(String, Type)> {
         if let Expr::Identifier(name, _) = expr {
-            if let Some(scheme) = self.env.lookup(name) {
-                let ty = scheme.instantiate();
+            let scheme = self.env.lookup(name).cloned();
+            if let Some(scheme) = scheme {
+                let ty = scheme.instantiate_gen(&mut self.type_var_gen);
                 if let Some(inner) = Self::unwrap_optional_type(&ty) {
                     return vec![(name.clone(), inner)];
                 }

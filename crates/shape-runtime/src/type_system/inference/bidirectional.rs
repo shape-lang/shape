@@ -217,7 +217,7 @@ impl TypeInferenceEngine {
             } else if let Some(ann) = &param.type_annotation {
                 Type::Concrete(ann.clone())
             } else {
-                Type::fresh_var()
+                self.fresh_type_var()
             };
 
             // Define all identifiers from the pattern
@@ -243,19 +243,17 @@ impl TypeInferenceEngine {
             .push((inferred_return_type, constrained_expected_return.clone()));
 
         // Build the function type using Type::Function to preserve type variables
-        let actual_param_types: Vec<_> = params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                if i < expected_params.len() {
-                    expected_params[i].clone()
-                } else if let Some(ann) = &p.type_annotation {
-                    Type::Concrete(ann.clone())
-                } else {
-                    Type::fresh_var()
-                }
-            })
-            .collect();
+        let mut actual_param_types: Vec<Type> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let ty = if i < expected_params.len() {
+                expected_params[i].clone()
+            } else if let Some(ann) = &p.type_annotation {
+                Type::Concrete(ann.clone())
+            } else {
+                self.fresh_type_var()
+            };
+            actual_param_types.push(ty);
+        }
 
         Ok(Type::Function {
             params: actual_param_types,
@@ -278,7 +276,7 @@ impl TypeInferenceEngine {
             let param_type = if let Some(ann) = &param.type_annotation {
                 Type::Concrete(ann.clone())
             } else {
-                Type::fresh_var()
+                self.fresh_type_var()
             };
 
             // Define all identifiers from the pattern

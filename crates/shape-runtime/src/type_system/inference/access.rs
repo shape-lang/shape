@@ -196,8 +196,8 @@ impl TypeInferenceEngine {
                 }
 
                 // For unknown types, create a constraint
-                let result_type = Type::fresh_var();
-                let var = TypeVar::fresh();
+                let result_type = self.fresh_type_var();
+                let var = self.fresh_var();
 
                 self.constraints.push((
                     object_type.clone(),
@@ -338,8 +338,8 @@ impl TypeInferenceEngine {
         property: &str,
     ) -> TypeResult<Type> {
         // For unknown types, create a constraint
-        let result_type = Type::fresh_var();
-        let var = TypeVar::fresh();
+        let result_type = self.fresh_type_var();
+        let var = self.fresh_var();
 
         self.constraints.push((
             object_type.clone(),
@@ -383,8 +383,8 @@ impl TypeInferenceEngine {
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown types, create a constraint
-                    let result_type = Type::fresh_var();
-                    let var = TypeVar::fresh();
+                    let result_type = self.fresh_type_var();
+                    let var = self.fresh_var();
 
                     self.constraints.push((
                         object_type.clone(),
@@ -399,8 +399,8 @@ impl TypeInferenceEngine {
             }
             _ => {
                 // For unknown types, create a constraint
-                let result_type = Type::fresh_var();
-                let var = TypeVar::fresh();
+                let result_type = self.fresh_type_var();
+                let var = self.fresh_var();
 
                 self.constraints.push((
                     object_type.clone(),
@@ -465,7 +465,7 @@ impl TypeInferenceEngine {
 
         // Instantiate with bounds to emit ImplementsTrait constraints for trait-bounded generics
         let (func_type, bound_constraints, default_substitutions) =
-            func_scheme.instantiate_with_bounds();
+            func_scheme.instantiate_with_bounds_gen(&mut self.type_var_gen);
         self.constraints.extend(bound_constraints);
         self.record_function_callsite(name, &arg_types);
 
@@ -480,7 +480,7 @@ impl TypeInferenceEngine {
             Type::Function { .. } | Type::Concrete(TypeAnnotation::Function { .. })
         ) {
             if matches!(&func_type, Type::Variable(_) | Type::Constrained { .. }) {
-                let result_type = Type::fresh_var();
+                let result_type = self.fresh_type_var();
                 let expected_func_type =
                     BuiltinTypes::function(arg_types.clone(), result_type.clone());
                 self.push_constraint_with_origin(func_type, expected_func_type, origin);
@@ -555,7 +555,7 @@ impl TypeInferenceEngine {
     }
 
     /// Infer element type from iterator type
-    pub(crate) fn infer_iterator_element_type(&self, iter_type: &Type) -> TypeResult<Type> {
+    pub(crate) fn infer_iterator_element_type(&mut self, iter_type: &Type) -> TypeResult<Type> {
         match iter_type {
             Type::Concrete(TypeAnnotation::Array(elem_type)) => {
                 Ok(Type::Concrete(*elem_type.clone()))
@@ -578,12 +578,12 @@ impl TypeInferenceEngine {
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown iterators, return a fresh type variable
-                    Ok(Type::fresh_var())
+                    Ok(self.fresh_type_var())
                 }
             }
             _ => {
                 // For unknown iterators, return a fresh type variable
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
         }
     }
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_table_iteration_produces_row() {
-        let engine = make_engine();
+        let mut engine = make_engine();
         let table = table_type("Candle");
         let element = engine.infer_iterator_element_type(&table).unwrap();
 

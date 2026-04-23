@@ -18,7 +18,7 @@ use shape_ast::ast::{BinaryOp, Literal, Span, TypeAnnotation, UnaryOp};
 
 impl TypeInferenceEngine {
     /// Infer type of a literal
-    pub(crate) fn infer_literal(&self, lit: &Literal) -> TypeResult<Type> {
+    pub(crate) fn infer_literal(&mut self, lit: &Literal) -> TypeResult<Type> {
         Ok(match lit {
             Literal::Int(_) => Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Literal::UInt(_) => Type::Concrete(TypeAnnotation::Basic("u64".to_string())),
@@ -33,7 +33,7 @@ impl TypeInferenceEngine {
             Literal::ContentString { .. } => BuiltinTypes::string(),
             Literal::Bool(_) => BuiltinTypes::boolean(),
             // `None` is polymorphic: Option<T> for fresh T.
-            Literal::None => Self::wrap_in_option(Type::fresh_var()),
+            Literal::None => Self::wrap_in_option(self.fresh_type_var()),
             Literal::Unit => Type::Concrete(TypeAnnotation::Basic("()".to_string())),
             Literal::Timeframe(_) => Type::Concrete(TypeAnnotation::Basic("timeframe".to_string())),
         })
@@ -243,7 +243,7 @@ impl TypeInferenceEngine {
 
         // Constrain operands to be numeric (int, float, number, decimal)
         // without forcing to `number` — preserves type specificity
-        let left_bound = TypeVar::fresh();
+        let left_bound = self.fresh_var();
         self.push_constraint_with_origin(
             effective_left.clone(),
             Type::Constrained {
@@ -254,7 +254,7 @@ impl TypeInferenceEngine {
             },
             span,
         );
-        let right_bound = TypeVar::fresh();
+        let right_bound = self.fresh_var();
         self.push_constraint_with_origin(
             effective_right.clone(),
             Type::Constrained {
@@ -347,7 +347,7 @@ impl TypeInferenceEngine {
 
                 self.push_constraint_with_origin(effective_left.clone(), effective_right, span);
                 // Add constraint that types must be comparable
-                let var = TypeVar::fresh();
+                let var = self.fresh_var();
                 self.push_constraint_with_origin(
                     effective_left,
                     Type::Constrained {
@@ -433,7 +433,7 @@ impl TypeInferenceEngine {
                 // Pipe operator - left is piped into right (which should be a function)
                 // Result type is determined by the right side's return type
                 // For now, return a new type variable that will be resolved later
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
         }
     }
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn test_infer_literal_formatted_string_is_string() {
-        let engine = TypeInferenceEngine::new();
+        let mut engine = TypeInferenceEngine::new();
         let inferred = engine
             .infer_literal(&Literal::FormattedString {
                 value: "x={x}".to_string(),
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_infer_literal_none_is_option_not_null() {
-        let engine = TypeInferenceEngine::new();
+        let mut engine = TypeInferenceEngine::new();
         let inferred = engine
             .infer_literal(&Literal::None)
             .expect("None literal should infer");

@@ -27,36 +27,39 @@ impl TypeInferenceEngine {
 
             Expr::Literal(lit, _) => self.infer_literal(lit),
 
-            Expr::Identifier(name, span) => self
-                .env
-                .lookup(name)
-                .map(|scheme| scheme.instantiate())
-                .or_else(|| {
-                    // Fall back to a type reference for known struct type names.
-                    // This enables static-path expressions like `Currency.symbol`
-                    // where `Currency` is a type name, not a variable.
-                    if self.struct_type_defs.contains_key(name.as_str())
-                        || self.env.lookup_type_alias(name).is_some()
-                    {
-                        Some(Type::Concrete(TypeAnnotation::Reference(name.as_str().into())))
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    // Recognize built-in namespace identifiers that have static
-                    // constructor methods (e.g. DateTime.now(), Content.chart()).
-                    match name.as_str() {
-                        "DateTime" | "Content" => {
-                            Some(Type::Concrete(TypeAnnotation::Reference(name.as_str().into())))
+            Expr::Identifier(name, span) => {
+                let scheme_clone = self.env.lookup(name).cloned();
+                scheme_clone
+                    .map(|scheme| scheme.instantiate_gen(&mut self.type_var_gen))
+                    .or_else(|| {
+                        // Fall back to a type reference for known struct type names.
+                        // This enables static-path expressions like `Currency.symbol`
+                        // where `Currency` is a type name, not a variable.
+                        if self.struct_type_defs.contains_key(name.as_str())
+                            || self.env.lookup_type_alias(name).is_some()
+                        {
+                            Some(Type::Concrete(TypeAnnotation::Reference(
+                                name.as_str().into(),
+                            )))
+                        } else {
+                            None
                         }
-                        _ => None,
-                    }
-                })
-                .ok_or_else(|| {
-                    self.register_undefined_variable_origin(name, *span);
-                    TypeError::UndefinedVariable(name.clone())
-                }),
+                    })
+                    .or_else(|| {
+                        // Recognize built-in namespace identifiers that have static
+                        // constructor methods (e.g. DateTime.now(), Content.chart()).
+                        match name.as_str() {
+                            "DateTime" | "Content" => Some(Type::Concrete(
+                                TypeAnnotation::Reference(name.as_str().into()),
+                            )),
+                            _ => None,
+                        }
+                    })
+                    .ok_or_else(|| {
+                        self.register_undefined_variable_origin(name, *span);
+                        TypeError::UndefinedVariable(name.clone())
+                    })
+            }
 
             Expr::BinaryOp {
                 left,
@@ -169,7 +172,7 @@ impl TypeInferenceEngine {
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
                     // Empty array, create a fresh type variable
-                    let elem_type = Type::fresh_var();
+                    let elem_type = self.fresh_type_var();
                     Ok(BuiltinTypes::array(elem_type))
                 } else {
                     // Infer element type from first element
@@ -187,7 +190,7 @@ impl TypeInferenceEngine {
 
             Expr::TableRows(_, _) => {
                 // Table row literals — type inference not yet implemented
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
 
             Expr::Object(entries, _) => {
@@ -326,25 +329,24 @@ impl TypeInferenceEngine {
                 // so closures get their param types from the method signature.
                 let (type_name, receiver_params) =
                     MethodTable::extract_receiver_info(&receiver_type);
-                let expected_arg_types: Option<Vec<Type>> = type_name.as_ref().and_then(|tn| {
-                    self.method_table
-                        .lookup_generic_signature(tn, method)
-                        .map(|gsig| {
-                            let method_vars: Vec<Type> = (0..gsig.method_type_params)
-                                .map(|_| Type::fresh_var())
-                                .collect();
-                            gsig.param_types
-                                .iter()
-                                .map(|pt| {
-                                    MethodTable::resolve_type_param_expr(
-                                        pt,
-                                        &receiver_type,
-                                        &receiver_params,
-                                        &method_vars,
-                                    )
-                                })
-                                .collect()
+                let gsig_opt = type_name
+                    .as_ref()
+                    .and_then(|tn| self.method_table.lookup_generic_signature(tn, method).cloned());
+                let expected_arg_types: Option<Vec<Type>> = gsig_opt.map(|gsig| {
+                    let method_vars: Vec<Type> = (0..gsig.method_type_params)
+                        .map(|_| self.fresh_type_var())
+                        .collect();
+                    gsig.param_types
+                        .iter()
+                        .map(|pt| {
+                            MethodTable::resolve_type_param_expr(
+                                pt,
+                                &receiver_type,
+                                &receiver_params,
+                                &method_vars,
+                            )
                         })
+                        .collect()
                 });
 
                 // Infer arguments WITH expected types (bidirectional)
@@ -426,12 +428,13 @@ impl TypeInferenceEngine {
                 // Method not found in table - create a fresh type variable
                 // This allows code to compile while deferring to runtime resolution
                 // for user-defined methods or extension methods
-                let result_type = Type::fresh_var();
+                let result_type = self.fresh_type_var();
+                let hm_var = self.fresh_var();
 
                 // Create a constraint that receiver must have this method
                 self.constraints.push((
                     Type::Constrained {
-                        var: TypeVar::fresh(),
+                        var: hm_var,
                         constraint: Box::new(TypeConstraint::HasMethod {
                             method_name: method.clone(),
                             arg_types: arg_types.clone(),
@@ -499,7 +502,7 @@ impl TypeInferenceEngine {
 
                 // Determine result type: unify if same, create nominal union if different
                 let result_type = if arm_types.is_empty() {
-                    Type::fresh_var()
+                    self.fresh_type_var()
                 } else if self.all_types_equal(&arm_types) {
                     // All arms have the same type - use that type
                     arm_types[0].clone()
@@ -569,7 +572,7 @@ impl TypeInferenceEngine {
                 let var_type = if let Some(ann) = &let_expr.type_annotation {
                     self.resolve_type_annotation(ann)
                 } else {
-                    Type::fresh_var()
+                    self.fresh_type_var()
                 };
 
                 if let Some(value) = &let_expr.value {
@@ -676,7 +679,7 @@ impl TypeInferenceEngine {
                     let param_type = if let Some(ann) = &param.type_annotation {
                         Type::Concrete(ann.clone())
                     } else {
-                        Type::fresh_var()
+                        self.fresh_type_var()
                     };
                     param_types.push(param_type.clone());
                     // Define all identifiers from the pattern
@@ -771,7 +774,7 @@ impl TypeInferenceEngine {
                 } else if let Some(e) = end {
                     self.infer_expr(e)?
                 } else {
-                    Type::fresh_var()
+                    self.fresh_type_var()
                 };
                 Ok(Type::Concrete(TypeAnnotation::Generic {
                     name: "Range".into(),
@@ -830,7 +833,7 @@ impl TypeInferenceEngine {
                 // Result<T,E> or Option<T>.  Return a fresh type variable for the
                 // unwrapped value and let downstream constraints refine it.
                 if self.type_contains_unresolved_vars(&inner_type) {
-                    return Ok(Type::fresh_var());
+                    return Ok(self.fresh_type_var());
                 }
 
                 Err(TypeError::ConstraintViolation(format!(
@@ -852,7 +855,7 @@ impl TypeInferenceEngine {
                     self.infer_expr(value_expr)?;
                 }
                 // Return a fresh type variable - actual type depends on runtime
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
 
             // Window expressions return numbers
@@ -915,7 +918,7 @@ impl TypeInferenceEngine {
                 for branch in &join_expr.branches {
                     self.infer_expr(&branch.expr)?;
                 }
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
 
             // Annotated expression - infer the type of the target
@@ -924,14 +927,14 @@ impl TypeInferenceEngine {
             // Async let - spawns a task, the expression type is a future handle
             Expr::AsyncLet(async_let, _) => {
                 self.infer_expr(&async_let.expr)?;
-                Ok(Type::fresh_var())
+                Ok(self.fresh_type_var())
             }
 
             // Async scope - cancellation boundary, type is the body's type
             Expr::AsyncScope(inner, _) => self.infer_expr(inner),
 
             // Comptime block - evaluated at compile time, returns Any for now
-            Expr::Comptime(_, _) => Ok(Type::fresh_var()),
+            Expr::Comptime(_, _) => Ok(self.fresh_type_var()),
 
             // Comptime for - unrolled at compile time, returns Unit
             Expr::ComptimeFor(_, _) => Ok(Type::Concrete(TypeAnnotation::Void)),
@@ -1188,7 +1191,7 @@ impl TypeInferenceEngine {
 
         match pattern {
             Pattern::Identifier(name) => {
-                let var_type = Type::fresh_var();
+                let var_type = self.fresh_type_var();
                 self.env.define(name, TypeScheme::mono(var_type));
             }
             Pattern::Typed {
