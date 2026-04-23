@@ -488,4 +488,72 @@ mod tests {
             Some(222.0)
         );
     }
+
+    // ── B5 regression: shape table lookup via task-local ────────────────
+
+    /// Verifies that `jit_v2_map_set_str_i64` — which runs in a raw
+    /// `extern "C"` FFI frame with no access to `&mut VirtualMachine` —
+    /// picks up the ambient shape table installed via
+    /// `shape_value::SyncShapeTableScope`. Without a scope the shape
+    /// transition silently degrades to `None` (dropping to dictionary
+    /// mode); with a scope installed the new key's shape transition
+    /// lands in the per-VM table and is observable by a subsequent
+    /// lookup.
+    #[test]
+    fn set_str_i64_uses_ambient_shape_table_under_scope() {
+        let handle = shape_value::ShapeTableHandle::new();
+        let _scope = shape_value::SyncShapeTableScope::enter(handle.clone());
+
+        // Build an initial map with one string-keyed entry so it starts
+        // with a non-None shape_id.
+        let map = ValueWord::from_hashmap_pairs(
+            vec![str_vw("first")],
+            vec![ValueWord::from_i64(1)],
+        );
+
+        // Capture the shape count before the FFI-triggered transition.
+        let count_before = handle.table().lock().unwrap().shape_count();
+
+        let new_map = jit_v2_map_set_str_i64(
+            map,
+            str_vw("second"),
+            ValueWord::from_i64(2),
+        );
+
+        // The FFI call should have transitioned the shape through the
+        // scoped handle — shape_count increases by one.
+        let count_after = handle.table().lock().unwrap().shape_count();
+        assert!(
+            count_after > count_before,
+            "expected shape transition on new string key (before={count_before}, \
+             after={count_after})",
+        );
+
+        // Sanity: the new entry is readable.
+        assert_eq!(
+            jit_v2_map_get_str_i64(new_map, str_vw("second")).to_number(),
+            Some(2.0)
+        );
+    }
+
+    /// With no scope installed the FFI call still succeeds and keeps
+    /// the map correct (dictionary-mode fallback). Matches the pre-B5
+    /// behaviour when the global Mutex was poisoned.
+    #[test]
+    fn set_str_i64_degrades_without_scope() {
+        // Intentionally no SyncShapeTableScope here — the FFI fallback
+        // path must not panic.
+        let map = make_str_int_map_no_shape(&[]);
+        let new_map = jit_v2_map_set_str_i64(
+            map,
+            str_vw("k"),
+            ValueWord::from_i64(99),
+        );
+
+        assert_eq!(jit_v2_map_len(new_map), 1);
+        assert_eq!(
+            jit_v2_map_get_str_i64(new_map, str_vw("k")).to_number(),
+            Some(99.0)
+        );
+    }
 }
