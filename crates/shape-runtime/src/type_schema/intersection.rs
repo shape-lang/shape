@@ -46,7 +46,10 @@ impl TypeSchema {
         }
 
         // Build the merged schema
-        let id = super::next_schema_id();
+        let id = match super::try_current_registry() {
+            Some(reg) => reg.allocate_id(),
+            None => super::next_schema_id(),
+        };
         let mut fields = Vec::with_capacity(all_fields.len());
         let mut field_map = HashMap::with_capacity(all_fields.len());
         let mut offset = 0;

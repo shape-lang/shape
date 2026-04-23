@@ -40,12 +40,21 @@ impl VirtualMachine {
              schema registry must include static builtin schemas",
             );
         // Reserve schema IDs above the compiled program registry.
+        //
+        // Prefer the current ambient registry (installed by the Runtime's
+        // execution entry point) so the reservation narrows to that
+        // runtime's domain. Fall back to the legacy process-global during
+        // the B1 migration window.
         let max_program_id = self
             .program
             .type_schema_registry
             .max_schema_id()
             .unwrap_or(0);
-        shape_runtime::type_schema::ensure_next_schema_id_above(max_program_id);
+        if let Some(reg) = shape_runtime::type_schema::try_current_registry() {
+            reg.ensure_next_id_above(max_program_id);
+        } else {
+            shape_runtime::type_schema::ensure_next_schema_id_above(max_program_id);
+        }
         self.rebuild_function_name_index();
         self.populate_content_addressed_metadata();
         self.program_entry_ip = 0;

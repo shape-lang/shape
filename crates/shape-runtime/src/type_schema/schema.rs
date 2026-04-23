@@ -10,6 +10,21 @@ use arrow_schema::{DataType, Schema as ArrowSchema};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+/// Allocate a fresh schema ID from the current ambient registry, falling
+/// back to the legacy global counter if no scope is active.
+///
+/// The fallback keeps the B1 migration window bisect-clean: code paths
+/// that construct schemas outside any `Runtime::enter_schema_scope` (e.g.
+/// static initialisers, ad-hoc tooling) still get a monotonically unique
+/// ID. The legacy counter disappears in B1.7.
+#[inline]
+fn allocate_current_id() -> SchemaId {
+    match super::try_current_registry() {
+        Some(reg) => reg.allocate_id(),
+        None => super::next_schema_id(),
+    }
+}
+
 /// Schema describing the memory layout of a declared type
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeSchema {
@@ -37,14 +52,14 @@ pub struct TypeSchema {
 }
 
 impl TypeSchema {
-    /// Create a new type schema with the given fields, using an ID from the
-    /// process-global `NEXT_SCHEMA_ID` counter.
+    /// Create a new type schema with the given fields, allocating an ID
+    /// from the current ambient [`super::TypeSchemaRegistry`].
     ///
-    /// During the B1 migration window this is the historic entry point used
-    /// by most call sites. Prefer [`TypeSchema::with_id`] combined with a
-    /// per-`Runtime` [`super::TypeSchemaRegistry`] counter for new code.
+    /// Since B1.4 the ID is drawn from [`super::current_registry`] rather
+    /// than the process-global `NEXT_SCHEMA_ID` static. Callers that need
+    /// a caller-supplied ID should use [`TypeSchema::with_id`].
     pub fn new(name: impl Into<String>, field_defs: Vec<(String, FieldType)>) -> Self {
-        Self::with_id(super::next_schema_id(), name, field_defs)
+        Self::with_id(allocate_current_id(), name, field_defs)
     }
 
     /// Create a new type schema with a caller-supplied schema ID.
@@ -140,17 +155,17 @@ impl TypeSchema {
         self.enum_info.as_ref()?.variant_id(variant_name)
     }
 
-    /// Create an enum schema with variant information, using an ID from the
-    /// process-global `NEXT_SCHEMA_ID` counter.
+    /// Create an enum schema with variant information, allocating an ID
+    /// from the current ambient [`super::TypeSchemaRegistry`].
     ///
     /// Layout:
     /// - Field 0: __variant (I64) - variant discriminator at offset 0
     /// - Field 1+: __payload_N (Any) - payload fields at offset 8, 16, etc.
     ///
-    /// Prefer [`TypeSchema::new_enum_with_id`] combined with a per-`Runtime`
-    /// [`super::TypeSchemaRegistry`] counter for new code.
+    /// Since B1.4 the ID is drawn from [`super::current_registry`] rather
+    /// than the process-global `NEXT_SCHEMA_ID` static.
     pub fn new_enum(name: impl Into<String>, variants: Vec<EnumVariantInfo>) -> Self {
-        Self::new_enum_with_id(super::next_schema_id(), name, variants)
+        Self::new_enum_with_id(allocate_current_id(), name, variants)
     }
 
     /// Create an enum schema with a caller-supplied ID.
@@ -304,7 +319,7 @@ impl TypeSchema {
     /// This converts the semantic CanonicalType representation into a JIT-ready
     /// TypeSchema with proper field offsets and types.
     pub fn from_canonical(canonical: &crate::type_system::environment::CanonicalType) -> Self {
-        let id = super::next_schema_id();
+        let id = allocate_current_id();
         let name = canonical.name.clone();
 
         let mut fields = Vec::with_capacity(canonical.fields.len());

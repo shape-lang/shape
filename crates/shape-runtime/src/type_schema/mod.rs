@@ -165,6 +165,28 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
         }
     }
 
+    // Prefer the current ambient registry; fall back to the legacy
+    // process-global static during the B1 migration window.
+    let ambient = try_current_registry();
+    let ambient_match = ambient.as_deref().and_then(|reg| {
+        reg.type_names()
+            .filter_map(|name| reg.get(name))
+            .find(|schema| {
+                if schema.fields.len() != fields.len() {
+                    return false;
+                }
+                schema
+                    .fields
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .eq(fields.iter().copied())
+            })
+            .map(|schema| schema.id)
+    });
+    if let Some(id) = ambient_match {
+        return Some(id);
+    }
+
     STDLIB_SCHEMA_REGISTRY
         .type_names()
         .filter_map(|name| STDLIB_SCHEMA_REGISTRY.get(name))
@@ -182,6 +204,14 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
 }
 
 fn lookup_schema_by_id(id: SchemaId) -> Option<TypeSchema> {
+    // Prefer the current ambient registry; fall back to the legacy
+    // process-global static and the predeclared global map during the B1
+    // migration window.
+    if let Some(reg) = try_current_registry() {
+        if let Some(schema) = reg.get_by_id(id).cloned() {
+            return Some(schema);
+        }
+    }
     STDLIB_SCHEMA_REGISTRY
         .get_by_id(id)
         .cloned()
@@ -216,6 +246,17 @@ fn schema_matches_field_set(schema: &TypeSchema, fields: &[&str]) -> bool {
 fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
     if let Some(id) = lookup_predeclared_schema_id(fields) {
         return lookup_schema_by_id(id);
+    }
+
+    // Ambient-first: order-insensitive match over the current registry.
+    if let Some(reg) = try_current_registry() {
+        if let Some(schema) = reg
+            .type_names()
+            .filter_map(|name| reg.get(name))
+            .find(|schema| schema_matches_field_set(schema, fields))
+        {
+            return Some(schema.clone());
+        }
     }
 
     if let Some(schema) = STDLIB_SCHEMA_REGISTRY
@@ -390,10 +431,7 @@ pub fn typed_object_to_hashmap_nb(
 ) -> Option<HashMap<String, shape_value::ValueWord>> {
     let (schema_id, slots, heap_mask) = value.as_typed_object()?;
     let sid = schema_id as SchemaId;
-    let schema = STDLIB_SCHEMA_REGISTRY
-        .get_by_id(sid)
-        .cloned()
-        .or_else(|| lookup_predeclared_schema_by_id(sid))?;
+    let schema = lookup_schema_by_id(sid)?;
     let mut map = HashMap::with_capacity(schema.fields.len());
     for (i, field_def) in schema.fields.iter().enumerate() {
         if i < slots.len() {
