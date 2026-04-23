@@ -5598,6 +5598,7 @@ dependencies = [
  "shape-gc",
  "smallvec",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
