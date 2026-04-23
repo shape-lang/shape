@@ -30,7 +30,7 @@
 use crate::shape_graph::{ShapeId, ShapeTransitionTable};
 use std::cell::RefCell;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Shareable handle to a shape transition table and its transition log.
 ///
@@ -92,6 +92,20 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Process-wide default handle used when neither a task-local nor a
+/// thread-local scope is active.
+///
+/// Callers that poke `HashMapData::compute_shape` / `shape_get`
+/// directly from a stdlib function or unit test — without a VM
+/// execution scope — historically relied on the pre-B5
+/// `GLOBAL_SHAPE_TABLE` static always being available. This fallback
+/// preserves that semantic: scopeless callers share one isolated-
+/// per-process table instead of getting `None`. Scoped callers
+/// (Runtime-installed) still get their own per-VM isolation, which
+/// was the B5 goal.
+static DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>> =
+    LazyLock::new(ShapeTableHandle::new);
+
 /// RAII guard that installs a shape-table handle on the thread-local
 /// slot for the lifetime of the guard.
 ///
@@ -136,7 +150,10 @@ pub fn try_current_shape_table() -> Option<Arc<ShapeTableHandle>> {
     if let Ok(h) = CURRENT_SHAPE_TABLE.try_with(|h| h.clone()) {
         return Some(h);
     }
-    SYNC_CURRENT_SHAPE_TABLE.with(|cell| cell.borrow().clone())
+    if let Some(h) = SYNC_CURRENT_SHAPE_TABLE.with(|cell| cell.borrow().clone()) {
+        return Some(h);
+    }
+    Some(DEFAULT_SHAPE_TABLE.clone())
 }
 
 /// Panicking variant of [`try_current_shape_table`]. Callers that are
@@ -173,7 +190,7 @@ mod tests {
         let h1 = ShapeTableHandle::new();
         let h2 = ShapeTableHandle::new();
 
-        assert!(try_current_shape_table().is_none());
+        let baseline = try_current_shape_table().expect("default fallback is always present");
 
         let outer = SyncShapeTableScope::enter(h1.clone());
         assert!(Arc::ptr_eq(&current_shape_table(), &h1));
@@ -188,15 +205,18 @@ mod tests {
         assert!(Arc::ptr_eq(&current_shape_table(), &h1));
         drop(outer);
 
-        // Nothing after outer drop.
-        assert!(try_current_shape_table().is_none());
+        // Default fallback visible again after outer drop.
+        assert!(Arc::ptr_eq(&current_shape_table(), &baseline));
     }
 
     #[test]
-    fn try_current_returns_none_without_scope() {
-        // On a fresh thread (cargo test runs each test on its own
-        // thread-local storage), no scope is installed by default.
-        assert!(try_current_shape_table().is_none());
+    fn try_current_falls_back_to_process_default_without_scope() {
+        // On a fresh thread with no installed scope, the process-wide
+        // default handle is returned so scopeless stdlib / unit-test
+        // callers retain pre-B5 shape-tracking semantics.
+        let first = try_current_shape_table().expect("default fallback");
+        let second = try_current_shape_table().expect("default fallback stable");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
