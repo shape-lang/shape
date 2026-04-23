@@ -1,5 +1,6 @@
 //! Function and closure call convention, execution wrappers, and async resolution.
 
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{Upvalue, VMError, ValueWord, ValueWordExt};
 
 use super::{CallFrame, ExecutionResult, VirtualMachine, task_scheduler};
@@ -219,8 +220,8 @@ impl VirtualMachine {
             self.ip = saved_ip;
             // Restore stack pointer (clear anything left above saved_sp)
             for i in saved_sp..self.sp {
-                // Drop the old occupant, then write the none sentinel.
-                drop(ValueWord::from_raw_bits(self.stack[i]));
+                // FR.3: real release (was no-op drop of Copy u64).
+                vw_drop(self.stack[i]);
                 self.stack[i] = Self::NONE_BITS;
             }
             self.sp = saved_sp;
@@ -249,7 +250,8 @@ impl VirtualMachine {
 
                 self.ip = saved_ip;
                 for i in saved_sp..self.sp {
-                    drop(ValueWord::from_raw_bits(self.stack[i]));
+                    // FR.3: real release (was no-op drop of Copy u64).
+                    vw_drop(self.stack[i]);
                     self.stack[i] = Self::NONE_BITS;
                 }
                 self.sp = saved_sp;
@@ -733,7 +735,8 @@ impl VirtualMachine {
             if local_idx < locals_count {
                 let cloned = clone_raw_bits(arg_bits);
                 let old = self.stack[bp + local_idx];
-                drop(ValueWord::from_raw_bits(old));
+                // FR.3: real release (was no-op drop of Copy u64).
+                vw_drop(old);
                 self.stack[bp + local_idx] = cloned;
             }
         }

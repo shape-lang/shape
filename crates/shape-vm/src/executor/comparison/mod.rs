@@ -27,6 +27,7 @@ use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{FilterLiteral, FilterNode, FilterOp, VMError, ValueWord, ValueWordExt};
 use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP, TAG_REF};
 use std::cmp::Ordering;
@@ -411,7 +412,8 @@ impl VirtualMachine {
                 // from the original Phase 2.6.5 bigbang attempt.
                 let v = self.pop_raw_u64()?;
                 let is_absent = v.is_none() || v.is_unit();
-                drop(v);
+                // FR.3: real release (was no-op drop of Copy u64).
+                vw_drop(v);
                 self.push_raw_bool(is_absent)?;
             }
             // NOTE: Trusted comparison variants removed — consolidated into

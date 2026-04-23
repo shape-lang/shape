@@ -12,6 +12,7 @@ use crate::{
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::nanboxed::RefTarget;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{RefProjection, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 impl VirtualMachine {
@@ -994,7 +995,8 @@ impl VirtualMachine {
         // raw SharedCell pointer.
         let old_bits = self.module_bindings[index];
         self.module_bindings[index] = Self::NONE_BITS;
-        drop(ValueWord::from_raw_bits(old_bits));
+        // FR.3: real release (was no-op drop of Copy u64).
+        vw_drop(old_bits);
 
         // Allocate the Arc<SharedCell>. A.1E: SharedCell is a
         // `#[repr(C)]` hand-rolled-spinlock struct, see

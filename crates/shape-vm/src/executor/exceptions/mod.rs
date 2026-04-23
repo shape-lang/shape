@@ -10,6 +10,7 @@ use crate::{
 use shape_ast::TypeAnnotation;
 use shape_runtime::type_schema::builtin_schemas::*;
 use shape_value::heap_value::HeapValue;
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -93,7 +94,8 @@ impl VirtualMachine {
             self.clear_last_uncaught_exception();
             // Unwind stack to handler's saved state (sp-based)
             for i in handler.stack_size..self.sp {
-                drop(ValueWord::from_raw_bits(self.stack[i]));
+                // FR.3: real release (was no-op drop of Copy u64).
+                vw_drop(self.stack[i]);
                 self.stack[i] = Self::NONE_BITS;
             }
             self.sp = handler.stack_size;
