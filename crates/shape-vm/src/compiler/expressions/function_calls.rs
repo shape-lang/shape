@@ -746,6 +746,30 @@ impl BytecodeCompiler {
             let mut call_name = resolved_name;
             let mut call_func_idx = func_idx;
 
+            // BUG3 — free-function monomorphization wiring.
+            //
+            // When the callee is a generic function (`fn inner<T>(x: T) { ... }`)
+            // and the call-site args resolve to concrete types, produce (or
+            // reuse) a `inner::<concrete>` specialization and redirect the
+            // call to it. Otherwise the call would land on the empty
+            // template body (generic bodies are intentionally skipped in
+            // `compile_function`) and run off the end of the bytecode,
+            // blowing the VM call stack.
+            //
+            // The cycle detector in `ensure_monomorphic_function` prevents
+            // transitive re-entry on the same `(fn_name, type_args)` pair
+            // if a dispatch helper ever tries to resolve the specialization
+            // from inside its own body. On any failure mode (unresolved
+            // type args, cycle, compile error) we fall back to the
+            // unspecialized callee — the caller already surfaces a clean
+            // diagnostic when the body is empty.
+            if let Some(specialized_idx) =
+                self.try_monomorphize_free_function_call(&call_name, args)
+            {
+                call_func_idx = specialized_idx;
+                call_name = self.program.functions[call_func_idx].name.clone();
+            }
+
             let total_arity = self.program.functions[call_func_idx].arity as usize;
             let (required_arity, effective_total_arity) = self
                 .function_arity_bounds
@@ -2531,6 +2555,76 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
         self.clear_last_expr_reference_result();
         Ok(Some(()))
+    }
+
+    /// BUG3 — Attempt to monomorphize a generic free function for the given
+    /// call-site argument types. Returns `Some(specialized_func_idx)` on
+    /// success, or `None` if monomorphization is not applicable or fails
+    /// (non-generic callee, unresolved type args, cycle, compile error).
+    ///
+    /// Mirrors `try_monomorphize_method_call` but without a receiver — the
+    /// callee's params are unified directly against the call-site arg types.
+    fn try_monomorphize_free_function_call(
+        &mut self,
+        func_name: &str,
+        args: &[Expr],
+    ) -> Option<usize> {
+        // 1. Only generic, non-const type-param functions participate.
+        let type_params: Vec<String> = {
+            let def = self.function_defs.get(func_name)?;
+            let tps = def.type_params.as_ref()?;
+            if tps.is_empty() {
+                return None;
+            }
+            tps.iter()
+                .filter(|tp| !tp.is_const())
+                .map(|tp| tp.name().to_string())
+                .collect()
+        };
+        if type_params.is_empty() {
+            return None;
+        }
+
+        // 2. Per-arg concrete types (None for anything the resolver can't
+        //    identify — calls, member accesses, etc.).
+        let arg_types = extract_arg_concrete_types(self, args);
+
+        // 3. Unify call-site arg types against the declared param annotations
+        //    to bind each type param to a concrete type.
+        let resolution =
+            resolve_call_site_type_args(self, func_name, &arg_types, &type_params)?;
+
+        // 4. All type args must be concrete. When resolution yields nothing,
+        //    fall back to the unspecialized (empty) template and let the
+        //    caller diagnose — it's never correct to emit a specialized
+        //    call with missing bindings.
+        if resolution.type_args.is_empty() {
+            return None;
+        }
+        if resolution.type_args.len() != type_params.len() {
+            return None;
+        }
+
+        // 5. Produce / reuse the specialization. On cycle or compile error,
+        //    the cache returns Err and we fall back to the unspecialized
+        //    template — callers handle the empty-body case via the existing
+        //    error reporting.
+        match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
+            Ok(specialized_idx) => {
+                let idx = specialized_idx as usize;
+                // Self-call guard: compiling `inner::f64`'s body may contain
+                // a recursive `inner(...)` that re-resolves to itself —
+                // without this guard we'd emit a direct call back into the
+                // function currently being compiled, which would be fine
+                // at runtime but routes through the compiler an extra time
+                // while the cache entry is not yet finalized.
+                if self.current_function == Some(idx) {
+                    return None;
+                }
+                Some(idx)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Attempt to monomorphize a generic extend method for the receiver's

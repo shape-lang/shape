@@ -875,6 +875,51 @@ fn test_type_method_generic_param_uses_runtime_concrete_type() {
     );
 }
 
+/// BUG3 regression — `.type()` on a non-generic receiver must still compile
+/// and run without tripping the monomorphization cycle detector.
+#[test]
+fn test_type_method_non_generic_concrete_receiver_still_works() {
+    let code = r#"
+        function test() {
+            let x: int = 5
+            return x.type().to_string()
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(
+        result.as_arc_string().expect("Expected String").as_ref() as &str,
+        "int"
+    );
+}
+
+/// BUG3 regression — distinct generic free-function calls with different
+/// type arguments must each get their own specialization; the cycle detector
+/// must not cross-fire between unrelated `(type, method)` pairs.
+#[test]
+fn test_generic_free_function_two_distinct_type_args_both_specialize() {
+    let code = r#"
+        function show<T>(x: T) -> string {
+            return x.type().to_string()
+        }
+        function test_number() -> string {
+            return show(2.1)
+        }
+        function test_int() -> string {
+            return show(7)
+        }
+    "#;
+    let n = compile_and_run_fn(code, "test_number");
+    assert_eq!(
+        n.as_arc_string().expect("Expected String").as_ref() as &str,
+        "number"
+    );
+    let i = compile_and_run_fn(code, "test_int");
+    assert_eq!(
+        i.as_arc_string().expect("Expected String").as_ref() as &str,
+        "int"
+    );
+}
+
 #[test]
 fn test_function_call_omits_default_argument_successfully() {
     let code = r#"

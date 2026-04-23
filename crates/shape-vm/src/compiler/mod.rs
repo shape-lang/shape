@@ -1083,6 +1083,22 @@ pub struct BytecodeCompiler {
     /// Monomorphization cache for generic function specialization.
     pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,
 
+    /// BUG3 — cycle detector for generic method / free-function monomorphization.
+    ///
+    /// Holds the set of `mono_key`s whose specialization is currently being
+    /// compiled further down the call stack. If `ensure_monomorphic_function`
+    /// is (re-)entered for a key that is already in-progress, it means the
+    /// specialized body is transitively trying to resolve itself before its
+    /// own `compile_function` has finished — without the guard this would
+    /// overflow the compiler stack or cache the wrong index. The entry is
+    /// inserted BEFORE the inner `compile_function` call and removed right
+    /// after, whether compilation succeeded or failed.
+    ///
+    /// Note: direct self-recursion in the body is already handled by the
+    /// cache-insert-before-compile behaviour; this guard only fires on the
+    /// pathological transitive-resolution cycle.
+    pub(crate) monomorphization_in_progress: std::collections::HashSet<String>,
+
     /// Monotonic counter for monomorphization specialization IDs.
     pub(crate) next_monomorphization_id: u64,
 

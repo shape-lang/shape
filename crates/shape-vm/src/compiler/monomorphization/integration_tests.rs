@@ -320,12 +320,11 @@ mod e2e_tests {
     /// `string` should produce two specializations: `identity::i64` and
     /// `identity::string`.
     ///
-    /// NOTE: Monomorphization of regular (non-method) generic function calls
-    /// is not yet wired into the compiler — only method calls on receivers
-    /// with known concrete types are monomorphized today. This test is gated
-    /// until `try_monomorphize_function_call` is implemented.
+    /// Un-gated in BUG3 — `try_monomorphize_free_function_call` is now wired
+    /// into `compile_expr_function_call`, so regular (non-method) generic
+    /// function calls produce mono-cache entries alongside their method
+    /// counterparts.
     #[test]
-    #[ignore] // regular function calls do not trigger monomorphization yet
     fn test_user_defined_generic_function() {
         let source = r#"
             fn identity<T>(x: T) -> T { x }

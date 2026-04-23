@@ -194,6 +194,24 @@ impl BytecodeCompiler {
             return Ok(existing);
         }
 
+        // BUG3 — cycle detector. If this exact `(base_fn_name, type_args)`
+        // specialization is already being compiled further down the call
+        // stack, its cache entry has not been written yet (that happens after
+        // `register_function` / `find_function` below). A transitive attempt
+        // to resolve the same specialization — e.g. a generic body whose
+        // `x.type()` dispatch path re-enters monomorphization for the same
+        // `(type, method)` pair — would recurse forever. Refuse to descend a
+        // second time and let the caller fall back to the generic path.
+        if self.monomorphization_in_progress.contains(&mono_key) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "ensure_monomorphic_function: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
+                    mono_key
+                ),
+                location: None,
+            });
+        }
+
         // Look up the original FunctionDef AST. The bytecode compiler always
         // populates `function_defs` during `register_function`, so this is
         // the canonical store for substitution input.
@@ -285,8 +303,16 @@ impl BytecodeCompiler {
         // the specialized function self-reference the same cache entry instead
         // of recursively re-monomorphizing.
         self.monomorphization_cache
-            .insert(mono_key, specialization_idx);
+            .insert(mono_key.clone(), specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
+
+        // BUG3 — mark this key as in-progress before compiling the body. The
+        // cache insert above handles direct self-recursive calls to the same
+        // specialization, but a transitive resolver path (e.g. a dispatch
+        // helper that re-triggers monomorphization for the same `(name,
+        // type_args)` pair via a different entry point) would otherwise
+        // recurse forever. The entry is removed below regardless of success.
+        self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: save/restore `closure_function_ids` across the recursive
         // `compile_function` call. The specialized body's own
@@ -304,6 +330,7 @@ impl BytecodeCompiler {
         // any failure mode it wants to tolerate.
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
         Ok(specialization_idx)
@@ -362,6 +389,17 @@ impl BytecodeCompiler {
 
         if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
             return Ok(existing);
+        }
+
+        // BUG3 — cycle detector (see `ensure_monomorphic_function`).
+        if self.monomorphization_in_progress.contains(&mono_key) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "ensure_monomorphic_function_with_consts: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
+                    mono_key
+                ),
+                location: None,
+            });
         }
 
         let original_def = self.function_defs.get(base_fn_name).cloned().ok_or_else(|| {
@@ -460,14 +498,18 @@ impl BytecodeCompiler {
         // the body resolves through the cache instead of recursively
         // re-monomorphizing.
         self.monomorphization_cache
-            .insert(mono_key, specialization_idx);
+            .insert(mono_key.clone(), specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
+
+        // BUG3 — mark this key as in-progress while its body is compiled.
+        self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function` above.
         let saved_closure_function_ids =
             std::mem::take(&mut self.closure_function_ids);
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
         Ok(specialization_idx)
@@ -513,6 +555,13 @@ impl BytecodeCompiler {
         // Cache hit — reuse.
         if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
             return Ok(Some(existing));
+        }
+
+        // BUG3 — cycle detector (see `ensure_monomorphic_function`).
+        // Closure-aware specialization is the soft-fail variant: bail to the
+        // generic path when a cycle is hit rather than surfacing the error.
+        if self.monomorphization_in_progress.contains(&mono_key) {
+            return Ok(None);
         }
 
         // Per-module specialization budget (§3.4). When we've already produced
@@ -594,16 +643,20 @@ impl BytecodeCompiler {
         // Cache BEFORE compile_function so any recursive call inside the
         // specialized body resolves through the cache.
         self.monomorphization_cache
-            .insert(mono_key, specialization_idx);
+            .insert(mono_key.clone(), specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
         self.closure_specialization_count =
             self.closure_specialization_count.saturating_add(1);
+
+        // BUG3 — mark this key as in-progress while its body is compiled.
+        self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function`.
         let saved_closure_function_ids =
             std::mem::take(&mut self.closure_function_ids);
         let compile_result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.monomorphization_in_progress.remove(&mono_key);
         if compile_result.is_err() {
             // Compilation failed — we already inserted the cache entry; the
             // caller will fall back to the generic path anyway. Returning
