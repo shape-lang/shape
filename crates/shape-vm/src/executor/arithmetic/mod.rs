@@ -855,8 +855,25 @@ impl VirtualMachine {
                 self.push_raw_i64(-val)?;
             }
             NegNumber => {
-                let val = self.pop_raw_f64()?;
-                self.push_raw_f64(-val)?;
+                // Mirror `MulNumber`'s fast/slow split (BUG5): the fast path
+                // assumes the compiler proved the operand is a plain f64, but
+                // `NegNumber` is also reached when a method body declared on
+                // `Number` executes with a tagged `int` (i48) receiver —
+                // `extend Number { method negate() { -self } }` called as
+                // `(42).negate()`. Reinterpreting the tagged bits as f64 would
+                // emit NaN; the fallback decodes the ValueWord and coerces
+                // losslessly, matching `MulNumber`/`AddNumber`/etc.
+                if self.stack_top_is_f64() {
+                    let val = self.pop_raw_f64()?;
+                    self.push_raw_f64(-val)?;
+                } else {
+                    let a = self.pop_raw_u64()?;
+                    let v = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    self.push_raw_f64(-v)?;
+                }
             }
             NegDecimal => {
                 // Decimal is heap-backed, use ValueWord path
