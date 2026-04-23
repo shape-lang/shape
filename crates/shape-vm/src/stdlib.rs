@@ -6,7 +6,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::Runtime;
@@ -14,11 +13,6 @@ use shape_runtime::module_loader::ModuleLoader;
 
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
-
-/// Legacy process-global cache. Scheduled for deletion in B2.3 once all
-/// callers consume the per-Runtime cache via `compile_core_modules`.
-#[allow(dead_code)]
-static CORE_STDLIB_CACHE: OnceLock<Result<BytecodeProgram>> = OnceLock::new();
 
 fn stdlib_compile_logs_enabled() -> bool {
     std::env::var("SHAPE_TRACE_STDLIB_COMPILE")
