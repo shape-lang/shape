@@ -37,9 +37,26 @@ pub struct TypeSchema {
 }
 
 impl TypeSchema {
-    /// Create a new type schema with the given fields
+    /// Create a new type schema with the given fields, using an ID from the
+    /// process-global `NEXT_SCHEMA_ID` counter.
+    ///
+    /// During the B1 migration window this is the historic entry point used
+    /// by most call sites. Prefer [`TypeSchema::with_id`] combined with a
+    /// per-`Runtime` [`super::TypeSchemaRegistry`] counter for new code.
     pub fn new(name: impl Into<String>, field_defs: Vec<(String, FieldType)>) -> Self {
-        let id = super::next_schema_id();
+        Self::with_id(super::next_schema_id(), name, field_defs)
+    }
+
+    /// Create a new type schema with a caller-supplied schema ID.
+    ///
+    /// Used by [`super::TypeSchemaRegistry::register_type_scoped`] (and tests)
+    /// to construct schemas whose IDs come from a per-registry counter rather
+    /// than the legacy global static.
+    pub fn with_id(
+        id: SchemaId,
+        name: impl Into<String>,
+        field_defs: Vec<(String, FieldType)>,
+    ) -> Self {
         let name = name.into();
 
         let mut fields = Vec::with_capacity(field_defs.len());
@@ -123,13 +140,25 @@ impl TypeSchema {
         self.enum_info.as_ref()?.variant_id(variant_name)
     }
 
-    /// Create an enum schema with variant information
+    /// Create an enum schema with variant information, using an ID from the
+    /// process-global `NEXT_SCHEMA_ID` counter.
     ///
     /// Layout:
     /// - Field 0: __variant (I64) - variant discriminator at offset 0
     /// - Field 1+: __payload_N (Any) - payload fields at offset 8, 16, etc.
+    ///
+    /// Prefer [`TypeSchema::new_enum_with_id`] combined with a per-`Runtime`
+    /// [`super::TypeSchemaRegistry`] counter for new code.
     pub fn new_enum(name: impl Into<String>, variants: Vec<EnumVariantInfo>) -> Self {
-        let id = super::next_schema_id();
+        Self::new_enum_with_id(super::next_schema_id(), name, variants)
+    }
+
+    /// Create an enum schema with a caller-supplied ID.
+    pub fn new_enum_with_id(
+        id: SchemaId,
+        name: impl Into<String>,
+        variants: Vec<EnumVariantInfo>,
+    ) -> Self {
         let name = name.into();
         let enum_info = EnumInfo::new(variants);
         let max_payload = enum_info.max_payload_fields();

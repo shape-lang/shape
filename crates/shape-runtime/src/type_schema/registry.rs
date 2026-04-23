@@ -8,20 +8,109 @@ use super::enum_support::EnumVariantInfo;
 use super::field_types::{FieldAnnotation, FieldType};
 use super::schema::TypeSchema;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Global registry of type schemas
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+/// Starting value for per-registry schema ID counters.
+///
+/// Matches the historical `NEXT_SCHEMA_ID` static seed so registries created
+/// via [`TypeSchemaRegistry::new_with_stdlib`] use the same ID domain that the
+/// process-wide static has always used.
+const INITIAL_SCHEMA_ID: SchemaId = 1;
+
+/// Registry of type schemas.
+///
+/// Each registry owns its own schema-ID counter via `next_id`. This is the
+/// per-`Runtime` replacement for the legacy process-global `NEXT_SCHEMA_ID`
+/// static: two registries built with [`TypeSchemaRegistry::new_with_stdlib`]
+/// assign IDs from their own domains and do not observe each other's state.
+///
+/// The counter is not currently consulted by the historic [`TypeSchema::new`]
+/// path (which still bumps the global static), but can be allocated via
+/// [`TypeSchemaRegistry::allocate_id`] and used with
+/// [`TypeSchema::with_id`]. During the B1 migration window both paths coexist.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeSchemaRegistry {
+    /// Per-registry counter for allocating fresh schema IDs.
+    ///
+    /// Skipped during (de)serialization; a decoded registry restarts its
+    /// counter above the maximum observed ID via the custom `Deserialize`
+    /// impl. This matches historical behaviour where the global static was
+    /// bumped via `ensure_next_schema_id_above`.
+    #[serde(skip, default = "default_next_id")]
+    next_id: AtomicU32,
     /// Schemas indexed by name
     by_name: HashMap<String, TypeSchema>,
     /// Schemas indexed by ID for fast runtime lookup
     by_id: HashMap<SchemaId, String>,
 }
 
+fn default_next_id() -> AtomicU32 {
+    AtomicU32::new(INITIAL_SCHEMA_ID)
+}
+
+impl Default for TypeSchemaRegistry {
+    fn default() -> Self {
+        Self {
+            next_id: default_next_id(),
+            by_name: HashMap::new(),
+            by_id: HashMap::new(),
+        }
+    }
+}
+
+impl Clone for TypeSchemaRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            next_id: AtomicU32::new(self.next_id.load(Ordering::SeqCst)),
+            by_name: self.by_name.clone(),
+            by_id: self.by_id.clone(),
+        }
+    }
+}
+
 impl TypeSchemaRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Allocate a fresh schema ID from this registry's per-instance counter.
+    ///
+    /// IDs allocated via this method are independent of the legacy
+    /// process-global `NEXT_SCHEMA_ID` static. Used together with
+    /// [`TypeSchema::with_id`] to construct schemas whose IDs are isolated per
+    /// registry (and therefore per `Runtime`).
+    pub fn allocate_id(&self) -> SchemaId {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Ensure all future allocations from this registry yield IDs strictly
+    /// greater than `max_existing_id`.
+    ///
+    /// Used after loading externally compiled bytecode whose schemas already
+    /// have assigned IDs — mirrors the legacy
+    /// `ensure_next_schema_id_above` helper at a per-registry scope.
+    pub fn ensure_next_id_above(&self, max_existing_id: SchemaId) {
+        let required_next = max_existing_id.saturating_add(1);
+        let mut current = self.next_id.load(Ordering::SeqCst);
+        while current < required_next {
+            match self.next_id.compare_exchange(
+                current,
+                required_next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Peek the next ID that [`allocate_id`](Self::allocate_id) would produce
+    /// without incrementing the counter. For tests/introspection only.
+    #[cfg(test)]
+    pub(crate) fn peek_next_id(&self) -> SchemaId {
+        self.next_id.load(Ordering::SeqCst)
     }
 
     /// Register a type schema
@@ -175,6 +264,92 @@ impl TypeSchemaRegistry {
         let ids = super::builtin_schemas::register_builtin_schemas(&mut registry);
 
         (registry, ids)
+    }
+
+    /// Register a type whose ID is drawn from this registry's per-instance
+    /// counter rather than the process-global `NEXT_SCHEMA_ID`.
+    ///
+    /// Preferred replacement for [`register_type`](Self::register_type) inside
+    /// `new_with_stdlib` and any future per-`Runtime` registration pathways.
+    pub fn register_type_scoped(
+        &mut self,
+        name: impl Into<String>,
+        fields: Vec<(String, FieldType)>,
+    ) -> SchemaId {
+        let id = self.allocate_id();
+        let schema = TypeSchema::with_id(id, name, fields);
+        self.register(schema);
+        id
+    }
+
+    /// Register an enum whose ID is drawn from this registry's per-instance
+    /// counter. See [`register_type_scoped`](Self::register_type_scoped).
+    pub fn register_enum_scoped(
+        &mut self,
+        name: impl Into<String>,
+        variants: Vec<EnumVariantInfo>,
+    ) -> SchemaId {
+        let id = self.allocate_id();
+        let schema = TypeSchema::new_enum_with_id(id, name, variants);
+        self.register(schema);
+        id
+    }
+
+    /// Create a registry seeded with the canonical stdlib schemas
+    /// (Row / Option / Result / builtin fixed-layout), using the registry's
+    /// own per-instance ID counter rather than the legacy global static.
+    ///
+    /// This is the entry point for per-`Runtime` schema isolation. Two
+    /// registries constructed with `new_with_stdlib` assign IDs from
+    /// independent domains and do not observe each other's state.
+    ///
+    /// Note: some schema constructors (e.g. when builtin_schemas uses
+    /// `TypeSchema::new`) still fall through to the global counter during the
+    /// B1 migration window; only the registry-level `register_type_scoped`
+    /// path is fully isolated. See the parity tests in this module for the
+    /// invariants that hold today.
+    pub fn new_with_stdlib() -> Self {
+        let mut registry = Self::new();
+
+        // Register Row type via the per-registry counter.
+        registry.register_type_scoped(
+            "Row",
+            vec![
+                ("timestamp".to_string(), FieldType::Timestamp),
+                ("fields".to_string(), FieldType::Any),
+            ],
+        );
+
+        // Register Option / Result enums via the per-registry counter.
+        registry.register_enum_scoped(
+            "Option",
+            vec![
+                EnumVariantInfo::new("Some", 0, 1),
+                EnumVariantInfo::new("None", 1, 0),
+            ],
+        );
+        registry.register_enum_scoped(
+            "Result",
+            vec![
+                EnumVariantInfo::new("Ok", 0, 1),
+                EnumVariantInfo::new("Err", 1, 1),
+            ],
+        );
+
+        // Register builtin fixed-layout schemas.
+        //
+        // NOTE: during the B1 migration window, `register_builtin_schemas`
+        // internally uses `TypeSchema::new`, which still bumps the global
+        // counter. The resulting IDs land in this registry's `by_id` / `by_name`
+        // maps, but they are drawn from the global domain. Registries
+        // constructed via `new_with_stdlib` therefore isolate *future*
+        // scoped allocations; they do not retrofit the builtin IDs. This is
+        // acceptable because builtin IDs are stable within a process — the
+        // failing-test leakage comes from user-registered types, which go
+        // through `register_type_scoped`.
+        super::builtin_schemas::register_builtin_schemas(&mut registry);
+
+        registry
     }
 
     /// Compute content hashes for all registered schemas.
@@ -448,5 +623,108 @@ mod tests {
         let a = registry.register_type("A", vec![("x".to_string(), FieldType::F64)]);
         let b = registry.register_type("B", vec![("y".to_string(), FieldType::F64)]);
         assert_eq!(registry.max_schema_id(), Some(a.max(b)));
+    }
+
+    // ---- B1.1 parity tests --------------------------------------------------
+    //
+    // These tests exercise the new per-registry schema ID counter in isolation
+    // from the process-global `NEXT_SCHEMA_ID` static. They prove that two
+    // independent `TypeSchemaRegistry` instances built with `new_with_stdlib`
+    // allocate IDs from *their own* domains when using `register_type_scoped`
+    // / `register_enum_scoped` — the root-cause fix for the cross-test schema
+    // ID leakage that motivates Track B1.
+
+    #[test]
+    fn b1_1_registry_allocate_id_is_per_instance() {
+        let r1 = TypeSchemaRegistry::new();
+        let r2 = TypeSchemaRegistry::new();
+
+        // Both freshly-constructed registries start at the same seed value.
+        assert_eq!(r1.peek_next_id(), r2.peek_next_id());
+
+        // Allocations on r1 don't advance r2's counter.
+        let id1a = r1.allocate_id();
+        let id1b = r1.allocate_id();
+        assert_eq!(id1b, id1a + 1);
+        assert_eq!(r2.peek_next_id(), id1a);
+
+        // And vice-versa.
+        let id2a = r2.allocate_id();
+        assert_eq!(id2a, id1a);
+    }
+
+    #[test]
+    fn b1_1_new_with_stdlib_uses_registry_counter_for_scoped_types() {
+        let mut r1 = TypeSchemaRegistry::new_with_stdlib();
+        let mut r2 = TypeSchemaRegistry::new_with_stdlib();
+
+        // Both registries expose the canonical stdlib types.
+        for name in ["Row", "Option", "Result"] {
+            assert!(r1.has_type(name), "r1 missing {name}");
+            assert!(r2.has_type(name), "r2 missing {name}");
+        }
+
+        // User-registered schemas go through the per-registry counter and
+        // therefore get IDs from disjoint domains when allocated back-to-back
+        // on independent registries.
+        let r1_user =
+            r1.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let r2_user =
+            r2.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+
+        // Both "UserA" schemas resolve within their own registry.
+        assert_eq!(r1.get("UserA").unwrap().id, r1_user);
+        assert_eq!(r2.get("UserA").unwrap().id, r2_user);
+
+        // The key invariant: r2's scoped ID is NOT advanced by allocations on
+        // r1. Independent registries can produce equal IDs for the same name
+        // without collision inside their own space.
+        let r1_user_b =
+            r1.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        assert_eq!(r1_user_b, r1_user + 1);
+
+        // r2's counter is unaffected by r1_user_b.
+        let r2_user_b =
+            r2.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        assert_eq!(r2_user_b, r2_user + 1);
+    }
+
+    #[test]
+    fn b1_1_scoped_enum_ids_are_per_registry() {
+        let mut r1 = TypeSchemaRegistry::new();
+        let mut r2 = TypeSchemaRegistry::new();
+
+        let e1 = r1.register_enum_scoped(
+            "Color",
+            vec![
+                EnumVariantInfo::new("Red", 0, 0),
+                EnumVariantInfo::new("Green", 1, 0),
+            ],
+        );
+        let e2 = r2.register_enum_scoped(
+            "Color",
+            vec![
+                EnumVariantInfo::new("Red", 0, 0),
+                EnumVariantInfo::new("Green", 1, 0),
+            ],
+        );
+
+        // Independent registries may legitimately produce the same ID for an
+        // enum type defined under the same name.
+        assert_eq!(e1, e2);
+        assert!(r1.get("Color").unwrap().is_enum());
+        assert!(r2.get("Color").unwrap().is_enum());
+    }
+
+    #[test]
+    fn b1_1_ensure_next_id_above_is_per_registry() {
+        let r1 = TypeSchemaRegistry::new();
+        let r2 = TypeSchemaRegistry::new();
+
+        r1.ensure_next_id_above(500);
+        assert_eq!(r1.peek_next_id(), 501);
+
+        // r2 is unaffected.
+        assert_eq!(r2.peek_next_id(), INITIAL_SCHEMA_ID);
     }
 }
