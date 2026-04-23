@@ -317,7 +317,8 @@ impl VirtualMachine {
 
                     // Drop call arguments from the VM stack now that native call succeeded.
                     for i in args_base..self.sp {
-                        drop(ValueWord::from_raw_bits(self.stack[i]));
+                        // FR.2: real release (was no-op drop of Copy u64).
+                        vw_drop(self.stack[i]);
                         self.stack[i] = Self::NONE_BITS;
                     }
                     self.sp = args_base;
@@ -442,7 +443,7 @@ impl VirtualMachine {
         match shape_value::tag_bits::get_tag(_bits) {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
-                drop(callee_nb);
+                let _ = callee_nb;
                 // WB2.3: function-id callees are inline (no heap share), so
                 // `vw_drop` is a no-op here — kept for contract uniformity.
                 vw_drop(self.stack[callee_idx]);
@@ -459,7 +460,7 @@ impl VirtualMachine {
             }
             TAG_MODULE_FN => {
                 let func_id = callee_nb.as_module_function().ok_or(VMError::InvalidCall)?;
-                drop(callee_nb);
+                let _ = callee_nb;
                 let args_base = callee_idx + 1;
                 let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                 for i in 0..arg_count {
@@ -486,7 +487,7 @@ impl VirtualMachine {
                 {
                     let function_id = function_id;
                     let upvalues = upvalues_slice.to_vec();
-                    drop(callee_nb);
+                    let _ = callee_nb;
                     let args_base = callee_idx + 1;
                     let mut args_nb = Vec::with_capacity(arg_count);
                     for i in 0..arg_count {
@@ -523,7 +524,7 @@ impl VirtualMachine {
                     callee_nb.as_heap_ref()
                 {
                     let callable = callable.clone();
-                    drop(callee_nb);
+                    let _ = callee_nb;
                     let args_base = callee_idx + 1;
                     let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                     for i in 0..arg_count {
@@ -572,7 +573,7 @@ impl VirtualMachine {
         match shape_value::tag_bits::get_tag(_bits) {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
-                drop(callee_nb);
+                let _ = callee_nb;
                 // WB2.3: inline function-id callee — `vw_drop` no-op.
                 vw_drop(self.stack[callee_idx]);
                 for i in callee_idx..callee_idx + arg_count {
@@ -585,7 +586,7 @@ impl VirtualMachine {
             }
             TAG_MODULE_FN => {
                 let func_id = callee_nb.as_module_function().ok_or(VMError::InvalidCall)?;
-                drop(callee_nb);
+                let _ = callee_nb;
                 let args_base = callee_idx + 1;
                 let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                 for i in 0..arg_count {
@@ -612,7 +613,7 @@ impl VirtualMachine {
                 {
                     let function_id = function_id;
                     let upvalues = upvalues_slice.to_vec();
-                    drop(callee_nb);
+                    let _ = callee_nb;
                     // Collect args as ValueWord, then remove callee
                     let args_base = callee_idx + 1;
                     let mut args_nb = Vec::with_capacity(arg_count);
@@ -638,7 +639,7 @@ impl VirtualMachine {
                 {
                     // cold-path
                     let callable = callable.clone();
-                    drop(callee_nb);
+                    let _ = callee_nb;
                     let args_base = callee_idx + 1;
                     let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                     for i in 0..arg_count {
@@ -778,8 +779,13 @@ impl VirtualMachine {
                                     // the stack via `pop_raw_u64` which
                                     // did NOT drop).
                                     if layout.is_heap_capture(i) {
+                                        // FR.2: clone_from_bits bumped the
+                                        // refcount; the resulting u64 is
+                                        // Copy so falling out of scope is a
+                                        // no-op — share stays alive for the
+                                        // block.
                                         let _dup = ValueWord::clone_from_bits(*bits);
-                                        std::mem::forget(_dup);
+                                        let _ = _dup;
                                     }
                                     write_capture_typed(ptr, &layout, i, *bits);
                                 }
