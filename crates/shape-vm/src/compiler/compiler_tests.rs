@@ -2510,7 +2510,13 @@ fn test_bug8_default_parameter_partial_override() {
 
 #[test]
 fn test_bug11_mutable_closure_counter() {
-    // Closure that mutates a captured variable should see updated state
+    // BUG1 — Assigning to a `let`-bound (immutable) outer binding from
+    // inside a closure must be rejected at compile time, not run time.
+    // Previously the compiler happily emitted an ill-formed `MakeClosure`
+    // and the VM crashed with "MakeClosure for function N has no
+    // registered ClosureLayout" during execution. The B0005 diagnostic
+    // now catches the write at the closure-capture analysis step and
+    // asks the user to upgrade the binding to `let mut` or `var`.
     let code = r#"
         fn make_counter() {
             let x = 0
@@ -2521,8 +2527,21 @@ fn test_bug11_mutable_closure_counter() {
         counter()
         counter()
     "#;
-    let result = compile_and_run(code);
-    assert_eq!(result.as_number_coerce().unwrap(), 2.0);
+    let program = parse_program(code).unwrap();
+    let err = BytecodeCompiler::new().compile(&program).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("B0005"),
+        "expected B0005 diagnostic for assigning to a `let` binding from a closure, got: {msg}"
+    );
+    assert!(
+        msg.contains("'x'"),
+        "diagnostic should name the offending binding, got: {msg}"
+    );
+    assert!(
+        msg.contains("let mut") && msg.contains("var"),
+        "diagnostic should suggest both `let mut` and `var`, got: {msg}"
+    );
 }
 
 /// BUG-10: Comptime errors should NOT have nested prefixes like

@@ -86,6 +86,46 @@ impl BytecodeCompiler {
             }
         }
 
+        // BUG1 — reject assignment to an immutable (`let`) outer binding
+        // from inside the closure body. The environment analyzer marks
+        // the binding in `mutated_captures` when the closure writes to
+        // it; if the outer binding's ownership class is `OwnedImmutable`
+        // (the `let` form), the write violates Shape's immutability
+        // rules. Without this check the compiler still lowers a
+        // `MakeClosure` whose capture layout mismatches the legacy
+        // SharedCell path, producing the runtime-only crash
+        // `MakeClosure for function N has no registered ClosureLayout`.
+        // The diagnostic uses code `B0005` — the same code used for other
+        // immutability/move violations across closure boundaries — and
+        // suggests both `let mut` (local mutation) and `var` (shareable
+        // mutation through closure captures) to match CLAUDE.md guidance.
+        for captured in &captured_vars {
+            if !mutated_captures.contains(captured) {
+                continue;
+            }
+            let ownership = self
+                .binding_semantics_for_name(captured)
+                .map(|(_, _, sem)| sem.ownership_class);
+            if !matches!(ownership, Some(BindingOwnershipClass::OwnedImmutable)) {
+                continue;
+            }
+            let is_local_slot = self.resolve_local(captured).is_some();
+            let is_module_binding_slot = !is_local_slot
+                && (self.resolve_scoped_module_binding_name(captured).is_some()
+                    || self.module_bindings.contains_key(captured));
+            if !is_local_slot && !is_module_binding_slot {
+                continue;
+            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "[B0005] cannot assign to immutable binding '{captured}' captured by \
+                     closure; use `let mut {captured}` for local mutation or `var {captured}` \
+                     to allow shared mutation through closures"
+                ),
+                location: Some(self.span_to_source_location(closure_span)),
+            });
+        }
+
         // Build per-capture mutability flags (aligned with captured_vars order).
         // A capture is mutable if the closure itself mutates it OR if a previous
         // closure in the same scope already boxed it into a SharedCell.
@@ -946,8 +986,15 @@ mod tests {
 
         let mut compiler = BytecodeCompiler::new();
         let counter_idx = compiler.get_or_create_module_binding("counter");
+        // BUG1 — closures that mutate an outer binding require the
+        // source to be `var` (or `let mut` for local mutation). Prior
+        // to the compile-time immutability check this test used
+        // `VarKind::Let, is_mut: false`, which is precisely the case
+        // that now (correctly) rejects with B0005. Bumping the source
+        // to `VarKind::Var` matches the test's documented intent
+        // ("mutable closure capture marks binding as shared storage").
         let counter_decl = VariableDecl {
-            kind: VarKind::Let,
+            kind: VarKind::Var,
             is_mut: false,
             pattern: shape_ast::ast::DestructurePattern::Identifier(
                 "counter".to_string(),
