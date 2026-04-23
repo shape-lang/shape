@@ -410,6 +410,15 @@ pub struct VirtualMachine {
     /// Megamorphic property lookup cache. Used when a property access site has
     /// seen too many different schemas (>4 targets) and IC state is Megamorphic.
     megamorphic_cache: crate::megamorphic_cache::MegamorphicCache,
+
+    /// Shape transition table + transition log owned by this VM.
+    ///
+    /// Replaces the process-global `GLOBAL_SHAPE_TABLE` / `SHAPE_TRANSITION_LOG`
+    /// statics. The VM installs this handle as the ambient
+    /// `shape_value::current_shape_table()` around every execution entry
+    /// point so HashMapData helpers (both VM-side and JIT-FFI-side) can
+    /// reach it without passing `&mut vm` through raw `extern "C"` calls.
+    pub(crate) shape_table: std::sync::Arc<shape_value::ShapeTableHandle>,
 }
 
 /// Data for resuming a single call frame mid-function.

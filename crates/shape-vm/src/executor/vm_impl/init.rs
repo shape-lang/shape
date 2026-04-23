@@ -69,6 +69,7 @@ impl VirtualMachine {
             metrics: None,
             feedback_vectors: Vec::new(),
             megamorphic_cache: crate::megamorphic_cache::MegamorphicCache::new(),
+            shape_table: shape_value::ShapeTableHandle::new(),
         };
 
         // VM-native stdlib modules are always available, independent of
