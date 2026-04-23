@@ -33,8 +33,8 @@
 //! - The pool is bounded by `INTERN_CAP` entries. When full, new lookups
 //!   fall through to the no-intern path — we never evict, keeping all live
 //!   `Arc<String>` refs valid.
-//! - The pool uses `std::sync::LazyLock<Mutex<...>>` (same pattern as
-//!   `shape_graph::GLOBAL_SHAPE_TABLE`). A `HashMap<Arc<String>, ()>` (set
+//! - The pool uses `std::sync::LazyLock<Mutex<...>>`. A
+//!   `HashMap<Arc<String>, ()>` (set
 //!   semantics keyed by the Arc's string content) would work, but using
 //!   `HashMap<Arc<String>, Arc<String>>` lets us return the *canonical* Arc
 //!   without rebuilding one.
