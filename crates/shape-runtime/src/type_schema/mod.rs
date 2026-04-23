@@ -21,7 +21,6 @@
 
 use shape_value::{ValueWord, ValueWordExt};
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // Module declarations
@@ -101,75 +100,80 @@ static STDLIB_SCHEMA_REGISTRY: std::sync::LazyLock<TypeSchemaRegistry> =
         registry
     });
 
-/// Explicitly predeclared schemas keyed by ordered field name signature.
+/// Process-wide fallback registry that owns the predeclared-schema state
+/// used when no runtime scope is active.
 ///
-/// These are registered by compile-time tooling/extensions and can be used at
-/// runtime for typed object materialization. No implicit runtime schema creation
-/// is performed.
-static PREDECLARED_SCHEMA_CACHE: std::sync::LazyLock<RwLock<HashMap<String, SchemaId>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// Explicitly predeclared schemas indexed by schema ID.
-static PREDECLARED_SCHEMA_REGISTRY: std::sync::LazyLock<RwLock<HashMap<SchemaId, TypeSchema>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-
-fn schema_key_from_fields(fields: &[&str]) -> String {
-    fields.join("\u{1f}")
-}
+/// Prior to B1.6 the predeclared maps were standalone process-global
+/// statics (`PREDECLARED_SCHEMA_CACHE` / `PREDECLARED_SCHEMA_REGISTRY`).
+/// B1.6 moves the logic onto `TypeSchemaRegistry` as instance state; this
+/// fallback exists so the free functions still work when invoked outside
+/// any Runtime scope (old tests, static setup, ad-hoc tooling). B1.7
+/// retires both the fallback and the `STDLIB_SCHEMA_REGISTRY` static.
+static FALLBACK_PREDECLARED_REGISTRY: std::sync::LazyLock<TypeSchemaRegistry> =
+    std::sync::LazyLock::new(TypeSchemaRegistry::new);
 
 /// Register a predeclared schema with `FieldType::Any` for the given ordered fields.
 ///
 /// This is intended for compile-time schema derivation paths (extensions/comptime)
 /// that need runtime object construction without runtime schema synthesis.
+///
+/// Writes to the process-wide fallback registry (preserving B1.5
+/// behaviour where predeclared schemas were globally visible across
+/// Runtimes) AND mirrors into the current ambient registry when present
+/// so per-Runtime lookups also succeed. The SchemaId is drawn from the
+/// global `NEXT_SCHEMA_ID` counter so it remains interleaved with other
+/// global-counter allocations (builtin schemas, no-scope
+/// `TypeSchema::new` calls), matching pre-B1.6 test ordering. B1.7
+/// retires the fallback once all call sites hold a scope.
 pub fn register_predeclared_any_schema(fields: &[String]) -> SchemaId {
     let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-    let key = schema_key_from_fields(&field_refs);
 
-    if let Ok(cache) = PREDECLARED_SCHEMA_CACHE.read() {
-        if let Some(id) = cache.get(&key) {
-            return *id;
+    // Primary write: process-wide fallback. Check cache first to avoid
+    // re-allocating global IDs on repeat calls.
+    if let Some(existing) = FALLBACK_PREDECLARED_REGISTRY
+        .lookup_predeclared_id_by_field_order(&field_refs)
+    {
+        if let Some(reg) = try_current_registry() {
+            reg.mirror_predeclared_any_schema(fields, existing);
         }
+        return existing;
     }
 
-    let typed_fields: Vec<(String, FieldType)> = fields
-        .iter()
-        .map(|name| (name.clone(), FieldType::Any))
-        .collect();
+    // Allocate from the global counter (legacy behaviour) so the
+    // predeclared ID domain does not collide with per-registry scoped
+    // allocations (1, 2, 3 ...).
+    let id = next_schema_id();
+    FALLBACK_PREDECLARED_REGISTRY.mirror_predeclared_any_schema(fields, id);
 
-    let schema = TypeSchema::new(format!("__predecl_{}", fields.join("_")), typed_fields);
-    let id = schema.id;
-
-    if let Ok(mut reg) = PREDECLARED_SCHEMA_REGISTRY.write() {
-        reg.insert(id, schema);
+    // Mirror into the ambient registry if one is active so scoped
+    // lookups observe the same schema without cross-referencing the
+    // fallback.
+    if let Some(reg) = try_current_registry() {
+        reg.mirror_predeclared_any_schema(fields, id);
     }
-    if let Ok(mut cache) = PREDECLARED_SCHEMA_CACHE.write() {
-        cache.insert(key, id);
-    }
-
     id
 }
 
 fn lookup_predeclared_schema_by_id(id: SchemaId) -> Option<TypeSchema> {
-    PREDECLARED_SCHEMA_REGISTRY
-        .read()
-        .ok()
-        .and_then(|reg| reg.get(&id).cloned())
+    if let Some(reg) = try_current_registry() {
+        if let Some(schema) = reg.lookup_predeclared_by_id(id) {
+            return Some(schema);
+        }
+    }
+    FALLBACK_PREDECLARED_REGISTRY.lookup_predeclared_by_id(id)
 }
 
 fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
-    let key = schema_key_from_fields(fields);
-
-    if let Ok(cache) = PREDECLARED_SCHEMA_CACHE.read() {
-        if let Some(id) = cache.get(&key) {
-            return Some(*id);
+    // Order-sensitive fast path over the current registry's predeclared cache.
+    if let Some(reg) = try_current_registry() {
+        if let Some(id) = reg.lookup_predeclared_id_by_field_order(fields) {
+            return Some(id);
         }
-    }
 
-    // Prefer the current ambient registry; fall back to the legacy
-    // process-global static during the B1 migration window.
-    let ambient = try_current_registry();
-    let ambient_match = ambient.as_deref().and_then(|reg| {
-        reg.type_names()
+        // Ordered match against user-registered / stdlib schemas in the
+        // ambient registry (previously only searched STDLIB_SCHEMA_REGISTRY).
+        if let Some(id) = reg
+            .type_names()
             .filter_map(|name| reg.get(name))
             .find(|schema| {
                 if schema.fields.len() != fields.len() {
@@ -182,8 +186,13 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
                     .eq(fields.iter().copied())
             })
             .map(|schema| schema.id)
-    });
-    if let Some(id) = ambient_match {
+        {
+            return Some(id);
+        }
+    }
+
+    // Fallback-registry cache (no-scope callers).
+    if let Some(id) = FALLBACK_PREDECLARED_REGISTRY.lookup_predeclared_id_by_field_order(fields) {
         return Some(id);
     }
 
@@ -204,18 +213,21 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
 }
 
 fn lookup_schema_by_id(id: SchemaId) -> Option<TypeSchema> {
-    // Prefer the current ambient registry; fall back to the legacy
-    // process-global static and the predeclared global map during the B1
-    // migration window.
+    // Prefer the current ambient registry (stdlib + predeclared); fall
+    // back to the legacy process-global static and the process-wide
+    // fallback predeclared registry during the B1 migration window.
     if let Some(reg) = try_current_registry() {
         if let Some(schema) = reg.get_by_id(id).cloned() {
             return Some(schema);
         }
+        if let Some(schema) = reg.lookup_predeclared_by_id(id) {
+            return Some(schema);
+        }
     }
-    STDLIB_SCHEMA_REGISTRY
-        .get_by_id(id)
-        .cloned()
-        .or_else(|| lookup_predeclared_schema_by_id(id))
+    if let Some(schema) = STDLIB_SCHEMA_REGISTRY.get_by_id(id).cloned() {
+        return Some(schema);
+    }
+    FALLBACK_PREDECLARED_REGISTRY.lookup_predeclared_by_id(id)
 }
 
 /// Public wrapper for looking up a schema by ID across all registries
@@ -248,7 +260,8 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
         return lookup_schema_by_id(id);
     }
 
-    // Ambient-first: order-insensitive match over the current registry.
+    // Ambient-first: order-insensitive match over the current registry
+    // (user/stdlib types + predeclared schemas).
     if let Some(reg) = try_current_registry() {
         if let Some(schema) = reg
             .type_names()
@@ -256,6 +269,9 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
             .find(|schema| schema_matches_field_set(schema, fields))
         {
             return Some(schema.clone());
+        }
+        if let Some(schema) = reg.lookup_predeclared_by_field_set(fields) {
+            return Some(schema);
         }
     }
 
@@ -267,11 +283,8 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
         return Some(schema.clone());
     }
 
-    if let Some(schema) = PREDECLARED_SCHEMA_REGISTRY.read().ok().and_then(|reg| {
-        reg.values()
-            .find(|schema| schema_matches_field_set(schema, fields))
-            .cloned()
-    }) {
+    // Fallback registry (no-scope callers).
+    if let Some(schema) = FALLBACK_PREDECLARED_REGISTRY.lookup_predeclared_by_field_set(fields) {
         return Some(schema);
     }
 

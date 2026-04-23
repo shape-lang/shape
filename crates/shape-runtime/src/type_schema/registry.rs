@@ -8,6 +8,7 @@ use super::enum_support::EnumVariantInfo;
 use super::field_types::{FieldAnnotation, FieldType};
 use super::schema::TypeSchema;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Starting value for per-registry schema ID counters.
@@ -42,6 +43,19 @@ pub struct TypeSchemaRegistry {
     by_name: HashMap<String, TypeSchema>,
     /// Schemas indexed by ID for fast runtime lookup
     by_id: HashMap<SchemaId, String>,
+    /// Predeclared schemas keyed by ordered field-name signature.
+    ///
+    /// Populated by [`Self::register_predeclared_any_schema`] when
+    /// compile-time tooling, extensions, or comptime paths derive a
+    /// TypedObject layout that is not backed by a named type.
+    /// Moved onto the registry in B1.6 (previously a process-global
+    /// `PREDECLARED_SCHEMA_CACHE` static).
+    #[serde(skip, default)]
+    predeclared_cache: RwLock<HashMap<String, SchemaId>>,
+    /// Predeclared schemas indexed by schema ID. B1.6 migrated this off
+    /// the legacy `PREDECLARED_SCHEMA_REGISTRY` static.
+    #[serde(skip, default)]
+    predeclared_by_id: RwLock<HashMap<SchemaId, TypeSchema>>,
 }
 
 fn default_next_id() -> AtomicU32 {
@@ -54,16 +68,30 @@ impl Default for TypeSchemaRegistry {
             next_id: default_next_id(),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
+            predeclared_cache: RwLock::new(HashMap::new()),
+            predeclared_by_id: RwLock::new(HashMap::new()),
         }
     }
 }
 
 impl Clone for TypeSchemaRegistry {
     fn clone(&self) -> Self {
+        let predeclared_cache = self
+            .predeclared_cache
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let predeclared_by_id = self
+            .predeclared_by_id
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         Self {
             next_id: AtomicU32::new(self.next_id.load(Ordering::SeqCst)),
             by_name: self.by_name.clone(),
             by_id: self.by_id.clone(),
+            predeclared_cache: RwLock::new(predeclared_cache),
+            predeclared_by_id: RwLock::new(predeclared_by_id),
         }
     }
 }
@@ -386,6 +414,142 @@ impl TypeSchemaRegistry {
                 self.by_name.insert(name, schema);
             }
         }
+        // Also merge predeclared schemas, first-registration-wins on ID collision.
+        if let (Ok(other_by_id), Ok(mut self_by_id)) = (
+            other.predeclared_by_id.read(),
+            self.predeclared_by_id.write(),
+        ) {
+            for (id, schema) in other_by_id.iter() {
+                self_by_id.entry(*id).or_insert_with(|| schema.clone());
+            }
+        }
+        if let (Ok(other_cache), Ok(mut self_cache)) = (
+            other.predeclared_cache.read(),
+            self.predeclared_cache.write(),
+        ) {
+            for (key, id) in other_cache.iter() {
+                self_cache.entry(key.clone()).or_insert(*id);
+            }
+        }
+    }
+
+    // -- Predeclared schema support (moved off process-global statics in B1.6) ---
+
+    /// Build the canonical field-signature key used by the predeclared
+    /// schema cache.
+    fn predeclared_cache_key(fields: &[&str]) -> String {
+        fields.join("\u{1f}")
+    }
+
+    /// Register (or retrieve) a predeclared schema with `FieldType::Any`
+    /// columns for the given ordered field set.
+    ///
+    /// Intended for compile-time schema derivation paths (extensions,
+    /// comptime, printing helpers) that need runtime object construction
+    /// without a user-declared type. Repeated calls with identical field
+    /// names return the same cached ID.
+    pub fn register_predeclared_any_schema(&self, fields: &[String]) -> SchemaId {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        let key = Self::predeclared_cache_key(&field_refs);
+
+        if let Ok(cache) = self.predeclared_cache.read() {
+            if let Some(id) = cache.get(&key) {
+                return *id;
+            }
+        }
+
+        let typed_fields: Vec<(String, FieldType)> = fields
+            .iter()
+            .map(|name| (name.clone(), FieldType::Any))
+            .collect();
+
+        let id = self.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            format!("__predecl_{}", fields.join("_")),
+            typed_fields,
+        );
+
+        if let Ok(mut reg) = self.predeclared_by_id.write() {
+            reg.insert(id, schema);
+        }
+        if let Ok(mut cache) = self.predeclared_cache.write() {
+            cache.insert(key, id);
+        }
+        id
+    }
+
+    /// Look up a predeclared schema by ID.
+    pub fn lookup_predeclared_by_id(&self, id: SchemaId) -> Option<TypeSchema> {
+        self.predeclared_by_id
+            .read()
+            .ok()
+            .and_then(|reg| reg.get(&id).cloned())
+    }
+
+    /// Mirror a predeclared schema with a caller-supplied ID.
+    ///
+    /// Used during the B1 migration window by
+    /// [`super::register_predeclared_any_schema`] so a single SchemaId
+    /// owned by the process-wide fallback registry is also visible
+    /// through the per-Runtime ambient registry. Idempotent: a second
+    /// call with the same ID is a no-op.
+    pub fn mirror_predeclared_any_schema(&self, fields: &[String], id: SchemaId) {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        let key = Self::predeclared_cache_key(&field_refs);
+
+        if let Ok(cache) = self.predeclared_cache.read() {
+            if cache.get(&key).copied() == Some(id) {
+                return;
+            }
+        }
+
+        let typed_fields: Vec<(String, FieldType)> = fields
+            .iter()
+            .map(|name| (name.clone(), FieldType::Any))
+            .collect();
+
+        let schema = TypeSchema::with_id(
+            id,
+            format!("__predecl_{}", fields.join("_")),
+            typed_fields,
+        );
+
+        if let Ok(mut reg) = self.predeclared_by_id.write() {
+            reg.entry(id).or_insert(schema);
+        }
+        if let Ok(mut cache) = self.predeclared_cache.write() {
+            cache.entry(key).or_insert(id);
+        }
+    }
+
+    /// Look up a predeclared schema ID by an ordered field signature (fast
+    /// path).
+    pub fn lookup_predeclared_id_by_field_order(&self, fields: &[&str]) -> Option<SchemaId> {
+        let key = Self::predeclared_cache_key(fields);
+        self.predeclared_cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&key).copied())
+    }
+
+    /// Order-insensitive predeclared schema lookup by field set.
+    pub fn lookup_predeclared_by_field_set(&self, fields: &[&str]) -> Option<TypeSchema> {
+        let Ok(reg) = self.predeclared_by_id.read() else {
+            return None;
+        };
+        reg.values()
+            .find(|schema| {
+                if schema.fields.len() != fields.len() {
+                    return false;
+                }
+                let wanted: std::collections::HashSet<&str> = fields.iter().copied().collect();
+                schema
+                    .fields
+                    .iter()
+                    .all(|f| wanted.contains(f.name.as_str()))
+            })
+            .cloned()
     }
 }
 
