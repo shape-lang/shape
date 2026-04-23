@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
 
 /// Unique identifier for a shape in the transition graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,19 +131,24 @@ impl ShapeTransitionTable {
     }
 }
 
-// ── Global shape table ──────────────────────────────────────────────────────
-
-static GLOBAL_SHAPE_TABLE: std::sync::LazyLock<Mutex<ShapeTransitionTable>> =
-    std::sync::LazyLock::new(|| Mutex::new(ShapeTransitionTable::new()));
-
-// ── Shape transition event log ──────────────────────────────────────────────
+// ── Ambient shape table (task-local / thread-local) ────────────────────────
 //
-// Records (parent_shape, new_shape) pairs whenever a shape transition occurs.
-// The TierManager drains this buffer periodically to detect shape changes
-// that invalidate JIT-compiled shape guards.
-
-static SHAPE_TRANSITION_LOG: std::sync::LazyLock<Mutex<Vec<(ShapeId, ShapeId)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+// Pre-B5 this module owned a process-global
+// `LazyLock<Mutex<ShapeTransitionTable>>` plus a sibling
+// `LazyLock<Mutex<Vec<(ShapeId, ShapeId)>>>` transition log. Those
+// statics were the single source of truth for every HashMap shape
+// transition and for the JIT tier-manager's shape-guard invalidation
+// drain.
+//
+// B5 replaces those statics with a per-VM `ShapeTableHandle` installed
+// via `shape_graph_current` (see module docs there). These free
+// functions now look up the ambient handle on entry — if one is
+// installed (i.e. we're inside a VM execution scope, either via
+// `SyncShapeTableScope` or `with_async_shape_table_scope`) they
+// operate against that per-VM table; otherwise they return the same
+// "degrade gracefully" values (`None` / empty) that the old impl
+// returned on lock poisoning, so callers outside any VM scope (e.g.
+// unit tests that build a `HashMapData` directly) continue to work.
 
 /// Drain all pending shape transition events.
 ///
@@ -152,8 +156,14 @@ static SHAPE_TRANSITION_LOG: std::sync::LazyLock<Mutex<Vec<(ShapeId, ShapeId)>>>
 /// `(parent_shape_id, new_child_shape_id)`.
 ///
 /// Called by `TierManager::check_shape_invalidations()` during `poll_completions()`.
+/// When no shape-table scope is active returns an empty `Vec` (no transitions
+/// are tracked in that state).
 pub fn drain_shape_transitions() -> Vec<(ShapeId, ShapeId)> {
-    SHAPE_TRANSITION_LOG
+    let Some(handle) = crate::shape_graph_current::try_current_shape_table() else {
+        return Vec::new();
+    };
+    handle
+        .transition_log()
         .lock()
         .map(|mut log| std::mem::take(&mut *log))
         .unwrap_or_default()
@@ -161,37 +171,44 @@ pub fn drain_shape_transitions() -> Vec<(ShapeId, ShapeId)> {
 
 /// Compute a ShapeId for a HashMap with the given key hashes (in insertion order).
 ///
-/// Uses the global shape transition table. Returns `None` if the lock is poisoned
-/// or if there are more than 64 properties (dictionary mode threshold).
+/// Consults the ambient shape table (see module docs). Returns `None` if no
+/// scope is active, if the lock is poisoned, or if there are more than 64
+/// properties (dictionary mode threshold).
 pub fn shape_for_hashmap_keys(key_hashes: &[u32]) -> Option<ShapeId> {
     if key_hashes.len() > 64 {
         return None; // Dictionary mode: too many properties
     }
-    let mut table = GLOBAL_SHAPE_TABLE.lock().ok()?;
+    let handle = crate::shape_graph_current::try_current_shape_table()?;
+    let mut table = handle.table().lock().ok()?;
     Some(table.shape_for_keys(key_hashes))
 }
 
 /// Look up the slot index of a property in a shape.
 ///
-/// Uses the global shape transition table.
+/// Consults the ambient shape table. Returns `None` if no scope is active.
 pub fn shape_property_index(shape_id: ShapeId, property_hash: u32) -> Option<usize> {
-    let table = GLOBAL_SHAPE_TABLE.lock().ok()?;
+    let handle = crate::shape_graph_current::try_current_shape_table()?;
+    let table = handle.table().lock().ok()?;
     table.property_index(shape_id, property_hash)
 }
 
 /// Transition a shape by adding a new property.
 ///
-/// Uses the global shape transition table. Returns `None` if dictionary mode
-/// threshold (>64 properties) would be exceeded.
+/// Consults the ambient shape table. Returns `None` if no scope is active or
+/// if the dictionary-mode threshold (>64 properties) would be exceeded. When
+/// a transition is recorded, it is also appended to the ambient table's
+/// transition log for JIT shape-guard invalidation.
 pub fn shape_transition(from: ShapeId, property_hash: u32) -> Option<ShapeId> {
-    let mut table = GLOBAL_SHAPE_TABLE.lock().ok()?;
+    let handle = crate::shape_graph_current::try_current_shape_table()?;
+    let mut table = handle.table().lock().ok()?;
     let shape = table.get_shape(from);
     if shape.property_count >= 64 {
         return None; // Dictionary mode threshold
     }
     let new_id = table.transition(from, property_hash);
-    // Log the transition for JIT shape guard invalidation
-    if let Ok(mut log) = SHAPE_TRANSITION_LOG.lock() {
+    drop(table);
+    // Log the transition for JIT shape-guard invalidation.
+    if let Ok(mut log) = handle.transition_log().lock() {
         log.push((from, new_id));
     }
     Some(new_id)
@@ -332,6 +349,8 @@ mod tests {
 
     #[test]
     fn test_global_shape_for_keys() {
+        let handle = crate::shape_graph_current::ShapeTableHandle::new();
+        let _scope = crate::shape_graph_current::SyncShapeTableScope::enter(handle);
         let keys = &[hash_property_name("x"), hash_property_name("y")];
         let id1 = shape_for_hashmap_keys(keys).unwrap();
         let id2 = shape_for_hashmap_keys(keys).unwrap();
@@ -340,6 +359,8 @@ mod tests {
 
     #[test]
     fn test_global_shape_transition() {
+        let handle = crate::shape_graph_current::ShapeTableHandle::new();
+        let _scope = crate::shape_graph_current::SyncShapeTableScope::enter(handle);
         let root = ShapeTransitionTable::root();
         let prop = hash_property_name("test_prop");
         let child = shape_transition(root, prop).unwrap();
@@ -348,8 +369,22 @@ mod tests {
 
     #[test]
     fn test_dictionary_mode_threshold() {
+        let handle = crate::shape_graph_current::ShapeTableHandle::new();
+        let _scope = crate::shape_graph_current::SyncShapeTableScope::enter(handle);
         // More than 64 properties → dictionary mode (None)
         let keys: Vec<u32> = (0..65).collect();
         assert!(shape_for_hashmap_keys(&keys).is_none());
+    }
+
+    #[test]
+    fn test_free_funcs_degrade_without_scope() {
+        // Without an active scope the free functions return None / empty,
+        // matching the previous lock-poisoning fallback. This keeps tests
+        // that indirectly construct HashMapData outside a VM scope
+        // (e.g. unit tests for JSON/YAML/CSV decoders) alive.
+        assert!(shape_for_hashmap_keys(&[1, 2]).is_none());
+        assert!(shape_transition(ShapeId(0), 42).is_none());
+        assert!(shape_property_index(ShapeId(0), 42).is_none());
+        assert!(drain_shape_transitions().is_empty());
     }
 }
