@@ -151,9 +151,11 @@ pub use error::{Result, ShapeError, SourceLocation};
 use shape_ast::ast::{Program, Query};
 pub use shape_ast::error;
 use shape_wire::WireValue;
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -202,6 +204,15 @@ pub struct Runtime {
     /// [`extension_context::extension_module_schema_for_spec`] /
     /// [`extension_context::register_declared_extensions_in_loader`].
     extension_module_schemas: Arc<extension_context::ExtensionModuleSchemaCache>,
+    /// Per-runtime cache for the compiled core stdlib `BytecodeProgram`.
+    ///
+    /// Replaces the legacy process-global `CORE_STDLIB_CACHE` static in
+    /// `shape-vm`. Populated lazily by `shape_vm::stdlib::get_core_stdlib`
+    /// on first use. Held as `OnceLock<Arc<dyn Any + Send + Sync>>` because
+    /// `shape-runtime` does not depend on `shape-vm` and therefore cannot
+    /// name `BytecodeProgram` directly; `shape-vm` wraps the compiled
+    /// result in `Arc<Result<BytecodeProgram>>` and downcasts on read.
+    core_stdlib_cache: OnceLock<Arc<dyn Any + Send + Sync>>,
 }
 
 impl Default for Runtime {
@@ -243,6 +254,7 @@ impl Runtime {
             extension_module_schemas: Arc::new(
                 extension_context::ExtensionModuleSchemaCache::new(),
             ),
+            core_stdlib_cache: OnceLock::new(),
         }
     }
 
@@ -348,6 +360,29 @@ impl Runtime {
     /// Get the module-binding registry shared with VM/JIT execution.
     pub fn module_binding_registry(&self) -> Arc<RwLock<module_bindings::ModuleBindingRegistry>> {
         self.module_binding_registry.clone()
+    }
+
+    /// Lazily initialize and return the core stdlib cache payload.
+    ///
+    /// `shape-runtime` cannot name `BytecodeProgram`, so the payload is
+    /// stored type-erased. Callers in `shape-vm` pass a closure that
+    /// produces an `Arc<T>` (typically `Arc<Result<BytecodeProgram>>`);
+    /// on read the returned `Arc<dyn Any>` is downcast back to `Arc<T>`.
+    ///
+    /// Panics if a subsequent call requests a different concrete `T` on
+    /// the same `Runtime` — the cache is single-typed per runtime.
+    pub fn get_or_init_core_stdlib_cache<T, F>(&self, init: F) -> Arc<T>
+    where
+        T: Any + Send + Sync + 'static,
+        F: FnOnce() -> Arc<T>,
+    {
+        let entry = self
+            .core_stdlib_cache
+            .get_or_init(|| init() as Arc<dyn Any + Send + Sync>);
+        entry
+            .clone()
+            .downcast::<T>()
+            .expect("core_stdlib_cache type mismatch: already initialized with a different type")
     }
 
     /// Add a module search path for imports
