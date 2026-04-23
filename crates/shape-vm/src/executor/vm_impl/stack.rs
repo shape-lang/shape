@@ -1,5 +1,6 @@
 use super::super::*;
 use shape_value::ValueWordExt;
+use shape_value::value_word_drop::vw_drop;
 
 impl VirtualMachine {
     pub fn create_typed_enum(
@@ -80,11 +81,12 @@ impl VirtualMachine {
     #[inline(never)]
     pub fn push_raw_u64_slow(&mut self, bits: u64) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
-            // Reconstruct ValueWord so its Drop runs (releases any heap ref).
-            // WB note: with `ValueWord = u64`, this `drop` is a no-op. A real
-            // release (`vw_drop(bits)`) is blocked on the retain-on-read
-            // audit described on `VirtualMachine::drop`.
-            drop(ValueWord::from_raw_bits(bits));
+            // Release any heap ref held by the overflow-dropped push bits.
+            // FR.1: with `ValueWord = u64` Copy, the prior
+            // `drop(ValueWord::from_raw_bits(bits))` was a no-op and leaked
+            // heap refs on overflow. Retain-on-read is now in place
+            // (WB2.1+), so call the real helper.
+            vw_drop(bits);
             return Err(VMError::StackOverflow);
         }
         let new_len = self.sp * 2 + 1;
@@ -139,18 +141,15 @@ impl VirtualMachine {
 
     /// Write a `ValueWord` into `stack[idx]`.
     ///
-    /// **WB NOTE.** Historically this release-drops the previous occupant
-    /// via `drop(ValueWord::from_raw_bits(old_bits))`. With `ValueWord = u64`
-    /// that drop is a no-op. Converting to a real `vw_drop(old_bits)` is
-    /// blocked on the retain-on-read audit (see `VirtualMachine::drop`):
-    /// until reads bump the Arc refcount, releasing the old occupant here
-    /// would double-free any outstanding bit-copy.
+    /// FR.1: releases the previous occupant via `vw_drop`. Retain-on-read
+    /// is in place (WB2.1+ `stack_read_owned` / `binding_read_owned`), so
+    /// any borrow-only readers (`stack_read_raw`) MUST NOT `vw_drop` the
+    /// returned bits — this call is the sole release site for the slot's
+    /// logical share.
     #[inline(always)]
     pub(crate) fn stack_write_raw(&mut self, idx: usize, value: ValueWord) {
-        // No-op drop preserved intentionally; see the struct-level note
-        // above for the upgrade path.
         let old_bits = self.stack[idx];
-        drop(ValueWord::from_raw_bits(old_bits));
+        vw_drop(old_bits);
         self.stack[idx] = value.into_raw_bits();
     }
 
@@ -164,8 +163,7 @@ impl VirtualMachine {
     }
 
     /// Peek at the raw u64 bits in `stack[idx]` and call a method on a
-    /// *temporary* `ValueWord` reference.  The temporary is forgotten
-    /// afterwards so no refcount change occurs.
+    /// *temporary* `ValueWord` reference. No refcount change occurs.
     ///
     /// This is useful for read-only inspection (e.g. `.tag()`, `.is_i64()`,
     /// `.as_heap_ref()`) without paying a clone cost.
@@ -178,11 +176,12 @@ impl VirtualMachine {
         F: FnOnce(&ValueWord) -> R,
     {
         let bits = self.stack[idx];
-        // SAFETY: from_raw_bits just wraps the u64; the temporary lives for
-        // the duration of the closure and is then forgotten.
+        // FR.1: `ValueWord = u64` is Copy, so the temporary has no Drop
+        // hook. We intentionally leak (no-op) to document the "borrow, do
+        // not release" contract — the slot still owns the heap share.
         let tmp = ValueWord::from_raw_bits(bits);
         let result = f(&tmp);
-        std::mem::forget(tmp);
+        let _ = tmp;
         result
     }
 
@@ -244,12 +243,14 @@ impl VirtualMachine {
 
     /// Write a `ValueWord` into `module_bindings[idx]`.
     ///
-    /// **WB NOTE.** Same leak-over-double-free tradeoff as
-    /// `stack_write_raw` — see that comment.
+    /// FR.1: releases the previous occupant via `vw_drop`, matching
+    /// `stack_write_raw`. Callers that read with `binding_read_raw`
+    /// (borrow) must NOT release the returned bits; use
+    /// `binding_read_owned` when an owning share is needed.
     #[inline(always)]
     pub(crate) fn binding_write_raw(&mut self, idx: usize, value: ValueWord) {
         let old_bits = self.module_bindings[idx];
-        drop(ValueWord::from_raw_bits(old_bits));
+        vw_drop(old_bits);
         self.module_bindings[idx] = value.into_raw_bits();
     }
 
