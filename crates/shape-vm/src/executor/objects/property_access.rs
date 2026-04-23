@@ -927,21 +927,18 @@ impl VirtualMachine {
                 if index < arr.len() {
                     record_heap_write();
                     let old_bits = *arr.get(index).unwrap();
-                    let old = unsafe { ValueWord::clone_from_bits(old_bits) };
-                    write_barrier_vw(&old, &value_nb);
-                    // FR.4: vw_drop (was no-op drop of Copy u64) releases
-                    // the write-barrier clone.
-                    vw_drop(old);
-                    // Decrement old element refcount
-                    if shape_value::tag_bits::is_tagged(old_bits)
-                        && shape_value::tag_bits::get_tag(old_bits) == shape_value::tag_bits::TAG_HEAP
-                    {
-                        let old_vw = unsafe { ValueWord::clone_from_bits(old_bits) };
-                        // FR.4: real release (was no-op drop of Copy u64).
-                        vw_drop(old_vw); // extra decrement
-                    }
+                    // Fire the write barrier against borrowed views of the
+                    // old/new slot bits — write_barrier_slot is the raw
+                    // entry point that doesn't touch refcounts.
+                    write_barrier_slot(old_bits, value_nb.raw_bits());
+                    // B6.3: release the old element's share. FR.4 wrapped
+                    // this in a `clone_from_bits` + `vw_drop` + second
+                    // `clone_from_bits` + `vw_drop` round-trip (net-zero
+                    // retain/release) that obscured intent; a single
+                    // `vw_drop(old_bits)` is the direct equivalent.
+                    vw_drop(old_bits);
                     let new_bits = value_nb.raw_bits();
-                    // FR.4: ownership of value_nb's heap share transfers to
+                    // Ownership of value_nb's heap share transfers to
                     // `arr.set_boxed(...)` below; the u64 is Copy so nothing
                     // more to do locally.
                     let _ = value_nb;
