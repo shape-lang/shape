@@ -22,6 +22,51 @@ pub struct ExtensionModuleSpec {
     pub extension_sections: HashMap<String, toml::Value>,
 }
 
+/// Process-local cache for parsed extension module schemas.
+///
+/// Loading an extension `.so` is expensive (`dlopen` + schema parsing) so
+/// repeat callers for the same `(name, canonical path, config)` key share a
+/// cached [`ParsedModuleSchema`]. Caches are owned by their user (e.g.
+/// [`crate::Runtime::extension_module_schemas`] or the LSP's per-process
+/// cache) — there is no process-global instance.
+#[derive(Debug, Default)]
+#[allow(dead_code)] // temporarily unused in B3.1; wired up in B3.2
+pub struct ExtensionModuleSchemaCache {
+    entries: Mutex<HashMap<String, Option<ParsedModuleSchema>>>,
+}
+
+#[allow(dead_code)] // wired up in B3.2
+impl ExtensionModuleSchemaCache {
+    /// Create a fresh empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build the cache key used for a given [`ExtensionModuleSpec`].
+    fn key_for(spec: &ExtensionModuleSpec) -> String {
+        let canonical = spec
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| spec.path.clone())
+            .to_string_lossy()
+            .to_string();
+        let config_key = serde_json::to_string(&spec.config).unwrap_or_default();
+        format!("{}|{}|{}", spec.name, canonical, config_key)
+    }
+
+    /// Fetch a cached schema result, if any.
+    fn get(&self, key: &str) -> Option<Option<ParsedModuleSchema>> {
+        self.entries.lock().ok()?.get(key).cloned()
+    }
+
+    /// Insert a schema result into the cache.
+    fn insert(&self, key: String, schema: Option<ParsedModuleSchema>) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.insert(key, schema);
+        }
+    }
+}
+
 static EXTENSION_MODULE_SCHEMA_CACHE: OnceLock<Mutex<HashMap<String, Option<ParsedModuleSchema>>>> =
     OnceLock::new();
 

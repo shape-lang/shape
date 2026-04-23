@@ -194,6 +194,14 @@ pub struct Runtime {
     blob_store: Option<Arc<dyn crate::blob_store::BlobStore>>,
     /// Optional keychain for module signature verification.
     keychain: Option<crate::crypto::keychain::Keychain>,
+    /// Per-runtime cache of parsed extension module schemas.
+    ///
+    /// Replaces the former process-global `EXTENSION_MODULE_SCHEMA_CACHE`
+    /// static. Shared through an `Arc` so execution entry points that load
+    /// extensions can hand the same cache to
+    /// [`extension_context::extension_module_schema_for_spec`] /
+    /// [`extension_context::register_declared_extensions_in_loader`].
+    extension_module_schemas: Arc<extension_context::ExtensionModuleSchemaCache>,
 }
 
 impl Default for Runtime {
@@ -232,7 +240,17 @@ impl Runtime {
             last_runtime_error: None,
             blob_store: None,
             keychain: None,
+            extension_module_schemas: Arc::new(
+                extension_context::ExtensionModuleSchemaCache::new(),
+            ),
         }
+    }
+
+    /// Borrow this runtime's extension module schema cache.
+    pub fn extension_module_schemas(
+        &self,
+    ) -> &Arc<extension_context::ExtensionModuleSchemaCache> {
+        &self.extension_module_schemas
     }
 
     pub fn annotation_registry(&self) -> Arc<RwLock<annotation_context::AnnotationRegistry>> {
