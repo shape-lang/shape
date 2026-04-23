@@ -44,12 +44,12 @@ impl ProgramExecutor for JITExecutor {
         let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
             let names = ctx.root_scope_binding_names();
             if names.is_empty() {
-                shape_vm::stdlib::core_binding_names()
+                shape_vm::stdlib::core_binding_names(runtime)
             } else {
                 names
             }
         } else {
-            shape_vm::stdlib::core_binding_names()
+            shape_vm::stdlib::core_binding_names(runtime)
         };
 
         // Build module graph and compile via graph pipeline

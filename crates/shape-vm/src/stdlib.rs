@@ -5,14 +5,19 @@
 //! Domain-specific modules (finance, iot, etc.) require explicit imports.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::Runtime;
 use shape_runtime::module_loader::ModuleLoader;
 
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
 
+/// Legacy process-global cache. Scheduled for deletion in B2.3 once all
+/// callers consume the per-Runtime cache via `compile_core_modules`.
+#[allow(dead_code)]
 static CORE_STDLIB_CACHE: OnceLock<Result<BytecodeProgram>> = OnceLock::new();
 
 fn stdlib_compile_logs_enabled() -> bool {
@@ -38,13 +43,20 @@ const EMBEDDED_CORE_STDLIB: Option<&[u8]> = None;
 /// Uses precompiled embedded bytecode when available, falling back to
 /// source compilation. Set `SHAPE_FORCE_SOURCE_STDLIB=1` to force source.
 ///
+/// The compiled program is cached on the passed-in `runtime`; repeat
+/// calls on the same `Runtime` return a cheap clone of the cached
+/// result. Different `Runtime` instances each build their own cache,
+/// which keeps per-Runtime `TypeSchemaRegistry` ids from colliding
+/// across tests that share the same process.
+///
 /// # Returns
 ///
 /// A merged BytecodeProgram containing all core functions, types, and metas.
-pub fn compile_core_modules() -> Result<BytecodeProgram> {
-    CORE_STDLIB_CACHE
-        .get_or_init(load_core_modules_best_effort)
-        .clone()
+pub fn compile_core_modules(runtime: &Runtime) -> Result<BytecodeProgram> {
+    let cached: Arc<Result<BytecodeProgram>> = runtime.get_or_init_core_stdlib_cache(|| {
+        Arc::new(load_core_modules_best_effort())
+    });
+    (*cached).clone()
 }
 
 fn load_core_modules_best_effort() -> Result<BytecodeProgram> {
@@ -84,8 +96,10 @@ fn load_from_embedded(bytes: &[u8]) -> Result<BytecodeProgram> {
 
 /// Extract top-level binding names from precompiled core bytecode.
 /// Used to seed the compiler with known names without loading AST into persistent context.
-pub fn core_binding_names() -> Vec<String> {
-    match compile_core_modules() {
+///
+/// Consumes the same per-Runtime cache as [`compile_core_modules`].
+pub fn core_binding_names(runtime: &Runtime) -> Vec<String> {
+    match compile_core_modules(runtime) {
         Ok(program) => {
             let mut names: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
             for name in &program.module_binding_names {
@@ -222,7 +236,8 @@ mod tests {
 
     #[test]
     fn test_core_bytecode_has_snapshot_schema() {
-        let core = compile_core_modules().expect("Core modules should compile");
+        let runtime = Runtime::new();
+        let core = compile_core_modules(&runtime).expect("Core modules should compile");
         let snapshot = core.type_schema_registry.get("Snapshot");
         assert!(
             snapshot.is_some(),
@@ -243,7 +258,8 @@ mod tests {
 
     #[test]
     fn test_core_bytecode_registers_queryable_trait_dispatch_symbols() {
-        let core = compile_core_modules().expect("Core modules should compile");
+        let runtime = Runtime::new();
+        let core = compile_core_modules(&runtime).expect("Core modules should compile");
         let filter = core.lookup_trait_method_symbol("Queryable", "Table", None, "filter");
         let map = core.lookup_trait_method_symbol("Queryable", "Table", None, "map");
         let execute = core.lookup_trait_method_symbol("Queryable", "Table", None, "execute");
@@ -372,7 +388,8 @@ mod tests {
 
     #[test]
     fn test_core_binding_names() {
-        let names = core_binding_names();
+        let runtime = Runtime::new();
+        let names = core_binding_names(&runtime);
         assert!(!names.is_empty(), "Should have binding names from stdlib");
     }
 }
