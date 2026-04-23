@@ -138,8 +138,13 @@ impl VirtualMachine {
         let bp = self.current_locals_base();
         let slot = bp + slot_idx as usize;
 
-        // Clone the map value from the slot (bumps refcount), mutate, write back
-        let mut map_vw = self.stack_read_raw(slot);
+        // B6.1: take ownership of the slot's share for in-place mutation.
+        // `as_hashmap_mut()` drives `Arc::make_mut` which consumes one
+        // refcount via `Arc::from_raw`. A borrowed read (`stack_read_raw`)
+        // would alias the slot's share, and the subsequent `stack_write_raw`
+        // would double-decrement. Taking the slot leaves NONE_BITS behind
+        // and writes the (possibly Arc::make_mut'd) bits back at the end.
+        let mut map_vw = self.stack_take_raw(slot);
         if let Some(map_data) = map_vw.as_hashmap_mut() {
             let key = unsafe { ValueWord::clone_from_bits(key_bits) };
             let value = unsafe { ValueWord::clone_from_bits(value_bits) };

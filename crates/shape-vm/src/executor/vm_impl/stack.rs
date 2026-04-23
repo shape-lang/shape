@@ -141,22 +141,24 @@ impl VirtualMachine {
 
     /// Write a `ValueWord` into `stack[idx]`.
     ///
-    /// **FR.1 AUDIT NOTE.** The historical
-    /// `drop(ValueWord::from_raw_bits(old_bits))` was a silent no-op under
-    /// `ValueWord = u64` (Copy). Promoting it to a real `vw_drop(old_bits)`
-    /// is blocked: at least one caller path aliases slot bits without a
-    /// paired retain — the canonical reproducer is
-    /// `test_print_uses_default_display_impl` (trait-dispatched
-    /// TypedObject print), which SIGABRTs with a double-free inside glibc
-    /// tcache if the slot release fires here. The release is therefore
-    /// intentionally absent until the specific aliasing caller is
-    /// identified and given its own retain; each explicit caller-site
-    /// `vw_drop(old_bits) / self.stack[idx] = NONE_BITS` sequence in the
-    /// executor is the sanctioned release point instead.
+    /// Releases the previous occupant via `vw_drop`. Retain-on-read is
+    /// in place (WB2.1+ `stack_read_owned` / `binding_read_owned`), so
+    /// borrow-only readers (`stack_read_raw`) MUST NOT `vw_drop` the
+    /// returned bits — this call is the sole release site for the slot's
+    /// logical share.
+    ///
+    /// **B6.1 aliasing audit.** The prior FR.7 gate-out was driven by a
+    /// double-free in `test_print_uses_default_display_impl` — the
+    /// trait-dispatched TypedObject print path had a caller that wrote
+    /// an aliased bit-copy without a paired retain. The canonical
+    /// aliasing site was `trait_dispatch::resolve_print_handler` at
+    /// `objects/property_access.rs` (see B6.1 note); the caller now
+    /// retains via `vw_clone` before handing bits to `stack_write_raw`,
+    /// so this release is safe.
     #[inline(always)]
     pub(crate) fn stack_write_raw(&mut self, idx: usize, value: ValueWord) {
-        // Intentional no-op on the old slot contents — see the doc above.
-        let _old_bits = self.stack[idx];
+        let old_bits = self.stack[idx];
+        vw_drop(old_bits);
         self.stack[idx] = value.into_raw_bits();
     }
 
@@ -250,16 +252,14 @@ impl VirtualMachine {
 
     /// Write a `ValueWord` into `module_bindings[idx]`.
     ///
-    /// **FR.1 AUDIT NOTE.** Mirrors `stack_write_raw` — the old
-    /// `drop(ValueWord::from_raw_bits(old_bits))` was a silent no-op
-    /// (Copy u64), and promoting to a real `vw_drop(old_bits)` caused the
-    /// same double-free class of bug because some binding callers alias
-    /// slot bits without a paired retain. Caller sites that logically
-    /// want release go through an explicit `vw_drop` + sentinel pattern.
+    /// Releases the previous occupant via `vw_drop`, matching
+    /// `stack_write_raw`. Callers that read with `binding_read_raw`
+    /// (borrow) must NOT release the returned bits; use
+    /// `binding_read_owned` when an owning share is needed.
     #[inline(always)]
     pub(crate) fn binding_write_raw(&mut self, idx: usize, value: ValueWord) {
-        // Intentional no-op on the old slot contents — see the doc above.
-        let _old_bits = self.module_bindings[idx];
+        let old_bits = self.module_bindings[idx];
+        vw_drop(old_bits);
         self.module_bindings[idx] = value.into_raw_bits();
     }
 

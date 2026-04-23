@@ -311,7 +311,16 @@ impl VirtualMachine {
 
         for i in 0..param_count {
             if i < locals_count {
-                let vw = args.get(i).cloned().unwrap_or_else(ValueWord::none);
+                // B6.1: the caller passes `args: &[ValueWord]` as borrows.
+                // Stack slots own their shares (the frame releases them on
+                // teardown), so we must retain each heap-tagged arg before
+                // installing it. Without this retain the param slot aliases
+                // the caller's ValueWord, and `stack_write_raw`'s old-slot
+                // release on the next overwrite would double-free.
+                let vw = args
+                    .get(i)
+                    .map(|v| shape_value::value_word_drop::vw_clone(*v))
+                    .unwrap_or_else(ValueWord::none);
                 self.stack_write_raw(bp + i, vw);
             }
         }
@@ -416,11 +425,14 @@ impl VirtualMachine {
             }
         }
 
-        // Bind the regular arguments after the upvalues
+        // Bind the regular arguments after the upvalues.
+        // B6.1: args is a borrow; retain each heap-tagged value so the
+        // owning stack slot does not alias the caller's ValueWord.
         for (i, arg) in args.iter().enumerate() {
             let local_idx = captures_count + i;
             if local_idx < locals_count {
-                self.stack_write_raw(bp + local_idx, arg.clone());
+                let vw = shape_value::value_word_drop::vw_clone(*arg);
+                self.stack_write_raw(bp + local_idx, vw);
             }
         }
 
