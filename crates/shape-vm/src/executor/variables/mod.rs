@@ -1222,6 +1222,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         use crate::type_tracking::SlotKind;
+        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
@@ -1237,32 +1238,42 @@ impl VirtualMachine {
 
             // Wave C Phase C1: smart raw push when FrameDescriptor proves the
             // slot kind is a scalar. Avoids ValueWord wrapping for the hot path.
+            //
+            // BUG4: the `trusted` contract is that the *compiler* promises the
+            // kind, but across call boundaries the FrameDescriptor's slot-kind
+            // inference can over-specify (e.g. claim `Float64` for a parameter
+            // that is actually populated with a TAG_INT value from the caller).
+            // Guard each typed fast path with a runtime tag check that matches
+            // the encoding — on mismatch, fall through to the legacy
+            // `clone_from_bits` path, which handles every inline-scalar /
+            // heap encoding uniformly. This mirrors the runtime guards in
+            // `op_load_local` and prevents reinterpreting an i48-tagged slot
+            // as a raw f64 (which would produce NaN).
             let kind = self
                 .current_frame_descriptor()
                 .map(|fd| fd.slot(idx as usize))
                 .unwrap_or(SlotKind::Unknown);
             match kind {
-                SlotKind::Float64 => {
-                    self.push_raw_f64(f64::from_bits(bits))?;
+                SlotKind::Float64 if !is_tagged(bits) => {
+                    return self.push_raw_f64(f64::from_bits(bits));
                 }
-                SlotKind::Int64 | SlotKind::IntSize => {
-                    // The slot holds an i48-tagged NaN-boxed integer.
-                    // pop_raw_i64 expects the same encoding, so push_raw_u64
-                    // (which writes raw bits without canonicalization) is the
-                    // correct symmetric op.
-                    self.push_raw_u64(bits)?;
+                SlotKind::Int64 | SlotKind::IntSize
+                    if is_tagged(bits) && get_tag(bits) == TAG_INT =>
+                {
+                    // Slot holds i48-tagged bits; push_raw_u64 preserves
+                    // the encoding so downstream pop_raw_i64 can decode.
+                    return self.push_raw_u64(bits);
                 }
-                SlotKind::Bool => {
-                    // The slot holds a NaN-boxed bool. push_raw_u64 preserves
-                    // the encoding so downstream pop_raw_bool can decode.
-                    self.push_raw_u64(bits)?;
+                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
+                    return self.push_raw_u64(bits);
                 }
                 _ => {
-                    // Heap or unknown slot — preserve legacy refcount-aware path.
-                    let nb = unsafe { ValueWord::clone_from_bits(bits) };
-                    self.push_raw_u64(nb)?;
+                    // Tag/kind mismatch, non-scalar slot, or Unknown — fall
+                    // through to the legacy refcount-aware path.
                 }
             }
+            let nb = unsafe { ValueWord::clone_from_bits(bits) };
+            self.push_raw_u64(nb)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
