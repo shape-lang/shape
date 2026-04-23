@@ -135,7 +135,8 @@ fn test_resolve_result_unwrap() {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
         args: vec![BuiltinTypes::string()],
     };
-    let resolved = table.resolve_method_call(&result_type, "unwrap", &[]);
+    let mut tvgen = shape_runtime::type_system::TypeVarGen::new();
+    let resolved = table.resolve_method_call(&result_type, "unwrap", &[], &mut tvgen);
     assert!(resolved.is_some(), "Result<string>.unwrap() should resolve");
     assert!(
         matches!(resolved.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "string"),
@@ -164,7 +165,8 @@ fn test_resolve_option_map() {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
         args: vec![BuiltinTypes::number()],
     };
-    let resolved = table.resolve_method_call(&option_type, "map", &[]);
+    let mut tvgen = shape_runtime::type_system::TypeVarGen::new();
+    let resolved = table.resolve_method_call(&option_type, "map", &[], &mut tvgen);
     assert!(resolved.is_some(), "Option<number>.map() should resolve");
     let rt = resolved.unwrap();
     assert!(
@@ -195,7 +197,8 @@ fn test_resolve_table_map_returns_table_u() {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference("Table".into()))),
         args: vec![Type::Concrete(TypeAnnotation::Reference("Row".into()))],
     };
-    let resolved = table.resolve_method_call(&table_type, "map", &[]);
+    let mut tvgen = shape_runtime::type_system::TypeVarGen::new();
+    let resolved = table.resolve_method_call(&table_type, "map", &[], &mut tvgen);
     assert!(resolved.is_some(), "Table<Row>.map() should resolve");
     let rt = resolved.unwrap();
     assert!(

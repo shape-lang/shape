@@ -39,7 +39,7 @@
 //! map alongside builtins. A universal receiver key (`__Any__`) is used
 //! for methods available on every value (e.g. `toString`, `toJSON`).
 
-use crate::type_system::{BuiltinTypes, Type};
+use crate::type_system::{BuiltinTypes, Type, TypeVar};
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
 
@@ -266,16 +266,21 @@ impl MethodTable {
         receiver_params: &[Type],
         method_vars: &[Type],
     ) -> Type {
+        // Out-of-bounds accesses here indicate malformed TypeParamExpr inputs
+        // (more indices than params supplied). We return a stable placeholder
+        // TypeVar so failures are deterministic rather than depending on a
+        // process-global fresh counter.
+        let placeholder = || Type::Variable(TypeVar::new("_oob".to_string()));
         match expr {
             TypeParamExpr::Concrete(t) => t.clone(),
             TypeParamExpr::ReceiverParam(idx) => receiver_params
                 .get(*idx)
                 .cloned()
-                .unwrap_or_else(|| Type::fresh_var()),
+                .unwrap_or_else(placeholder),
             TypeParamExpr::MethodParam(idx) => method_vars
                 .get(*idx)
                 .cloned()
-                .unwrap_or_else(|| Type::fresh_var()),
+                .unwrap_or_else(placeholder),
             TypeParamExpr::SelfType => receiver_type.clone(),
             TypeParamExpr::Function { params, returns } => Type::Function {
                 params: params
@@ -354,41 +359,10 @@ impl MethodTable {
     /// Get return type for a method call, performing basic type checking.
     /// Tries generic method signatures first, then falls back to monomorphic lookup.
     ///
-    /// Legacy variant that allocates fresh method type vars from the
-    /// process-global counter; prefer `resolve_method_call_gen` which
-    /// sources IDs from a per-engine `TypeVarGen`.
+    /// Fresh method type vars are sourced from the caller-provided per-engine
+    /// `TypeVarGen`, so IDs are scoped to a single inference run and don't
+    /// collide across independent calls.
     pub fn resolve_method_call(
-        &self,
-        receiver_type: &Type,
-        method_name: &str,
-        _arg_types: &[Type],
-    ) -> Option<Type> {
-        // Extract type name and receiver params
-        let (type_name, receiver_params) = Self::extract_receiver_info(receiver_type);
-        let type_name = type_name?;
-
-        // Try generic method first
-        let key = (type_name, method_name.to_string());
-        if let Some(gsig) = self.generic_methods.get(&key) {
-            let method_vars: Vec<Type> = (0..gsig.method_type_params)
-                .map(|_| Type::fresh_var())
-                .collect();
-            return Some(Self::resolve_type_param_expr(
-                &gsig.return_type,
-                receiver_type,
-                &receiver_params,
-                &method_vars,
-            ));
-        }
-
-        // Fall back to non-generic lookup
-        let sig = self.lookup(receiver_type, method_name)?;
-        Some(sig.return_type.clone())
-    }
-
-    /// Same as `resolve_method_call` but sources fresh method type vars
-    /// from the caller-provided per-engine generator.
-    pub fn resolve_method_call_gen(
         &self,
         receiver_type: &Type,
         method_name: &str,
@@ -514,7 +488,8 @@ mod tests {
             args: vec![BuiltinTypes::number()],
         };
 
-        let result = table.resolve_method_call(&array_type, "first", &[]);
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table.resolve_method_call(&array_type, "first", &[], &mut tvgen);
         assert!(result.is_some());
         // Should return the element type (number)
         assert!(
@@ -525,13 +500,14 @@ mod tests {
     #[test]
     fn test_register_user_method() {
         let mut table = MethodTable::new();
+        let mut tvgen = crate::type_system::TypeVarGen::new();
 
         // Register a custom method on a user type
         table.register_user_method(
             "Table",
             "query",
             vec![BuiltinTypes::string()],
-            BuiltinTypes::any(),
+            tvgen.fresh_type(),
         );
 
         let table_type = Type::Concrete(TypeAnnotation::Reference("Table".into()));
@@ -546,7 +522,8 @@ mod tests {
     #[test]
     fn test_user_method_not_found_on_other_type() {
         let mut table = MethodTable::new();
-        table.register_user_method("Table", "query", vec![], BuiltinTypes::any());
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        table.register_user_method("Table", "query", vec![], tvgen.fresh_type());
 
         let array_type = BuiltinTypes::array(BuiltinTypes::number());
         let sig = table.lookup(&array_type, "query");
@@ -592,7 +569,8 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::number()],
         };
-        let result = table.resolve_method_call(&array_type, "filter", &[]);
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table.resolve_method_call(&array_type, "filter", &[], &mut tvgen);
         assert!(result.is_some());
         let rt = result.unwrap();
         assert!(matches!(rt, Type::Generic { .. }), "filter should return Vec<number>, got {:?}", rt);
@@ -618,7 +596,8 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::string()],
         };
-        let result = table.resolve_method_call(&array_type, "map", &[]);
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table.resolve_method_call(&array_type, "map", &[], &mut tvgen);
         assert!(result.is_some());
         let rt = result.unwrap();
         assert!(matches!(rt, Type::Generic { .. }), "map should return Vec<U>, got {:?}", rt);
@@ -636,7 +615,8 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![BuiltinTypes::number()],
         };
-        let result = table.resolve_method_call(&option_type, "unwrap", &[]);
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table.resolve_method_call(&option_type, "unwrap", &[], &mut tvgen);
         assert!(result.is_some());
         assert!(matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number"));
     }
@@ -658,7 +638,8 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("HashMap".into()))),
             args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
         };
-        let result = table.resolve_method_call(&map_type, "get", &[]);
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table.resolve_method_call(&map_type, "get", &[], &mut tvgen);
         assert!(result.is_some());
         let rt = result.unwrap();
         assert!(

@@ -136,7 +136,7 @@ impl TypeInferenceEngine {
                     for name in decl.pattern.get_identifiers() {
                         let scheme = self.env.lookup(&name).cloned();
                         let inferred = scheme
-                            .map(|s| s.instantiate_gen(&mut self.type_var_gen))
+                            .map(|s| s.instantiate(&mut self.type_var_gen))
                             .unwrap_or_else(|| var_type.clone());
                         types.insert(name, inferred);
                     }
@@ -151,7 +151,7 @@ impl TypeInferenceEngine {
                         for name in decl.pattern.get_identifiers() {
                             let scheme = self.env.lookup(&name).cloned();
                             let inferred = scheme
-                                .map(|s| s.instantiate_gen(&mut self.type_var_gen))
+                                .map(|s| s.instantiate(&mut self.type_var_gen))
                                 .unwrap_or_else(|| var_type.clone());
                             types.insert(name, inferred);
                         }

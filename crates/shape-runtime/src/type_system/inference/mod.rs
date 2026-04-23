@@ -188,8 +188,8 @@ impl TypeInferenceEngine {
 
     /// Allocate a fresh type variable from this engine's local counter.
     ///
-    /// Prefer this over the deprecated process-global `TypeVar::fresh`
-    /// so that IDs are scoped to a single inference run.
+    /// IDs are scoped to a single inference run, so independent
+    /// `TypeInferenceEngine` instances (e.g. one per test) cannot alias.
     pub fn fresh_var(&mut self) -> TypeVar {
         self.type_var_gen.fresh_var()
     }

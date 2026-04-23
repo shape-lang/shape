@@ -7,7 +7,6 @@
 
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::builtins::BuiltinTypes;
 use super::constraints::TypeConstraint;
@@ -50,17 +49,6 @@ pub struct TypeVar(pub String);
 impl TypeVar {
     pub fn new(name: String) -> Self {
         TypeVar(name)
-    }
-
-    /// Legacy process-global fresh. Retained only during the migration to
-    /// per-engine counters; new code should use `TypeInferenceEngine::fresh_var`
-    /// or `TypeVarGen::fresh_var` so IDs are scoped to a single inference run.
-    ///
-    /// Will be removed once all callers are migrated (B4).
-    pub fn fresh() -> Self {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        TypeVar(format!("T{}", id))
     }
 }
 
@@ -150,58 +138,13 @@ impl TypeScheme {
         }
     }
 
-    /// Instantiate a type scheme with fresh type variables.
-    /// Returns the instantiated type, any ImplementsTrait constraints that need
-    /// to be emitted for the fresh variables, and fallback default substitutions.
+    /// Instantiate a type scheme with fresh type variables sourced from a
+    /// per-engine `TypeVarGen`.
     ///
-    /// Legacy variant; prefer `instantiate_with_bounds_gen` so IDs come from
-    /// a per-engine counter rather than the process-global fallback.
-    pub fn instantiate_with_bounds(&self) -> (Type, Vec<(Type, Type)>, HashMap<TypeVar, Type>) {
-        if self.quantified.is_empty() {
-            return (self.ty.clone(), Vec::new(), HashMap::new());
-        }
-
-        let mut subst = HashMap::new();
-        let mut constraints = Vec::new();
-        let mut defaults = HashMap::new();
-
-        for var in &self.quantified {
-            let fresh = TypeVar::fresh();
-            subst.insert(var.clone(), Type::Variable(fresh.clone()));
-
-            // Emit ImplementsTrait constraints for trait bounds
-            if let Some(bounds) = self.trait_bounds.get(&var.0) {
-                for trait_name in bounds {
-                    let bound_var = TypeVar::fresh();
-                    constraints.push((
-                        Type::Variable(fresh.clone()),
-                        Type::Constrained {
-                            var: bound_var,
-                            constraint: Box::new(
-                                super::constraints::TypeConstraint::ImplementsTrait {
-                                    trait_name: trait_name.clone(),
-                                },
-                            ),
-                        },
-                    ));
-                }
-            }
-        }
-
-        for var in &self.quantified {
-            let Some(Type::Variable(fresh_var)) = subst.get(var) else {
-                continue;
-            };
-            if let Some(default_ty) = self.default_types.get(&var.0) {
-                defaults.insert(fresh_var.clone(), substitute(default_ty, &subst));
-            }
-        }
-
-        (substitute(&self.ty, &subst), constraints, defaults)
-    }
-
-    /// Instantiate a type scheme using a per-engine type-variable generator.
-    pub fn instantiate_with_bounds_gen(
+    /// Returns the instantiated type, any ImplementsTrait constraints that
+    /// need to be emitted for the fresh variables, and fallback default
+    /// substitutions.
+    pub fn instantiate_with_bounds(
         &self,
         var_gen: &mut TypeVarGen,
     ) -> (Type, Vec<(Type, Type)>, HashMap<TypeVar, Type>) {
@@ -248,25 +191,8 @@ impl TypeScheme {
         (substitute(&self.ty, &subst), constraints, defaults)
     }
 
-    /// Instantiate a type scheme with fresh type variables.
-    ///
-    /// Legacy variant; prefer `instantiate_gen` so IDs come from a per-engine
-    /// counter rather than the process-global fallback.
-    pub fn instantiate(&self) -> Type {
-        if self.quantified.is_empty() {
-            return self.ty.clone();
-        }
-
-        let mut subst = HashMap::new();
-        for var in &self.quantified {
-            subst.insert(var.clone(), Type::fresh_var());
-        }
-
-        substitute(&self.ty, &subst)
-    }
-
     /// Instantiate a type scheme using a per-engine type-variable generator.
-    pub fn instantiate_gen(&self, var_gen: &mut TypeVarGen) -> Type {
+    pub fn instantiate(&self, var_gen: &mut TypeVarGen) -> Type {
         if self.quantified.is_empty() {
             return self.ty.clone();
         }
@@ -317,15 +243,6 @@ pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
 }
 
 impl Type {
-    /// Create a fresh type variable via the process-global counter.
-    ///
-    /// Legacy API retained during the B4 migration. New code should use
-    /// `TypeInferenceEngine::fresh_type_var` or `TypeVarGen::fresh_type`
-    /// so IDs are scoped to a single inference run.
-    pub fn fresh_var() -> Type {
-        Type::Variable(TypeVar::fresh())
-    }
-
     /// Convert Type back to TypeAnnotation for AST
     pub fn to_annotation(&self) -> Option<TypeAnnotation> {
         match self {

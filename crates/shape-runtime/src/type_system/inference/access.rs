@@ -465,7 +465,7 @@ impl TypeInferenceEngine {
 
         // Instantiate with bounds to emit ImplementsTrait constraints for trait-bounded generics
         let (func_type, bound_constraints, default_substitutions) =
-            func_scheme.instantiate_with_bounds_gen(&mut self.type_var_gen);
+            func_scheme.instantiate_with_bounds(&mut self.type_var_gen);
         self.constraints.extend(bound_constraints);
         self.record_function_callsite(name, &arg_types);
 

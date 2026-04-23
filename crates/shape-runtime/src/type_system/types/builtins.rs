@@ -53,10 +53,6 @@ impl BuiltinTypes {
         )))
     }
 
-    pub fn any() -> Type {
-        Type::fresh_var()
-    }
-
     /// Canonical runtime numeric type for aliases and width-aware native names.
     ///
     /// This preserves scripting ergonomics (`int`, `number`) while making

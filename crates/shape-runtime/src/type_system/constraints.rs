@@ -1010,8 +1010,8 @@ mod tests {
     use shape_ast::ast::ObjectTypeField;
 
     /// Test-local helper: allocate a fresh type variable from a
-    /// per-test counter, keeping tests independent of the (now-removed)
-    /// process-global `TypeVar::fresh()` pool.
+    /// per-test counter. Each test owns its own `TypeVarGen`, so IDs
+    /// (`T0`, `T1`, ...) are deterministic and independent across tests.
     fn fresh_var(tvgen: &mut TypeVarGen) -> TypeVar {
         tvgen.fresh_var()
     }

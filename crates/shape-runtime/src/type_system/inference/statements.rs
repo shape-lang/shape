@@ -102,7 +102,7 @@ impl TypeInferenceEngine {
                 if let Some(name) = assign.pattern.as_identifier() {
                     let scheme = self.env.lookup(name).cloned();
                     let target_type = match scheme {
-                        Some(s) => s.instantiate_gen(&mut self.type_var_gen),
+                        Some(s) => s.instantiate(&mut self.type_var_gen),
                         None => {
                             self.register_undefined_variable_origin(name, *span);
                             return Err(TypeError::UndefinedVariable(name.to_string()));
@@ -115,7 +115,7 @@ impl TypeInferenceEngine {
                     for name in assign.pattern.get_identifiers() {
                         let scheme = self.env.lookup(&name).cloned();
                         let target_type = match scheme {
-                            Some(s) => s.instantiate_gen(&mut self.type_var_gen),
+                            Some(s) => s.instantiate(&mut self.type_var_gen),
                             None => {
                                 self.register_undefined_variable_origin(&name, *span);
                                 return Err(TypeError::UndefinedVariable(name.clone()));
@@ -278,7 +278,7 @@ impl TypeInferenceEngine {
         if let Expr::Identifier(name, _) = expr {
             let scheme = self.env.lookup(name).cloned();
             if let Some(scheme) = scheme {
-                let ty = scheme.instantiate_gen(&mut self.type_var_gen);
+                let ty = scheme.instantiate(&mut self.type_var_gen);
                 if let Some(inner) = Self::unwrap_optional_type(&ty) {
                     return vec![(name.clone(), inner)];
                 }

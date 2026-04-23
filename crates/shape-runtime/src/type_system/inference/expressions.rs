@@ -30,7 +30,7 @@ impl TypeInferenceEngine {
             Expr::Identifier(name, span) => {
                 let scheme_clone = self.env.lookup(name).cloned();
                 scheme_clone
-                    .map(|scheme| scheme.instantiate_gen(&mut self.type_var_gen))
+                    .map(|scheme| scheme.instantiate(&mut self.type_var_gen))
                     .or_else(|| {
                         // Fall back to a type reference for known struct type names.
                         // This enables static-path expressions like `Currency.symbol`
@@ -368,7 +368,7 @@ impl TypeInferenceEngine {
                 };
 
                 // Try to resolve the method statically using the method table
-                if let Some(result_type) = self.method_table.resolve_method_call_gen(
+                if let Some(result_type) = self.method_table.resolve_method_call(
                     &receiver_type,
                     method,
                     &arg_types,
