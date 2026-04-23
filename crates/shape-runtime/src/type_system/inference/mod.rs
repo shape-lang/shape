@@ -56,6 +56,10 @@ use std::collections::HashSet;
 pub struct TypeInferenceEngine {
     /// Type environment tracking variable types
     pub env: TypeEnvironment,
+    /// Per-engine generator for fresh type variables (B4). Replaces the
+    /// former process-global `NEXT_TYPEVAR_ID` counter so test runs and
+    /// independent inference sessions can't alias each other's IDs.
+    pub type_var_gen: crate::type_system::TypeVarGen,
     /// Constraint solver for type constraints
     pub(crate) solver: ConstraintSolver,
     /// Type unifier
@@ -143,6 +147,7 @@ impl TypeInferenceEngine {
 
         TypeInferenceEngine {
             env,
+            type_var_gen: crate::type_system::TypeVarGen::new(),
             solver: ConstraintSolver::new(),
             unifier: Unifier::new(),
             constraints: Vec::new(),
@@ -179,6 +184,19 @@ impl TypeInferenceEngine {
                     .define(name, TypeScheme::mono(Type::fresh_var()));
             }
         }
+    }
+
+    /// Allocate a fresh type variable from this engine's local counter.
+    ///
+    /// Prefer this over the deprecated process-global `TypeVar::fresh`
+    /// so that IDs are scoped to a single inference run.
+    pub fn fresh_var(&mut self) -> TypeVar {
+        self.type_var_gen.fresh_var()
+    }
+
+    /// Allocate a fresh type variable wrapped in `Type::Variable`.
+    pub fn fresh_type_var(&mut self) -> Type {
+        self.type_var_gen.fresh_type()
     }
 
     /// Push a new function scope for fallibility tracking

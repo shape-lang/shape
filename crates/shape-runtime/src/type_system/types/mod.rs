@@ -18,4 +18,4 @@ pub mod core;
 pub use annotations::{annotation_to_semantic, annotation_to_string, semantic_to_annotation};
 pub use builtins::BuiltinTypes;
 pub use constraints::TypeConstraint;
-pub use core::{Type, TypeScheme, TypeVar, substitute};
+pub use core::{Type, TypeScheme, TypeVar, TypeVarGen, substitute};
