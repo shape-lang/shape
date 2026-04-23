@@ -309,10 +309,11 @@ impl VirtualMachine {
             self.push_raw_u64(ValueWord::from_raw_bits(receiver_bits))?;
             let result = self.builtin_type_of(shape_value::ArgVec::new())?;
             self.push_raw_u64(result)?;
-            // Drop the popped args to release refcounts
-            // FR.4: real release (was no-op drop of Copy u64).
+            // FR.8: same treatment as `dispatch_method_handler` — the
+            // no-op preserves compatibility with handlers that return
+            // raw-bits aliases of their args.
             for bits in raw_args {
-                vw_drop(bits);
+                let _ = bits;
             }
             return Ok(());
         }
