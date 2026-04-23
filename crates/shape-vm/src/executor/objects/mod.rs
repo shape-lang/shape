@@ -199,10 +199,18 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         let result = handler(self, &mut raw_args, ctx)?;
-        // Drop args: the handler may have updated pointers (e.g. after Arc::make_mut).
-        // FR.4: real release (was no-op drop of Copy u64).
+        // FR.7: the prior `drop(ValueWord::from_raw_bits(bits))` was a
+        // silent no-op on Copy u64, which several v2 method handlers
+        // (e.g. `set_methods::v2_add`, `hashmap_methods::v2_set`) rely
+        // on — they return the receiver's bits directly without
+        // calling `vw_clone`, so the released arg share would free the
+        // Arc out from under the caller's consumer. Until those
+        // handlers are audited to bump their return value's refcount,
+        // keep the arg release as a documented no-op. This re-leaks 1
+        // share per method call on heap-tagged args — the same leak
+        // present before FR.4, no regression relative to `@2a600ab`.
         for bits in raw_args {
-            vw_drop(bits);
+            let _ = bits;
         }
         self.push_raw_u64(result)?;
         Ok(())
