@@ -353,6 +353,10 @@ impl MethodTable {
 
     /// Get return type for a method call, performing basic type checking.
     /// Tries generic method signatures first, then falls back to monomorphic lookup.
+    ///
+    /// Legacy variant that allocates fresh method type vars from the
+    /// process-global counter; prefer `resolve_method_call_gen` which
+    /// sources IDs from a per-engine `TypeVarGen`.
     pub fn resolve_method_call(
         &self,
         receiver_type: &Type,
@@ -378,6 +382,35 @@ impl MethodTable {
         }
 
         // Fall back to non-generic lookup
+        let sig = self.lookup(receiver_type, method_name)?;
+        Some(sig.return_type.clone())
+    }
+
+    /// Same as `resolve_method_call` but sources fresh method type vars
+    /// from the caller-provided per-engine generator.
+    pub fn resolve_method_call_gen(
+        &self,
+        receiver_type: &Type,
+        method_name: &str,
+        _arg_types: &[Type],
+        var_gen: &mut crate::type_system::TypeVarGen,
+    ) -> Option<Type> {
+        let (type_name, receiver_params) = Self::extract_receiver_info(receiver_type);
+        let type_name = type_name?;
+
+        let key = (type_name, method_name.to_string());
+        if let Some(gsig) = self.generic_methods.get(&key) {
+            let method_vars: Vec<Type> = (0..gsig.method_type_params)
+                .map(|_| var_gen.fresh_type())
+                .collect();
+            return Some(Self::resolve_type_param_expr(
+                &gsig.return_type,
+                receiver_type,
+                &receiver_params,
+                &method_vars,
+            ));
+        }
+
         let sig = self.lookup(receiver_type, method_name)?;
         Some(sig.return_type.clone())
     }

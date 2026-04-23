@@ -368,10 +368,12 @@ impl TypeInferenceEngine {
                 };
 
                 // Try to resolve the method statically using the method table
-                if let Some(result_type) =
-                    self.method_table
-                        .resolve_method_call(&receiver_type, method, &arg_types)
-                {
+                if let Some(result_type) = self.method_table.resolve_method_call_gen(
+                    &receiver_type,
+                    method,
+                    &arg_types,
+                    &mut self.type_var_gen,
+                ) {
                     return Ok(result_type);
                 }
 

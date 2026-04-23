@@ -1006,7 +1006,19 @@ impl ConstraintSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_system::TypeVarGen;
     use shape_ast::ast::ObjectTypeField;
+
+    /// Test-local helper: allocate a fresh type variable from a
+    /// per-test counter, keeping tests independent of the (now-removed)
+    /// process-global `TypeVar::fresh()` pool.
+    fn fresh_var(tvgen: &mut TypeVarGen) -> TypeVar {
+        tvgen.fresh_var()
+    }
+
+    fn fresh_type(tvgen: &mut TypeVarGen) -> Type {
+        tvgen.fresh_type()
+    }
 
     #[test]
     fn test_hasfield_backward_propagation_binds_field_type() {
@@ -1014,10 +1026,11 @@ mod tests {
         // object type, the field's result type variable should be bound to the
         // actual field type. This enables backward type propagation.
         let mut solver = ConstraintSolver::new();
+        let mut tvgen = TypeVarGen::new();
 
-        let obj_var = TypeVar::fresh();
-        let field_result_var = TypeVar::fresh();
-        let bound_var = TypeVar::fresh();
+        let obj_var = fresh_var(&mut tvgen);
+        let field_result_var = fresh_var(&mut tvgen);
+        let bound_var = fresh_var(&mut tvgen);
 
         let mut constraints = vec![
             // obj_var ~ Constrained { var: bound_var, HasField("x", field_result_var) }
@@ -1066,12 +1079,13 @@ mod tests {
     fn test_hasfield_backward_propagation_multiple_fields() {
         // Test that multiple HasField constraints on the same object all propagate
         let mut solver = ConstraintSolver::new();
+        let mut tvgen = TypeVarGen::new();
 
-        let obj_var = TypeVar::fresh();
-        let field_x_var = TypeVar::fresh();
-        let field_y_var = TypeVar::fresh();
-        let bound_var_x = TypeVar::fresh();
-        let bound_var_y = TypeVar::fresh();
+        let obj_var = fresh_var(&mut tvgen);
+        let field_x_var = fresh_var(&mut tvgen);
+        let field_y_var = fresh_var(&mut tvgen);
+        let bound_var_x = fresh_var(&mut tvgen);
+        let bound_var_y = fresh_var(&mut tvgen);
 
         let mut constraints = vec![
             // HasField("x", field_x_var)
@@ -1149,7 +1163,8 @@ mod tests {
             "Numeric::f32", "Numeric::f64",
         ].iter().map(|s| s.to_string()).collect();
         solver.set_trait_impls(trait_impls);
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Type::Constrained {
@@ -1204,7 +1219,8 @@ mod tests {
             "Numeric::f32", "Numeric::f64",
         ].iter().map(|s| s.to_string()).collect();
         solver.set_trait_impls(trait_impls);
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
             Type::Constrained {
@@ -1221,7 +1237,8 @@ mod tests {
     fn test_comparable_accepts_int() {
         // int should be Comparable
         let mut solver = ConstraintSolver::new();
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Type::Constrained {
@@ -1237,8 +1254,9 @@ mod tests {
     #[test]
     fn test_function_type_preserves_variables() {
         // BuiltinTypes::function with Variable params should be Type::Function
-        let param = Type::fresh_var();
-        let ret = Type::fresh_var();
+        let mut tvgen = TypeVarGen::new();
+        let param = fresh_type(&mut tvgen);
+        let ret = fresh_type(&mut tvgen);
         let func = BuiltinTypes::function(vec![param.clone()], ret.clone());
         match func {
             Type::Function { params, returns } => {
@@ -1254,8 +1272,9 @@ mod tests {
     fn test_function_unification_binds_variables() {
         // (T1)->T2 ~ (number)->string should bind T1=number, T2=string
         let mut solver = ConstraintSolver::new();
-        let t1 = TypeVar::fresh();
-        let t2 = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let t1 = fresh_var(&mut tvgen);
+        let t2 = fresh_var(&mut tvgen);
 
         let mut constraints = vec![(
             Type::Function {
@@ -1280,7 +1299,8 @@ mod tests {
     fn test_function_cross_unification_with_concrete() {
         // Type::Function ~ Concrete(TypeAnnotation::Function) should unify
         let mut solver = ConstraintSolver::new();
-        let t1 = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let t1 = fresh_var(&mut tvgen);
 
         let concrete_func = Type::Concrete(TypeAnnotation::Function {
             params: vec![shape_ast::ast::FunctionParam {
@@ -1384,7 +1404,8 @@ mod tests {
         impls.insert("Comparable::number".to_string());
         solver.set_trait_impls(impls);
 
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("number".to_string())),
             Type::Constrained {
@@ -1401,7 +1422,8 @@ mod tests {
     fn test_implements_trait_violated() {
         let mut solver = ConstraintSolver::new();
         // No trait impls registered — string doesn't implement Comparable
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("string".to_string())),
             Type::Constrained {
@@ -1432,8 +1454,9 @@ mod tests {
         impls.insert("Sortable::number".to_string());
         solver.set_trait_impls(impls);
 
-        let type_var = TypeVar::fresh();
-        let bound_var = TypeVar::fresh();
+        let mut tvgen = TypeVarGen::new();
+        let type_var = fresh_var(&mut tvgen);
+        let bound_var = fresh_var(&mut tvgen);
 
         let mut constraints = vec![
             // T: Sortable
