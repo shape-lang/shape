@@ -169,6 +169,15 @@ pub struct Runtime {
     annotation_registry: Arc<RwLock<annotation_context::AnnotationRegistry>>,
     /// Module binding registry shared with VM/JIT execution pipelines.
     module_binding_registry: Arc<RwLock<module_bindings::ModuleBindingRegistry>>,
+    /// Per-runtime type schema registry.
+    ///
+    /// Target state for Track B1: owns its own schema-ID counter + stdlib
+    /// schemas and replaces the process-global `STDLIB_SCHEMA_REGISTRY` +
+    /// `NEXT_SCHEMA_ID` statics. During the B1 migration window this field
+    /// coexists with the statics; it is populated at construction time and
+    /// will be threaded through decode / wire / printing / executor call
+    /// sites in follow-up sub-commits (B1.3–B1.5). B1.6 deletes the statics.
+    pub schema_registry: type_schema::TypeSchemaRegistry,
     /// Debug mode flag — enables verbose logging/tracing when true
     debug_mode: bool,
     /// Execution timeout — the executor can check elapsed time against this
@@ -215,6 +224,7 @@ impl Runtime {
                 annotation_context::AnnotationRegistry::new(),
             )),
             module_binding_registry,
+            schema_registry: type_schema::TypeSchemaRegistry::new_with_stdlib(),
             debug_mode: false,
             execution_timeout: None,
             memory_limit: None,
@@ -275,6 +285,21 @@ impl Runtime {
 
     pub fn type_method_registry(&self) -> &Arc<TypeMethodRegistry> {
         &self.type_method_registry
+    }
+
+    /// Borrow the per-runtime type schema registry.
+    ///
+    /// During the B1 migration window this accessor is informational — most
+    /// decode / wire / printing / executor call sites still consult the
+    /// process-global statics. Track B1 threads `&runtime.schema_registry`
+    /// through those call sites and deletes the statics in B1.6.
+    pub fn schema_registry(&self) -> &type_schema::TypeSchemaRegistry {
+        &self.schema_registry
+    }
+
+    /// Mutable access to the per-runtime type schema registry.
+    pub fn schema_registry_mut(&mut self) -> &mut type_schema::TypeSchemaRegistry {
+        &mut self.schema_registry
     }
 
     /// Get the module-binding registry shared with VM/JIT execution.
@@ -795,5 +820,40 @@ impl Runtime {
     /// Query the configured memory limit, if any.
     pub fn memory_limit(&self) -> Option<usize> {
         self.memory_limit
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::type_schema::FieldType;
+
+    // B1.2 parity: two freshly constructed Runtimes have independent
+    // schema_registry instances. Scoped registrations on one registry do not
+    // advance the other's ID counter.
+    #[test]
+    fn b1_2_runtime_schema_registries_are_independent() {
+        let mut r1 = Runtime::new();
+        let mut r2 = Runtime::new();
+
+        // Both registries expose the canonical stdlib schemas.
+        assert!(r1.schema_registry().has_type("Row"));
+        assert!(r2.schema_registry().has_type("Row"));
+        assert!(r1.schema_registry().has_type("Option"));
+        assert!(r2.schema_registry().has_type("Result"));
+
+        let id_a = r1
+            .schema_registry_mut()
+            .register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let id_b = r2
+            .schema_registry_mut()
+            .register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+
+        // Independent registries can hand out identical IDs for equivalently
+        // named user schemas without cross-runtime collision. Inside each
+        // runtime, the ID resolves to its own schema.
+        assert_eq!(r1.schema_registry().get("UserA").unwrap().id, id_a);
+        assert_eq!(r2.schema_registry().get("UserA").unwrap().id, id_b);
+        assert_eq!(id_a, id_b);
     }
 }
