@@ -2402,7 +2402,12 @@ mod tests {
         // the Arc. In real bytecode the V1.1C compiler guarantees no
         // subsequent read or drop of the moved slot; the test has to
         // simulate that invariant manually.
-        std::mem::forget(vm.stack_take_raw(0));
+        //
+        // B6.4: `ValueWord = u64` has no Drop, so `mem::forget` /
+        // `drop` would be no-ops. The poisoning is actually done by
+        // `stack_take_raw` itself (writes `NONE_BITS` into slot 0); the
+        // returned bits are discarded with `let _ =`.
+        let _ = vm.stack_take_raw(0);
     }
 
     #[test]

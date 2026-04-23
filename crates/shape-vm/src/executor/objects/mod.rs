@@ -1715,7 +1715,10 @@ mod v2a_dispatch_tests {
         let vw = ValueWord::from_native_ptr(arr as usize);
         let view = as_v2_typed_array(&vw).expect("v2 detect");
         assert_eq!(view.elem_type, V2ElemType::I64);
-        std::mem::forget(vw);
+        // B6.4: `ValueWord = u64` has no Drop, so `mem::forget(vw)` /
+        // `drop(vw)` would be no-ops. Keep the binding alive for the
+        // assertion above via `let _ = vw;` to document intent.
+        let _ = vw;
 
         unsafe {
             TypedArray::drop_array(arr);
@@ -1739,7 +1742,8 @@ mod v2a_dispatch_tests {
         let vw = ValueWord::from_native_ptr(arr as usize);
         let view = as_v2_typed_array(&vw).expect("v2 detect");
         assert_eq!(view.elem_type, V2ElemType::F64);
-        std::mem::forget(vw);
+        // B6.4: see the I64 sibling above.
+        let _ = vw;
 
         unsafe {
             TypedArray::drop_array(arr);
