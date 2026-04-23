@@ -223,7 +223,11 @@ impl VirtualMachine {
                 "string" => value.as_str().is_some(),
                 "boolean" | "bool" => value.is_bool(),
                 "null" => value.is_none(),
-                "array" => value.as_any_array().is_some(),
+                "array" => {
+                    value.as_any_array().is_some()
+                        || crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(value)
+                            .is_some()
+                }
                 "object" => matches!(value.heap_kind(), Some(HeapKind::TypedObject)),
                 "function" => {
                     (value.is_function() || value.is_module_function())
