@@ -10,6 +10,7 @@
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapValue, IteratorState, IteratorTransform};
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
@@ -181,7 +182,7 @@ fn advance_iterator(
                         ctx.as_deref_mut(),
                     )?;
                     let truthy = raw_helpers::is_truthy_raw(result_bits);
-                    drop(ValueWord::from_raw_bits(result_bits));
+                    vw_drop(result_bits); // FR.5
                     if !truthy {
                         continue 'outer;
                     }
@@ -320,7 +321,7 @@ fn collect_all(
                                 ctx.as_deref_mut(),
                             )?;
                             let truthy = raw_helpers::is_truthy_raw(result_bits);
-                            drop(ValueWord::from_raw_bits(result_bits));
+                            vw_drop(result_bits); // FR.5
                             if truthy {
                                 filtered.push(elem);
                             }
@@ -658,7 +659,7 @@ pub(crate) fn handle_for_each(
     let elements = collect_all(vm, &mut state, &mut ctx)?;
     for elem in elements {
         let result_bits = vm.call_value_immediate_raw(args[1], &[elem.raw_bits()], ctx.as_deref_mut())?;
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::none().into_raw_bits())
 }
@@ -696,7 +697,7 @@ pub(crate) fn handle_reduce(
             &[acc_bits, elem.into_raw_bits()],
             ctx.as_deref_mut(),
         )?;
-        drop(ValueWord::from_raw_bits(acc_bits));
+        vw_drop(acc_bits); // FR.5
         acc_bits = new_acc;
     }
     Ok(acc_bits)
@@ -751,7 +752,7 @@ pub(crate) fn handle_any(
                 let result_bits =
                     vm.call_value_immediate_raw(args[1], &[val.raw_bits()], ctx.as_deref_mut())?;
                 let truthy = raw_helpers::is_truthy_raw(result_bits);
-                drop(ValueWord::from_raw_bits(result_bits));
+                vw_drop(result_bits); // FR.5
                 if truthy {
                     return Ok(ValueWord::from_bool(true).into_raw_bits());
                 }
@@ -793,7 +794,7 @@ pub(crate) fn handle_all(
                 let result_bits =
                     vm.call_value_immediate_raw(args[1], &[val.raw_bits()], ctx.as_deref_mut())?;
                 let truthy = raw_helpers::is_truthy_raw(result_bits);
-                drop(ValueWord::from_raw_bits(result_bits));
+                vw_drop(result_bits); // FR.5
                 if !truthy {
                     return Ok(ValueWord::from_bool(false).into_raw_bits());
                 }
@@ -836,7 +837,7 @@ pub(crate) fn handle_find(
                 let result_bits =
                     vm.call_value_immediate_raw(args[1], &[val_bits_clone], ctx.as_deref_mut())?;
                 let truthy = raw_helpers::is_truthy_raw(result_bits);
-                drop(ValueWord::from_raw_bits(result_bits));
+                vw_drop(result_bits); // FR.5
                 if truthy {
                     return Ok(val.into_raw_bits());
                 }

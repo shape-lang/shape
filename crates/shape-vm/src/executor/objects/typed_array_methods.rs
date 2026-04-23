@@ -7,6 +7,7 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+use shape_value::value_word_drop::vw_drop;
 use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use wide::f64x4;
@@ -1104,7 +1105,7 @@ pub(crate) fn handle_float_filter(
         if raw_helpers::is_truthy_raw(keep_bits) {
             result.push(v);
         }
-        drop(ValueWord::from_raw_bits(keep_bits));
+        vw_drop(keep_bits); // FR.5
     }
     Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
@@ -1126,7 +1127,7 @@ pub(crate) fn handle_float_for_each(
     for &v in &arr_clone {
         let elem_bits = f64::to_bits(v);
         let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::none().into_raw_bits())
 }
@@ -1185,7 +1186,7 @@ pub(crate) fn handle_float_find(
         if raw_helpers::is_truthy_raw(result_bits) {
             return Ok(ValueWord::from_f64(v).into_raw_bits());
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::none().into_raw_bits())
 }
@@ -1214,10 +1215,10 @@ pub(crate) fn handle_float_some(
             vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
         };
         if raw_helpers::is_truthy_raw(result_bits) {
-            drop(ValueWord::from_raw_bits(result_bits));
+            vw_drop(result_bits); // FR.5
             return Ok(ValueWord::from_bool(true).into_raw_bits());
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::from_bool(false).into_raw_bits())
 }
@@ -1246,10 +1247,10 @@ pub(crate) fn handle_float_every(
             vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
         };
         if !raw_helpers::is_truthy_raw(result_bits) {
-            drop(ValueWord::from_raw_bits(result_bits));
+            vw_drop(result_bits); // FR.5
             return Ok(ValueWord::from_bool(false).into_raw_bits());
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::from_bool(true).into_raw_bits())
 }
@@ -1344,7 +1345,7 @@ pub(crate) fn handle_int_filter(
         if raw_helpers::is_truthy_raw(keep_bits) {
             result.push(v);
         }
-        drop(ValueWord::from_raw_bits(keep_bits));
+        vw_drop(keep_bits); // FR.5
     }
     Ok(ValueWord::from_int_array(Arc::new(result.into())).into_raw_bits())
 }
@@ -1366,7 +1367,7 @@ pub(crate) fn handle_int_for_each(
     for &v in &arr_clone {
         let elem_bits = ValueWord::from_i64(v).into_raw_bits();
         let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::none().into_raw_bits())
 }
@@ -1425,7 +1426,7 @@ pub(crate) fn handle_int_find(
         if raw_helpers::is_truthy_raw(result_bits) {
             return Ok(elem_bits);
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::none().into_raw_bits())
 }
@@ -1454,10 +1455,10 @@ pub(crate) fn handle_int_some(
             vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
         };
         if raw_helpers::is_truthy_raw(result_bits) {
-            drop(ValueWord::from_raw_bits(result_bits));
+            vw_drop(result_bits); // FR.5
             return Ok(ValueWord::from_bool(true).into_raw_bits());
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::from_bool(false).into_raw_bits())
 }
@@ -1486,10 +1487,10 @@ pub(crate) fn handle_int_every(
             vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
         };
         if !raw_helpers::is_truthy_raw(result_bits) {
-            drop(ValueWord::from_raw_bits(result_bits));
+            vw_drop(result_bits); // FR.5
             return Ok(ValueWord::from_bool(false).into_raw_bits());
         }
-        drop(ValueWord::from_raw_bits(result_bits));
+        vw_drop(result_bits); // FR.5
     }
     Ok(ValueWord::from_bool(true).into_raw_bits())
 }
