@@ -291,12 +291,15 @@ mod e2e_tests {
     ///
     /// `flatten` is defined in `impl Iterable for Array` (a trait impl).
     /// Trait impl methods now get synthesized type params (Stage 2.6), enabling
-    /// monomorphization. However, `flatten` goes through the extend path (Vec.flatten
-    /// exists), and the monomorphized body calls `self.len()` via the delegating
-    /// extend method, which causes recursion due to the empty-template-call issue.
-    /// Gated until the delegating extend method recursion issue is resolved.
+    /// monomorphization. The previous blocker — `flatten`'s body calling
+    /// `self.len()` via the delegating `extend Vec<T>` method and recursing —
+    /// has been resolved by dropping that delegating method from vec.shape.
+    /// The test still fails on a separate axis: the expected `flatten`
+    /// specialization does not land in `monomorphization_keys` (cache is
+    /// empty). That's a pre-existing monomorphization-cache population bug
+    /// unrelated to dispatch recursion.
     #[test]
-    #[ignore] // pre-existing: monomorphized extend methods calling self.len() overflow
+    #[ignore] // pre-existing: flatten specialization missing from monomorphization cache (unrelated to len() recursion)
     fn test_nested_generic_call() {
         let source = r#"
             let nested = [[1, 2], [3, 4]]
