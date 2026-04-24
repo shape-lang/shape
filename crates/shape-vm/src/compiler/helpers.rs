@@ -2089,7 +2089,8 @@ impl BytecodeCompiler {
             "__intrinsic_reduce" => BuiltinFunction::Reduce,
             "print" => BuiltinFunction::Print,
             "format" => BuiltinFunction::Format,
-            "len" | "count" => BuiltinFunction::Len,
+            // "len" and "count" removed: use x.len() method form via per-type
+            // PHF dispatch (ARRAY_METHODS, HASHMAP_METHODS, STRING_METHODS, ...)
             // "throw" removed: Shape uses Result types
             "__intrinsic_snapshot" | "snapshot" => BuiltinFunction::Snapshot,
             "exit" => BuiltinFunction::Exit,
@@ -2310,7 +2311,7 @@ impl BytecodeCompiler {
                 | BuiltinFunction::ChannelCtor
                 | BuiltinFunction::Print
                 | BuiltinFunction::Format
-                | BuiltinFunction::Len
+                // BuiltinFunction::Len removed
                 // BuiltinFunction::Throw removed
                 | BuiltinFunction::Snapshot
                 | BuiltinFunction::ObjectRest

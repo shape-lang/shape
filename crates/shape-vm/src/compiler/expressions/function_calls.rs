@@ -37,8 +37,6 @@ fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
 /// Get the known return NumericType for a builtin function name.
 fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
     match name {
-        // Int-returning builtins
-        "len" | "count" => Some(NumericType::Int),
         // Number-returning builtins
         "abs" | "sqrt" | "ceil" | "floor" | "round" | "sum" | "mean" | "min" | "max" | "sin"
         | "cos" | "tan" | "exp" | "ln" | "log" | "stddev" | "std" | "variance" => {
@@ -2473,8 +2471,6 @@ impl BytecodeCompiler {
             "every",
             "print",
             "format",
-            "len",
-            "count",
             "range",
             "sum",
             "mean",

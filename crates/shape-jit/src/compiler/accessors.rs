@@ -340,10 +340,9 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::FindIndex,
     BuiltinFunction::Some,
     BuiltinFunction::Every,
-    // Utility (5)
+    // Utility (4)
     BuiltinFunction::Print,
     BuiltinFunction::Format,
-    BuiltinFunction::Len,
     BuiltinFunction::Snapshot,
     BuiltinFunction::Exit,
     // Object (1)

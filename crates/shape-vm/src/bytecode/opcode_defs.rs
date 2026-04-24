@@ -1486,7 +1486,7 @@ pub enum BuiltinFunction {
     // Utility functions
     Print,
     Format,
-    Len,
+    // Len removed: use x.len() method form via per-type PHF dispatch
     // Throw removed: Shape uses Result types
     Snapshot,
     Exit,
@@ -1794,10 +1794,9 @@ impl BuiltinFunction {
             BuiltinFunction::FindIndex,
             BuiltinFunction::Some,
             BuiltinFunction::Every,
-            // Utility (5)
+            // Utility (4)
             BuiltinFunction::Print,
             BuiltinFunction::Format,
-            BuiltinFunction::Len,
             BuiltinFunction::Snapshot,
             BuiltinFunction::Exit,
             // Object (1)

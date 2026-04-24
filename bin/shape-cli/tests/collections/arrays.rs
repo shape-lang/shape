@@ -6,7 +6,7 @@ fn test_array_literals() {
 
     assert_eq!(eval_to_number("let arr = [1, 2, 3]; arr[0]"), 1.0);
     assert_eq!(eval_to_number("let arr = [1, 2, 3]; arr[2]"), 3.0);
-    assert_eq!(eval_to_number("len([1, 2, 3, 4, 5])"), 5.0);
+    assert_eq!(eval_to_number("[1, 2, 3, 4, 5].len()"), 5.0);
 }
 
 #[test]

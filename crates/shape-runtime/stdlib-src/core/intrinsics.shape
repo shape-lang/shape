@@ -78,8 +78,6 @@ builtin fn tanh(value: number) -> number;
 
 /// Print values to output.
 builtin fn print<T>(values: T) -> void;
-/// Return the length of an array, string, or collection.
-builtin fn len<T>(value: T) -> number;
 /// Alias for len().
 builtin fn length<T>(value: T) -> number;
 /// Generate an array of numbers from start to end.
@@ -124,8 +122,6 @@ builtin fn sum<T>(table: Table<T>, value: (row: T) => number) -> number;
 builtin fn mean<T>(table: Table<T>, value: (row: T) => number) -> number;
 /// Compute standard deviation.
 builtin fn stddev<T>(values: T) -> number;
-/// Count elements.
-builtin fn count(array: Vec) -> number;
 /// Return highest value.
 builtin fn highest<T>(collection: T, count: number) -> number;
 /// Return lowest value.

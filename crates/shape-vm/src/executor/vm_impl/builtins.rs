@@ -150,11 +150,6 @@ impl VirtualMachine {
                     let result = self.builtin_zip(args)?;
                     self.push_raw_u64(result)?;
                 }
-                BuiltinFunction::Len => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_len(args)?;
-                    self.push_raw_u64(result)?;
-                }
                 BuiltinFunction::Filled => {
                     let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
                     let result = self.builtin_filled(args)?;

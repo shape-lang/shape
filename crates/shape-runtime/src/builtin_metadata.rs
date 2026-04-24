@@ -306,20 +306,6 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
         example: Some("print(\"hello\", x)"),
     },
     BuiltinMetadata {
-        name: "len",
-        signature: "len(value) -> number",
-        description: "Return the length of an array, string, or collection.",
-        category: "Utility",
-        parameters: &[BuiltinParam {
-            name: "value",
-            param_type: "any",
-            optional: false,
-            description: "Collection or string",
-        }],
-        return_type: "number",
-        example: Some("len([1, 2, 3]) // 3"),
-    },
-    BuiltinMetadata {
         name: "range",
         signature: "range(start, end, step?) -> Vec<number>",
         description: "Generate an array of numbers from start to end.",
