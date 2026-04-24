@@ -78,6 +78,19 @@ impl ShapeTransitionTable {
         &self.shapes[id.0 as usize]
     }
 
+    /// Get a shape by its ID, returning `None` if the ID is not present in
+    /// this table.
+    ///
+    /// Use this when a `ShapeId` may have originated from a *different*
+    /// transition table (for example, a `HashMapData::shape_id` computed
+    /// under the process-default ambient handle but observed inside a
+    /// per-VM scope). In that case callers should degrade to the
+    /// hash-based slow path rather than panic on an out-of-range index.
+    #[inline]
+    pub fn try_get_shape(&self, id: ShapeId) -> Option<&Shape> {
+        self.shapes.get(id.0 as usize)
+    }
+
     /// Transition from `from` shape by adding `property_name`.
     ///
     /// Returns the existing child shape if the transition already exists,
@@ -117,10 +130,12 @@ impl ShapeTransitionTable {
 
     /// Find the slot index of `property_name` in the given shape.
     ///
-    /// Returns `None` if the property is not part of this shape.
+    /// Returns `None` if the property is not part of this shape, or if
+    /// `shape_id` does not belong to this table (e.g. a stale ID carried
+    /// over from a different ambient handle — see `try_get_shape`).
     /// O(n) scan of the shape's properties list.
     pub fn property_index(&self, shape_id: ShapeId, property_name: u32) -> Option<usize> {
-        let shape = &self.shapes[shape_id.0 as usize];
+        let shape = self.shapes.get(shape_id.0 as usize)?;
         shape.properties.iter().position(|&p| p == property_name)
     }
 
@@ -194,14 +209,17 @@ pub fn shape_property_index(shape_id: ShapeId, property_hash: u32) -> Option<usi
 
 /// Transition a shape by adding a new property.
 ///
-/// Consults the ambient shape table. Returns `None` if no scope is active or
-/// if the dictionary-mode threshold (>64 properties) would be exceeded. When
-/// a transition is recorded, it is also appended to the ambient table's
-/// transition log for JIT shape-guard invalidation.
+/// Consults the ambient shape table. Returns `None` if no scope is active,
+/// if the dictionary-mode threshold (>64 properties) would be exceeded, or
+/// if `from` is not present in the active table (e.g. a stale shape_id
+/// carried over from a different ambient handle — a `HashMapData` built
+/// under the process-default handle and later mutated inside a per-VM
+/// scope). When a transition is recorded, it is also appended to the
+/// ambient table's transition log for JIT shape-guard invalidation.
 pub fn shape_transition(from: ShapeId, property_hash: u32) -> Option<ShapeId> {
     let handle = crate::shape_graph_current::try_current_shape_table()?;
     let mut table = handle.table().lock().ok()?;
-    let shape = table.get_shape(from);
+    let shape = table.try_get_shape(from)?;
     if shape.property_count >= 64 {
         return None; // Dictionary mode threshold
     }
@@ -386,5 +404,28 @@ mod tests {
         assert!(shape_transition(ShapeId(0), 42).is_none());
         assert!(shape_property_index(ShapeId(0), 42).is_none());
         assert!(drain_shape_transitions().is_empty());
+    }
+
+    /// Regression test for the B5 cross-table stale-ShapeId bug: a
+    /// `ShapeId` minted under one transition table must not panic when
+    /// fed to another. This can happen in real workloads when a
+    /// `HashMapData::shape_id` is computed under the process-default
+    /// ambient handle (via `ValueWord::from_hashmap_pairs` called
+    /// outside any VM scope) and later observed inside a per-VM scope
+    /// whose fresh table has no knowledge of that id. Both
+    /// `property_index` and `shape_transition` must degrade to `None`
+    /// instead of indexing out of bounds.
+    #[test]
+    fn cross_table_stale_shape_id_degrades_gracefully() {
+        let table = ShapeTransitionTable::new();
+        let huge = ShapeId(9_999);
+        assert_eq!(table.property_index(huge, 42), None);
+        assert!(table.try_get_shape(huge).is_none());
+
+        // Free-function path via a fresh scoped handle must also degrade.
+        let handle = crate::shape_graph_current::ShapeTableHandle::new();
+        let _scope = crate::shape_graph_current::SyncShapeTableScope::enter(handle);
+        assert_eq!(shape_property_index(huge, 42), None);
+        assert_eq!(shape_transition(huge, 42), None);
     }
 }
