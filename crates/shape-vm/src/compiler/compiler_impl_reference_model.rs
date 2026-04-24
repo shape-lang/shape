@@ -1192,6 +1192,17 @@ impl BytecodeCompiler {
         self.non_function_mir_context_stack
             .push("__main__".to_string());
 
+        // Register root's imports from the module graph. This emits alias
+        // copy instructions (e.g. `set = std::core::set`) and MUST happen
+        // INSIDE the `__main__` blob — emitting before the blob started
+        // would leave the copies in an unreachable gap, so at runtime the
+        // alias binding would remain None and `set::contains(...)` would
+        // read a None callable and raise `InvalidCall`.
+        if let Some(graph) = self.module_graph.clone() {
+            let root_id = graph.root_id();
+            self.register_graph_imports_for_module(root_id, &graph)?;
+        }
+
         // Second pass: compile all items (collect errors instead of early-returning)
         let item_count = program.items.len();
         for (idx, item) in program.items.iter().enumerate() {
@@ -1528,8 +1539,14 @@ impl BytecodeCompiler {
         }
 
         // Phase 2: Compile the root module using the graph for its imports.
-        // Register root's imports from the graph
-        self.register_graph_imports_for_module(graph.root_id(), &graph)?;
+        // NOTE: root's imports are registered INSIDE `compile()` after the
+        // `__main__` blob builder starts, so any emitted Load/Store for
+        // namespace-alias bindings (e.g. `use std::core::set` creates a
+        // runtime copy from canonical binding `std::core::set` to alias
+        // binding `set`) lands inside `__main__`. Registering them here —
+        // before `compile()` opens the `__main__` blob — would leave those
+        // instructions in an unreachable gap between module bodies and
+        // `__main__`'s entry point.
 
         // Strip import items from root program (imports already resolved via graph)
         let mut stripped_program = root_program.clone();
