@@ -19,8 +19,13 @@
 /// | Array<T>       | built-in PHF (array_basic, array_ops)        |
 /// | String         | built-in PHF (string_methods)                |
 /// | HashMap<K,V>   | built-in PHF (hashmap_methods)               |
-/// | Set<T>         | std/core/set.shape                           |
+/// | Set<T>         | built-in PHF (set_methods)                   |
+/// | Deque<T>       | built-in PHF (deque_methods)                 |
+/// | PriorityQueue<T> | built-in PHF (priority_queue_methods)      |
 /// | TypedArray<T>  | built-in PHF (typed_access.rs)               |
+/// | DataTable      | built-in PHF (datatable_methods)             |
+/// | Column         | built-in PHF (column_methods)                |
+/// | Vec<T>         | built-in PHF (typed_array_methods)           |
 
 /// Uniform length interface for collection-like types.
 ///
@@ -31,4 +36,49 @@
 trait Len {
     /// Return the number of elements (or bytes, for strings).
     len(): int
+}
+
+// =============================================================================
+// Explicit trait impls for built-in length-bearing types.
+//
+// Each impl delegates to the PHF-dispatched `.len()` method on the receiver.
+// Following the `Queryable<T>` generic-impl constraint documented in the root
+// CLAUDE.md ("generic impls parse but are not first-class end-to-end"), these
+// impls use the concrete bare type name rather than a generic header.
+// =============================================================================
+
+impl Len for Array {
+    method len() -> int { self.len() }
+}
+
+impl Len for string {
+    method len() -> int { self.len() }
+}
+
+impl Len for HashMap {
+    method len() -> int { self.len() }
+}
+
+impl Len for Set {
+    method len() -> int { self.len() }
+}
+
+impl Len for Deque {
+    method len() -> int { self.len() }
+}
+
+impl Len for PriorityQueue {
+    method len() -> int { self.len() }
+}
+
+impl Len for DataTable {
+    method len() -> int { self.len() }
+}
+
+impl Len for Column {
+    method len() -> int { self.len() }
+}
+
+impl Len for Vec {
+    method len() -> int { self.len() }
 }
