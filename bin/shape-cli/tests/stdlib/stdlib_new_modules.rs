@@ -153,6 +153,30 @@ fn test_msgpack_encode_decode_basic() {
     ));
 }
 
+/// Regression: `UnwrapOk` used to leak the outer `Ok(...)` refcount while
+/// pushing the inner value without a matching retain. Combined with the
+/// interner-backed `Arc<String>` for small string literals this produced an
+/// off-by-one refcount that eventually freed a still-referenced
+/// `HeapValue::String` and corrupted the allocator freelist
+/// (malloc_consolidate SIGABRT). The msgpack tests above were a symptom;
+/// this is the minimal form.
+#[test]
+fn regression_match_ok_string_len_no_heap_corruption() {
+    init_runtime();
+    assert_eq!(
+        eval_to_number(
+            r#"
+        let encoded: Result<string, string> = Ok("hello")
+        match encoded {
+            Ok(data) => len(data),
+            Err(_) => 0,
+        }
+        "#
+        ),
+        5.0
+    );
+}
+
 // === Set Module ===
 
 #[test]

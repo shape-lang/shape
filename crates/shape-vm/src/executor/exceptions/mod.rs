@@ -10,7 +10,7 @@ use crate::{
 use shape_ast::TypeAnnotation;
 use shape_runtime::type_schema::builtin_schemas::*;
 use shape_value::heap_value::HeapValue;
-use shape_value::value_word_drop::vw_drop;
+use shape_value::value_word_drop::{vw_clone, vw_drop};
 use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -828,34 +828,51 @@ impl VirtualMachine {
         let nb = self.pop_raw_u64()?;
         // Fast path: inline None
         if nb.is_none() {
+            vw_drop(nb);
             let err = self.build_try_none_error_nb();
             return return_early_with_err(self, err);
         }
-        // Heap types: Ok/Err/Some
+        // Heap types: Ok/Err/Some — see the retain/release rationale on
+        // `op_unwrap_ok`. Retain the inner, release the outer wrapper.
         if let Some(inner) = raw_helpers::extract_ok_inner(nb) {
-            self.push_raw_u64(inner.clone())?;
+            let retained = vw_clone(*inner);
+            vw_drop(nb);
+            self.push_raw_u64(retained)?;
             Ok(())
         } else if let Some(inner) = raw_helpers::extract_err_inner(nb) {
-            return_early_with_err(self, inner.clone())
+            let retained = vw_clone(*inner);
+            vw_drop(nb);
+            return_early_with_err(self, retained)
         } else if let Some(inner) = raw_helpers::extract_some_inner(nb) {
-            self.push_raw_u64(inner.clone())?;
+            let retained = vw_clone(*inner);
+            vw_drop(nb);
+            self.push_raw_u64(retained)?;
             Ok(())
         } else {
-            // All non-None, non-Err values are successful payloads
+            // All non-None, non-Err values are successful payloads. Pass-through
+            // retains ownership of `nb` on the stack — no retain/release pair
+            // needed here.
             self.push_raw_u64(nb)?;
             Ok(())
         }
     }
 
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
+        // See the retain/release rationale on `op_unwrap_ok`. When the scrutinee
+        // is a `Some(_)` wrapper we retain the inner and release the wrapper;
+        // non-Some scrutinees pass the popped bits through untouched (no
+        // retain/release pair needed).
         let nb = self.pop_raw_u64()?;
         if nb.is_none() {
+            vw_drop(nb);
             return Err(VMError::RuntimeError(
                 "Cannot unwrap None value".to_string(),
             ));
         }
         if let Some(inner) = raw_helpers::extract_some_inner(nb) {
-            self.push_raw_u64(inner.clone())?;
+            let retained = vw_clone(*inner);
+            vw_drop(nb);
+            self.push_raw_u64(retained)?;
             Ok(())
         } else {
             // Some() constructor returns the value unwrapped (not wrapped in
@@ -881,22 +898,38 @@ impl VirtualMachine {
 
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
+        // `pop_raw_u64` transfers ownership of the popped slot's heap share into
+        // `nb` without running any Drop. The inner value lives *inside* the
+        // Ok wrapper (`Box<ValueWord>`); we must retain it before pushing so
+        // the stack slot owns its own share, then release the outer Ok
+        // wrapper via `vw_drop(nb)`. Without the retain/release pair the Ok
+        // wrapper leaks and the inner shares refcount with the leaked box —
+        // when later `vw_drop`s on the stack inner decrement below zero they
+        // free memory the leaked Ok still points at, corrupting the allocator
+        // freelist (malloc_consolidate: unaligned fastbin chunk).
         let nb = self.pop_raw_u64()?;
         if let Some(inner) = raw_helpers::extract_ok_inner(nb) {
-            self.push_raw_u64(inner.clone())
+            let retained = vw_clone(*inner);
+            vw_drop(nb);
+            self.push_raw_u64(retained)
         } else {
-            Err(VMError::RuntimeError(format!(
+            let err = Err(VMError::RuntimeError(format!(
                 "UnwrapOk can only be applied to Ok(value), got {}",
                 nb.type_name()
-            )))
+            )));
+            vw_drop(nb);
+            err
         }
     }
 
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
+        // See the retain/release rationale on `op_unwrap_ok`. The popped
+        // `nb` owns the Err wrapper's heap share; we retain the inner
+        // payload, release the wrapper, and push the retained inner.
         let nb = self.pop_raw_u64()?;
         if let Some(inner) = raw_helpers::extract_err_inner(nb) {
-            let inner_val = inner.clone();
+            let inner_val = vw_clone(*inner);
             // If the inner value is an AnyError TypedObject (created by
             // normalize_err_payload_nb), extract and return the original
             // payload rather than exposing the full AnyError struct.
@@ -908,17 +941,73 @@ impl VirtualMachine {
                 {
                     if ANYERROR_PAYLOAD < slots.len() {
                         let is_heap = heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
+                        // `as_value_word` returns a fresh retained share for
+                        // heap payloads; our `inner_val` retain is consumed
+                        // by dropping it below (it keeps the AnyError alive
+                        // while we read its slot).
                         let payload = slots[ANYERROR_PAYLOAD].as_value_word(is_heap);
+                        vw_drop(inner_val);
+                        vw_drop(nb);
                         return self.push_raw_u64(payload);
                     }
                 }
             }
+            vw_drop(nb);
             self.push_raw_u64(inner_val)
         } else {
-            Err(VMError::RuntimeError(format!(
+            let err = Err(VMError::RuntimeError(format!(
                 "UnwrapErr can only be applied to Err(value), got {}",
                 nb.type_name()
-            )))
+            )));
+            vw_drop(nb);
+            err
         }
+    }
+}
+
+#[cfg(test)]
+mod unwrap_refcount_regression_tests {
+    use crate::test_utils::eval;
+    use shape_value::ValueWordExt;
+
+    /// Regression: `op_unwrap_ok` used to expose the inner value without
+    /// a retain and leak the outer `Ok(...)` wrapper's share. With the
+    /// interner-backed `Arc<String>` for small literals the off-by-one
+    /// refcount eventually freed a `HeapValue::String` that the leaked
+    /// wrapper still pointed at, corrupting the allocator freelist
+    /// (malloc_consolidate SIGABRT under release glibc).
+    ///
+    /// The minimal trigger is `match Ok(<small-string>) { Ok(data) => len(data) }`
+    /// — the inner local is first written un-retained, then its
+    /// destructor at frame unwind decrements below zero. The fix retains
+    /// the inner on extract and releases the wrapper before push.
+    #[test]
+    fn match_ok_small_string_then_len_no_heap_corruption() {
+        let v = eval(
+            r#"
+            let encoded: Result<string, string> = Ok("hello")
+            match encoded {
+                Ok(data) => len(data),
+                Err(_) => 0,
+            }
+            "#,
+        );
+        assert_eq!(v.as_i64(), Some(5));
+    }
+
+    /// Mirror test for `op_unwrap_err`: the same refcount imbalance
+    /// applied to the Err path.
+    #[test]
+    fn match_err_small_string_then_len_no_heap_corruption() {
+        let v = eval(
+            r#"
+            let encoded: Result<int, string> = Err("oops!")
+            match encoded {
+                Ok(_) => 0,
+                Err(msg) => len(msg),
+            }
+            "#,
+        );
+        assert_eq!(v.as_i64(), Some(5));
     }
 }
