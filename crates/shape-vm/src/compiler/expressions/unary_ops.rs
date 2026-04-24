@@ -93,6 +93,67 @@ impl BytecodeCompiler {
                     return Ok(());
                 }
 
+                // Second-chance: ask the type inferencer. If it resolves to
+                // a concrete numeric type, emit the appropriate typed
+                // opcode. If it resolves to a concrete non-numeric, non-Neg
+                // type, error out — the caller genuinely wrote something
+                // nonsensical like `-"foo"`.
+                //
+                // C.STDLIB-B: when the operand type cannot be proven at
+                // compile time (unresolved numeric TypeVar, closure
+                // parameter whose type the outer inferencer can't resolve,
+                // or any other "not yet known" case), default to `number`.
+                // `infer_unary_op` on the inference side already pushes a
+                // constraint `operand == number` for untyped numeric
+                // operands, so `number` is the type-system-consistent
+                // default. This is a principled compile-time default, NOT
+                // runtime coercion: the choice is made during bytecode
+                // emission, before the program runs. `NegNumber`'s
+                // executor has a tagged-ValueWord slow path (see
+                // executor/arithmetic/mod.rs:857) that handles
+                // dynamically-typed operands correctly — coercing a tagged
+                // `int` through `number_operand` without silent precision
+                // loss for i48 values.
+                use shape_runtime::type_system::Type;
+                match self.infer_expr_type(operand) {
+                    Ok(inferred) => {
+                        if let Some(nt) = inferred_type_to_numeric(&inferred) {
+                            let opcode = match nt {
+                                NumericType::Int | NumericType::IntWidth(_) => OpCode::NegInt,
+                                NumericType::Number => OpCode::NegNumber,
+                                NumericType::Decimal => OpCode::NegDecimal,
+                            };
+                            self.emit(Instruction::simple(opcode));
+                            self.last_expr_numeric_type = Some(nt);
+                            return Ok(());
+                        }
+                        // Unresolved TypeVar / Constrained / Function (not
+                        // a concrete type) — default to `number`.
+                        if matches!(
+                            inferred,
+                            Type::Variable(_)
+                                | Type::Constrained { .. }
+                                | Type::Function { .. }
+                        ) {
+                            self.emit(Instruction::simple(OpCode::NegNumber));
+                            self.last_expr_numeric_type = Some(NumericType::Number);
+                            return Ok(());
+                        }
+                        // Concrete non-numeric type with no Neg impl: fall
+                        // through to error.
+                    }
+                    Err(_) => {
+                        // Inferencer couldn't resolve the operand type
+                        // (e.g. a closure parameter when the outer
+                        // inference scope doesn't cover the closure body).
+                        // Default to `number` — the only principled
+                        // numeric choice for unary `-`.
+                        self.emit(Instruction::simple(OpCode::NegNumber));
+                        self.last_expr_numeric_type = Some(NumericType::Number);
+                        return Ok(());
+                    }
+                }
+
                 return Err(shape_ast::error::ShapeError::SemanticError {
                     message: "Cannot infer operand type for unary `-` — add type annotations".to_string(),
                     location: None,
