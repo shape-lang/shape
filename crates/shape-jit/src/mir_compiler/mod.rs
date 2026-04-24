@@ -33,10 +33,16 @@ pub(crate) mod v2_refcount;
 pub(crate) mod v2_string;
 pub(crate) mod v2_typed_map;
 
-#[cfg(test)]
+// Heavy execution-path tests — gated behind the `deep-tests` feature.
+// Each test calls JITExecutor::execute_program, which JIT-compiles ~118
+// stdlib functions via MirToIR. Running them on the default Tier 1 path
+// at n-cpu parallelism makes the shape-jit test binary slow enough to
+// miss the summary line and racy enough to SIGILL in the JIT code cache.
+// See `just test-deep` to run.
+#[cfg(all(test, feature = "deep-tests"))]
 mod integration_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 mod v2_array_tests;
 
 // Un-gated: pins the fix-jit-lead arg_count ABI / closure-param typing

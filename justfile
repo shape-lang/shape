@@ -44,15 +44,15 @@ test-fast:
 
 # Tier 2: Unit + deep tests, no integration
 test:
-	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests
+	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests
 
 # Tier 3: Everything — unit + deep + soak + integration (~10-15 min)
 test-all:
-	cargo test --workspace --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
+	cargo test --workspace --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests -- --include-ignored
 
 # Run only deep/soak tests
 test-deep:
-	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- deep --include-ignored
+	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests -- deep --include-ignored
 
 # Run only shape-test integration suite
 test-integration:

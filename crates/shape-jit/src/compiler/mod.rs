@@ -13,10 +13,12 @@ mod program;
 mod setup;
 mod strategy;
 
-#[cfg(test)]
+// Heavy execution-path tests — gated behind the `deep-tests` feature.
+// See crate-level `deep-tests` gate in `mir_compiler/mod.rs` for rationale.
+#[cfg(all(test, feature = "deep-tests"))]
 mod a1d2_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 mod a1e_tests;
 
 // Re-export the main struct and public functions

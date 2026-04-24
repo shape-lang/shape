@@ -36,3 +36,11 @@ shape-gc = { workspace = true, optional = true }
 [features]
 default = []
 gc = ["shape-gc"]
+# Gate heavy JIT execution-path tests (integration_tests, a1d2_tests, a1e_tests,
+# v2_array_tests) behind this feature. Each heavy test invokes
+# JITExecutor::execute_program which JIT-compiles ~118 stdlib functions via
+# MirToIR — collectively too slow to run on the default Tier 1 path and, at
+# the default test-threads=n-cpus concurrency level, racy enough to SIGILL
+# before the summary line. Run these via `just test-deep` (which already
+# enables deep-tests on shape-vm/shape-runtime/shape-ast).
+deep-tests = []
