@@ -49,7 +49,7 @@ fn test_distributions_wrappers() {
          let u = dist_uniform(0, 1);\n\
          let s = dist_sample_n(\"uniform\", [0, 1], 5);\n\
          let p = dist_poisson(3);\n\
-         (u >= 0 && u < 1) && (len(s) == 5) && (p >= 0)",
+         (u >= 0 && u < 1) && (s.len() == 5) && (p >= 0)",
     );
     assert!(eval_to_bool(&code));
 }
@@ -63,7 +63,7 @@ fn test_stochastic_wrappers() {
         "let b = brownian_motion(5, 1.0, 1.0);\n\
          let g = gbm(5, 0.01, 0.1, 0.2, 100.0);\n\
          let o = ou_process(5, 0.1, 0.5, 1.0, 0.3, 2.0);\n\
-         (len(b) == 5) && (len(g) == 5) && (len(o) == 5)",
+         (b.len() == 5) && (g.len() == 5) && (o.len() == 5)",
     );
     assert!(eval_to_bool(&code));
 }
@@ -83,7 +83,7 @@ fn test_monte_carlo_and_stats() {
         }
 
         let sim = monte_carlo(5, |i| i * 2);
-        len(sim.results)
+        sim.results.len()
     "#;
     assert_eq!(eval_to_number(code), 5.0);
 }
@@ -96,7 +96,7 @@ fn test_ode_integrators() {
         &["core/ode.shape"],
         "let e = euler(|t, y| -y, 1.0, 0.0, 1.0, 0.1);\n\
          let r = rk4(|t, y| -y, 1.0, 0.0, 1.0, 0.1);\n\
-         (len(e) >= 0) && (len(r) >= 0)",
+         (e.len() >= 0) && (r.len() >= 0)",
     );
     assert!(eval_to_bool(&code));
 }
@@ -108,7 +108,7 @@ fn test_harmonic_oscillator_rk4_system() {
     let code = with_modules(
         &["core/ode.shape"],
         "let res = rk4_system(|t, y| [y[1], -y[0]], [1.0, 0.0], 0.0, 6.283185307179586, 0.05);\n\
-         (len(res) > 100) && (res[0].t == 0.0)",
+         (res.len() > 100) && (res[0].t == 0.0)",
     );
     assert!(eval_to_bool(&code));
 }
@@ -126,7 +126,7 @@ fn test_physics_projectile_range() {
         "let vx = 7.0710678118654755;\n\
          let vy = 7.0710678118654755;\n\
          let res = simulate_projectile({ x: 0.0, y: 0.0, vx: vx, vy: vy, t: 0.0 }, 5.0, 0.01, 9.81);\n\
-         len(res) >= 0",
+         res.len() >= 0",
     );
 
     assert!(eval_to_bool(&code));
@@ -143,7 +143,7 @@ fn test_rk45_scalar_exponential_decay() {
         &["core/ode.shape"],
         r#"
         let res = rk45(|t, y| -y, 1.0, 0.0, 1.0);
-        let last = res[len(res) - 1];
+        let last = res[res.len() - 1];
         // Should reach t=1 with y close to e^(-1) ≈ 0.3679
         let err = abs(last.y - 0.36787944117144233);
         err < 0.0001
@@ -163,7 +163,7 @@ fn test_rk45_uses_fewer_steps_on_smooth_ode() {
         let adaptive = rk45(|t, y| -y, 1.0, 0.0, 1.0);
         let fixed = rk4(|t, y| -y, 1.0, 0.0, 1.0, 0.01);
         // Adaptive should use fewer steps than 100 fixed steps
-        len(adaptive) < len(fixed)
+        adaptive.len() < fixed.len()
         "#,
     );
     assert!(eval_to_bool(&code));
@@ -179,7 +179,7 @@ fn test_rk45_system_harmonic_oscillator() {
         &["core/ode.shape"],
         r#"
         let res = rk45_system(|t, y| [y[1], -y[0]], [1.0, 0.0], 0.0, 6.283185307179586);
-        let last = res[len(res) - 1];
+        let last = res[res.len() - 1];
         // After one full period, y[0] should be close to 1.0
         let err = abs(last.y[0] - 1.0);
         err < 0.001
@@ -198,7 +198,7 @@ fn test_rk45_stiff_like_ode() {
         &["core/ode.shape"],
         r#"
         let res = rk45(|t, y| -50.0 * y, 1.0, 0.0, 0.1);
-        let last = res[len(res) - 1];
+        let last = res[res.len() - 1];
         // y(0.1) = e^(-5) ≈ 0.006738
         let err = abs(last.y - 0.006737946999085467);
         err < 0.001
@@ -215,7 +215,7 @@ fn test_rk45_scalar_reaches_endpoint() {
         &["core/ode.shape"],
         r#"
         let res = rk45(|t, y| 1.0, 0.0, 0.0, 2.0);
-        let last = res[len(res) - 1];
+        let last = res[res.len() - 1];
         // dy/dt = 1, y(0) = 0 => y(2) = 2.0
         abs(last.y - 2.0) < 0.001 && abs(last.t - 2.0) < 0.001
         "#,
@@ -238,7 +238,7 @@ fn test_monte_carlo_antithetic() {
             if is_anti { 1.0 - u } else { u }
         });
         // Should have 100 averaged results (from 200 total sims)
-        result.simulations == 200 && len(result.results) == 100
+        result.simulations == 200 && result.results.len() == 100
         "#,
     );
     assert!(eval_to_bool(&code));
@@ -288,7 +288,7 @@ fn test_monte_carlo_control_variate() {
             { value: u * u, control: u }
         }, 0.5);
         // Should have results and variance_reduction metric
-        len(result.results) == 500 && result.variance_reduction >= 0.0
+        result.results.len() == 500 && result.variance_reduction >= 0.0
         "#,
     );
     assert!(eval_to_bool(&code));
@@ -304,7 +304,7 @@ fn test_monte_carlo_stratified() {
         random_seed(42);
         let result = monte_carlo_stratified(100, |i, u| u * u);
         // Should return 100 results, all between 0 and 1
-        let mut ok = len(result.results) == 100;
+        let mut ok = result.results.len() == 100;
         for r in result.results {
             if r < 0.0 || r > 1.0 {
                 ok = false;
@@ -451,7 +451,7 @@ fn test_find_collisions_brute() {
         ];
         let pairs = find_collisions_brute(boxes);
         // (0,1) overlap, (2,3) overlap, total 2 pairs
-        len(pairs) == 2
+        pairs.len() == 2
         "#,
     );
     assert!(eval_to_bool(&code));
@@ -472,7 +472,7 @@ fn test_find_collisions_sweep() {
         ];
         let pairs = find_collisions_sweep(boxes);
         // Same result as brute force: 2 pairs
-        len(pairs) == 2
+        pairs.len() == 2
         "#,
     );
     assert!(eval_to_bool(&code));

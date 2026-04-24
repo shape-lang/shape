@@ -382,7 +382,7 @@ pub fn backtest_correlated(series_map, strategy, config = None) {
     };
 
     let asset_keys = keys(series_map);
-    let default_asset = if len(asset_keys) > 0 { asset_keys[0] } else { None };
+    let default_asset = if asset_keys.len() > 0 { asset_keys[0] } else { None };
 
     simulate_correlated(
         series_map,

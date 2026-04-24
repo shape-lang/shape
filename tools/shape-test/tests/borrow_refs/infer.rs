@@ -213,7 +213,7 @@ fn infer_array_mutation_visible_to_caller() {
         r#"
         fn fill(arr, val) {
             let mut i = 0
-            while i < len(arr) {
+            while i < arr.len() {
                 arr[i] = val
                 i = i + 1
             }

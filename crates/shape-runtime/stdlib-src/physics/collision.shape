@@ -155,7 +155,7 @@ pub fn aabb_separation(a, b) {
 /// @returns array of { i, j } index pairs where boxes[i] overlaps boxes[j]
 pub fn find_collisions_brute(boxes) {
     let mut pairs = [];
-    let n = len(boxes);
+    let n = boxes.len();
 
     for i in range(0, n) {
         let box_i = boxes[i];
@@ -178,7 +178,7 @@ pub fn find_collisions_brute(boxes) {
 /// @param boxes - array of AABB objects
 /// @returns array of { i, j } index pairs of overlapping boxes
 pub fn find_collisions_sweep(boxes) {
-    let n = len(boxes);
+    let n = boxes.len();
 
     // Build index array sorted by min_x
     let mut indices = [];

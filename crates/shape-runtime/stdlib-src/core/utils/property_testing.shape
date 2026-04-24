@@ -55,7 +55,7 @@ pub fn run_properties(tests) {
     {
         passed: passed_count,
         failed: failed_count,
-        total: len(tests),
+        total: tests.len(),
         results: results
     }
 }
@@ -106,7 +106,7 @@ pub fn gen_array(max_len, elem_gen) {
 /// Generate a value picked uniformly from a list of choices
 pub fn gen_one_of(choices) {
     || {
-        let idx = __intrinsic_random_int(0, len(choices) - 1);
+        let idx = __intrinsic_random_int(0, choices.len() - 1);
         choices[idx]
     }
 }

@@ -31,7 +31,7 @@ fn test_complex_array_mutation_through_ref_caller_sees_changes() {
         r#"
         fn double_all(&arr) {
             let mut i = 0
-            while i < len(arr) {
+            while i < arr.len() {
                 arr[i] = arr[i] * 2
                 i = i + 1
             }
@@ -329,7 +329,7 @@ fn test_complex_bubble_sort_via_refs() {
             arr[j] = tmp
         }
         let arr = [5, 3, 1, 4, 2]
-        let n = len(arr)
+        let n = arr.len()
         let mut i = 0
         while i < n {
             let mut j = 0

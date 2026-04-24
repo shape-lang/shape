@@ -120,7 +120,7 @@ pub fn monte_carlo_control_variate(
     }
 
     // Compute optimal coefficient c = Cov(X,Y) / Var(Y)
-    let n = len(values);
+    let n = values.len();
     let mean_x = __intrinsic_mean(values);
     let mean_y = __intrinsic_mean(controls);
 
@@ -201,7 +201,7 @@ pub fn monte_carlo_stratified(
 
 /// Compute summary statistics for Monte Carlo results
 pub fn monte_carlo_stats(results) {
-    let n = len(results);
+    let n = results.len();
     if n == 0 {
         return {
             count: 0,

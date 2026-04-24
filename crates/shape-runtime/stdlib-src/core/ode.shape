@@ -5,7 +5,7 @@
 
 function vec_add(a, b) {
     let mut out = [];
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         out.push(a[i] + b[i]);
     }
     out
@@ -13,7 +13,7 @@ function vec_add(a, b) {
 
 function vec_scale(a, s) {
     let mut out = [];
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         out.push(a[i] * s);
     }
     out
@@ -105,7 +105,7 @@ pub fn rk4_system(f, y0_vec, t_start, t_end, dt) {
 
 function vec_sub(a, b) {
     let mut out = [];
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         out.push(a[i] - b[i]);
     }
     out
@@ -113,7 +113,7 @@ function vec_sub(a, b) {
 
 function vec_norm(a) {
     let mut s = 0.0;
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         s = s + a[i] * a[i];
     }
     sqrt(s)

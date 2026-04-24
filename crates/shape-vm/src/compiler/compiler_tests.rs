@@ -2639,7 +2639,7 @@ fn test_push_inplace_top_level() {
         out.push(1);
         out.push(2);
         out.push(3);
-        len(out)
+        out.len()
         "#,
     );
     assert_eq!(result.to_number().unwrap(), 3.0);
@@ -2677,7 +2677,7 @@ fn test_push_inplace_in_while_loop() {
                 out.push(i);
                 i = i + 1;
             }
-            return len(out);
+            return out.len();
         }
         "#,
         "build",
@@ -2695,7 +2695,7 @@ fn test_push_inplace_in_for_loop() {
             for x in [10, 20, 30] {
                 out.push(x);
             }
-            return len(out);
+            return out.len();
         }
         "#,
         "build",
@@ -2715,7 +2715,7 @@ fn test_push_inplace_nested_loop() {
                     out.push(i + j);
                 }
             }
-            return len(out);
+            return out.len();
         }
         "#,
         "build",

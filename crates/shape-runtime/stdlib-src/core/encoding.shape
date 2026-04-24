@@ -15,7 +15,7 @@
 /// @returns URL-encoded string
 pub fn url_encode(s: string) {
     var result = "";
-    for i in range(0, len(s)) {
+    for i in range(0, s.len()) {
         let ch = s[i];
         if is_url_unreserved(ch) {
             result = result + ch;
@@ -36,7 +36,7 @@ pub fn url_encode(s: string) {
 pub fn url_decode(s: string) {
     var result = "";
     var i = 0;
-    let n = len(s);
+    let n = s.len();
     while i < n {
         let ch = s[i];
         if ch == "%" && i + 2 < n {

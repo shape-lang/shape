@@ -146,7 +146,7 @@ fn test_msgpack_encode_decode_basic() {
         use std::core::msgpack
         let encoded = msgpack::encode("test")
         match encoded {
-            Ok(data) => len(data) > 0,
+            Ok(data) => data.len() > 0,
             Err(_) => false,
         }
     "#

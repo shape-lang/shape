@@ -5,7 +5,7 @@
 
 function vec_add(a, b) {
     let mut out = [];
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         out.push(a[i] + b[i]);
     }
     out
@@ -13,7 +13,7 @@ function vec_add(a, b) {
 
 function vec_scale(a, s) {
     let mut out = [];
-    for i in range(0, len(a)) {
+    for i in range(0, a.len()) {
         out.push(a[i] * s);
     }
     out
@@ -62,7 +62,7 @@ pub fn spring_mass_step(state, k, m, dt, damping = 0.0) {
 /// @param dt - time step
 /// @param G - gravitational constant
 pub fn n_body_step(particles, dt, G = 1.0) {
-    let n = len(particles);
+    let n = particles.len();
     let mut acc = [];
 
     for i in range(0, n) {

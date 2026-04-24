@@ -306,14 +306,14 @@ print(c)"#;
 #[test]
 fn array_len_function() {
     let code = r#"let nums = [1, 2, 3, 4, 5]
-print(len(nums))"#;
+print(nums.len())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("5");
 }
 
 #[test]
 fn empty_array_len() {
     let code = r#"let a = []
-print(len(a))"#;
+print(a.len())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("0");
 }
 
@@ -408,7 +408,7 @@ fn array_of_objects_with_filter() {
   { name: "Charlie", score: 95 }
 ]
 let top = users.filter(|u| u.score > 85)
-print(len(top))"#;
+print(top.len())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("2");
 }
 
