@@ -427,8 +427,19 @@ pub fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
 
 /// Extract a Vec<f64> from a ValueWord array argument.
 ///
-/// Supports typed arrays (IntArray, FloatArray) with zero-copy fast paths.
+/// Supports typed arrays (IntArray, FloatArray) with zero-copy fast paths,
+/// plus the v2 raw-ptr `TypedArray<T>` representation (produced by the
+/// `NewTypedArrayF64/I64` opcodes — stored as `NativeScalar::Ptr`).
 pub fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
+    // v2 raw-pointer fast path: `TypedArray<f64>` or `TypedArray<i64>` held as
+    // `NativeScalar::Ptr`. The `Mat<number> * Vec<number>` lowering passes its
+    // `Vec<number>` argument in this form.
+    if let Some(shape_value::heap_value::NativeScalar::Ptr(p)) = nb.as_native_scalar() {
+        if let Some(result) = extract_f64_from_v2_typed_array_ptr(p) {
+            return Ok(result);
+        }
+    }
+
     let view = nb.as_any_array().ok_or_else(|| ShapeError::RuntimeError {
         message: format!("{} must be an array", label),
         location: None,
@@ -449,6 +460,51 @@ pub fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
                 })
         })
         .collect()
+}
+
+/// Read a v2 `TypedArray<f64>` or `TypedArray<i64>` via its raw pointer and
+/// materialize its contents as `Vec<f64>`. Returns `None` for any other heap
+/// kind (caller falls through to the legacy `ArrayView` path).
+///
+/// The element type is decoded from the stamped `_pad` byte at offset 7 of
+/// the `HeapHeader` (see `v2_array_detect::stamp_elem_type`).
+fn extract_f64_from_v2_typed_array_ptr(p: usize) -> Option<Vec<f64>> {
+    use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
+    use shape_value::v2::typed_array::TypedArray;
+
+    // Element-type discriminants kept in sync with
+    // `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs`.
+    const ELEM_TYPE_F64: u8 = 1;
+    const ELEM_TYPE_I64: u8 = 2;
+    const ELEM_TYPE_I32: u8 = 3;
+
+    if p == 0 {
+        return None;
+    }
+    // Verify the object kind via the HeapHeader at offset 0.
+    let header = unsafe { &*(p as *const HeapHeader) };
+    if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
+        return None;
+    }
+    let elem_byte = unsafe { *(p as *const u8).add(7) };
+    match elem_byte {
+        ELEM_TYPE_F64 => {
+            let arr = p as *const TypedArray<f64>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            Some(slice.to_vec())
+        }
+        ELEM_TYPE_I64 => {
+            let arr = p as *const TypedArray<i64>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            Some(slice.iter().map(|&v| v as f64).collect())
+        }
+        ELEM_TYPE_I32 => {
+            let arr = p as *const TypedArray<i32>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            Some(slice.iter().map(|&v| v as f64).collect())
+        }
+        _ => None,
+    }
 }
 
 /// Extract a string reference from a ValueWord argument.
