@@ -396,14 +396,28 @@ mod tests {
 
     #[test]
     fn test_free_funcs_degrade_without_scope() {
-        // Without an active scope the free functions return None / empty,
-        // matching the previous lock-poisoning fallback. This keeps tests
-        // that indirectly construct HashMapData outside a VM scope
-        // (e.g. unit tests for JSON/YAML/CSV decoders) alive.
-        assert!(shape_for_hashmap_keys(&[1, 2]).is_none());
-        assert!(shape_transition(ShapeId(0), 42).is_none());
-        assert!(shape_property_index(ShapeId(0), 42).is_none());
-        assert!(drain_shape_transitions().is_empty());
+        // Post-B5-followup (1e5a924), scopeless callers no longer get
+        // `None` from the free functions — `try_current_shape_table`
+        // falls back to the process-wide `DEFAULT_SHAPE_TABLE`. That
+        // preserves pre-B5 shape-tracking semantics for stdlib / unit-
+        // test callers that poke `HashMapData::compute_shape` without a
+        // VM execution scope (e.g. JSON/YAML/CSV decoders).
+        //
+        // The fallback handle is shared process-wide, so we cannot assert
+        // specific shape IDs without racing other tests; instead we just
+        // check that the calls succeed and return sensible values under
+        // the process-default handle.
+        assert!(shape_for_hashmap_keys(&[1, 2]).is_some());
+        let root = ShapeTransitionTable::root();
+        assert!(shape_transition(root, 42).is_some());
+        // The root shape is always present and empty; looking up a
+        // hash that was never registered under root returns None
+        // independently of whatever other tests have populated the
+        // default table.
+        assert_eq!(shape_property_index(root, u32::MAX), None);
+        // `drain_shape_transitions` returns whatever has accumulated in
+        // the default handle; just exercise the call path.
+        let _ = drain_shape_transitions();
     }
 
     /// Regression test for the B5 cross-table stale-ShapeId bug: a
