@@ -138,6 +138,16 @@ impl VirtualMachine {
         if let Some(s) = args[0].as_str() {
             return Ok(ValueWord::from_i64(s.len() as i64));
         }
+        // v2 raw-pointer fast path: `TypedArray<T>` held as `NativeScalar::Ptr`
+        // (produced by `NewTypedArrayI64`/`NewTypedArrayF64` etc.). Decode the
+        // length via the `HeapHeader` at offset 0. See
+        // `crates/shape-runtime/src/intrinsics/mod.rs` for the sibling pattern
+        // in `extract_f64_from_v2_typed_array_ptr`.
+        if let Some(shape_value::heap_value::NativeScalar::Ptr(p)) = args[0].as_native_scalar() {
+            if let Some(len) = v2_typed_array_len_from_ptr(p) {
+                return Ok(ValueWord::from_i64(len as i64));
+            }
+        }
         // TypedObject: return number of slots
         // cold-path: as_heap_ref retained — TypedObject slot count for len()
         if let Some(HeapValue::TypedObject { slots, .. }) = args[0].as_heap_ref() { // cold-path
@@ -147,5 +157,45 @@ impl VirtualMachine {
             "len() argument must be an array, string, or object, got {:?}",
             args[0].type_name()
         )))
+    }
+}
+
+/// Decode the length of a v2 heap object held as a raw pointer.
+///
+/// Returns `Some(len)` for `TypedArray<T>` (kind=80), `StringObj` (kind=81),
+/// and `TypedMap<K, V>` (kind=82). Returns `None` for any other heap kind.
+///
+/// The element-length field is decoded directly from the known `#[repr(C)]`
+/// layout — same convention used by `extract_f64_from_v2_typed_array_ptr` in
+/// `shape-runtime/src/intrinsics/mod.rs`.
+fn v2_typed_array_len_from_ptr(p: usize) -> Option<usize> {
+    use shape_value::v2::heap_header::{
+        HeapHeader, HEAP_KIND_V2_STRING, HEAP_KIND_V2_TYPED_ARRAY, HEAP_KIND_V2_TYPED_MAP,
+    };
+
+    if p == 0 {
+        return None;
+    }
+    // Verify the object kind via the HeapHeader at offset 0.
+    // SAFETY: caller supplies a ValueWord-encoded raw heap pointer (held as
+    // NativeScalar::Ptr); v2 objects always start with a HeapHeader.
+    let header = unsafe { &*(p as *const HeapHeader) };
+    match header.kind {
+        // TypedArray<T>: `len: u32` at offset 16 (after 8-byte header + 8-byte data ptr).
+        HEAP_KIND_V2_TYPED_ARRAY => {
+            let len = unsafe { *((p + 16) as *const u32) };
+            Some(len as usize)
+        }
+        // StringObj: `len: u32` at offset 16 (after 8-byte header + 8-byte data ptr).
+        HEAP_KIND_V2_STRING => {
+            let len = unsafe { *((p + 16) as *const u32) };
+            Some(len as usize)
+        }
+        // TypedMap<K, V>: `len: u32` at offset 20 (header + buckets + bucket_count + len).
+        HEAP_KIND_V2_TYPED_MAP => {
+            let len = unsafe { *((p + 20) as *const u32) };
+            Some(len as usize)
+        }
+        _ => None,
     }
 }
