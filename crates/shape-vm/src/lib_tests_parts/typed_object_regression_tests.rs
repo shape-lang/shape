@@ -6,6 +6,18 @@ mod typed_object_regression_tests {
 
     /// Helper that compiles and executes a Shape snippet through the VM.
     fn eval(code: &str) -> ValueWord {
+        // Per-test TypeSchemaRegistry scope; see module_qualified_type_tests
+        // for the rationale. Without this, concurrent compiles of enum
+        // payload types with overlapping field layouts can observe each
+        // other's SchemaIds via FALLBACK_PREDECLARED_REGISTRY, causing
+        // GetFieldTyped to read stale slots and the EqInt slow path to
+        // call as_i64_unchecked on a TAG_NONE ValueWord.
+        let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(
+            std::sync::Arc::new(
+                shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib(),
+            ),
+        );
+
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let compiler = BytecodeCompiler::new();
 

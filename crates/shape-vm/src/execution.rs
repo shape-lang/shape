@@ -639,6 +639,16 @@ impl ProgramExecutor for BytecodeExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        // Install this engine's per-runtime TypeSchemaRegistry as the
+        // ambient handle for compile + execution. Without a scope,
+        // compile-time predeclared-schema registration falls back to
+        // the process-global FALLBACK_PREDECLARED_REGISTRY, and under
+        // parallel test execution concurrent compiles observe each
+        // other's SchemaIds via that shared cache — producing ID drift
+        // that the VM observes as GetFieldTyped mismatches or stale
+        // slot reads.
+        let _schema_scope = engine.runtime.enter_schema_scope();
+
         // Capture source text before getting runtime reference (for error messages)
         let source_for_compilation = engine.current_source().map(|s| s.to_string());
 

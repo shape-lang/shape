@@ -5,6 +5,19 @@ mod module_qualified_type_tests {
     use shape_value::{ValueWord, ValueWordExt};
 
     fn eval(code: &str) -> ValueWord {
+        // Install a per-test TypeSchemaRegistry scope so compile-time
+        // predeclared-schema registration and VM-side schema lookups
+        // consult a fresh registry instead of the process-global
+        // FALLBACK_PREDECLARED_REGISTRY. Under parallel test execution
+        // the fallback otherwise returns another test's SchemaId for
+        // TypedObjects with overlapping field layouts, producing the
+        // schema-ID drift observed in these tests.
+        let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(
+            std::sync::Arc::new(
+                shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib(),
+            ),
+        );
+
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let compiler = BytecodeCompiler::new();
         let bytecode = compiler.compile(&program).expect("compile failed");
