@@ -10,19 +10,15 @@ use arrow_schema::{DataType, Schema as ArrowSchema};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// Allocate a fresh schema ID from the current ambient registry, falling
-/// back to the legacy global counter if no scope is active.
+/// Allocate a fresh schema ID from the current ambient registry.
 ///
-/// The fallback keeps the B1 migration window bisect-clean: code paths
-/// that construct schemas outside any `Runtime::enter_schema_scope` (e.g.
-/// static initialisers, ad-hoc tooling) still get a monotonically unique
-/// ID. The legacy counter disappears in B1.7.
+/// Since B1.7 the registry is always available (scopeless callers share
+/// a process-wide default), so this helper simply delegates to
+/// [`super::current_registry`] — the previous legacy-counter fallback
+/// has been retired.
 #[inline]
 fn allocate_current_id() -> SchemaId {
-    match super::try_current_registry() {
-        Some(reg) => reg.allocate_id(),
-        None => super::next_schema_id(),
-    }
+    super::current_registry().allocate_id()
 }
 
 /// Schema describing the memory layout of a declared type

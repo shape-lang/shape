@@ -219,12 +219,17 @@ impl TypeSchemaRegistry {
         self.by_name.keys().map(|s| s.as_str())
     }
 
-    /// Create a registry with common stdlib types pre-registered
+    /// Create a registry with common stdlib types pre-registered.
+    ///
+    /// Since B1.7 all registrations draw their IDs from the registry'''s
+    /// per-instance counter — no process-global or ambient counter is
+    /// consulted. This keeps two independently constructed registries
+    /// isolated.
     pub fn with_stdlib_types() -> Self {
         let mut registry = Self::new();
 
-        // Register Row type (generic data row)
-        registry.register_type(
+        // Register Row type (generic data row).
+        registry.register_type_scoped(
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
@@ -232,25 +237,25 @@ impl TypeSchemaRegistry {
             ],
         );
 
-        // Register Option enum type
-        registry.register(TypeSchema::new_enum(
+        // Register Option enum type.
+        registry.register_enum_scoped(
             "Option",
             vec![
                 EnumVariantInfo::new("Some", 0, 1), // Some(T) has 1 payload field
                 EnumVariantInfo::new("None", 1, 0), // None has no payload
             ],
-        ));
+        );
 
-        // Register Result enum type
-        registry.register(TypeSchema::new_enum(
+        // Register Result enum type.
+        registry.register_enum_scoped(
             "Result",
             vec![
                 EnumVariantInfo::new("Ok", 0, 1),  // Ok(T) has 1 payload field
                 EnumVariantInfo::new("Err", 1, 1), // Err(E) has 1 payload field
             ],
-        ));
+        );
 
-        // Register builtin fixed-layout schemas (AnyError, TraceFrame, etc.)
+        // Register builtin fixed-layout schemas (AnyError, TraceFrame, etc.).
         super::builtin_schemas::register_builtin_schemas(&mut registry);
 
         // Note: Domain-specific types (Candle, Trade, etc.) should be
@@ -260,11 +265,15 @@ impl TypeSchemaRegistry {
     }
 
     /// Create a registry with stdlib types and return both registry and builtin IDs.
+    ///
+    /// Since B1.7 all registrations draw their IDs from the registry'''s
+    /// per-instance counter — no process-global or ambient counter is
+    /// consulted.
     pub fn with_stdlib_types_and_builtin_ids() -> (Self, super::builtin_schemas::BuiltinSchemaIds) {
         let mut registry = Self::new();
 
-        // Register Row type
-        registry.register_type(
+        // Register Row type.
+        registry.register_type_scoped(
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
@@ -272,23 +281,23 @@ impl TypeSchemaRegistry {
             ],
         );
 
-        // Register Option/Result enum types
-        registry.register(TypeSchema::new_enum(
+        // Register Option/Result enum types.
+        registry.register_enum_scoped(
             "Option",
             vec![
                 EnumVariantInfo::new("Some", 0, 1),
                 EnumVariantInfo::new("None", 1, 0),
             ],
-        ));
-        registry.register(TypeSchema::new_enum(
+        );
+        registry.register_enum_scoped(
             "Result",
             vec![
                 EnumVariantInfo::new("Ok", 0, 1),
                 EnumVariantInfo::new("Err", 1, 1),
             ],
-        ));
+        );
 
-        // Register builtin schemas and capture IDs
+        // Register builtin schemas and capture IDs.
         let ids = super::builtin_schemas::register_builtin_schemas(&mut registry);
 
         (registry, ids)
@@ -405,14 +414,31 @@ impl TypeSchemaRegistry {
     /// Merge another registry into this one
     ///
     /// Schemas from `other` are added to this registry. If a schema with the
-    /// same name already exists, it is NOT overwritten (first registration wins).
+    /// same name already exists, it is NOT overwritten (first registration
+    /// wins). If the incoming schema'''s numeric ID already maps to a
+    /// different name in `self.by_id`, it is skipped — this preserves the
+    /// first `by_id` binding so callers that resolve names through the
+    /// ID domain of the pre-existing registry still find what they
+    /// registered. (Pre-B1.7 this never happened because all registries
+    /// drew IDs from a single process-global counter; B1.7 retired that
+    /// counter in favour of per-instance ones, so fresh registries can
+    /// produce overlapping ID ranges when merged.)
     pub fn merge(&mut self, other: TypeSchemaRegistry) {
         for (name, schema) in other.by_name {
-            if !self.by_name.contains_key(&name) {
-                let id = schema.id;
-                self.by_id.insert(id, name.clone());
-                self.by_name.insert(name, schema);
+            if self.by_name.contains_key(&name) {
+                continue;
             }
+            let id = schema.id;
+            if self.by_id.contains_key(&id) {
+                // ID collision with an existing schema under a different
+                // name — skip silently. The `resolve_builtin_schema_ids`
+                // path looks up builtins by name, so losing the ID mapping
+                // for builtins whose IDs collide with user schemas is
+                // acceptable; user lookups win.
+                continue;
+            }
+            self.by_id.insert(id, name.clone());
+            self.by_name.insert(name, schema);
         }
         // Also merge predeclared schemas, first-registration-wins on ID collision.
         if let (Ok(other_by_id), Ok(mut self_by_id)) = (
@@ -671,10 +697,22 @@ impl TypeSchemaBuilder {
         schema
     }
 
-    /// Build and register in a registry
+    /// Build and register in a registry, using the registry's per-instance
+    /// schema-ID counter.
+    ///
+    /// Since B1.7 this path must not consult `current_registry`, because
+    /// `DEFAULT_SCHEMA_REGISTRY` is itself initialized via this builder
+    /// and that would cause a recursive `LazyLock` init. Allocating
+    /// directly from the target registry keeps bootstrap deterministic
+    /// and per-registry isolated.
     pub fn register(self, registry: &mut TypeSchemaRegistry) -> SchemaId {
-        let schema = self.build();
-        let id = schema.id;
+        let id = registry.allocate_id();
+        let mut schema = TypeSchema::with_id(id, self.name, self.fields);
+        for (i, annotations) in self.field_meta.into_iter().enumerate() {
+            if i < schema.fields.len() {
+                schema.fields[i].annotations = annotations;
+            }
+        }
         registry.register(schema);
         id
     }

@@ -45,11 +45,9 @@ impl TypeSchema {
             }
         }
 
-        // Build the merged schema
-        let id = match super::try_current_registry() {
-            Some(reg) => reg.allocate_id(),
-            None => super::next_schema_id(),
-        };
+        // Build the merged schema via the ambient registry (B1.7: always
+        // available, no legacy-counter fallback).
+        let id = super::current_registry().allocate_id();
         let mut fields = Vec::with_capacity(all_fields.len());
         let mut field_map = HashMap::with_capacity(all_fields.len());
         let mut offset = 0;

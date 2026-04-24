@@ -173,9 +173,9 @@ pub struct Runtime {
     module_binding_registry: Arc<RwLock<module_bindings::ModuleBindingRegistry>>,
     /// Per-runtime type schema registry.
     ///
-    /// Target state for Track B1: owns its own schema-ID counter + stdlib
-    /// schemas and replaces the process-global `STDLIB_SCHEMA_REGISTRY` +
-    /// `NEXT_SCHEMA_ID` statics. Stored as `Arc<_>` so execution entry
+    /// Owns its own schema-ID counter + stdlib schemas; replaces the
+    /// process-global `STDLIB_SCHEMA_REGISTRY` + `NEXT_SCHEMA_ID` statics
+    /// that were retired in B1.7. Stored as `Arc<_>` so execution entry
     /// points can cheaply install it as the task-local / thread-local
     /// ambient registry ([`type_schema::current`]); mutations through
     /// [`Runtime::schema_registry_mut`] use `Arc::make_mut` (copy-on-write
