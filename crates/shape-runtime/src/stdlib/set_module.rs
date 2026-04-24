@@ -13,6 +13,76 @@ fn empty_set() -> ValueWord {
     ValueWord::from_hashmap_pairs(Vec::new(), Vec::new())
 }
 
+/// Materialize an array argument as `Vec<ValueWord>`, handling both the legacy
+/// `HeapValue::Array` / `HeapValue::TypedArray` representations reachable via
+/// `as_any_array()` and the v2 raw-ptr `TypedArray<T>` representation held as
+/// `NativeScalar::Ptr` (produced by the `NewTypedArrayF64/I64/I32/Bool`
+/// opcodes the compiler emits for typed array literals like `[1, 2, 3]`).
+///
+/// Returns `None` if `arg` is not any recognized array representation.
+fn materialize_array_items(arg: &ValueWord) -> Option<Vec<ValueWord>> {
+    if let Some(view) = arg.as_any_array() {
+        return Some(view.to_generic().iter().copied().collect());
+    }
+    // v2 raw-pointer fallback: typed array literals compile to a
+    // `TypedArray<T>` pointer held as `NativeScalar::Ptr`. Decode the element
+    // type from the stamped byte at `HeapHeader` offset 7 and materialize its
+    // contents as `ValueWord`s.
+    if let Some(shape_value::heap_value::NativeScalar::Ptr(p)) = arg.as_native_scalar() {
+        return v2_typed_array_ptr_to_items(p);
+    }
+    None
+}
+
+/// Read a v2 `TypedArray<T>` via its raw pointer and materialize its contents
+/// as `Vec<ValueWord>`. Returns `None` for any other heap kind.
+///
+/// Element-type discriminants mirror
+/// `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs`.
+fn v2_typed_array_ptr_to_items(p: usize) -> Option<Vec<ValueWord>> {
+    use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
+    use shape_value::v2::typed_array::TypedArray;
+
+    const ELEM_TYPE_F64: u8 = 1;
+    const ELEM_TYPE_I64: u8 = 2;
+    const ELEM_TYPE_I32: u8 = 3;
+    const ELEM_TYPE_BOOL: u8 = 4;
+
+    if p == 0 {
+        return None;
+    }
+    // Verify the object kind via the HeapHeader at offset 0.
+    let header = unsafe { &*(p as *const HeapHeader) };
+    if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
+        return None;
+    }
+    let elem_byte = unsafe { *(p as *const u8).add(7) };
+    let items: Vec<ValueWord> = match elem_byte {
+        ELEM_TYPE_F64 => {
+            let arr = p as *const TypedArray<f64>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            slice.iter().map(|&v| ValueWord::from_f64(v)).collect()
+        }
+        ELEM_TYPE_I64 => {
+            let arr = p as *const TypedArray<i64>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            slice.iter().map(|&v| ValueWord::from_i64(v)).collect()
+        }
+        ELEM_TYPE_I32 => {
+            let arr = p as *const TypedArray<i32>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            slice.iter().map(|&v| ValueWord::from_i64(v as i64)).collect()
+        }
+        ELEM_TYPE_BOOL => {
+            let arr = p as *const TypedArray<u8>;
+            let slice = unsafe { TypedArray::as_slice(arr) };
+            slice.iter().map(|&v| ValueWord::from_bool(v != 0)).collect()
+        }
+        _ => return None,
+    };
+    Some(items)
+}
+
 /// Insert a key into a set (HashMap where all values are `true`).
 /// Returns a new set with the key added.
 fn set_insert(set: &ValueWord, item: &ValueWord) -> Result<ValueWord, String> {
@@ -52,12 +122,11 @@ pub fn create_set_module() -> ModuleExports {
     module.add_function_with_schema(
         "from_array",
         |args: &[ValueWord], _ctx: &ModuleContext| {
-            let arr = args
+            let items = args
                 .first()
-                .and_then(|a| a.as_any_array())
+                .and_then(materialize_array_items)
                 .ok_or_else(|| "set.from_array() requires an array argument".to_string())?;
 
-            let items = arr.to_generic();
             let mut result = empty_set();
             for item in items.iter() {
                 result = set_insert(&result, item)?;
