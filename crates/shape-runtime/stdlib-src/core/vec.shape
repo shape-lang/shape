@@ -4,15 +4,20 @@
 /// Type-agnostic methods are defined via `extend Vec<T>`.
 /// Numeric-only methods are defined via `trait NumericVec` + `impl NumericVec for Vec`.
 /// Most methods have pure Shape implementations. Methods that need VM intrinsics
-/// (len, pop, sort, groupBy) delegate to Rust PHF dispatch; the compiler self-call
-/// guard prevents infinite recursion.
+/// (pop, sort, groupBy) delegate to Rust PHF dispatch; the compiler self-call
+/// guard prevents infinite recursion. Note: `len`/`isEmpty` are intentionally
+/// NOT defined here — they would intercept dispatch and recurse on Vec<T>.
 
 // -- Type-agnostic methods --------------------------------------------------
 
 extend Vec<T> {
-    // --- These delegate to VM builtins (need VM intrinsics) ---
-    method len() -> int { self.len() }
-    method isEmpty() -> bool { self.len() == 0 }
+    // NOTE: `len()` and `isEmpty()` are intentionally NOT defined here.
+    // `arr.len()` dispatches directly to the PHF handler (ARRAY_METHODS::handle_len_v2
+    // for Arc arrays; TYPED_INT_ARRAY_METHODS::len / TYPED_NUMBER_ARRAY_METHODS::len
+    // for v2 raw-ptr arrays via as_v2_typed_array). Defining `method len() -> int
+    // { self.len() }` here causes the extend-method to intercept dispatch and
+    // recurse infinitely (or, post self-call guard, produce garbage).
+    // Callers needing `isEmpty()` can write `arr.len() == 0` directly.
 
     // --- Pure Shape implementations ---
     method first() -> T { self[0] }
