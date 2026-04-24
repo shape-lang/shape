@@ -376,6 +376,16 @@ impl BytecodeExecutor {
             }
         }
 
+        // Install this engine's runtime-scoped TypeSchemaRegistry as the
+        // ambient handle for the duration of compilation. Compile-time
+        // paths that consult `current_registry()` — predeclared schema
+        // registration, comptime-synthesized TypedObject layouts,
+        // extension module schema merge — otherwise fall back to the
+        // process-global `FALLBACK_PREDECLARED_REGISTRY`, which under
+        // parallel test execution causes schema-ID drift between
+        // concurrent compiles.
+        let _schema_scope = engine.runtime.enter_schema_scope();
+
         let runtime = engine.get_runtime_mut();
 
         let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
