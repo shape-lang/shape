@@ -1,9 +1,18 @@
 //! Typed array element access opcodes (local-slot based).
 //!
 //! These opcodes skip the HeapValue enum dispatch when the compiler proves the
-//! element type.  The array lives in a local slot (Operand::Local) as a NaN-boxed
-//! `HeapValue::TypedArray(TypedArrayData::I64|F64|...)`.  The index (and value
-//! for set/push) are on the operand stack.
+//! element type. The array lives in a local slot (Operand::Local) in one of two
+//! representations:
+//!
+//! 1. Legacy heap-boxed `HeapValue::TypedArray(TypedArrayData::I64|F64|...)`
+//!    populated by older `NewArray` + coercion paths.
+//! 2. Raw v2 pointer `HeapValue::NativeScalar(NativeScalar::Ptr(p))` where `p`
+//!    is a `*mut TypedArray<T>` populated by the v2 `NewTypedArrayI64/F64`
+//!    opcodes (see `v2_handlers/array.rs`).
+//!
+//! Both representations are supported transparently — the compiler emits these
+//! opcodes whenever a local is tracked in `v2_typed_array_locals`, and that
+//! map covers both paths.
 //!
 //! ## Opcodes handled here
 //!
@@ -20,8 +29,20 @@
 use std::sync::Arc;
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_value::heap_value::TypedArrayData;
+use shape_value::heap_value::{NativeScalar, TypedArrayData};
+use shape_value::v2::typed_array::TypedArray;
 use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
+
+/// If the ValueWord is a v2 raw `TypedArray<T>` pointer (stored as
+/// `NativeScalar::Ptr`), return the raw pointer. Otherwise return `None`.
+#[inline]
+fn as_v2_typed_array_ptr(vw: &ValueWord) -> Option<usize> {
+    if let Some(NativeScalar::Ptr(p)) = vw.as_native_scalar() {
+        Some(p)
+    } else {
+        None
+    }
+}
 
 use super::super::VirtualMachine;
 
@@ -85,6 +106,19 @@ impl VirtualMachine {
         let index = index as usize;
 
         let result = self.stack_peek_raw(slot, |vw| -> Result<i64, VMError> {
+            // v2 raw-pointer fast path (NewTypedArrayI64 representation).
+            if let Some(p) = as_v2_typed_array_ptr(vw) {
+                let arr = p as *const TypedArray<i64>;
+                let len = unsafe { TypedArray::len(arr) } as usize;
+                if index >= len {
+                    return Err(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len,
+                    });
+                }
+                let val = unsafe { TypedArray::get_unchecked(arr, index as u32) };
+                return Ok(val);
+            }
             if let Some(hv) = vw.as_heap_ref() {
                 match hv {
                     HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
@@ -140,6 +174,19 @@ impl VirtualMachine {
         let index = index as usize;
 
         let result = self.stack_peek_raw(slot, |vw| -> Result<f64, VMError> {
+            // v2 raw-pointer fast path (NewTypedArrayF64 representation).
+            if let Some(p) = as_v2_typed_array_ptr(vw) {
+                let arr = p as *const TypedArray<f64>;
+                let len = unsafe { TypedArray::len(arr) } as usize;
+                if index >= len {
+                    return Err(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len,
+                    });
+                }
+                let val = unsafe { TypedArray::get_unchecked(arr, index as u32) };
+                return Ok(val);
+            }
             if let Some(hv) = vw.as_heap_ref() {
                 match hv {
                     HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
@@ -205,7 +252,20 @@ impl VirtualMachine {
 
         // Take-mutate-write pattern for the local slot.
         let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(hv) = arr_vw.as_heap_mut() {
+        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
+            // v2 raw-pointer fast path.
+            let arr = p as *mut TypedArray<i64>;
+            let len = unsafe { TypedArray::len(arr) } as usize;
+            if index >= len {
+                Err(VMError::IndexOutOfBounds {
+                    index: index as i32,
+                    length: len,
+                })
+            } else {
+                unsafe { TypedArray::set(arr, index as u32, val) };
+                Ok(())
+            }
+        } else if let Some(hv) = arr_vw.as_heap_mut() {
             match hv {
                 HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
                     let buf = Arc::make_mut(buf);
@@ -271,7 +331,20 @@ impl VirtualMachine {
         let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(hv) = arr_vw.as_heap_mut() {
+        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
+            // v2 raw-pointer fast path.
+            let arr = p as *mut TypedArray<f64>;
+            let len = unsafe { TypedArray::len(arr) } as usize;
+            if index >= len {
+                Err(VMError::IndexOutOfBounds {
+                    index: index as i32,
+                    length: len,
+                })
+            } else {
+                unsafe { TypedArray::set(arr, index as u32, val) };
+                Ok(())
+            }
+        } else if let Some(hv) = arr_vw.as_heap_mut() {
             match hv {
                 HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
                     let buf = Arc::make_mut(buf);
@@ -329,7 +402,12 @@ impl VirtualMachine {
         let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(hv) = arr_vw.as_heap_mut() {
+        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
+            // v2 raw-pointer fast path.
+            let arr = p as *mut TypedArray<i64>;
+            unsafe { TypedArray::push(arr, val) };
+            Ok(())
+        } else if let Some(hv) = arr_vw.as_heap_mut() {
             match hv {
                 HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
                     Arc::make_mut(buf).data.push(val);
@@ -371,7 +449,12 @@ impl VirtualMachine {
         let _ = value;
 
         let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(hv) = arr_vw.as_heap_mut() {
+        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
+            // v2 raw-pointer fast path.
+            let arr = p as *mut TypedArray<f64>;
+            unsafe { TypedArray::push(arr, val) };
+            Ok(())
+        } else if let Some(hv) = arr_vw.as_heap_mut() {
             match hv {
                 HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
                     Arc::make_mut(buf).data.push(val);
@@ -404,6 +487,14 @@ impl VirtualMachine {
         let slot = self.resolve_local_slot(instruction)?;
 
         let len = self.stack_peek_raw(slot, |vw| -> Result<usize, VMError> {
+            // v2 raw-pointer fast path. The `len` field sits at a fixed offset
+            // regardless of T — any TypedArray<T> instantiation reads it the
+            // same way, so we safely use `TypedArray<u8>` here.
+            if let Some(p) = as_v2_typed_array_ptr(vw) {
+                let arr = p as *const TypedArray<u8>;
+                let len = unsafe { TypedArray::len(arr) } as usize;
+                return Ok(len);
+            }
             if let Some(hv) = vw.as_heap_ref() {
                 match hv {
                     HeapValue::TypedArray(ta) => Ok(match ta {
