@@ -4,7 +4,7 @@
 //! Uses the thread-local RNG from the random module.
 
 use super::random;
-use super::{extract_f64, extract_str, extract_usize};
+use super::{extract_f64, extract_f64_array, extract_str, extract_usize};
 use crate::context::ExecutionContext;
 use rand::Rng;
 use shape_ast::error::{Result, ShapeError};
@@ -167,13 +167,16 @@ pub fn intrinsic_dist_sample_n(
     }
 
     let dist_name = extract_str(&args[0], "__intrinsic_dist_sample_n: dist_name")?;
-    let params = args[1]
-        .as_any_array()
-        .ok_or_else(|| ShapeError::RuntimeError {
-            message: "__intrinsic_dist_sample_n: params must be an array".to_string(),
-            location: None,
-        })?
-        .to_generic();
+    // Use extract_f64_array — handles both the legacy heap-boxed arrays and
+    // the v2 raw-pointer TypedArray<f64>/TypedArray<i64> representation
+    // emitted by `NewTypedArrayF64`/`NewTypedArrayI64` for literal arrays
+    // like `[0, 1]` or `[0.0, 1.0]`.
+    let params_f64 =
+        extract_f64_array(&args[1], "__intrinsic_dist_sample_n: params")?;
+    let params: Vec<ValueWord> = params_f64
+        .iter()
+        .map(|&v| ValueWord::from_f64(v))
+        .collect();
     let n = extract_usize(&args[2], "__intrinsic_dist_sample_n: n")?;
 
     let mut samples = Vec::with_capacity(n);
