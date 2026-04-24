@@ -13,7 +13,7 @@
 ///
 /// @param s - string to encode
 /// @returns URL-encoded string
-pub fn url_encode(s) {
+pub fn url_encode(s: string) {
     var result = "";
     for i in range(0, len(s)) {
         let ch = s[i];
@@ -33,7 +33,7 @@ pub fn url_encode(s) {
 ///
 /// @param s - URL-encoded string
 /// @returns decoded string
-pub fn url_decode(s) {
+pub fn url_decode(s: string) {
     var result = "";
     var i = 0;
     let n = len(s);

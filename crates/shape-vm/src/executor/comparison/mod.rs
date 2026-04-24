@@ -358,9 +358,22 @@ impl VirtualMachine {
             EqString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
+                // Accept String-vs-String and the Char-vs-String mix that
+                // `s[i] == "x"` produces (string indexing returns `Char`).
                 let eq = match (a.as_str(), b.as_str()) {
                     (Some(a_str), Some(b_str)) => a_str == b_str,
-                    _ => false,
+                    (Some(a_str), None) => b.as_char().is_some_and(|c| {
+                        let mut buf = [0u8; 4];
+                        a_str == c.encode_utf8(&mut buf)
+                    }),
+                    (None, Some(b_str)) => a.as_char().is_some_and(|c| {
+                        let mut buf = [0u8; 4];
+                        c.encode_utf8(&mut buf) == b_str
+                    }),
+                    (None, None) => match (a.as_char(), b.as_char()) {
+                        (Some(ac), Some(bc)) => ac == bc,
+                        _ => false,
+                    },
                 };
                 self.push_raw_bool(eq)?;
             }
