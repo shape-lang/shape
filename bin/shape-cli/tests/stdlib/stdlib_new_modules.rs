@@ -168,7 +168,7 @@ fn regression_match_ok_string_len_no_heap_corruption() {
             r#"
         let encoded: Result<string, string> = Ok("hello")
         match encoded {
-            Ok(data) => len(data),
+            Ok(data) => data.len(),
             Err(_) => 0,
         }
         "#

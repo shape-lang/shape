@@ -987,7 +987,7 @@ mod unwrap_refcount_regression_tests {
             r#"
             let encoded: Result<string, string> = Ok("hello")
             match encoded {
-                Ok(data) => len(data),
+                Ok(data) => data.len(),
                 Err(_) => 0,
             }
             "#,
@@ -1004,7 +1004,7 @@ mod unwrap_refcount_regression_tests {
             let encoded: Result<int, string> = Err("oops!")
             match encoded {
                 Ok(_) => 0,
-                Err(msg) => len(msg),
+                Err(msg) => msg.len(),
             }
             "#,
         );
