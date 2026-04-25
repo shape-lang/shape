@@ -242,21 +242,22 @@ test()"#,
     .expect_number(1.0);
 }
 
-/// Verifies array len builtin.
+/// Verifies array len method (was global `len()`, retired in path-c2).
 #[test]
 fn test_array_len_builtin() {
     ShapeTest::new(
-        r#"function test() { len([1, 2, 3, 4]) }
+        r#"function test() { [1, 2, 3, 4].len() }
 test()"#,
     )
     .expect_number(4.0);
 }
 
-/// Verifies array len empty.
+/// Verifies array len method on an empty array (was global `len()`).
+/// Annotation needed because empty literal has no inferable element type.
 #[test]
 fn test_array_len_empty() {
     ShapeTest::new(
-        r#"function test() { len([]) }
+        r#"function test() { let arr: Array<int> = []; arr.len() }
 test()"#,
     )
     .expect_number(0.0);

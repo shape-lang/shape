@@ -139,7 +139,7 @@ fn test_array_consistency() {
         "let arr = [10, 20, 30]; arr[1]",
         20.0
     ));
-    assert!(check_number("array_length", "len([1, 2, 3, 4, 5])", 5.0));
+    assert!(check_number("array_length", "[1, 2, 3, 4, 5].len()", 5.0));
 }
 
 #[test]
