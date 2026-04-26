@@ -1355,6 +1355,24 @@ impl BytecodeCompiler {
             return;
         };
 
+        // Mirror extension type schemas into the per-bytecode registry,
+        // preserving their pre-allocated IDs. To prevent the synthetic
+        // `__mod_*` schemas (allocated below from the registry's per-instance
+        // counter) from colliding with any extension schema's pre-allocated
+        // ID, bump the per-instance counter past the highest ID observed
+        // across *all* registered extensions. Scoping the bump to a single
+        // module is insufficient because later `register_extension_module_schema`
+        // calls can still introduce extension schemas with IDs <= the counter
+        // we already advanced past.
+        let mut global_max_ext_id: Option<shape_runtime::type_schema::SchemaId> = None;
+        for ext_module in registry.iter() {
+            for schema in &ext_module.type_schemas {
+                global_max_ext_id = Some(match global_max_ext_id {
+                    Some(prev) => prev.max(schema.id),
+                    None => schema.id,
+                });
+            }
+        }
         for schema in &module.type_schemas {
             if self
                 .type_tracker
@@ -1366,6 +1384,11 @@ impl BytecodeCompiler {
                     .schema_registry_mut()
                     .register(schema.clone());
             }
+        }
+        if let Some(max_id) = global_max_ext_id {
+            self.type_tracker
+                .schema_registry()
+                .ensure_next_id_above(max_id);
         }
 
         let schema_name = format!("__mod_{}", module_path);
@@ -1408,9 +1431,18 @@ impl BytecodeCompiler {
             .into_iter()
             .map(|name| (name, FieldType::Any))
             .collect();
+        // Allocate the synthetic `__mod_*` schema ID from the per-bytecode
+        // registry's own counter, not the ambient (process-wide / per-Runtime)
+        // counter that `register_type` consults via `TypeSchema::new`. The
+        // ambient counter is shared with `state_builtins::create_state_module`
+        // and other extension-schema constructors; sharing it here lets a
+        // synthetic `__mod_<name>` schema receive the same ID as a previously
+        // baked extension schema (e.g. `ModuleState`), causing the
+        // per-bytecode `by_id` map to overwrite one with the other and
+        // surfacing as "module 'X' has no export 'Y'" at compile time.
         self.type_tracker
             .schema_registry_mut()
-            .register_type(schema_name, fields);
+            .register_type_scoped(schema_name, fields);
     }
 
     /// Register an enum definition in the TypeSchemaRegistry
