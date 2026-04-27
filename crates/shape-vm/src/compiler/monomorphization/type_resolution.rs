@@ -56,7 +56,7 @@
 //!      a struct into an enum, or add an `is_const: bool` + `const_type:
 //!      Option<TypeAnnotation>` pair. The enum form is cleaner because
 //!      const-kind params have no `trait_bounds` / `default_type` semantics:
-//!      ```rust
+//!      ```text
 //!      pub enum TypeParam {
 //!          Type {
 //!              name: String,

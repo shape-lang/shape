@@ -352,8 +352,9 @@ fn test_union_type_hover() {
 
 #[test]
 fn test_builtin_hover_has_description() {
-    // Hover for core builtins should include signature and description
-    for name in &["abs", "sqrt", "print", "max", "min", "len"] {
+    // Hover for core builtins should include signature and description.
+    // `len` is no longer a global builtin (path-c2 retired it; use `.len()` method form).
+    for name in &["abs", "sqrt", "print", "max", "min"] {
         let hover = get_builtin_function_hover(name);
         assert!(hover.is_some(), "'{}' should have hover info", name);
 
