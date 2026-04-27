@@ -497,11 +497,14 @@ impl BytecodeCompiler {
             }
         }
 
-        let jump_over = self.emit_jump(OpCode::Jump, 0);
+        // Jump-over is now emitted unconditionally inside
+        // `compile_function_body`, which patches its own jump at the end of
+        // the body. Emitting another jump here would double-jump and the
+        // closure's entry_point (post-the-outer-jump) would point at the
+        // inner jump, which then skips the body entirely. Don't.
         let saved_closure_ids = self.closure_function_ids.clone();
         self.compile_function(&closure_def)?;
         self.closure_function_ids = saved_closure_ids;
-        self.patch_jump(jump_over);
 
         // Restore mutable_closure_captures
         self.mutable_closure_captures = saved_mutable_captures;

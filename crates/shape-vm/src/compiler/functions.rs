@@ -983,13 +983,26 @@ impl BytecodeCompiler {
                 location: None,
             })?;
 
-        // If compiling at top-level (not inside another function), emit a jump over the function body
-        // This prevents the VM from falling through into function code during normal execution
-        let jump_over = if self.current_function.is_none() {
-            Some(self.emit_jump(OpCode::Jump, 0))
-        } else {
-            None
-        };
+        // Always emit a jump-over for the function body. This prevents the
+        // VM from falling through into the function body during normal
+        // execution at the call site.
+        //
+        // Two cases motivate this:
+        //   1. Top-level: function defs are sandwiched between top-level
+        //      statements. Without a jump, top-level execution would fall
+        //      through into the body.
+        //   2. Nested: a function compile triggered mid-body of another
+        //      function (closure literal compiled by closures.rs, or a
+        //      generic monomorphization triggered from inside a call-site
+        //      compile_expr) emits its body into the live instruction
+        //      stream. The outer function's `entry_point` was already set
+        //      before the nested compile started, so any inlined body that
+        //      precedes the outer's first emitted instruction would
+        //      OVERLAP the outer's `entry_point`. Emitting a jump-over
+        //      around the nested body keeps the outer's entry_point
+        //      pointing at a Jump that skips the nested body, leaving the
+        //      outer's actual logic intact.
+        let jump_over = Some(self.emit_jump(OpCode::Jump, 0));
 
         // Save current state
         let saved_function = self.current_function;
