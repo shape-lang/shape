@@ -107,6 +107,13 @@ impl JITCompiler {
                     HashMap::new(),
                     closure_function_layouts,
                 );
+                // Bounds-check elision: scan the MIR for trusted index
+                // accesses and install the plan before compile_body. The
+                // analyzer is conservative; an empty plan preserves the
+                // bounds-checked path for every access.
+                let elision_plan =
+                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                mir_compiler.set_bounds_elision_plan(elision_plan);
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();
@@ -225,6 +232,9 @@ impl JITCompiler {
                     user_func_arities.clone(),
                     closure_function_layouts,
                 );
+                let elision_plan =
+                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                mir_compiler.set_bounds_elision_plan(elision_plan);
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();

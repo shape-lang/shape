@@ -1,0 +1,23 @@
+// Benchmark 7b: Dot product over Array<number> — the canonical
+// bounds-check-elision target. Each iteration does two indexed loads
+// `a[i] * b[i]` over arrays of identical length; the bound `n` was set
+// from `a.length` before the loop, so every access is provably in-bounds
+// and bounds checks should be elided in the JIT.
+function dot(n) {
+    var a = []
+    var b = []
+    var i = 0
+    while i < n {
+        a = a.push(i * 1.0)
+        b = b.push((n - i) * 1.0)
+        i = i + 1
+    }
+    var sum = 0.0
+    var k = 0
+    while k < n {
+        sum = sum + a[k] * b[k]
+        k = k + 1
+    }
+    return sum
+}
+print(dot(10000000))

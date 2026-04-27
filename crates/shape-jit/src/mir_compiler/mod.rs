@@ -19,6 +19,7 @@
 //! - **Explicit Drop points**: Scope cleanup from MIR, not heuristic
 
 mod blocks;
+pub mod bounds_elision;
 mod conversions;
 mod ownership;
 mod places;
@@ -312,6 +313,14 @@ pub struct MirToIR<'a, 'b> {
     /// `compile_body` matches the scan order used by
     /// `scan_closure_placeholder_fids`, so this is a stable pairing.
     pub(crate) next_closure_placeholder_idx: std::cell::Cell<usize>,
+    /// Bounds-check elision plan: pairs `(arr_slot, iv_slot)` for which
+    /// `Place::Index(Local(arr), Operand::*(Local(iv)))` accesses can skip
+    /// the inline bounds check. Populated by callers via
+    /// `set_bounds_elision_plan` after running
+    /// `bounds_elision::analyze(mir)`. Empty by default — falls back to
+    /// the bounds-checked path, preserving the v2_array_tests OOB
+    /// zero-default semantics.
+    pub(crate) bounds_elision: bounds_elision::BoundsElisionPlan,
 }
 
 /// Result of MIR preflight check.
@@ -666,7 +675,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             shared_local_slots,
             closure_placeholder_fids,
             next_closure_placeholder_idx: std::cell::Cell::new(0),
+            bounds_elision: bounds_elision::BoundsElisionPlan::default(),
         }
+    }
+
+    /// Install a precomputed bounds-elision plan so `Place::Index` codegen
+    /// can skip the inline bounds check on trusted access pairs.
+    ///
+    /// Callers normally invoke `bounds_elision::analyze(&mir_data.mir)` and
+    /// pass the result here. Leaving the plan empty (the default) is
+    /// always sound — every access falls back to the bounds-checked path,
+    /// matching pre-elision behaviour and preserving the v2_array_tests
+    /// OOB zero-default semantics.
+    pub fn set_bounds_elision_plan(&mut self, plan: bounds_elision::BoundsElisionPlan) {
+        self.bounds_elision = plan;
     }
 
     /// Track A.1D.2: register the leading capture param slots that back

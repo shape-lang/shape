@@ -348,6 +348,61 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
+    /// Bounds-check-elided variant of `inline_array_get`.
+    ///
+    /// Identical to `inline_array_get` except the `brif` and the OOB merge
+    /// block are removed. Caller is responsible for proving the access is
+    /// in-bounds (typically via `bounds_elision::BoundsElisionPlan`).
+    /// Index normalization is also skipped — the caller must guarantee a
+    /// non-negative index. Out-of-bounds reads with this variant are
+    /// memory-unsafe; only emit when the elision plan grants trust.
+    fn inline_array_get_unchecked(&mut self, arr_boxed: Value, index_val: Value) -> Value {
+        let (data_ptr, _length) = self.emit_array_data_and_len(arr_boxed);
+        let idx_i64 = self.index_to_i64(index_val);
+        // No `normalize_index`/`bounds_check` — the elision plan proves
+        // `idx >= 0` and `idx < length`.
+        let byte_offset = self.builder.ins().ishl_imm(idx_i64, 3);
+        let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), elem_addr, 0)
+    }
+
+    /// Bounds-check-elided variant of `inline_array_set`.
+    ///
+    /// Same caveats as `inline_array_get_unchecked`.
+    fn inline_array_set_unchecked(&mut self, arr_boxed: Value, index_val: Value, val: Value) {
+        let (data_ptr, _length) = self.emit_array_data_and_len(arr_boxed);
+        let idx_i64 = self.index_to_i64(index_val);
+        let byte_offset = self.builder.ins().ishl_imm(idx_i64, 3);
+        let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
+        self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
+    }
+
+    /// Resolve a `Place::Index` operand to a `(arr_slot, iv_slot)` pair if
+    /// both sides reduce to MIR locals. Used to consult
+    /// `MirToIR::bounds_elision`.
+    ///
+    /// Returns `None` for nested or non-trivial access shapes
+    /// (e.g. `arr.field[iv]`, `arr[expr+1]`, `arr[constant]`).
+    pub(crate) fn resolve_simple_index_pair(
+        base: &shape_vm::mir::types::Place,
+        index_op: &shape_vm::mir::types::Operand,
+    ) -> Option<(shape_vm::mir::types::SlotId, shape_vm::mir::types::SlotId)> {
+        use shape_vm::mir::types::{Operand, Place};
+        let arr_slot = match base {
+            Place::Local(s) => *s,
+            _ => return None,
+        };
+        let iv_slot = match index_op {
+            Operand::Copy(Place::Local(s))
+            | Operand::Move(Place::Local(s))
+            | Operand::MoveExplicit(Place::Local(s)) => *s,
+            _ => return None,
+        };
+        Some((arr_slot, iv_slot))
+    }
+
     // ── Inline typed-struct field access ──────────────────────────────
     //
     // When the compiler knows the field byte offset at compile time, we
@@ -548,6 +603,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let base_val = self.read_place(base)?;
                 // Index can stay native — index_to_i64 handles all types
                 let index_val = self.compile_operand_raw(operand)?;
+                // Bounds-check elision: when the bounds-elision plan
+                // proves the (array, iv) slot pair is dominated by a loop
+                // header that already enforces `0 <= iv < arr.length`, emit
+                // the unchecked variant. Default empty plan keeps every
+                // access on the checked path — no behaviour change.
+                if let Some((arr, iv)) = Self::resolve_simple_index_pair(base, operand) {
+                    if self.bounds_elision.is_trusted(arr, iv) {
+                        return Ok(self.inline_array_get_unchecked(base_val, index_val));
+                    }
+                }
                 Ok(self.inline_array_get(base_val, index_val))
             }
             Place::Deref(inner) => {
@@ -698,6 +763,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // already-ValueWord-encoded I64 slots.
                 let base_val = self.read_place(base)?;
                 let index_val = self.compile_operand_raw(operand)?;
+                // Bounds-check elision: see the matching read-side path.
+                if let Some((arr, iv)) = Self::resolve_simple_index_pair(base, operand) {
+                    if self.bounds_elision.is_trusted(arr, iv) {
+                        self.inline_array_set_unchecked(base_val, index_val, val);
+                        return Ok(());
+                    }
+                }
                 self.inline_array_set(base_val, index_val, val);
                 Ok(())
             }

@@ -19,6 +19,7 @@ BENCHMARKS=(
     "05_spectral"
     "06_ackermann"
     "07_sum_loop"
+    "07b_dot_product"
     "08_collatz"
     "09_matrix_mul"
     "10_primes_count"

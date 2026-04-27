@@ -387,6 +387,13 @@ impl JITCompiler {
                     user_func_arities.clone(),
                     closure_function_layouts,
                 );
+                // Bounds-check elision: install the per-function plan
+                // before MIR codegen so `Place::Index` lowering can
+                // bypass the inline bounds check on trusted (arr, iv)
+                // pairs. Default empty plan keeps every access checked.
+                let elision_plan =
+                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                mir_compiler.set_bounds_elision_plan(elision_plan);
                 // Track A.1D.2: flag the leading capture param slots whose
                 // `ClosureLayout` marks them as `OwnedMutable`. `read_place`
                 // / `write_place` then route through the cell pointer bits
