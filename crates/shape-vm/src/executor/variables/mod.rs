@@ -367,6 +367,29 @@ impl VirtualMachine {
             StoreOwnedMutableCapture => self.op_store_owned_mutable_capture(instruction)?,
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
+            // D.2: typed Shared capture opcodes (0x156..=0x16B).
+            LoadSharedCaptureI64 => self.op_load_shared_capture_i64(instruction)?,
+            LoadSharedCaptureU64 => self.op_load_shared_capture_u64(instruction)?,
+            LoadSharedCaptureF64 => self.op_load_shared_capture_f64(instruction)?,
+            LoadSharedCaptureI32 => self.op_load_shared_capture_i32(instruction)?,
+            LoadSharedCaptureU32 => self.op_load_shared_capture_u32(instruction)?,
+            LoadSharedCaptureI16 => self.op_load_shared_capture_i16(instruction)?,
+            LoadSharedCaptureU16 => self.op_load_shared_capture_u16(instruction)?,
+            LoadSharedCaptureI8 => self.op_load_shared_capture_i8(instruction)?,
+            LoadSharedCaptureU8 => self.op_load_shared_capture_u8(instruction)?,
+            LoadSharedCaptureBool => self.op_load_shared_capture_bool(instruction)?,
+            LoadSharedCapturePtr => self.op_load_shared_capture_ptr(instruction)?,
+            StoreSharedCaptureI64 => self.op_store_shared_capture_i64(instruction)?,
+            StoreSharedCaptureU64 => self.op_store_shared_capture_u64(instruction)?,
+            StoreSharedCaptureF64 => self.op_store_shared_capture_f64(instruction)?,
+            StoreSharedCaptureI32 => self.op_store_shared_capture_i32(instruction)?,
+            StoreSharedCaptureU32 => self.op_store_shared_capture_u32(instruction)?,
+            StoreSharedCaptureI16 => self.op_store_shared_capture_i16(instruction)?,
+            StoreSharedCaptureU16 => self.op_store_shared_capture_u16(instruction)?,
+            StoreSharedCaptureI8 => self.op_store_shared_capture_i8(instruction)?,
+            StoreSharedCaptureU8 => self.op_store_shared_capture_u8(instruction)?,
+            StoreSharedCaptureBool => self.op_store_shared_capture_bool(instruction)?,
+            StoreSharedCapturePtr => self.op_store_shared_capture_ptr(instruction)?,
             AllocSharedLocal => self.op_alloc_shared_local(instruction)?,
             LoadSharedLocal => self.op_load_shared_local(instruction)?,
             StoreSharedLocal => self.op_store_shared_local(instruction)?,
@@ -665,6 +688,524 @@ impl VirtualMachine {
             *guard = new_bits;
             drop(guard);
         }
+        Ok(())
+    }
+
+    // ── Track D.2: per-FieldKind typed Shared capture handlers ─────────
+    //
+    // Each handler resolves the upvalue's raw `*const SharedCell` bits and
+    // delegates to the lock-gated `read_shared_<kind>` /
+    // `write_shared_<kind>` helper in `shape_value::v2::closure_raw`.
+    // Critical invariant: the helpers acquire the cell's
+    // `parking_lot::Mutex` internally, so the handler MUST NOT take the
+    // lock externally — that would deadlock on a non-reentrant mutex.
+    //
+    // The pushed/popped 8-byte stack value is the raw native bit pattern
+    // matching the cell's interior `FieldKind`. For widths < 8 bytes the
+    // helper sign-/zero-extends to a 64-bit register-shaped value before
+    // the handler stores those bits via `push_raw_u64`. The compiler
+    // emitter (Wave E) and the JIT FFI lowering (C.2) already share this
+    // convention — see `crates/shape-jit/src/ffi/object/closure.rs:660`+.
+    //
+    // SAFETY (common to every handler below):
+    //   * `cell_ptr` is the raw u64 bits placed in `frame.upvalues[idx]`
+    //     by `op_make_closure`. It was minted via
+    //     `Arc::into_raw(Arc::new(SharedCell::new(...)))`; the
+    //     surrounding closure block owns one strong-count share which
+    //     keeps the cell alive for this call frame's lifetime.
+    //   * The compiler emits the typed opcode only when the capture's
+    //     `CaptureKind` is `Shared` and the cell's interior `FieldKind`
+    //     matches. Mismatches are a compiler bug.
+
+    fn op_load_shared_capture_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: see common invariants on the section header.
+        // `read_shared_i64` acquires the parking_lot mutex internally,
+        // performs an aligned 8-byte load, releases, and returns. We
+        // must NOT take the lock externally.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_i64(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_shared_capture_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_u64(cell_ptr) };
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_shared_capture_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_f64(cell_ptr) };
+        self.push_raw_u64(value.to_bits())
+    }
+
+    fn op_load_shared_capture_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. `read_shared_i32`
+        // returns a 4-byte value sign-extended (by the writer) from the
+        // 8-byte payload; we sign-extend to i64 here to fit the
+        // 8-byte stack slot.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_i32(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_shared_capture_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend the u32
+        // to u64 for the 8-byte stack slot.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_u32(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_shared_capture_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Sign-extend i16 to
+        // i64 for the 8-byte stack slot.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_i16(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_shared_capture_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_u16(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_shared_capture_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Sign-extend i8 to
+        // i64.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_i8(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_shared_capture_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend u8 to
+        // u64.
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_u8(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_shared_capture_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. The helper reads the
+        // low byte of the payload (0 ⇒ false; non-zero ⇒ true). We
+        // store the resulting bool on the stack as a 0 or 1 in the
+        // 8-byte slot via `push_raw_u64` to keep the slot's bit pattern
+        // unambiguously typed for the typed-Bool reader (Wave E /
+        // future JIT lowering will rewire to `push_raw_bool` once
+        // typed-bool stack helpers are unified).
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_bool(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_shared_capture_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. The 8-byte payload
+        // is a ValueWord bit pattern carrying a NaN-boxed Arc/Box
+        // pointer. The helper does NOT clone/retain — refcount
+        // semantics are the caller's responsibility. Wave E will pair
+        // the Load with `vw_clone` / `vw_drop` at the IR level
+        // (matching the c-stdlib-msgpack pattern from commit afb1651).
+        let value = unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr) };
+        self.push_raw_u64(value)
+    }
+
+    fn op_store_shared_capture_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i64;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply. `write_shared_i64`
+        // takes the lock internally — DO NOT take it here.
+        unsafe { shape_value::v2::closure_raw::write_shared_i64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_u64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_f64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop as raw u64; truncate to i32 (the low 4 bytes carry the
+        // signed value, matching the JIT's `i32` ABI).
+        let new_value = self.pop_raw_u64()? as i64 as i32;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply. `write_shared_i32`
+        // sign-extends the value to 8 bytes inside the cell.
+        unsafe { shape_value::v2::closure_raw::write_shared_i32(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u32;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_u32(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i64 as i16;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_i16(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u16;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_u16(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i64 as i8;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_i8(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u8;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_u8(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop the 8-byte slot; treat any nonzero bit pattern as true to
+        // mirror `read_shared_bool`'s "any non-zero byte" semantics.
+        let new_value = self.pop_raw_u64()? != 0;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_shared_bool(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_shared_capture_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        use shape_value::v2::closure_layout::SharedCell;
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *const SharedCell;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "Shared capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply. `write_shared_ptr`
+        // does NOT release the previous payload nor retain the new one
+        // (matches `read_shared_ptr` symmetry). Refcount management is
+        // the responsibility of the compiler / IR (see Wave E plan).
+        unsafe { shape_value::v2::closure_raw::write_shared_ptr(cell_ptr, new_bits) };
         Ok(())
     }
 

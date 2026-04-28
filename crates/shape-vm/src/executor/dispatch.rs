@@ -512,6 +512,28 @@ impl VirtualMachine {
             | StoreOwnedMutableCapture
             | LoadSharedCapture
             | StoreSharedCapture
+            | LoadSharedCaptureI64
+            | LoadSharedCaptureU64
+            | LoadSharedCaptureF64
+            | LoadSharedCaptureI32
+            | LoadSharedCaptureU32
+            | LoadSharedCaptureI16
+            | LoadSharedCaptureU16
+            | LoadSharedCaptureI8
+            | LoadSharedCaptureU8
+            | LoadSharedCaptureBool
+            | LoadSharedCapturePtr
+            | StoreSharedCaptureI64
+            | StoreSharedCaptureU64
+            | StoreSharedCaptureF64
+            | StoreSharedCaptureI32
+            | StoreSharedCaptureU32
+            | StoreSharedCaptureI16
+            | StoreSharedCaptureU16
+            | StoreSharedCaptureI8
+            | StoreSharedCaptureU8
+            | StoreSharedCaptureBool
+            | StoreSharedCapturePtr
             | AllocSharedLocal
             | LoadSharedLocal
             | StoreSharedLocal
