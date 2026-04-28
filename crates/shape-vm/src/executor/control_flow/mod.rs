@@ -729,8 +729,13 @@ impl VirtualMachine {
                 if upvalues.len() == layout.capture_count() {
                     use shape_value::v2::closure_layout::{CaptureKind, SharedCell};
                     use shape_value::v2::closure_raw::{
-                        OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
+                        OwnedClosureBlock, alloc_owned_mutable_bool, alloc_owned_mutable_f64,
+                        alloc_owned_mutable_i8, alloc_owned_mutable_i16, alloc_owned_mutable_i32,
+                        alloc_owned_mutable_i64, alloc_owned_mutable_ptr, alloc_owned_mutable_u8,
+                        alloc_owned_mutable_u16, alloc_owned_mutable_u32, alloc_owned_mutable_u64,
+                        alloc_typed_closure, write_capture_typed,
                     };
+                    use shape_value::v2::struct_layout::FieldKind;
                     // SAFETY: `alloc_typed_closure` returns a freshly-
                     // allocated block with refcount=1; we write the
                     // captures at their typed offsets in-bounds, then
@@ -778,33 +783,139 @@ impl VirtualMachine {
                                     write_capture_typed(ptr, &layout, i, *bits);
                                 }
                                 CaptureKind::OwnedMutable => {
-                                    // A.1B assumption: the capture
-                                    // ValueWord on the stack is the
-                                    // initial value of a `let mut`
-                                    // binding being moved into the
-                                    // closure. We own it by allocating
-                                    // a fresh Box<ValueWord>. If the
-                                    // initial value carried a heap
-                                    // refcount share, that share moves
-                                    // into the box (no extra retain
-                                    // needed — the stack slot's share
-                                    // is what fills the box).
+                                    // Wave D (D.3): allocate the typed
+                                    // OwnedMutable cell via Wave B's
+                                    // per-FieldKind helpers — `Box<T>`
+                                    // matching `capture_inner_kind(i)`,
+                                    // not a uniform `Box<ValueWord>`.
+                                    // `release_typed_closure` /
+                                    // `drop_owned_mutable_capture`
+                                    // already dispatches on the same
+                                    // `capture_inner_kind` to reclaim
+                                    // each typed box.
                                     //
-                                    // SAFETY: Box::into_raw yields a
-                                    // non-null 8-aligned `*mut ValueWord`
-                                    // owned by this closure for its
-                                    // refcount lifetime. The Ptr slot
-                                    // at `heap_capture_offset(i)` is
-                                    // 8-byte aligned and in-bounds per
-                                    // layout invariants.
-                                    let cell_ptr: *mut ValueWord = Box::into_raw(Box::new(*bits));
+                                    // Wave-E ordering note: until the
+                                    // bytecode emitter is flipped to
+                                    // push native typed bytes for
+                                    // closure captures, the stack
+                                    // contract here is still
+                                    // ValueWord-encoded bits. We decode
+                                    // the inline scalar at this
+                                    // boundary using the same VW
+                                    // accessors `write_capture_typed`
+                                    // uses for Immutable captures
+                                    // (`as_i64`, `as_number_coerce`,
+                                    // `as_bool`), so a `let mut x = 42`
+                                    // closure capture stores native
+                                    // `i64` bytes 42, not the i48-tagged
+                                    // ValueWord pattern. The legacy
+                                    // `op_load_owned_mutable_capture` /
+                                    // `op_store_owned_mutable_capture`
+                                    // handlers re-encode at the legacy
+                                    // stack boundary on Load and decode
+                                    // on Store (symmetric round-trip).
+                                    // After Wave E flips the emitter to
+                                    // emit the typed
+                                    // `Load/StoreOwnedMutableCapture<Kind>`
+                                    // opcodes, both decode boundaries
+                                    // become dead code (Wave G cleanup).
+                                    //
+                                    // For `FieldKind::Ptr` the popped
+                                    // `*bits` already carries the heap
+                                    // refcount share verbatim (the
+                                    // stack slot's `pop_raw_u64` did
+                                    // NOT drop), so the box swallows
+                                    // that share — no retain/release
+                                    // pair at this site.
+                                    //
+                                    // SAFETY: each `alloc_owned_mutable_<kind>`
+                                    // returns `Box::into_raw(Box::new(...))`
+                                    // — a non-null pointer with the
+                                    // alignment of `T`. We cast to
+                                    // `u64` for storage in the Ptr
+                                    // slot at
+                                    // `layout.heap_capture_offset(i)`,
+                                    // which is 8-byte aligned and
+                                    // in-bounds per layout invariants.
+                                    let inner = layout.capture_inner_kind(i);
+                                    let vw: ValueWord = *bits;
+                                    let cell_ptr_bits: u64 = match inner {
+                                        FieldKind::I64 => alloc_owned_mutable_i64(
+                                            vw.as_i64().unwrap_or(0),
+                                        )
+                                            as u64,
+                                        FieldKind::F64 => alloc_owned_mutable_f64(
+                                            vw.as_number_coerce().unwrap_or(0.0),
+                                        )
+                                            as u64,
+                                        FieldKind::I32 => alloc_owned_mutable_i32(
+                                            vw.as_i64().unwrap_or(0) as i32,
+                                        )
+                                            as u64,
+                                        FieldKind::I16 => alloc_owned_mutable_i16(
+                                            vw.as_i64().unwrap_or(0) as i16,
+                                        )
+                                            as u64,
+                                        FieldKind::I8 => alloc_owned_mutable_i8(
+                                            vw.as_i64().unwrap_or(0) as i8,
+                                        )
+                                            as u64,
+                                        FieldKind::U64 => alloc_owned_mutable_u64(
+                                            vw.as_u64_value().unwrap_or(0),
+                                        )
+                                            as u64,
+                                        FieldKind::U32 => alloc_owned_mutable_u32(
+                                            vw.as_i64().unwrap_or(0) as u32,
+                                        )
+                                            as u64,
+                                        FieldKind::U16 => alloc_owned_mutable_u16(
+                                            vw.as_i64().unwrap_or(0) as u16,
+                                        )
+                                            as u64,
+                                        FieldKind::U8 => alloc_owned_mutable_u8(
+                                            vw.as_i64().unwrap_or(0) as u8,
+                                        )
+                                            as u64,
+                                        FieldKind::Bool => alloc_owned_mutable_bool(
+                                            vw.as_bool().unwrap_or(false),
+                                        )
+                                            as u64,
+                                        FieldKind::Ptr => {
+                                            // Pass-through: the cell
+                                            // stores the raw 8-byte
+                                            // heap-pointer bit pattern
+                                            // verbatim (the popped
+                                            // share moves into the
+                                            // box). `release_typed_closure`
+                                            // releases this share via
+                                            // `release_raw_value_bits`
+                                            // before reclaiming the
+                                            // `Box<u64>`.
+                                            alloc_owned_mutable_ptr(*bits) as u64
+                                        }
+                                    };
                                     let off = layout.heap_capture_offset(i);
                                     std::ptr::write(
-                                        (ptr as *mut u8).add(off) as *mut *mut ValueWord,
-                                        cell_ptr,
+                                        (ptr as *mut u8).add(off) as *mut u64,
+                                        cell_ptr_bits,
                                     );
                                 }
                                 CaptureKind::Shared => {
+                                    // Wave D (D.3): Shared cells use a
+                                    // single 8-byte payload regardless
+                                    // of declared FieldKind (D5
+                                    // invariant); Wave B's per-FieldKind
+                                    // read/write helpers reinterpret the
+                                    // 8 bytes correctly. The legacy
+                                    // generic Arc-pointer-bits
+                                    // pass-through path remains until
+                                    // follow-up #17 (atomic Shared
+                                    // encoding flip) lands across BOTH
+                                    // the JIT's outer-scope
+                                    // shared_local_slots path AND the
+                                    // closure-body shared_capture_slots
+                                    // path.
+                                    //
                                     // Track A.1C.2: the compiler emits
                                     // code that pushes the raw
                                     // `*const SharedCell` pointer bits
@@ -1386,16 +1497,27 @@ mod a1b_make_closure_tests {
             "A.1B expects OwnedMutable-capturing closure to be ClosureRaw, got {}",
             hv.type_name()
         );
-        // Capture 0 reads back as 42 through the handle (deref's the
-        // Box via A.1B's `capture_as_value` CaptureKind dispatch).
+        // Wave D (D.3): the slot now holds `*mut i64` from
+        // `alloc_owned_mutable_i64`, not `*mut ValueWord`. The legacy
+        // `capture_as_value` widening path reads 8 bytes verbatim which
+        // is sound for I64 cells (8-byte allocation) but the resulting
+        // `u64` is the native i64 bit pattern, not an i48-tagged
+        // ValueWord — so `as_i64()` would return `None`. Read back via
+        // Wave B's typed accessor instead.
         let handle = hv.as_closure_handle().expect("handle");
         assert_eq!(handle.capture_count(), 1);
-        assert_eq!(handle.capture_as_value(0).as_i64(), Some(42));
         // capture_owned_mutable_ptr returns a non-null pointer.
         let cell_ptr = handle
             .capture_owned_mutable_ptr(0)
             .expect("OwnedMutable slot");
         assert!(!cell_ptr.is_null());
+        // SAFETY: the slot was produced by `alloc_owned_mutable_i64`,
+        // so reading the cell as `*mut i64` is the correctly-typed
+        // access. The closure block's refcount keeps the box alive.
+        let value = unsafe {
+            shape_value::v2::closure_raw::read_owned_mutable_i64(cell_ptr as *mut i64)
+        };
+        assert_eq!(value, 42);
 
         // Drop the result and VM — release_typed_closure will reclaim
         // the Box. If the reclaim is wrong (leaked or double-freed),
