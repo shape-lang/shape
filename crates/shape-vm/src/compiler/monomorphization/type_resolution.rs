@@ -511,9 +511,11 @@ pub fn split_type_and_const_param_names(
 ///   - `bool(true)`    → `"bool_true"`
 ///   - `string("hi")`  → `"string_hi"`
 ///
-/// TODO(phase-5-agent-1): once `ComptimeValue` lands with a typed `Hash` impl,
-/// switch this to a stable hash-based key (e.g. `"int_<hex8>"`) so the keys
-/// stay compact for large bigint / decimal values.
+/// TODO(phase-5-agent-1): once `ConstantValue` (sweep phase 4d, see
+/// `compiler::comptime_concrete`) is wired into the comptime mini-VM and
+/// gains a typed `Hash` impl, switch this to a stable hash-based key
+/// (e.g. `"int_<hex8>"`) so the keys stay compact for large bigint /
+/// decimal values.
 pub fn const_value_mono_segment(v: &ComptimeConstValue) -> String {
     match v {
         ComptimeConstValue::Int(i) => format!("int_{}", i),
@@ -573,7 +575,8 @@ pub struct TypeArgResolution {
     /// in declaration order. Empty when the callee has no const generic params.
     ///
     /// See [`ComptimeConstValue`] for the underlying value representation and
-    /// the migration path to the typed Phase 5 ComptimeValue.
+    /// the migration path to the typed sweep-phase-4d
+    /// [`crate::compiler::comptime_concrete::ConstantValue`].
     pub const_args: Vec<ComptimeConstValue>,
     /// Phase C — one entry per closure-literal argument at the call site, in
     /// positional order. Empty when no `Expr::FunctionExpr` argument was

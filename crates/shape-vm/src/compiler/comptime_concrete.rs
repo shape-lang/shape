@@ -1,254 +1,202 @@
-//! Comptime ↔ ConcreteType bridge for v2 Phase 5.
+//! Typed comptime constant value (sweep phase 4d).
 //!
-//! This module provides a typed view over comptime evaluation results so that
-//! values produced inside `comptime { }` blocks can flow through the rest of
-//! the v2 monomorphization pipeline as `ConcreteType`s rather than opaque
-//! NaN-boxed `ValueWord`s.
+//! Phase 4d eliminates `ValueWord` from the comptime constant carrier. Where
+//! the previous shape stored a NaN-boxed `ValueWord` plus an *optional*
+//! `ConcreteType` tag, [`ConstantValue`] is a typed sum: each variant carries
+//! both the runtime data and its concrete type by construction.
 //!
 //! ## Design
 //!
-//! Until Phase 4 lands, the comptime mini-VM still uses `ValueWord` as its
-//! universal value representation. We don't want to boil the ocean — Phase 4
-//! is the boundary where `ValueWord` is finally deleted, and Phase 5 needs to
-//! coexist with the still-NaN-boxed runtime.
+//! ```text
+//! pub enum ConstantValue {
+//!     I64(i64),
+//!     F64(f64),
+//!     Bool(bool),
+//!     String(Arc<str>),
+//!     Array(ConcreteType, Vec<ConstantValue>),
+//!     Unit,
+//!     None,
+//!     Opaque(ConcreteType, [u8; 8]),
+//! }
+//! ```
 //!
-//! [`ComptimeValue`] therefore wraps a `ValueWord` and exposes:
-//! - the underlying NaN-boxed value (so existing comptime code keeps working),
-//! - an *optional* [`ConcreteType`] tag describing what the value really is.
+//! - **Scalar variants** (I64, F64, Bool, String) carry their value directly.
+//!   The corresponding [`ConcreteType`] is implied by the variant.
+//! - **Array(ct, elems)** carries an explicit element-type tag (so empty
+//!   arrays still type-check) plus the constant elements.
+//! - **Unit / None** are the two distinguished "no value" cases. `Unit`
+//!   corresponds to `void`; `None` corresponds to `Option(Void)` / a
+//!   `null`-shaped sentinel.
+//! - **Opaque(ct, bytes)** is a temporary bridge for extension-function
+//!   returns and other producer paths that haven't yet been migrated to one
+//!   of the typed variants. The 8-byte payload deliberately matches the size
+//!   of a `ValueWord`, so callers that still need to round-trip through
+//!   NaN-boxing can do so without enlarging the representation. Future phases
+//!   should narrow `Opaque` use until it can be deleted.
 //!
-//! When the comptime evaluator can prove the type of a result (because it
-//! came from a typed builtin like `build_config()`, was unrolled from a
-//! typed iterator, or was constructed by a comptime helper that returned a
-//! known typed value), it attaches the `ConcreteType`. When it can't, the
-//! tag stays `None` and we fall back to NaN-box-driven introspection — Phase
-//! 4 will eliminate this fallback once `ValueWord` is gone.
+//! ## Why this exists
+//!
+//! Comptime evaluation produces values that need to flow into v2 typed
+//! monomorphization (`shape_value::v2::ConcreteType`). With the old
+//! `ComptimeValue { value: ValueWord, concrete: Option<ConcreteType> }`
+//! shape, every consumer had to either trust the optional tag or fall back
+//! to NaN-box introspection. With [`ConstantValue`] the type is
+//! discriminant-encoded — there is no "untyped" state.
 //!
 //! ## Bridge functions
 //!
-//! - [`comptime_value_to_concrete_type`] — given a [`ComptimeValue`], extract
-//!   the `ConcreteType` (using both the explicit tag and NaN-box inspection).
-//! - [`concrete_type_to_comptime_value`] — given a `ConcreteType`, build a
-//!   [`ComptimeValue`] whose payload is a stable string representation of the
-//!   type. This is the foundation for typed `type_info()`-style results.
+//! - [`ConstantValue::concrete_type`] — return the value's type. Total.
+//! - [`type_name_constant`] — given a `ConcreteType`, build a
+//!   `ConstantValue::String` carrying the canonical type name (used by
+//!   `type_info()`-style typed comptime queries).
+//! - [`type_annotation_to_constant_value`] — resolve a `TypeAnnotation` to a
+//!   typed-name `ConstantValue::String`. Returns `None` for annotations that
+//!   cannot be reduced to a `ConcreteType` (unions, intersections, dyn).
 //!
-//! ## What stays NaN-boxed (and why)
+//! ## ConcreteType namespace
 //!
-//! Several comptime constructs intentionally retain raw `ValueWord` payloads:
+//! `ConstantValue` references `shape_value::v2::ConcreteType` (the
+//! comprehensive runtime-visible enum), not the smaller
+//! `shape_runtime::typed_module_exports::ConcreteType` used by extension
+//! return-type metadata. Unifying those two enums is a separate
+//! cross-cutting refactor and is deliberately out of phase 4d scope.
 //!
-//! 1. **Comptime annotation targets**. `ComptimeTarget::to_nanboxed()` builds
-//!    a `TypedObject` describing functions/types/modules. Until Phase 4
-//!    rewrites the annotation handler interface, these targets stay NaN-boxed
-//!    so handlers can call into the existing `typed_object_to_hashmap_nb`
-//!    machinery. We *can* tag them with `ConcreteType::Struct(_)` via
-//!    [`ComptimeValue::with_concrete`], but the payload itself remains a
-//!    `ValueWord`.
+//! ## What stays out of scope
 //!
-//! 2. **`comptime for` element values**. When the iterator is unrolled, each
-//!    element is currently spliced back into the host program as an AST
-//!    literal via [`super::comptime::nb_to_literal`]. Walking through a
-//!    `ComptimeValue` lets the unroller stamp a `ConcreteType` on the loop
-//!    variable, but the literal it splices is still derived from the
-//!    NaN-boxed payload.
+//! The comptime mini-VM in `compiler/comptime.rs` still uses raw `ValueWord`
+//! internally — its `ComptimeExecutionResult.value` and `SetParamValue`
+//! directives are NaN-boxed. Migrating that pipeline is a deeper rewrite
+//! than fits in phase 4d; once it lands, `Opaque` becomes the bridge
+//! variant that disappears, and the typed variants here become the sole
+//! constant carrier.
 //!
-//! 3. **Extension function results**. Extension functions registered via
-//!    `ModuleExports` return `ValueWord`. We can wrap their result in a
-//!    `ComptimeValue` after the call, but the function signatures themselves
-//!    remain NaN-boxed until the v2 ABI rewrite.
-//!
-//! 4. **Comptime directives**. Directives like `Extend`, `SetParamType`,
-//!    `ReplaceBody` are AST-level — they don't carry runtime values, so they
-//!    don't go through this bridge.
-//!
-//! Phase 4 will collapse all of these onto raw typed pointers, at which
-//! point the `Option<ConcreteType>` tag becomes mandatory and the
-//! `ValueWord` field disappears.
+//! Until that wiring lands, the items below are exercised solely by the
+//! test module — `#[allow(dead_code)]` is applied at module scope to keep
+//! the strict-typing-sweep build clean.
 
+#![allow(dead_code)]
+
+use crate::compiler::v2_map_emission::concrete_type_from_annotation;
 use shape_ast::ast::TypeAnnotation;
-use shape_runtime::type_system::annotation_to_concrete;
-use shape_value::{ValueWord, ValueWordExt};
 use shape_value::v2::ConcreteType;
 use std::sync::Arc;
 
-/// Typed view over a comptime evaluation result.
+/// A typed comptime constant value.
 ///
-/// In v2 Phase 5 we want comptime results to flow as [`ConcreteType`]-tagged
-/// values rather than opaque [`ValueWord`]s. Because the comptime mini-VM is
-/// still NaN-boxed (Phase 4 will fix that), `ComptimeValue` keeps the
-/// `ValueWord` payload alongside an optional `ConcreteType` tag.
-///
-/// - **Tagged values** (`concrete = Some(_)`) have a known compile-time type
-///   the rest of the pipeline can monomorphize against.
-/// - **Untagged values** (`concrete = None`) fall back to NaN-box
-///   introspection. This is the pre-Phase-4 escape hatch.
-#[derive(Debug, Clone)]
-pub struct ComptimeValue {
-    /// NaN-boxed payload — the wire format the comptime mini-VM still speaks.
-    pub value: ValueWord,
-    /// Optional resolved type. `None` means "we don't know the concrete type
-    /// at this site; please introspect the `ValueWord`".
-    pub concrete: Option<ConcreteType>,
+/// Each variant carries both the runtime data and its [`ConcreteType`] by
+/// construction. There is no "untyped" state — calling
+/// [`ConstantValue::concrete_type`] is total.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstantValue {
+    /// Signed 64-bit integer. Concrete type: [`ConcreteType::I64`].
+    I64(i64),
+    /// 64-bit float (default `number`). Concrete type: [`ConcreteType::F64`].
+    F64(f64),
+    /// Boolean. Concrete type: [`ConcreteType::Bool`].
+    Bool(bool),
+    /// Interned string. Concrete type: [`ConcreteType::String`].
+    String(Arc<str>),
+    /// Homogeneous array of constant values. The element type is carried
+    /// explicitly so empty arrays still type-check.
+    Array(ConcreteType, Vec<ConstantValue>),
+    /// Unit (void) — produced by statements without a value.
+    Unit,
+    /// Distinguished `None` / null — produces `Option<Void>` typing.
+    None,
+    /// Bridge variant for producer paths not yet migrated to typed variants
+    /// (notably extension-function returns). Carries an explicit type tag
+    /// alongside an 8-byte payload — deliberately the same size as a
+    /// `ValueWord` so existing NaN-box round-trips remain feasible.
+    ///
+    /// New code should NOT introduce `Opaque` uses; future phases will
+    /// narrow this variant until it can be deleted.
+    Opaque(ConcreteType, [u8; 8]),
 }
 
-impl ComptimeValue {
-    /// Wrap a `ValueWord` with no known concrete type. The bridge functions
-    /// will fall back to NaN-box introspection on this value.
-    pub fn from_value_word(value: ValueWord) -> Self {
-        Self {
-            value,
-            concrete: None,
+impl ConstantValue {
+    /// Build a `ConstantValue::String` from a Rust `&str`.
+    pub fn from_str(s: &str) -> Self {
+        ConstantValue::String(Arc::<str>::from(s))
+    }
+
+    /// Build a `ConstantValue::String` from an owned `String`.
+    pub fn from_string(s: String) -> Self {
+        ConstantValue::String(Arc::<str>::from(s.as_str()))
+    }
+
+    /// Return the value's [`ConcreteType`]. Total — every variant has a
+    /// well-defined type.
+    pub fn concrete_type(&self) -> ConcreteType {
+        match self {
+            ConstantValue::I64(_) => ConcreteType::I64,
+            ConstantValue::F64(_) => ConcreteType::F64,
+            ConstantValue::Bool(_) => ConcreteType::Bool,
+            ConstantValue::String(_) => ConcreteType::String,
+            ConstantValue::Array(elem, _) => ConcreteType::Array(Box::new(elem.clone())),
+            ConstantValue::Unit => ConcreteType::Void,
+            ConstantValue::None => ConcreteType::Option(Box::new(ConcreteType::Void)),
+            ConstantValue::Opaque(ct, _) => ct.clone(),
         }
     }
 
-    /// Wrap a `ValueWord` together with an explicit `ConcreteType` tag.
-    pub fn with_concrete(value: ValueWord, concrete: ConcreteType) -> Self {
-        Self {
-            value,
-            concrete: Some(concrete),
-        }
-    }
-
-    /// Construct a typed string `ComptimeValue` from a Rust `&str`.
-    /// This is the canonical way to encode a type-name result.
-    pub fn from_string(s: &str) -> Self {
-        Self::with_concrete(
-            ValueWord::from_string(Arc::new(s.to_string())),
-            ConcreteType::String,
-        )
-    }
-
-    /// Construct a typed integer `ComptimeValue`.
-    pub fn from_i64(v: i64) -> Self {
-        Self::with_concrete(ValueWord::from_i64(v), ConcreteType::I64)
-    }
-
-    /// Construct a typed number (f64) `ComptimeValue`.
-    pub fn from_f64(v: f64) -> Self {
-        Self::with_concrete(ValueWord::from_f64(v), ConcreteType::F64)
-    }
-
-    /// Construct a typed boolean `ComptimeValue`.
-    pub fn from_bool(v: bool) -> Self {
-        Self::with_concrete(ValueWord::from_bool(v), ConcreteType::Bool)
-    }
-
-    /// Whether this value has a known concrete type. Useful for callers that
-    /// want to fail fast on un-tagged values once Phase 4 lands.
-    pub fn is_typed(&self) -> bool {
-        self.concrete.is_some()
-    }
-}
-
-/// Bridge: extract a `ConcreteType` from a `ComptimeValue`.
-///
-/// This function is the v2 Phase 5 single source of truth for "what type
-/// does this comptime value have". Resolution order:
-///
-/// 1. If the value carries an explicit `ConcreteType` tag, return it.
-/// 2. Otherwise, introspect the underlying `ValueWord` and infer a tag from
-///    its NaN-box discriminant. This handles legacy values that still flow
-///    through the comptime pipeline untagged.
-/// 3. If neither path can decide, return `None` (the caller must keep the
-///    NaN-boxed fallback path active until Phase 4).
-pub fn comptime_value_to_concrete_type(val: &ComptimeValue) -> Option<ConcreteType> {
-    if let Some(ct) = &val.concrete {
-        return Some(ct.clone());
-    }
-    nb_to_concrete_type(&val.value)
-}
-
-/// Best-effort `ValueWord` → `ConcreteType` mapping.
-///
-/// This is the fallback used when a [`ComptimeValue`] arrives untagged. It
-/// only considers shapes the v2 typed runtime can already represent — things
-/// like raw closures, host closures, type annotations and tables stay
-/// `None`, deferring to the NaN-box path.
-pub fn nb_to_concrete_type(nb: &ValueWord) -> Option<ConcreteType> {
-    use shape_value::heap_value::HeapValue;
-
-    if nb.is_none() {
-        // Bare null collapses to `void` for typing purposes; callers that
-        // care about Option-ness should keep the explicit tag instead.
-        return Some(ConcreteType::Option(Box::new(ConcreteType::Void)));
-    }
-    if nb.is_unit() {
-        return Some(ConcreteType::Void);
-    }
-    if nb.as_bool().is_some() {
-        return Some(ConcreteType::Bool);
-    }
-    if nb.as_i64().is_some() {
-        return Some(ConcreteType::I64);
-    }
-    if nb.as_f64().is_some() {
-        return Some(ConcreteType::F64);
-    }
-    if nb.as_str().is_some() {
-        return Some(ConcreteType::String);
-    }
-    if nb.as_decimal().is_some() {
-        return Some(ConcreteType::Decimal);
-    }
-
-    if let Some(view) = nb.as_any_array() {
-        // Probe the first element. Empty arrays cannot be typed precisely
-        // here — Phase 4 will require a stored element type.
-        if let Some(first) = view.get_nb(0) {
-            if let Some(elem_ct) = nb_to_concrete_type(&first) {
-                return Some(ConcreteType::Array(Box::new(elem_ct)));
-            }
-        }
-        return Some(ConcreteType::Array(Box::new(ConcreteType::Void)));
-    }
-
-    // cold-path: as_heap_ref retained — comptime concrete type inference
-    if let Some(heap) = nb.as_heap_ref() { // cold-path
-        return match heap {
-            HeapValue::TypedObject { .. } => {
-                // We don't have enough info to recover the StructLayoutId
-                // from a comptime TypedObject without consulting the bytecode
-                // schema registry. Phase 4 will plumb the schema id through;
-                // until then, return a placeholder Struct id so callers know
-                // it's a struct shape.
-                Some(ConcreteType::Struct(shape_value::v2::StructLayoutId(0)))
-            }
-            HeapValue::String(_) => Some(ConcreteType::String),
-            HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(ann)) => annotation_to_concrete(ann).ok(),
+    /// Extract the i64 payload, if this is an `I64`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            ConstantValue::I64(v) => Some(*v),
             _ => None,
-        };
+        }
     }
 
-    None
+    /// Extract the f64 payload, if this is an `F64`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            ConstantValue::F64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Extract the bool payload, if this is a `Bool`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            ConstantValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Extract the string payload, if this is a `String`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ConstantValue::String(s) => Some(s.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Whether this value is a typed scalar / array (i.e. not `Opaque`).
+    /// Useful for callers that want to fail fast once a producer stops
+    /// emitting `Opaque`.
+    pub fn is_typed(&self) -> bool {
+        !matches!(self, ConstantValue::Opaque(_, _))
+    }
 }
 
-/// Bridge: build a `ComptimeValue` from a `ConcreteType`.
+/// Build a `ConstantValue::String` whose payload is the canonical type name
+/// for `ct` (e.g. `"int"`, `"number"`, `"Array<int>"`, `"int?"`).
 ///
-/// This is what `type_info()`-style typed comptime queries call. The
-/// resulting `ComptimeValue`:
-/// - has its `concrete` field set to `ConcreteType::String` (the kind
-///   identifier that callers like `.name` would consume),
-/// - has its `value` field set to a `ValueWord` carrying the canonical
-///   `Display` form of the input type (`"int"`, `"number"`, `"Array<int>"`,
-///   …).
-///
-/// This matches the typed-result shape the v2 design wants: a string-typed
-/// `ConcreteType::String` with a stable payload that downstream code can
-/// pattern-match on.
-pub fn concrete_type_to_comptime_value(ct: &ConcreteType) -> ComptimeValue {
-    ComptimeValue::from_string(&ct.to_string())
+/// This is the typed analogue of the v2 Phase 5 `type_info()` query: instead
+/// of returning a NaN-boxed string, it returns a typed `ConstantValue`
+/// whose own concrete type is `String`.
+pub fn type_name_constant(ct: &ConcreteType) -> ConstantValue {
+    ConstantValue::from_string(ct.to_string())
 }
 
-/// Build a typed comptime value from a `TypeAnnotation`.
+/// Resolve a `TypeAnnotation` to its canonical-name `ConstantValue::String`.
 ///
-/// This is the entry point for `type_info(T)`-style calls in user code:
-/// the type annotation is resolved through `annotation_to_concrete` and then
-/// re-exposed as a typed `ComptimeValue`.
-///
-/// Returns `None` if the annotation cannot be resolved to a `ConcreteType`
-/// (e.g. unions, intersections, dyn). Callers should fall back to the
-/// NaN-boxed value path in that case.
-pub fn type_annotation_to_comptime_value(ann: &TypeAnnotation) -> Option<ComptimeValue> {
-    let ct = annotation_to_concrete(ann).ok()?;
-    Some(concrete_type_to_comptime_value(&ct))
+/// Returns `None` if the annotation cannot be reduced to a `ConcreteType`
+/// (e.g. unions, intersections, dyn). Callers may keep an annotation-level
+/// fallback in those cases.
+pub fn type_annotation_to_constant_value(ann: &TypeAnnotation) -> Option<ConstantValue> {
+    let ct = concrete_type_from_annotation(ann)?;
+    Some(type_name_constant(&ct))
 }
 
 #[cfg(test)]
@@ -259,182 +207,142 @@ mod tests {
     use shape_value::v2::ConcreteType;
 
     // ------------------------------------------------------------------
-    // ComptimeValue constructors
+    // ConstantValue constructors and concrete_type
     // ------------------------------------------------------------------
 
     #[test]
-    fn ctor_from_string_is_typed() {
-        let v = ComptimeValue::from_string("int");
+    fn ctor_string_concrete_type_is_string() {
+        let v = ConstantValue::from_str("int");
+        assert_eq!(v.concrete_type(), ConcreteType::String);
+        assert_eq!(v.as_str(), Some("int"));
         assert!(v.is_typed());
-        assert_eq!(v.concrete, Some(ConcreteType::String));
-        assert_eq!(v.value.as_str(), Some("int"));
     }
 
     #[test]
-    fn ctor_from_i64_is_typed() {
-        let v = ComptimeValue::from_i64(42);
-        assert_eq!(v.concrete, Some(ConcreteType::I64));
-        assert_eq!(v.value.as_i64(), Some(42));
+    fn ctor_i64_concrete_type_is_i64() {
+        let v = ConstantValue::I64(42);
+        assert_eq!(v.concrete_type(), ConcreteType::I64);
+        assert_eq!(v.as_i64(), Some(42));
+        assert!(v.is_typed());
     }
 
     #[test]
-    fn ctor_from_f64_is_typed() {
-        let v = ComptimeValue::from_f64(3.14);
-        assert_eq!(v.concrete, Some(ConcreteType::F64));
-        assert_eq!(v.value.as_f64(), Some(3.14));
+    fn ctor_f64_concrete_type_is_f64() {
+        let v = ConstantValue::F64(3.14);
+        assert_eq!(v.concrete_type(), ConcreteType::F64);
+        assert_eq!(v.as_f64(), Some(3.14));
     }
 
     #[test]
-    fn ctor_from_bool_is_typed() {
-        let v = ComptimeValue::from_bool(true);
-        assert_eq!(v.concrete, Some(ConcreteType::Bool));
-        assert_eq!(v.value.as_bool(), Some(true));
+    fn ctor_bool_concrete_type_is_bool() {
+        let v = ConstantValue::Bool(true);
+        assert_eq!(v.concrete_type(), ConcreteType::Bool);
+        assert_eq!(v.as_bool(), Some(true));
     }
 
     #[test]
-    fn ctor_from_value_word_is_untyped() {
-        let v = ComptimeValue::from_value_word(ValueWord::from_i64(7));
+    fn array_concrete_type_carries_element_type() {
+        let v = ConstantValue::Array(
+            ConcreteType::I64,
+            vec![ConstantValue::I64(1), ConstantValue::I64(2)],
+        );
+        assert_eq!(
+            v.concrete_type(),
+            ConcreteType::Array(Box::new(ConcreteType::I64))
+        );
+    }
+
+    #[test]
+    fn empty_array_still_types() {
+        // Empty arrays type-check via the element-type tag — there's no
+        // need to introspect a (nonexistent) element.
+        let v = ConstantValue::Array(ConcreteType::F64, vec![]);
+        assert_eq!(
+            v.concrete_type(),
+            ConcreteType::Array(Box::new(ConcreteType::F64))
+        );
+    }
+
+    #[test]
+    fn unit_and_none_have_distinct_concrete_types() {
+        assert_eq!(ConstantValue::Unit.concrete_type(), ConcreteType::Void);
+        assert_eq!(
+            ConstantValue::None.concrete_type(),
+            ConcreteType::Option(Box::new(ConcreteType::Void))
+        );
+    }
+
+    #[test]
+    fn opaque_carries_explicit_type_tag() {
+        // Opaque is the bridge for not-yet-migrated producer paths. The
+        // explicit type tag is required and `is_typed()` reports false so
+        // callers can detect remaining bridge sites.
+        let v = ConstantValue::Opaque(ConcreteType::U8, [0; 8]);
+        assert_eq!(v.concrete_type(), ConcreteType::U8);
         assert!(!v.is_typed());
     }
 
     // ------------------------------------------------------------------
-    // Bridge: ComptimeValue → ConcreteType
+    // type_name_constant — ConcreteType → typed String
     // ------------------------------------------------------------------
 
     #[test]
-    fn bridge_uses_explicit_tag_first() {
-        // The explicit tag wins even if it disagrees with the NaN-box content.
-        // This lets callers force a specific shape (e.g. tag a u8 buffer that
-        // happens to round-trip through f64).
-        let v = ComptimeValue::with_concrete(ValueWord::from_i64(0), ConcreteType::U8);
-        assert_eq!(comptime_value_to_concrete_type(&v), Some(ConcreteType::U8));
+    fn type_name_int_returns_typed_string() {
+        let v = type_name_constant(&ConcreteType::I64);
+        assert_eq!(v.concrete_type(), ConcreteType::String);
+        assert_eq!(v.as_str(), Some("int"));
     }
 
     #[test]
-    fn bridge_falls_back_to_nb_inspection_for_int() {
-        let v = ComptimeValue::from_value_word(ValueWord::from_i64(42));
-        assert_eq!(comptime_value_to_concrete_type(&v), Some(ConcreteType::I64));
+    fn type_name_number_returns_typed_string() {
+        let v = type_name_constant(&ConcreteType::F64);
+        assert_eq!(v.concrete_type(), ConcreteType::String);
+        assert_eq!(v.as_str(), Some("number"));
     }
 
     #[test]
-    fn bridge_falls_back_to_nb_inspection_for_string() {
-        let v = ComptimeValue::from_value_word(ValueWord::from_string(Arc::new("hi".into())));
-        assert_eq!(
-            comptime_value_to_concrete_type(&v),
-            Some(ConcreteType::String)
-        );
+    fn type_name_array_of_number() {
+        let v = type_name_constant(&ConcreteType::Array(Box::new(ConcreteType::F64)));
+        assert_eq!(v.as_str(), Some("Array<number>"));
     }
 
     #[test]
-    fn bridge_falls_back_for_bool_and_f64() {
-        assert_eq!(
-            comptime_value_to_concrete_type(&ComptimeValue::from_value_word(ValueWord::from_bool(
-                false
-            ))),
-            Some(ConcreteType::Bool)
-        );
-        assert_eq!(
-            comptime_value_to_concrete_type(&ComptimeValue::from_value_word(ValueWord::from_f64(
-                2.5
-            ))),
-            Some(ConcreteType::F64)
-        );
-    }
-
-    #[test]
-    fn bridge_handles_typed_array_via_nb() {
-        let arr = Arc::new(vec![ValueWord::from_i64(1), ValueWord::from_i64(2)]);
-        let nb = ValueWord::from_array(arr);
-        let v = ComptimeValue::from_value_word(nb);
-        // The result should be Array<i64> via element introspection.
-        assert_eq!(
-            comptime_value_to_concrete_type(&v),
-            Some(ConcreteType::Array(Box::new(ConcreteType::I64)))
-        );
-    }
-
-    #[test]
-    fn bridge_handles_unit_and_none() {
-        let unit = ComptimeValue::from_value_word(ValueWord::unit());
-        assert_eq!(
-            comptime_value_to_concrete_type(&unit),
-            Some(ConcreteType::Void)
-        );
-
-        let none = ComptimeValue::from_value_word(ValueWord::none());
-        assert_eq!(
-            comptime_value_to_concrete_type(&none),
-            Some(ConcreteType::Option(Box::new(ConcreteType::Void)))
-        );
+    fn type_name_option_int() {
+        let v = type_name_constant(&ConcreteType::Option(Box::new(ConcreteType::I64)));
+        assert_eq!(v.as_str(), Some("int?"));
     }
 
     // ------------------------------------------------------------------
-    // Bridge: ConcreteType → ComptimeValue
+    // type_annotation_to_constant_value — annotation end-to-end
     // ------------------------------------------------------------------
 
     #[test]
-    fn reverse_bridge_int_returns_typed_string() {
-        let v = concrete_type_to_comptime_value(&ConcreteType::I64);
-        assert_eq!(v.concrete, Some(ConcreteType::String));
-        assert_eq!(v.value.as_str(), Some("int"));
-    }
-
-    #[test]
-    fn reverse_bridge_number_returns_typed_string() {
-        let v = concrete_type_to_comptime_value(&ConcreteType::F64);
-        assert_eq!(v.concrete, Some(ConcreteType::String));
-        assert_eq!(v.value.as_str(), Some("number"));
-    }
-
-    #[test]
-    fn reverse_bridge_array_of_number_returns_array_number_string() {
-        let v = concrete_type_to_comptime_value(&ConcreteType::Array(Box::new(ConcreteType::F64)));
-        assert_eq!(v.concrete, Some(ConcreteType::String));
-        assert_eq!(v.value.as_str(), Some("Array<number>"));
-    }
-
-    #[test]
-    fn reverse_bridge_option_int_returns_int_questionmark() {
-        let v = concrete_type_to_comptime_value(&ConcreteType::Option(Box::new(ConcreteType::I64)));
-        assert_eq!(v.value.as_str(), Some("int?"));
-    }
-
-    // ------------------------------------------------------------------
-    // type_annotation_to_comptime_value end-to-end
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn comptime_type_info_int_name_is_int_string() {
-        // `comptime { type_info(int).name }` — the `.name` access returns the
-        // canonical type name as a `ConcreteType::String`.
+    fn annotation_int_resolves_to_typed_string() {
         let ann = TypeAnnotation::Basic("int".into());
-        let v = type_annotation_to_comptime_value(&ann).expect("int annotation should resolve");
-        assert_eq!(v.concrete, Some(ConcreteType::String));
-        assert_eq!(v.value.as_str(), Some("int"));
+        let v = type_annotation_to_constant_value(&ann)
+            .expect("int annotation should resolve");
+        assert_eq!(v.concrete_type(), ConcreteType::String);
+        assert_eq!(v.as_str(), Some("int"));
     }
 
     #[test]
-    fn comptime_type_info_array_f64_element_type() {
-        // `comptime { type_info(Array<f64>).element_type }` — the
-        // element-type query collapses to `number` in canonical form, with
-        // `ConcreteType::F64` as the underlying element representation.
+    fn annotation_array_f64_resolves_to_array_number_string() {
         let ann = TypeAnnotation::Generic {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("f64".into())],
         };
-        // First: the whole-type comptime value.
-        let whole = type_annotation_to_comptime_value(&ann).expect("Array<f64> resolves");
-        assert_eq!(whole.value.as_str(), Some("Array<number>"));
+        let whole = type_annotation_to_constant_value(&ann).expect("Array<f64> resolves");
+        assert_eq!(whole.as_str(), Some("Array<number>"));
 
-        // Then: extract the element type via the bridge directly to verify
-        // the ConcreteType representation a typed runtime would consume.
-        let resolved = annotation_to_concrete(&ann).expect("annotation_to_concrete works");
+        // And via concrete-type extraction directly:
+        let resolved =
+            concrete_type_from_annotation(&ann).expect("concrete_type_from_annotation works");
         match resolved {
             ConcreteType::Array(elem) => {
                 assert_eq!(*elem, ConcreteType::F64);
-                let elem_value = concrete_type_to_comptime_value(&elem);
-                assert_eq!(elem_value.value.as_str(), Some("number"));
-                assert_eq!(elem_value.concrete, Some(ConcreteType::String));
+                let elem_value = type_name_constant(&elem);
+                assert_eq!(elem_value.as_str(), Some("number"));
+                assert_eq!(elem_value.concrete_type(), ConcreteType::String);
             }
             other => panic!("expected Array, got {:?}", other),
         }
@@ -443,45 +351,44 @@ mod tests {
     #[test]
     fn comptime_for_field_iteration_yields_typed_field_info() {
         // Stand-in for `comptime for field in MyStruct.fields { field.type }`.
-        // We simulate the field descriptors a comptime for-loop would
-        // produce, then verify each one becomes a typed ComptimeValue when
-        // walked through the bridge.
+        // Each field-type annotation becomes a typed `ConstantValue::String`.
         let fields = [
             ("x", TypeAnnotation::Basic("number".into())),
             ("y", TypeAnnotation::Basic("number".into())),
             ("name", TypeAnnotation::Basic("string".into())),
         ];
 
-        let typed_fields: Vec<(&str, ComptimeValue)> = fields
+        let typed_fields: Vec<(&str, ConstantValue)> = fields
             .iter()
             .map(|(n, ann)| {
-                let cv = type_annotation_to_comptime_value(ann)
+                let cv = type_annotation_to_constant_value(ann)
                     .expect("field type annotation must resolve");
                 (*n, cv)
             })
             .collect();
 
-        // Every iteration produces a typed (string) ComptimeValue whose
-        // payload is the canonical type name. That's exactly what a typed
-        // `comptime for field in ...` body would consume.
         assert_eq!(typed_fields.len(), 3);
         for (name, cv) in &typed_fields {
-            assert!(cv.is_typed(), "field '{}' should be typed", name);
-            assert_eq!(cv.concrete, Some(ConcreteType::String));
+            assert_eq!(
+                cv.concrete_type(),
+                ConcreteType::String,
+                "field '{}' should be typed String",
+                name
+            );
         }
-        assert_eq!(typed_fields[0].1.value.as_str(), Some("number"));
-        assert_eq!(typed_fields[1].1.value.as_str(), Some("number"));
-        assert_eq!(typed_fields[2].1.value.as_str(), Some("string"));
+        assert_eq!(typed_fields[0].1.as_str(), Some("number"));
+        assert_eq!(typed_fields[1].1.as_str(), Some("number"));
+        assert_eq!(typed_fields[2].1.as_str(), Some("string"));
     }
 
     #[test]
-    fn type_annotation_to_comptime_value_returns_none_for_unions() {
-        // Unions can't be reduced to a single ConcreteType (per
-        // `concrete_conv` rules), so the bridge has to fail soft.
+    fn annotation_to_constant_value_returns_none_for_unions() {
+        // Unions can't be reduced to a single ConcreteType, so the bridge
+        // has to fail soft.
         let ann = TypeAnnotation::Union(vec![
             TypeAnnotation::Basic("int".into()),
             TypeAnnotation::Basic("string".into()),
         ]);
-        assert!(type_annotation_to_comptime_value(&ann).is_none());
+        assert!(type_annotation_to_constant_value(&ann).is_none());
     }
 }

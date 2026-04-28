@@ -42,6 +42,7 @@ use shape_runtime::type_system::{
 // Sub-modules
 pub(crate) mod comptime;
 pub(crate) mod comptime_builtins;
+pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_target;
 mod control_flow;
 mod expressions;
