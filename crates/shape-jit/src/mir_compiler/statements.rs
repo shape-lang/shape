@@ -690,37 +690,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .store(MemFlags::trusted(), stored, closure_ptr, offset);
                 }
                 CaptureKind::OwnedMutable => {
-                    // Allocate the cell via the FFI helper. The helper is
-                    // the sole allocator for OwnedMutable cells (it does
-                    // `Box::into_raw(Box::new(initial))` under the hood);
-                    // `release_typed_closure` in `shape-value`
-                    // reclaims the pointer with the matching
-                    // `Box::from_raw` for every bit set in
-                    // `owned_mutable_capture_mask`.
+                    // Wave C.2: dispatch to the per-FieldKind allocator
+                    // from C.1. The per-kind helpers in
+                    // `crates/shape-jit/src/ffi/object/closure.rs` (and
+                    // their `shape-value::v2::closure_raw` counterparts)
+                    // do `Box::into_raw(Box::new(initial))` at the
+                    // native interior width — F64 cells are an
+                    // 8-byte `Box<f64>`, Bool cells are a 1-byte
+                    // `Box<bool>`, etc. `release_typed_closure` consults
+                    // `ClosureLayout::capture_inner_kind` to pick the
+                    // matching `Box::from_raw::<T>` reclaim.
                     //
-                    // SAFETY: the FFI returns a non-null `*mut u64` owned
+                    // SAFETY: the FFI returns a non-null `*mut T` owned
                     // by the closure block. Between this call and the
                     // subsequent `store` the closure block MUST NOT be
                     // dropped — any intervening panic leaks the cell.
-                    // Cranelift lowering is panic-free by construction in
-                    // this function (all ops here are pure stores /
-                    // loads / direct calls), so we inherit that
-                    // guarantee without extra cleanup code. Heap-capture
-                    // atomic retain (step 5 below) iterates
-                    // `heap_capture_mask` only — OwnedMutable captures
-                    // set `owned_mutable_capture_mask` instead and are
-                    // skipped.
+                    // Cranelift lowering in this function is panic-free
+                    // by construction (pure stores / loads / direct
+                    // calls). Heap-capture atomic retain (step 5 below)
+                    // iterates `heap_capture_mask` only — OwnedMutable
+                    // captures set `owned_mutable_capture_mask` instead
+                    // and are skipped.
+                    let inner_kind = layout.capture_inner_kind(i);
                     let raw = self.compile_operand(op)?;
                     let val_ty = self.builder.func.dfg.value_type(raw);
-                    // Widen narrow types to I64 bits before handing off
-                    // to the allocator. `coerce_for_capture_store` with
-                    // target I64 yields a ValueWord-shaped u64.
-                    let initial_bits =
-                        self.coerce_for_capture_store(raw, val_ty, cl_types::I64);
-                    let inst = self.builder.ins().call(
-                        self.ffi.alloc_owned_mut_cell,
-                        &[initial_bits],
-                    );
+                    // Coerce the operand to the FFI-call's expected
+                    // native Cranelift type per the C.1 ABI:
+                    //   F64                       -> F64
+                    //   I64 / U64 / Ptr           -> I64
+                    //   I32 / U32                 -> I32
+                    //   I16 / U16 / I8 / U8 / Bool -> I32
+                    let target_ty = ffi_param_type_for_field_kind(inner_kind);
+                    let initial = self
+                        .coerce_for_capture_store(raw, val_ty, target_ty);
+                    let alloc_func = owned_mut_alloc_func(&self.ffi, inner_kind);
+                    let inst = self.builder.ins().call(alloc_func, &[initial]);
                     let cell_ptr = self.builder.inst_results(inst)[0];
                     self.builder
                         .ins()
@@ -740,6 +744,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // into the Ptr slot. `release_typed_closure` on
                     // closure drop walks `shared_capture_mask` and
                     // reclaims each share with `Arc::from_raw`.
+                    //
+                    // Wave C.2 note: the SharedCell itself was
+                    // allocated upstream by `initialize_shared_local_slots`
+                    // (in `blocks.rs`) via the legacy generic
+                    // `jit_alloc_shared_cell(NONE_BITS)` — which writes
+                    // 8 bytes of NaN-boxed null at the cell's payload
+                    // offset. Wave-B's per-kind shared writers
+                    // sign-/zero-extend to 8 bytes on each subsequent
+                    // store, so reads at the kind's native width
+                    // truncate correctly. Adding a typed
+                    // `jit_alloc_shared_cell_typed` is a small follow-up
+                    // (Wave G); the legacy entry point stays for now.
                     //
                     // SAFETY: the operand produces a non-null
                     // `*const SharedCell` whose Arc strong count ≥ 1
@@ -917,6 +933,49 @@ fn cranelift_type_for_field_kind(kind: shape_value::v2::struct_layout::FieldKind
         // Pointers / Strings / Arrays / Structs are all stored as i64-sized
         // heap pointers in the `TypedClosureHeader` block.
         FieldKind::Ptr => cl_types::I64,
+    }
+}
+
+/// Wave C.2: Cranelift type used at the per-FieldKind closure-cell FFI
+/// boundary. Sub-32 ints are widened to I32 to match the C ABI of the
+/// `jit_alloc_owned_mut_cell_<kind>` / `jit_*_shared_cell_<kind>`
+/// wrappers (declared in `crates/shape-jit/src/ffi_symbols/object_symbols.rs`).
+fn ffi_param_type_for_field_kind(
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> Type {
+    use cranelift::prelude::types as cl_types;
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::F64 => cl_types::F64,
+        FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => cl_types::I64,
+        FieldKind::I32 | FieldKind::U32 => cl_types::I32,
+        FieldKind::I16
+        | FieldKind::U16
+        | FieldKind::I8
+        | FieldKind::U8
+        | FieldKind::Bool => cl_types::I32,
+    }
+}
+
+/// Wave C.2: per-FieldKind selector for `jit_alloc_owned_mut_cell_<kind>`
+/// FuncRefs.
+fn owned_mut_alloc_func(
+    ffi: &crate::ffi_refs::FFIFuncRefs,
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> cranelift::codegen::ir::FuncRef {
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::I64 => ffi.alloc_owned_mut_cell_i64,
+        FieldKind::U64 => ffi.alloc_owned_mut_cell_u64,
+        FieldKind::F64 => ffi.alloc_owned_mut_cell_f64,
+        FieldKind::I32 => ffi.alloc_owned_mut_cell_i32,
+        FieldKind::U32 => ffi.alloc_owned_mut_cell_u32,
+        FieldKind::I16 => ffi.alloc_owned_mut_cell_i16,
+        FieldKind::U16 => ffi.alloc_owned_mut_cell_u16,
+        FieldKind::I8 => ffi.alloc_owned_mut_cell_i8,
+        FieldKind::U8 => ffi.alloc_owned_mut_cell_u8,
+        FieldKind::Bool => ffi.alloc_owned_mut_cell_bool,
+        FieldKind::Ptr => ffi.alloc_owned_mut_cell_ptr,
     }
 }
 
