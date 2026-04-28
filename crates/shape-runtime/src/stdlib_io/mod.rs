@@ -12,7 +12,56 @@ pub mod network_ops;
 pub mod path_ops;
 pub mod process_ops;
 
-use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{
+    ConcreteType, TypedReturn, register_typed_async_function, register_typed_function,
+};
+
+/// Wrap a legacy-shaped `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>`
+/// into a typed-body closure that round-trips the produced `ValueWord` through
+/// `TypedReturn::ValueWord`. The actual `ValueWord` construction still lives
+/// in the original op module — this Phase 4c.2 migration changes only the
+/// registration surface so the legacy `add_function_with_schema` callers go
+/// to zero, unblocking the typed-dispatch refactor in Phase 4d.
+fn wrap_legacy<F>(
+    f: F,
+) -> impl for<'ctx> Fn(
+    &[shape_value::ValueWord],
+    &crate::module_exports::ModuleContext<'ctx>,
+) -> Result<TypedReturn, String>
+       + Send
+       + Sync
+       + 'static
+where
+    F: for<'ctx> Fn(
+            &[shape_value::ValueWord],
+            &crate::module_exports::ModuleContext<'ctx>,
+        ) -> Result<shape_value::ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    move |args, ctx| f(args, ctx).map(TypedReturn::ValueWord)
+}
+
+/// Same as [`wrap_legacy`] but for async-shaped function pointers.
+fn wrap_legacy_async<F, Fut>(
+    f: F,
+) -> impl Fn(Vec<shape_value::ValueWord>) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>,
+> + Send
+       + Sync
+       + Clone
+       + 'static
+where
+    F: Fn(Vec<shape_value::ValueWord>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<shape_value::ValueWord, String>> + Send + 'static,
+{
+    move |args| {
+        let fut = f(args);
+        Box::pin(async move { fut.await.map(TypedReturn::ValueWord) })
+    }
+}
 
 /// Create the `io` module with file system operations.
 pub fn create_io_module() -> ModuleExports {
@@ -21,955 +70,907 @@ pub fn create_io_module() -> ModuleExports {
 
     // === File handle operations ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "open",
-        file_ops::io_open,
-        ModuleFunction {
-            description: "Open a file and return a handle".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "File path to open".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "mode".to_string(),
-                    type_name: "string".to_string(),
-                    required: false,
-                    description: "Open mode: \"r\" (default), \"w\", \"a\", \"rw\"".to_string(),
-                    default_snippet: Some("\"r\"".to_string()),
-                    allowed_values: Some(vec![
-                        "r".to_string(),
-                        "w".to_string(),
-                        "a".to_string(),
-                        "rw".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("IoHandle".to_string()),
-        },
+        "Open a file and return a handle",
+        vec![
+            ModuleParam {
+                name: "path".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "File path to open".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "mode".to_string(),
+                type_name: "string".to_string(),
+                required: false,
+                description: "Open mode: \"r\" (default), \"w\", \"a\", \"rw\"".to_string(),
+                default_snippet: Some("\"r\"".to_string()),
+                allowed_values: Some(vec![
+                    "r".to_string(),
+                    "w".to_string(),
+                    "a".to_string(),
+                    "rw".to_string(),
+                ]),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(file_ops::io_open),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "read",
-        file_ops::io_read,
-        ModuleFunction {
-            description: "Read from a file handle (n bytes or all)".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "File handle from io.open()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Number of bytes to read (omit for all)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "read_to_string",
-        file_ops::io_read_to_string,
-        ModuleFunction {
-            description: "Read entire file as a string".to_string(),
-            params: vec![ModuleParam {
+        "Read from a file handle (n bytes or all)",
+        vec![
+            ModuleParam {
                 name: "handle".to_string(),
                 type_name: "IoHandle".to_string(),
                 required: true,
                 description: "File handle from io.open()".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Number of bytes to read (omit for all)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        wrap_legacy(file_ops::io_read),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
+        "read_to_string",
+        "Read entire file as a string",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "File handle from io.open()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(file_ops::io_read_to_string),
+    );
+
+    register_typed_function(
+        &mut module,
         "read_bytes",
-        file_ops::io_read_bytes,
-        ModuleFunction {
-            description: "Read bytes from a file as array of ints".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "File handle from io.open()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Number of bytes to read (omit for all)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Vec<int>".to_string()),
-        },
+        "Read bytes from a file as array of ints",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "File handle from io.open()".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Number of bytes to read (omit for all)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Vec<int>".to_string()),
+        wrap_legacy(file_ops::io_read_bytes),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "write",
-        file_ops::io_write,
-        ModuleFunction {
-            description: "Write string or bytes to a file".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "File handle from io.open()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to write".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
+        "Write string or bytes to a file",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "File handle from io.open()".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to write".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy(file_ops::io_write),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "close",
-        file_ops::io_close,
-        ModuleFunction {
-            description: "Close a file handle".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "IoHandle".to_string(),
-                required: true,
-                description: "File handle to close".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+        "Close a file handle",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "File handle to close".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy(file_ops::io_close),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "flush",
-        file_ops::io_flush,
-        ModuleFunction {
-            description: "Flush buffered writes to disk".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "IoHandle".to_string(),
-                required: true,
-                description: "File handle to flush".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("unit".to_string()),
-        },
+        "Flush buffered writes to disk",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "File handle to flush".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        wrap_legacy(file_ops::io_flush),
     );
 
     // === Stat operations (no handle needed) ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "exists",
-        file_ops::io_exists,
-        ModuleFunction {
-            description: "Check if a path exists".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+        "Check if a path exists",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy(file_ops::io_exists),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stat",
-        file_ops::io_stat,
-        ModuleFunction {
-            description: "Get file/directory metadata".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to stat".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("object".to_string()),
-        },
+        "Get file/directory metadata",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to stat".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Object,
+        wrap_legacy(file_ops::io_stat),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_file",
-        file_ops::io_is_file,
-        ModuleFunction {
-            description: "Check if path is a file".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+        "Check if path is a file",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy(file_ops::io_is_file),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_dir",
-        file_ops::io_is_dir,
-        ModuleFunction {
-            description: "Check if path is a directory".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+        "Check if path is a directory",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy(file_ops::io_is_dir),
     );
 
     // === Directory operations ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "mkdir",
-        file_ops::io_mkdir,
-        ModuleFunction {
-            description: "Create a directory".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Directory path to create".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "recursive".to_string(),
-                    type_name: "bool".to_string(),
-                    required: false,
-                    description: "Create parent directories if needed".to_string(),
-                    default_snippet: Some("false".to_string()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("unit".to_string()),
-        },
+        "Create a directory",
+        vec![
+            ModuleParam {
+                name: "path".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Directory path to create".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "recursive".to_string(),
+                type_name: "bool".to_string(),
+                required: false,
+                description: "Create parent directories if needed".to_string(),
+                default_snippet: Some("false".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Unit,
+        wrap_legacy(file_ops::io_mkdir),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "remove",
-        file_ops::io_remove,
-        ModuleFunction {
-            description: "Remove a file or directory".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to remove".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("unit".to_string()),
-        },
+        "Remove a file or directory",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to remove".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        wrap_legacy(file_ops::io_remove),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "rename",
-        file_ops::io_rename,
-        ModuleFunction {
-            description: "Rename/move a file or directory".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "old".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Current path".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "new".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "New path".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("unit".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "read_dir",
-        file_ops::io_read_dir,
-        ModuleFunction {
-            description: "List directory contents".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
+        "Rename/move a file or directory",
+        vec![
+            ModuleParam {
+                name: "old".to_string(),
                 type_name: "string".to_string(),
                 required: true,
-                description: "Directory path to list".to_string(),
+                description: "Current path".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("Vec<string>".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "new".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "New path".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Unit,
+        wrap_legacy(file_ops::io_rename),
+    );
+
+    register_typed_function(
+        &mut module,
+        "read_dir",
+        "List directory contents",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Directory path to list".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("Vec<string>".to_string()),
+        wrap_legacy(file_ops::io_read_dir),
     );
 
     // === Path operations (sync, pure string manipulation) ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "join",
-        path_ops::io_join,
-        ModuleFunction {
-            description: "Join path components".to_string(),
-            params: vec![ModuleParam {
-                name: "parts".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path components to join".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Join path components",
+        vec![ModuleParam {
+            name: "parts".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path components to join".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(path_ops::io_join),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "dirname",
-        path_ops::io_dirname,
-        ModuleFunction {
-            description: "Get parent directory of a path".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "File path".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Get parent directory of a path",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "File path".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(path_ops::io_dirname),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "basename",
-        path_ops::io_basename,
-        ModuleFunction {
-            description: "Get filename component of a path".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "File path".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Get filename component of a path",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "File path".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(path_ops::io_basename),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "extension",
-        path_ops::io_extension,
-        ModuleFunction {
-            description: "Get file extension".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "File path".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Get file extension",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "File path".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(path_ops::io_extension),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "resolve",
-        path_ops::io_resolve,
-        ModuleFunction {
-            description: "Resolve/canonicalize a path".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to resolve".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Resolve/canonicalize a path",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to resolve".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(path_ops::io_resolve),
     );
 
     // === TCP operations ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tcp_connect",
-        network_ops::io_tcp_connect,
-        ModuleFunction {
-            description: "Connect to a TCP server".to_string(),
-            params: vec![ModuleParam {
-                name: "addr".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Address to connect to (e.g. \"127.0.0.1:8080\")".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("IoHandle".to_string()),
-        },
+        "Connect to a TCP server",
+        vec![ModuleParam {
+            name: "addr".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Address to connect to (e.g. \"127.0.0.1:8080\")".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(network_ops::io_tcp_connect),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tcp_listen",
-        network_ops::io_tcp_listen,
-        ModuleFunction {
-            description: "Bind a TCP listener".to_string(),
-            params: vec![ModuleParam {
-                name: "addr".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Address to bind (e.g. \"0.0.0.0:8080\")".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("IoHandle".to_string()),
-        },
+        "Bind a TCP listener",
+        vec![ModuleParam {
+            name: "addr".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Address to bind (e.g. \"0.0.0.0:8080\")".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(network_ops::io_tcp_listen),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tcp_accept",
-        network_ops::io_tcp_accept,
-        ModuleFunction {
-            description: "Accept an incoming TCP connection".to_string(),
-            params: vec![ModuleParam {
-                name: "listener".to_string(),
-                type_name: "IoHandle".to_string(),
-                required: true,
-                description: "TcpListener handle from io.tcp_listen()".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("IoHandle".to_string()),
-        },
+        "Accept an incoming TCP connection",
+        vec![ModuleParam {
+            name: "listener".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "TcpListener handle from io.tcp_listen()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(network_ops::io_tcp_accept),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tcp_read",
-        network_ops::io_tcp_read,
-        ModuleFunction {
-            description: "Read from a TCP stream".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "TcpStream handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Max bytes to read (default 65536)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "tcp_write",
-        network_ops::io_tcp_write,
-        ModuleFunction {
-            description: "Write to a TCP stream".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "TcpStream handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to send".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "tcp_close",
-        network_ops::io_tcp_close,
-        ModuleFunction {
-            description: "Close a TCP handle".to_string(),
-            params: vec![ModuleParam {
+        "Read from a TCP stream",
+        vec![
+            ModuleParam {
                 name: "handle".to_string(),
                 type_name: "IoHandle".to_string(),
                 required: true,
-                description: "TCP handle to close".to_string(),
+                description: "TcpStream handle".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Max bytes to read (default 65536)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        wrap_legacy(network_ops::io_tcp_read),
+    );
+
+    register_typed_function(
+        &mut module,
+        "tcp_write",
+        "Write to a TCP stream",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "TcpStream handle".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to send".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy(network_ops::io_tcp_write),
+    );
+
+    register_typed_function(
+        &mut module,
+        "tcp_close",
+        "Close a TCP handle",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "TCP handle to close".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy(network_ops::io_tcp_close),
     );
 
     // === UDP operations ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "udp_bind",
-        network_ops::io_udp_bind,
-        ModuleFunction {
-            description: "Bind a UDP socket".to_string(),
-            params: vec![ModuleParam {
-                name: "addr".to_string(),
+        "Bind a UDP socket",
+        vec![ModuleParam {
+            name: "addr".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Address to bind (e.g. \"0.0.0.0:0\" for ephemeral)".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(network_ops::io_udp_bind),
+    );
+
+    register_typed_function(
+        &mut module,
+        "udp_send",
+        "Send a UDP datagram",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "UdpSocket handle".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "data".to_string(),
                 type_name: "string".to_string(),
                 required: true,
-                description: "Address to bind (e.g. \"0.0.0.0:0\" for ephemeral)".to_string(),
+                description: "Data to send".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("IoHandle".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "target".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Target address (e.g. \"127.0.0.1:9000\")".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy(network_ops::io_udp_send),
     );
 
-    module.add_function_with_schema(
-        "udp_send",
-        network_ops::io_udp_send,
-        ModuleFunction {
-            description: "Send a UDP datagram".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "UdpSocket handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to send".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "target".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Target address (e.g. \"127.0.0.1:9000\")".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "udp_recv",
-        network_ops::io_udp_recv,
-        ModuleFunction {
-            description: "Receive a UDP datagram".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "UdpSocket handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Max receive buffer size (default 65536)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("object".to_string()),
-        },
+        "Receive a UDP datagram",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "UdpSocket handle".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Max receive buffer size (default 65536)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Object,
+        wrap_legacy(network_ops::io_udp_recv),
     );
 
     // === Process operations ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "spawn",
-        process_ops::io_spawn,
-        ModuleFunction {
-            description: "Spawn a subprocess with piped I/O".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "cmd".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Command to execute".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "args".to_string(),
-                    type_name: "Vec<string>".to_string(),
-                    required: false,
-                    description: "Command arguments".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("IoHandle".to_string()),
-        },
+        "Spawn a subprocess with piped I/O",
+        vec![
+            ModuleParam {
+                name: "cmd".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Command to execute".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "args".to_string(),
+                type_name: "Vec<string>".to_string(),
+                required: false,
+                description: "Command arguments".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(process_ops::io_spawn),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "exec",
-        process_ops::io_exec,
-        ModuleFunction {
-            description: "Run a command and capture output".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "cmd".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Command to execute".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "args".to_string(),
-                    type_name: "Vec<string>".to_string(),
-                    required: false,
-                    description: "Command arguments".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("object".to_string()),
-        },
+        "Run a command and capture output",
+        vec![
+            ModuleParam {
+                name: "cmd".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Command to execute".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "args".to_string(),
+                type_name: "Vec<string>".to_string(),
+                required: false,
+                description: "Command arguments".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Object,
+        wrap_legacy(process_ops::io_exec),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "process_wait",
-        process_ops::io_process_wait,
-        ModuleFunction {
-            description: "Wait for a process to exit".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "IoHandle".to_string(),
-                required: true,
-                description: "Process handle from io.spawn()".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("int".to_string()),
-        },
+        "Wait for a process to exit",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "Process handle from io.spawn()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Int,
+        wrap_legacy(process_ops::io_process_wait),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "process_kill",
-        process_ops::io_process_kill,
-        ModuleFunction {
-            description: "Kill a running process".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "IoHandle".to_string(),
-                required: true,
-                description: "Process handle from io.spawn()".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("unit".to_string()),
-        },
+        "Kill a running process",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "Process handle from io.spawn()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        wrap_legacy(process_ops::io_process_kill),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "process_write",
-        process_ops::io_process_write,
-        ModuleFunction {
-            description: "Write to a process stdin".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "Process handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to write to stdin".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "process_read",
-        process_ops::io_process_read,
-        ModuleFunction {
-            description: "Read from a process stdout".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "Process handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Max bytes to read (default 65536)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "process_read_err",
-        process_ops::io_process_read_err,
-        ModuleFunction {
-            description: "Read from a process stderr".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "handle".to_string(),
-                    type_name: "IoHandle".to_string(),
-                    required: true,
-                    description: "Process handle".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "n".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Max bytes to read (default 65536)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "process_read_line",
-        process_ops::io_process_read_line,
-        ModuleFunction {
-            description: "Read one line from process stdout".to_string(),
-            params: vec![ModuleParam {
+        "Write to a process stdin",
+        vec![
+            ModuleParam {
                 name: "handle".to_string(),
                 type_name: "IoHandle".to_string(),
                 required: true,
                 description: "Process handle".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to write to stdin".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy(process_ops::io_process_write),
     );
 
-    module.add_function_with_schema(
-        "stdin",
-        process_ops::io_stdin,
-        ModuleFunction {
-            description: "Get handle for current process stdin".to_string(),
-            params: vec![],
-            return_type: Some("IoHandle".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "stdout",
-        process_ops::io_stdout,
-        ModuleFunction {
-            description: "Get handle for current process stdout".to_string(),
-            params: vec![],
-            return_type: Some("IoHandle".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "stderr",
-        process_ops::io_stderr,
-        ModuleFunction {
-            description: "Get handle for current process stderr".to_string(),
-            params: vec![],
-            return_type: Some("IoHandle".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "read_line",
-        process_ops::io_read_line,
-        ModuleFunction {
-            description: "Read a line from a handle or stdin".to_string(),
-            params: vec![ModuleParam {
+    register_typed_function(
+        &mut module,
+        "process_read",
+        "Read from a process stdout",
+        vec![
+            ModuleParam {
                 name: "handle".to_string(),
                 type_name: "IoHandle".to_string(),
-                required: false,
-                description: "Handle to read from (default: stdin)".to_string(),
+                required: true,
+                description: "Process handle".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Max bytes to read (default 65536)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        wrap_legacy(process_ops::io_process_read),
+    );
+
+    register_typed_function(
+        &mut module,
+        "process_read_err",
+        "Read from a process stderr",
+        vec![
+            ModuleParam {
+                name: "handle".to_string(),
+                type_name: "IoHandle".to_string(),
+                required: true,
+                description: "Process handle".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "n".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Max bytes to read (default 65536)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        wrap_legacy(process_ops::io_process_read_err),
+    );
+
+    register_typed_function(
+        &mut module,
+        "process_read_line",
+        "Read one line from process stdout",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: true,
+            description: "Process handle".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(process_ops::io_process_read_line),
+    );
+
+    register_typed_function(
+        &mut module,
+        "stdin",
+        "Get handle for current process stdin",
+        vec![],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(process_ops::io_stdin),
+    );
+
+    register_typed_function(
+        &mut module,
+        "stdout",
+        "Get handle for current process stdout",
+        vec![],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(process_ops::io_stdout),
+    );
+
+    register_typed_function(
+        &mut module,
+        "stderr",
+        "Get handle for current process stderr",
+        vec![],
+        ConcreteType::Named("IoHandle".to_string()),
+        wrap_legacy(process_ops::io_stderr),
+    );
+
+    register_typed_function(
+        &mut module,
+        "read_line",
+        "Read a line from a handle or stdin",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "IoHandle".to_string(),
+            required: false,
+            description: "Handle to read from (default: stdin)".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(process_ops::io_read_line),
     );
 
     // === Async file I/O operations ===
 
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "read_file_async",
-        async_file_ops::io_read_file_async,
-        ModuleFunction {
-            description: "Asynchronously read entire file as a string".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "File path to read".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
+        "Asynchronously read entire file as a string",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "File path to read".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy_async(async_file_ops::io_read_file_async),
     );
 
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "write_file_async",
-        async_file_ops::io_write_file_async,
-        ModuleFunction {
-            description: "Asynchronously write a string to a file".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "File path to write".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to write".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
+        "Asynchronously write a string to a file",
+        vec![
+            ModuleParam {
+                name: "path".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "File path to write".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to write".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy_async(async_file_ops::io_write_file_async),
     );
 
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "append_file_async",
-        async_file_ops::io_append_file_async,
-        ModuleFunction {
-            description: "Asynchronously append a string to a file".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "File path to append to".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to append".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("int".to_string()),
-        },
+        "Asynchronously append a string to a file",
+        vec![
+            ModuleParam {
+                name: "path".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "File path to append to".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to append".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Int,
+        wrap_legacy_async(async_file_ops::io_append_file_async),
     );
 
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "read_bytes_async",
-        async_file_ops::io_read_bytes_async,
-        ModuleFunction {
-            description: "Asynchronously read file as raw bytes".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "File path to read".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".to_string()),
-        },
+        "Asynchronously read file as raw bytes",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "File path to read".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::ArrayInt,
+        wrap_legacy_async(async_file_ops::io_read_bytes_async),
     );
 
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "exists_async",
-        async_file_ops::io_exists_async,
-        ModuleFunction {
-            description: "Asynchronously check if a path exists".to_string(),
-            params: vec![ModuleParam {
-                name: "path".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Path to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
-        },
+        "Asynchronously check if a path exists",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        wrap_legacy_async(async_file_ops::io_exists_async),
     );
 
     // === Gzip file I/O ===
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "read_gzip",
-        file_ops::io_read_gzip,
-        ModuleFunction {
-            description: "Read a gzip-compressed file and return decompressed string".to_string(),
-            params: vec![ModuleParam {
+        "Read a gzip-compressed file and return decompressed string",
+        vec![ModuleParam {
+            name: "path".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Path to gzip file".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(file_ops::io_read_gzip),
+    );
+
+    register_typed_function(
+        &mut module,
+        "write_gzip",
+        "Compress a string with gzip and write to a file",
+        vec![
+            ModuleParam {
                 name: "path".to_string(),
                 type_name: "string".to_string(),
                 required: true,
-                description: "Path to gzip file".to_string(),
+                description: "Output file path".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
-        },
-    );
-
-    module.add_function_with_schema(
-        "write_gzip",
-        file_ops::io_write_gzip,
-        ModuleFunction {
-            description: "Compress a string with gzip and write to a file".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Output file path".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "String data to compress and write".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "level".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Compression level 0-9 (default: 6)".to_string(),
-                    default_snippet: Some("6".to_string()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("null".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "String data to compress and write".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "level".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Compression level 0-9 (default: 6)".to_string(),
+                default_snippet: Some("6".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("null".to_string()),
+        wrap_legacy(file_ops::io_write_gzip),
     );
 
     module
