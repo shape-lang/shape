@@ -219,15 +219,13 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_string() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_string(Arc::new("hello".to_string()));
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("hello"));
     }
@@ -235,15 +233,13 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_number() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_f64(42.5);
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_f64(), Some(42.5));
     }
@@ -251,15 +247,13 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_bool() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_bool(true);
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_bool(), Some(true));
     }
@@ -267,15 +261,13 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_null() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::none();
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert!(inner.is_none());
     }
@@ -283,8 +275,6 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_array() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
@@ -292,10 +282,10 @@ mod tests {
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
         ]));
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 3);
@@ -307,8 +297,6 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_object() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_hashmap_pairs(
@@ -321,10 +309,10 @@ mod tests {
                 ValueWord::from_i64(30),
             ],
         );
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
         assert_eq!(keys.len(), 2);
@@ -333,12 +321,10 @@ mod tests {
     #[test]
     fn test_encode_bytes_decode_bytes_roundtrip() {
         let module = create_msgpack_module();
-        let encode_bytes_fn = module.get_export("encode_bytes").unwrap();
-        let decode_bytes_fn = module.get_export("decode_bytes").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_string(Arc::new("test".to_string()));
-        let encoded = encode_bytes_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode_bytes", &[input], &ctx).unwrap().unwrap();
         let byte_arr = encoded.as_ok_inner().expect("should be Ok");
 
         // Verify it's an array of ints
@@ -352,7 +338,7 @@ mod tests {
             assert!((0..=255).contains(&byte_val));
         }
 
-        let decoded = decode_bytes_fn(&[byte_arr.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode_bytes", &[byte_arr.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("test"));
     }
@@ -360,71 +346,64 @@ mod tests {
     #[test]
     fn test_decode_invalid_hex() {
         let module = create_msgpack_module();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_string(Arc::new("not_valid_hex!@#".to_string()));
-        let result = decode_fn(&[input], &ctx);
+        let result = module.invoke_export("decode", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_decode_invalid_msgpack() {
         let module = create_msgpack_module();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         // Valid hex but not valid msgpack
         let input = ValueWord::from_string(Arc::new("deadbeef".to_string()));
-        let result = decode_fn(&[input], &ctx);
+        let result = module.invoke_export("decode", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_decode_requires_string() {
         let module = create_msgpack_module();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
-        let result = decode_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("decode", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_decode_bytes_requires_array() {
         let module = create_msgpack_module();
-        let decode_bytes_fn = module.get_export("decode_bytes").unwrap();
         let ctx = test_ctx();
 
-        let result = decode_bytes_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("decode_bytes", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_decode_bytes_invalid_byte_values() {
         let module = create_msgpack_module();
-        let decode_bytes_fn = module.get_export("decode_bytes").unwrap();
         let ctx = test_ctx();
 
         // Array with value > 255
         let input = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(300)]));
-        let result = decode_bytes_fn(&[input], &ctx);
+        let result = module.invoke_export("decode_bytes", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_hex_and_bytes_encode_same_data() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let encode_bytes_fn = module.get_export("encode_bytes").unwrap();
         let ctx = test_ctx();
 
         let input = ValueWord::from_i64(42);
-        let hex_result = encode_fn(&[input.clone()], &ctx).unwrap();
+        let hex_result = module.invoke_export("encode", &[input.clone()], &ctx).unwrap().unwrap();
         let hex_str = hex_result.as_ok_inner().expect("should be Ok");
         let hex_bytes = hex::decode(hex_str.as_str().unwrap()).unwrap();
 
-        let bytes_result = encode_bytes_fn(&[input], &ctx).unwrap();
+        let bytes_result = module.invoke_export("encode_bytes", &[input], &ctx).unwrap().unwrap();
         let byte_arr = bytes_result.as_ok_inner().expect("should be Ok");
         let arr = byte_arr
             .as_any_array()
@@ -470,8 +449,6 @@ mod tests {
     #[test]
     fn test_encode_decode_nested_structure() {
         let module = create_msgpack_module();
-        let encode_fn = module.get_export("encode").unwrap();
-        let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
         // Build nested: { "users": [{"name": "Alice"}, {"name": "Bob"}] }
@@ -488,10 +465,10 @@ mod tests {
             vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![user1, user2]))],
         );
 
-        let encoded = encode_fn(&[input], &ctx).unwrap();
+        let encoded = module.invoke_export("encode", &[input], &ctx).unwrap().unwrap();
         let hex_str = encoded.as_ok_inner().expect("should be Ok");
 
-        let decoded = decode_fn(&[hex_str.clone()], &ctx).unwrap();
+        let decoded = module.invoke_export("decode", &[hex_str.clone()], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
         assert_eq!(keys.len(), 1);

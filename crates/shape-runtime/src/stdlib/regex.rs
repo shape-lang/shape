@@ -350,8 +350,7 @@ mod tests {
     fn test_is_match_true() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("is_match").unwrap();
-        let result = f(&[s("hello world"), s(r"\bworld\b")], &ctx).unwrap();
+        let result = module.invoke_export("is_match", &[s("hello world"), s(r"\bworld\b")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -359,8 +358,7 @@ mod tests {
     fn test_is_match_false() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("is_match").unwrap();
-        let result = f(&[s("hello world"), s(r"^\d+$")], &ctx).unwrap();
+        let result = module.invoke_export("is_match", &[s("hello world"), s(r"^\d+$")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
 
@@ -368,16 +366,14 @@ mod tests {
     fn test_is_match_invalid_pattern() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("is_match").unwrap();
-        assert!(f(&[s("text"), s("[invalid")], &ctx).is_err());
+        assert!(module.invoke_export("is_match", &[s("text"), s("[invalid")], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_match_found() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("match").unwrap();
-        let result = f(&[s("abc 123 def"), s(r"(\d+)")], &ctx).unwrap();
+        let result = module.invoke_export("match", &[s("abc 123 def"), s(r"(\d+)")], &ctx).unwrap().unwrap();
         // Should be Some(match_object)
         let inner = result.as_some_inner().expect("should be Some");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
@@ -393,8 +389,7 @@ mod tests {
     fn test_match_not_found() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("match").unwrap();
-        let result = f(&[s("abc def"), s(r"\d+")], &ctx).unwrap();
+        let result = module.invoke_export("match", &[s("abc def"), s(r"\d+")], &ctx).unwrap().unwrap();
         assert!(result.is_none());
     }
 
@@ -402,8 +397,7 @@ mod tests {
     fn test_match_all() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("match_all").unwrap();
-        let result = f(&[s("a1 b2 c3"), s(r"\d")], &ctx).unwrap();
+        let result = module.invoke_export("match_all", &[s("a1 b2 c3"), s(r"\d")], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 3);
     }
@@ -412,8 +406,7 @@ mod tests {
     fn test_match_all_no_matches() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("match_all").unwrap();
-        let result = f(&[s("abc"), s(r"\d+")], &ctx).unwrap();
+        let result = module.invoke_export("match_all", &[s("abc"), s(r"\d+")], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 0);
     }
@@ -422,8 +415,7 @@ mod tests {
     fn test_replace_first() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("replace").unwrap();
-        let result = f(&[s("foo bar foo"), s("foo"), s("baz")], &ctx).unwrap();
+        let result = module.invoke_export("replace", &[s("foo bar foo"), s("foo"), s("baz")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some("baz bar foo"));
     }
 
@@ -431,8 +423,7 @@ mod tests {
     fn test_replace_all() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("replace_all").unwrap();
-        let result = f(&[s("foo bar foo"), s("foo"), s("baz")], &ctx).unwrap();
+        let result = module.invoke_export("replace_all", &[s("foo bar foo"), s("foo"), s("baz")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some("baz bar baz"));
     }
 
@@ -440,15 +431,14 @@ mod tests {
     fn test_replace_with_capture_group() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("replace_all").unwrap();
-        let result = f(
+        let result = module.invoke_export("replace_all", 
             &[
                 s("2024-01-15"),
                 s(r"(\d{4})-(\d{2})-(\d{2})"),
                 s("$3/$2/$1"),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_str(), Some("15/01/2024"));
     }
@@ -457,8 +447,7 @@ mod tests {
     fn test_split() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("split").unwrap();
-        let result = f(&[s("one,two,,three"), s(",")], &ctx).unwrap();
+        let result = module.invoke_export("split", &[s("one,two,,three"), s(",")], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 4);
         assert_eq!(arr[0].as_str(), Some("one"));
@@ -471,8 +460,7 @@ mod tests {
     fn test_split_by_whitespace() {
         let module = create_regex_module();
         let ctx = test_ctx();
-        let f = module.get_export("split").unwrap();
-        let result = f(&[s("hello   world  test"), s(r"\s+")], &ctx).unwrap();
+        let result = module.invoke_export("split", &[s("hello   world  test"), s(r"\s+")], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0].as_str(), Some("hello"));

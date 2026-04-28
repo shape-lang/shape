@@ -197,12 +197,11 @@ mod tests {
     #[test]
     fn test_yaml_parse_mapping() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             "name: test\nversion: 42\npi: 3.14\nactive: true\n".to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
         assert_eq!(keys.len(), 4);
@@ -211,10 +210,9 @@ mod tests {
     #[test]
     fn test_yaml_parse_sequence() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("- 1\n- 2\n- 3\n".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 3);
@@ -223,10 +221,9 @@ mod tests {
     #[test]
     fn test_yaml_parse_scalar_string() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("hello world".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("hello world"));
     }
@@ -234,10 +231,9 @@ mod tests {
     #[test]
     fn test_yaml_parse_null() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("null".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert!(inner.is_none());
     }
@@ -245,12 +241,11 @@ mod tests {
     #[test]
     fn test_yaml_parse_nested() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             "server:\n  host: localhost\n  port: 8080\n".to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
         assert_eq!(keys.len(), 1);
@@ -259,21 +254,19 @@ mod tests {
     #[test]
     fn test_yaml_parse_requires_string() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_yaml_parse_all_multi_document() {
         let module = create_yaml_module();
-        let parse_all_fn = module.get_export("parse_all").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             "---\nname: doc1\n---\nname: doc2\n---\nname: doc3\n".to_string(),
         ));
-        let result = parse_all_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse_all", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 3);
@@ -282,10 +275,9 @@ mod tests {
     #[test]
     fn test_yaml_parse_all_single_document() {
         let module = create_yaml_module();
-        let parse_all_fn = module.get_export("parse_all").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("name: single\n".to_string()));
-        let result = parse_all_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse_all", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
         assert_eq!(arr.len(), 1);
@@ -294,12 +286,11 @@ mod tests {
     #[test]
     fn test_yaml_stringify_mapping() {
         let module = create_yaml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
         let keys = vec![ValueWord::from_string(Arc::new("name".to_string()))];
         let values = vec![ValueWord::from_string(Arc::new("test".to_string()))];
         let hm = ValueWord::from_hashmap_pairs(keys, values);
-        let result = stringify_fn(&[hm], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[hm], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("name"));
@@ -309,9 +300,8 @@ mod tests {
     #[test]
     fn test_yaml_stringify_number() {
         let module = create_yaml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::from_f64(42.0)], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[ValueWord::from_f64(42.0)], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("42"));
@@ -320,9 +310,8 @@ mod tests {
     #[test]
     fn test_yaml_stringify_bool() {
         let module = create_yaml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::from_bool(true)], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[ValueWord::from_bool(true)], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("true"));
@@ -331,12 +320,11 @@ mod tests {
     #[test]
     fn test_yaml_is_valid_true() {
         let module = create_yaml_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new("key: value\n".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
@@ -344,14 +332,13 @@ mod tests {
     #[test]
     fn test_yaml_is_valid_false() {
         let module = create_yaml_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new(
                 ":\n  :\n    - : :\n  bad: [".to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // serde_yaml may or may not parse some edge cases; just verify we get a bool
         assert!(result.as_bool().is_some());
@@ -360,27 +347,24 @@ mod tests {
     #[test]
     fn test_yaml_is_valid_requires_string() {
         let module = create_yaml_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("is_valid", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_yaml_roundtrip() {
         let module = create_yaml_module();
-        let parse_fn = module.get_export("parse").unwrap();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let yaml_str = "name: test\nversion: 42\n";
-        let parsed = parse_fn(
+        let parsed = module.invoke_export("parse", 
             &[ValueWord::from_string(Arc::new(yaml_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = parsed.as_ok_inner().expect("should be Ok");
-        let re_stringified = stringify_fn(&[inner.clone()], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
         let re_str = re_stringified.as_ok_inner().expect("should be Ok");
         assert!(re_str.as_str().is_some());
     }

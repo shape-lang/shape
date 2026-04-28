@@ -238,72 +238,65 @@ mod tests {
     #[test]
     fn test_normalize_nfc() {
         let module = create_unicode_module();
-        let f = module.get_export("normalize").unwrap();
         let ctx = test_ctx();
         // e followed by combining acute accent
         let input = ValueWord::from_string(Arc::new("e\u{0301}".to_string()));
         let form = ValueWord::from_string(Arc::new("NFC".to_string()));
-        let result = f(&[input, form], &ctx).unwrap();
+        let result = module.invoke_export("normalize", &[input, form], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some("\u{00e9}"));
     }
 
     #[test]
     fn test_normalize_nfd() {
         let module = create_unicode_module();
-        let f = module.get_export("normalize").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("\u{00e9}".to_string()));
         let form = ValueWord::from_string(Arc::new("NFD".to_string()));
-        let result = f(&[input, form], &ctx).unwrap();
+        let result = module.invoke_export("normalize", &[input, form], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some("e\u{0301}"));
     }
 
     #[test]
     fn test_normalize_invalid_form() {
         let module = create_unicode_module();
-        let f = module.get_export("normalize").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("hello".to_string()));
         let form = ValueWord::from_string(Arc::new("INVALID".to_string()));
-        assert!(f(&[input, form], &ctx).is_err());
+        assert!(module.invoke_export("normalize", &[input, form], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_category_uppercase() {
         let module = create_unicode_module();
-        let f = module.get_export("category").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_i64(65)], &ctx).unwrap(); // 'A'
+        let result = module.invoke_export("category", &[ValueWord::from_i64(65)], &ctx).unwrap().unwrap(); // 'A'
         assert_eq!(result.as_str(), Some("Lu"));
     }
 
     #[test]
     fn test_category_lowercase() {
         let module = create_unicode_module();
-        let f = module.get_export("category").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_i64(97)], &ctx).unwrap(); // 'a'
+        let result = module.invoke_export("category", &[ValueWord::from_i64(97)], &ctx).unwrap().unwrap(); // 'a'
         assert_eq!(result.as_str(), Some("Ll"));
     }
 
     #[test]
     fn test_category_digit() {
         let module = create_unicode_module();
-        let f = module.get_export("category").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_i64(48)], &ctx).unwrap(); // '0'
+        let result = module.invoke_export("category", &[ValueWord::from_i64(48)], &ctx).unwrap().unwrap(); // '0'
         assert_eq!(result.as_str(), Some("Nd"));
     }
 
     #[test]
     fn test_is_letter_alpha() {
         let module = create_unicode_module();
-        let f = module.get_export("is_letter").unwrap();
         let ctx = test_ctx();
-        let result = f(
+        let result = module.invoke_export("is_letter", 
             &[ValueWord::from_string(Arc::new("\u{00e9}".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
@@ -311,38 +304,34 @@ mod tests {
     #[test]
     fn test_is_letter_digit() {
         let module = create_unicode_module();
-        let f = module.get_export("is_letter").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_string(Arc::new("5".to_string()))], &ctx).unwrap();
+        let result = module.invoke_export("is_letter", &[ValueWord::from_string(Arc::new("5".to_string()))], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
 
     #[test]
     fn test_is_digit_numeric() {
         let module = create_unicode_module();
-        let f = module.get_export("is_digit").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_string(Arc::new("7".to_string()))], &ctx).unwrap();
+        let result = module.invoke_export("is_digit", &[ValueWord::from_string(Arc::new("7".to_string()))], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_is_digit_alpha() {
         let module = create_unicode_module();
-        let f = module.get_export("is_digit").unwrap();
         let ctx = test_ctx();
-        let result = f(&[ValueWord::from_string(Arc::new("a".to_string()))], &ctx).unwrap();
+        let result = module.invoke_export("is_digit", &[ValueWord::from_string(Arc::new("a".to_string()))], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
 
     #[test]
     fn test_graphemes_emoji() {
         let module = create_unicode_module();
-        let f = module.get_export("graphemes").unwrap();
         let ctx = test_ctx();
         // Family emoji (multiple codepoints, single grapheme cluster)
         let input = ValueWord::from_string(Arc::new("hello".to_string()));
-        let result = f(&[input], &ctx).unwrap();
+        let result = module.invoke_export("graphemes", &[input], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 5);
         assert_eq!(arr[0].as_str(), Some("h"));
@@ -352,11 +341,10 @@ mod tests {
     #[test]
     fn test_graphemes_combining() {
         let module = create_unicode_module();
-        let f = module.get_export("graphemes").unwrap();
         let ctx = test_ctx();
         // "e" + combining acute = one grapheme cluster
         let input = ValueWord::from_string(Arc::new("e\u{0301}a".to_string()));
-        let result = f(&[input], &ctx).unwrap();
+        let result = module.invoke_export("graphemes", &[input], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 2); // "e\u{0301}" and "a"
     }

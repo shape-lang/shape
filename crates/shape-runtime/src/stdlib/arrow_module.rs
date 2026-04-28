@@ -214,14 +214,13 @@ mod tests {
         write_test_arrow_file(&path);
 
         let module = create_arrow_module();
-        let read_fn = module.get_export("read_table").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(
+        let result = module.invoke_export("read_table", 
             &[ValueWord::from_string(Arc::new(
                 path.to_str().unwrap().to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert!(inner.as_datatable().is_some());
@@ -234,14 +233,13 @@ mod tests {
         write_test_arrow_file(&path);
 
         let module = create_arrow_module();
-        let read_fn = module.get_export("read_tables").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(
+        let result = module.invoke_export("read_tables", 
             &[ValueWord::from_string(Arc::new(
                 path.to_str().unwrap().to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let tables = inner.as_any_array().expect("should be array").to_generic();
@@ -255,14 +253,13 @@ mod tests {
         write_test_arrow_file(&path);
 
         let module = create_arrow_module();
-        let meta_fn = module.get_export("metadata").unwrap();
         let ctx = test_ctx();
-        let result = meta_fn(
+        let result = module.invoke_export("metadata", 
             &[ValueWord::from_string(Arc::new(
                 path.to_str().unwrap().to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
@@ -280,23 +277,21 @@ mod tests {
     #[test]
     fn test_arrow_read_table_nonexistent() {
         let module = create_arrow_module();
-        let read_fn = module.get_export("read_table").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(
+        let result = module.invoke_export("read_table", 
             &[ValueWord::from_string(Arc::new(
                 "/nonexistent/file.arrow".to_string(),
             ))],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_arrow_read_table_requires_string() {
         let module = create_arrow_module();
-        let read_fn = module.get_export("read_table").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("read_table", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 

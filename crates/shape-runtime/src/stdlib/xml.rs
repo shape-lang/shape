@@ -334,11 +334,10 @@ mod tests {
     #[test]
     fn test_xml_parse_simple() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input =
             ValueWord::from_string(Arc::new("<root><child>hello</child></root>".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
         // Find the "name" field
@@ -355,12 +354,11 @@ mod tests {
     #[test]
     fn test_xml_parse_with_attributes() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             r#"<person name="Alice" age="30">text</person>"#.to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
 
@@ -379,12 +377,11 @@ mod tests {
     #[test]
     fn test_xml_parse_nested() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             "<config><db><host>localhost</host><port>5432</port></db></config>".to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
 
@@ -400,10 +397,9 @@ mod tests {
     #[test]
     fn test_xml_parse_self_closing() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(r#"<br class="spacer"/>"#.to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
 
@@ -420,26 +416,23 @@ mod tests {
     #[test]
     fn test_xml_parse_no_root() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = parse_fn(&[input], &ctx);
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_xml_parse_requires_string() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_xml_stringify_simple() {
         let module = create_xml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         // Build a node: { name: "root", attributes: {}, children: [], text: "hello" }
@@ -457,7 +450,7 @@ mod tests {
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
 
-        let result = stringify_fn(&[node], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("<root>"));
@@ -468,7 +461,6 @@ mod tests {
     #[test]
     fn test_xml_stringify_with_attributes() {
         let module = create_xml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let attr_keys = vec![ValueWord::from_string(Arc::new("id".to_string()))];
@@ -487,7 +479,7 @@ mod tests {
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
 
-        let result = stringify_fn(&[node], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("id=\"42\""));
@@ -496,7 +488,6 @@ mod tests {
     #[test]
     fn test_xml_stringify_self_closing() {
         let module = create_xml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let node_keys = vec![
@@ -511,7 +502,7 @@ mod tests {
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
 
-        let result = stringify_fn(&[node], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("<br/>") || s.contains("<br />"));
@@ -520,18 +511,16 @@ mod tests {
     #[test]
     fn test_xml_roundtrip() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let xml_str = r#"<root><child attr="val">text</child></root>"#;
-        let parsed = parse_fn(
+        let parsed = module.invoke_export("parse", 
             &[ValueWord::from_string(Arc::new(xml_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = parsed.as_ok_inner().expect("should be Ok");
-        let re_stringified = stringify_fn(&[inner.clone()], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
         let re_str = re_stringified.as_ok_inner().expect("should be Ok");
         let s = re_str.as_str().expect("should be string");
         assert!(s.contains("root"));
@@ -557,12 +546,11 @@ mod tests {
     #[test]
     fn test_xml_parse_with_declaration() {
         let module = create_xml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             r#"<?xml version="1.0" encoding="UTF-8"?><root>hello</root>"#.to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
         let mut found_name = false;

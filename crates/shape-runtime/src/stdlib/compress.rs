@@ -263,16 +263,14 @@ mod tests {
     fn test_gzip_roundtrip() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let gzip_fn = module.get_export("gzip").unwrap();
-        let gunzip_fn = module.get_export("gunzip").unwrap();
 
         let input = ValueWord::from_string(Arc::new("hello world".to_string()));
-        let compressed = gzip_fn(&[input], &ctx).unwrap();
+        let compressed = module.invoke_export("gzip", &[input], &ctx).unwrap().unwrap();
 
         // Compressed should be an array
         assert!(compressed.as_any_array().is_some());
 
-        let decompressed = gunzip_fn(&[compressed], &ctx).unwrap();
+        let decompressed = module.invoke_export("gunzip", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some("hello world"));
     }
 
@@ -280,15 +278,13 @@ mod tests {
     fn test_zstd_roundtrip() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let zstd_fn = module.get_export("zstd").unwrap();
-        let unzstd_fn = module.get_export("unzstd").unwrap();
 
         let input = ValueWord::from_string(Arc::new("hello zstd compression".to_string()));
-        let compressed = zstd_fn(&[input], &ctx).unwrap();
+        let compressed = module.invoke_export("zstd", &[input], &ctx).unwrap().unwrap();
 
         assert!(compressed.as_any_array().is_some());
 
-        let decompressed = unzstd_fn(&[compressed], &ctx).unwrap();
+        let decompressed = module.invoke_export("unzstd", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some("hello zstd compression"));
     }
 
@@ -296,14 +292,12 @@ mod tests {
     fn test_zstd_with_level() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let zstd_fn = module.get_export("zstd").unwrap();
-        let unzstd_fn = module.get_export("unzstd").unwrap();
 
         let input = ValueWord::from_string(Arc::new("level test".to_string()));
         let level = ValueWord::from_i64(1);
-        let compressed = zstd_fn(&[input, level], &ctx).unwrap();
+        let compressed = module.invoke_export("zstd", &[input, level], &ctx).unwrap().unwrap();
 
-        let decompressed = unzstd_fn(&[compressed], &ctx).unwrap();
+        let decompressed = module.invoke_export("unzstd", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some("level test"));
     }
 
@@ -311,15 +305,13 @@ mod tests {
     fn test_deflate_roundtrip() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let deflate_fn = module.get_export("deflate").unwrap();
-        let inflate_fn = module.get_export("inflate").unwrap();
 
         let input = ValueWord::from_string(Arc::new("deflate test data".to_string()));
-        let compressed = deflate_fn(&[input], &ctx).unwrap();
+        let compressed = module.invoke_export("deflate", &[input], &ctx).unwrap().unwrap();
 
         assert!(compressed.as_any_array().is_some());
 
-        let decompressed = inflate_fn(&[compressed], &ctx).unwrap();
+        let decompressed = module.invoke_export("inflate", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some("deflate test data"));
     }
 
@@ -327,9 +319,8 @@ mod tests {
     fn test_gzip_requires_string() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let gzip_fn = module.get_export("gzip").unwrap();
 
-        let result = gzip_fn(&[ValueWord::from_i64(42)], &ctx);
+        let result = module.invoke_export("gzip", &[ValueWord::from_i64(42)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -337,14 +328,13 @@ mod tests {
     fn test_gunzip_invalid_data() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let gunzip_fn = module.get_export("gunzip").unwrap();
 
         let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
         ]));
-        let result = gunzip_fn(&[bad_data], &ctx);
+        let result = module.invoke_export("gunzip", &[bad_data], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -352,12 +342,10 @@ mod tests {
     fn test_empty_string_roundtrip() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let gzip_fn = module.get_export("gzip").unwrap();
-        let gunzip_fn = module.get_export("gunzip").unwrap();
 
         let input = ValueWord::from_string(Arc::new(String::new()));
-        let compressed = gzip_fn(&[input], &ctx).unwrap();
-        let decompressed = gunzip_fn(&[compressed], &ctx).unwrap();
+        let compressed = module.invoke_export("gzip", &[input], &ctx).unwrap().unwrap();
+        let decompressed = module.invoke_export("gunzip", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some(""));
     }
 
@@ -365,18 +353,16 @@ mod tests {
     fn test_large_data_roundtrip() {
         let module = create_compress_module();
         let ctx = test_ctx();
-        let gzip_fn = module.get_export("gzip").unwrap();
-        let gunzip_fn = module.get_export("gunzip").unwrap();
 
         let large = "a".repeat(10_000);
         let input = ValueWord::from_string(Arc::new(large.clone()));
-        let compressed = gzip_fn(&[input], &ctx).unwrap();
+        let compressed = module.invoke_export("gzip", &[input], &ctx).unwrap().unwrap();
 
         // Compressed should be smaller than original
         let arr = compressed.as_any_array().unwrap().to_generic();
         assert!(arr.len() < 10_000);
 
-        let decompressed = gunzip_fn(&[compressed], &ctx).unwrap();
+        let decompressed = module.invoke_export("gunzip", &[compressed], &ctx).unwrap().unwrap();
         assert_eq!(decompressed.as_str(), Some(large.as_str()));
     }
 

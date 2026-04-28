@@ -325,16 +325,14 @@ mod tests {
     fn test_zip_roundtrip() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let zip_create_fn = module.get_export("zip_create").unwrap();
-        let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
         let entries = make_test_entries();
-        let zip_bytes = zip_create_fn(&[entries], &ctx).unwrap();
+        let zip_bytes = module.invoke_export("zip_create", &[entries], &ctx).unwrap().unwrap();
 
         // Should be a byte array
         assert!(zip_bytes.as_any_array().is_some());
 
-        let extracted = zip_extract_fn(&[zip_bytes], &ctx).unwrap();
+        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
         let arr = extracted.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 2);
 
@@ -353,15 +351,13 @@ mod tests {
     fn test_tar_roundtrip() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let tar_create_fn = module.get_export("tar_create").unwrap();
-        let tar_extract_fn = module.get_export("tar_extract").unwrap();
 
         let entries = make_test_entries();
-        let tar_bytes = tar_create_fn(&[entries], &ctx).unwrap();
+        let tar_bytes = module.invoke_export("tar_create", &[entries], &ctx).unwrap().unwrap();
 
         assert!(tar_bytes.as_any_array().is_some());
 
-        let extracted = tar_extract_fn(&[tar_bytes], &ctx).unwrap();
+        let extracted = module.invoke_export("tar_extract", &[tar_bytes], &ctx).unwrap().unwrap();
         let arr = extracted.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 2);
 
@@ -378,13 +374,11 @@ mod tests {
     fn test_zip_create_empty() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let zip_create_fn = module.get_export("zip_create").unwrap();
-        let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
         let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
-        let zip_bytes = zip_create_fn(&[empty], &ctx).unwrap();
+        let zip_bytes = module.invoke_export("zip_create", &[empty], &ctx).unwrap().unwrap();
 
-        let extracted = zip_extract_fn(&[zip_bytes], &ctx).unwrap();
+        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
         let arr = extracted.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 0);
     }
@@ -393,13 +387,11 @@ mod tests {
     fn test_tar_create_empty() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let tar_create_fn = module.get_export("tar_create").unwrap();
-        let tar_extract_fn = module.get_export("tar_extract").unwrap();
 
         let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
-        let tar_bytes = tar_create_fn(&[empty], &ctx).unwrap();
+        let tar_bytes = module.invoke_export("tar_create", &[empty], &ctx).unwrap().unwrap();
 
-        let extracted = tar_extract_fn(&[tar_bytes], &ctx).unwrap();
+        let extracted = module.invoke_export("tar_extract", &[tar_bytes], &ctx).unwrap().unwrap();
         let arr = extracted.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 0);
     }
@@ -408,13 +400,12 @@ mod tests {
     fn test_zip_extract_invalid_data() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
         let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
         ]));
-        let result = zip_extract_fn(&[bad_data], &ctx);
+        let result = module.invoke_export("zip_extract", &[bad_data], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -422,13 +413,12 @@ mod tests {
     fn test_tar_extract_invalid_data() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let tar_extract_fn = module.get_export("tar_extract").unwrap();
 
         let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
         ]));
-        let result = tar_extract_fn(&[bad_data], &ctx);
+        let result = module.invoke_export("tar_extract", &[bad_data], &ctx).unwrap();
         // tar with just 2 bytes will likely result in empty entries (not enough for header)
         // or an error — either is acceptable
         if let Ok(val) = result {
@@ -441,9 +431,8 @@ mod tests {
     fn test_zip_create_requires_array() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let zip_create_fn = module.get_export("zip_create").unwrap();
 
-        let result = zip_create_fn(&[ValueWord::from_i64(42)], &ctx);
+        let result = module.invoke_export("zip_create", &[ValueWord::from_i64(42)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -476,14 +465,12 @@ mod tests {
     fn test_zip_unicode_content() {
         let module = create_archive_module();
         let ctx = test_ctx();
-        let zip_create_fn = module.get_export("zip_create").unwrap();
-        let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
         let entries = vec![make_entry("unicode.txt", "Hello \u{1F600} World \u{00E9}")];
         let input = ValueWord::from_array(shape_value::vmarray_from_vec(entries));
-        let zip_bytes = zip_create_fn(&[input], &ctx).unwrap();
+        let zip_bytes = module.invoke_export("zip_create", &[input], &ctx).unwrap().unwrap();
 
-        let extracted = zip_extract_fn(&[zip_bytes], &ctx).unwrap();
+        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
         let arr = extracted.as_any_array().unwrap().to_generic();
         let (_, data) = extract_entry_fields(&arr[0]).unwrap();
         assert_eq!(data, "Hello \u{1F600} World \u{00E9}");

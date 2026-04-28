@@ -436,10 +436,9 @@ mod tests {
     #[test]
     fn test_json_parse_string() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(r#""hello""#.to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         // Result is Ok(Json::Str("hello"))
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
@@ -450,10 +449,9 @@ mod tests {
     #[test]
     fn test_json_parse_number() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("42.5".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_NUMBER);
@@ -463,10 +461,9 @@ mod tests {
     #[test]
     fn test_json_parse_int() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("42".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_INT, "integral JSON should be Json::Int");
@@ -476,10 +473,9 @@ mod tests {
     #[test]
     fn test_json_parse_bool() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("true".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_BOOL);
@@ -489,10 +485,9 @@ mod tests {
     #[test]
     fn test_json_parse_null() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("null".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, _payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_NULL);
@@ -501,10 +496,9 @@ mod tests {
     #[test]
     fn test_json_parse_array() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("[1, 2, 3]".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_ARRAY);
@@ -522,10 +516,9 @@ mod tests {
     #[test]
     fn test_json_parse_object() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(r#"{"a": 1, "b": "two"}"#.to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (variant, payload) = extract_json(inner);
         assert_eq!(variant, JSON_VARIANT_OBJECT);
@@ -537,28 +530,25 @@ mod tests {
     #[test]
     fn test_json_parse_invalid() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("{invalid}".to_string()));
-        let result = parse_fn(&[input], &ctx);
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_json_parse_requires_string() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_json_stringify_number() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::from_f64(42.0)], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[ValueWord::from_f64(42.0)], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("42.0"));
     }
@@ -566,12 +556,11 @@ mod tests {
     #[test]
     fn test_json_stringify_string() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(
+        let result = module.invoke_export("stringify", 
             &[ValueWord::from_string(Arc::new("hello".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("\"hello\""));
@@ -580,9 +569,8 @@ mod tests {
     #[test]
     fn test_json_stringify_bool() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::from_bool(true)], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[ValueWord::from_bool(true)], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("true"));
     }
@@ -590,9 +578,8 @@ mod tests {
     #[test]
     fn test_json_stringify_none() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::none()], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[ValueWord::none()], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("null"));
     }
@@ -600,13 +587,12 @@ mod tests {
     #[test]
     fn test_json_stringify_array() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
         let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let result = stringify_fn(&[arr], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[arr], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("[1.0,2.0]"));
     }
@@ -614,12 +600,11 @@ mod tests {
     #[test]
     fn test_json_stringify_pretty() {
         let module = create_json_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(
+        let result = module.invoke_export("stringify", 
             &[ValueWord::from_f64(42.0), ValueWord::from_bool(true)],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         // Pretty mode with a single number is the same as compact
@@ -629,14 +614,13 @@ mod tests {
     #[test]
     fn test_json_is_valid_true() {
         let module = create_json_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new(
                 r#"{"key": "value"}"#.to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
@@ -644,14 +628,13 @@ mod tests {
     #[test]
     fn test_json_is_valid_false() {
         let module = create_json_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new(
                 "{not valid json".to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
@@ -659,9 +642,8 @@ mod tests {
     #[test]
     fn test_json_is_valid_requires_string() {
         let module = create_json_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("is_valid", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -688,23 +670,21 @@ mod tests {
     #[test]
     fn test_json_roundtrip_nested() {
         let module = create_json_module();
-        let parse_fn = module.get_export("parse").unwrap();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let json_str = r#"{"name":"test","values":[1,2,3],"active":true,"meta":null}"#;
-        let parsed = parse_fn(
+        let parsed = module.invoke_export("parse", 
             &[ValueWord::from_string(Arc::new(json_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = parsed.as_ok_inner().expect("should be Ok");
 
-        let re_stringified = stringify_fn(&[inner.clone()], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
         let re_str = re_stringified.as_ok_inner().expect("should be Ok");
 
         // Re-parse to verify round-trip validity
-        let re_parsed = parse_fn(&[re_str.clone()], &ctx).unwrap();
+        let re_parsed = module.invoke_export("parse", &[re_str.clone()], &ctx).unwrap().unwrap();
         assert!(re_parsed.as_ok_inner().is_some());
     }
 
@@ -774,7 +754,6 @@ mod tests {
         registry.register(schema);
 
         let module = create_json_module();
-        let parse_typed_fn = module.get_export("__parse_typed").unwrap();
         let ctx = crate::module_exports::ModuleContext {
             schemas: &registry,
             invoke_callable: None,
@@ -791,7 +770,7 @@ mod tests {
             r#"{"Close Price": 100.5, "vol.": 1000}"#.to_string(),
         ));
         let sid = ValueWord::from_f64(trade_id as f64);
-        let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
+        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
 
         // Verify it's a TypedObject with correct field values
@@ -865,7 +844,6 @@ mod tests {
         );
 
         let module = create_json_module();
-        let parse_typed_fn = module.get_export("__parse_typed").unwrap();
         let ctx = crate::module_exports::ModuleContext {
             schemas: &registry,
             invoke_callable: None,
@@ -882,7 +860,7 @@ mod tests {
         let text =
             ValueWord::from_string(Arc::new(r#"{"user_name": "Bob", "age": 30}"#.to_string()));
         let sid = ValueWord::from_f64(schema_id as f64);
-        let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
+        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
 
         // Verify it's a TypedObject and the name field was populated from the aliased key
@@ -913,7 +891,6 @@ mod tests {
         );
 
         let module = create_json_module();
-        let parse_typed_fn = module.get_export("__parse_typed").unwrap();
         let ctx = crate::module_exports::ModuleContext {
             schemas: &registry,
             invoke_callable: None,
@@ -929,7 +906,7 @@ mod tests {
         let text =
             ValueWord::from_string(Arc::new(r#"{"name": "test", "value": 42.5}"#.to_string()));
         let sid = ValueWord::from_f64(schema_id as f64);
-        let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
+        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
 
         if let Some((_sid, slots, _hm)) = inner.as_typed_object() {

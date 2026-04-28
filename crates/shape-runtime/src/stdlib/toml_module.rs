@@ -191,7 +191,6 @@ mod tests {
     #[test]
     fn test_toml_parse_simple_table() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             r#"
@@ -201,7 +200,7 @@ port = 8080
 "#
             .to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
         assert_eq!(keys.len(), 1); // "server" key
@@ -210,7 +209,6 @@ port = 8080
     #[test]
     fn test_toml_parse_basic_types() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(
             r#"
@@ -221,7 +219,7 @@ active = true
 "#
             .to_string(),
         ));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert!(inner.as_hashmap().is_some());
     }
@@ -229,10 +227,9 @@ active = true
     #[test]
     fn test_toml_parse_array() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(r#"values = [1, 2, 3]"#.to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert!(inner.as_hashmap().is_some());
     }
@@ -240,31 +237,28 @@ active = true
     #[test]
     fn test_toml_parse_invalid() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("= invalid toml [".to_string()));
-        let result = parse_fn(&[input], &ctx);
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_toml_parse_requires_string() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_toml_stringify_table() {
         let module = create_toml_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
         let keys = vec![ValueWord::from_string(Arc::new("name".to_string()))];
         let values = vec![ValueWord::from_string(Arc::new("test".to_string()))];
         let hm = ValueWord::from_hashmap_pairs(keys, values);
-        let result = stringify_fn(&[hm], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[hm], &ctx).unwrap().unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let s = inner.as_str().expect("should be string");
         assert!(s.contains("name"));
@@ -274,14 +268,13 @@ active = true
     #[test]
     fn test_toml_is_valid_true() {
         let module = create_toml_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new(
                 r#"key = "value""#.to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
@@ -289,14 +282,13 @@ active = true
     #[test]
     fn test_toml_is_valid_false() {
         let module = create_toml_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(
+        let result = module.invoke_export("is_valid", 
             &[ValueWord::from_string(Arc::new(
                 "= not valid toml".to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
@@ -304,20 +296,18 @@ active = true
     #[test]
     fn test_toml_roundtrip() {
         let module = create_toml_module();
-        let parse_fn = module.get_export("parse").unwrap();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let toml_str = r#"name = "test"
 version = 42
 "#;
-        let parsed = parse_fn(
+        let parsed = module.invoke_export("parse", 
             &[ValueWord::from_string(Arc::new(toml_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = parsed.as_ok_inner().expect("should be Ok");
-        let re_stringified = stringify_fn(&[inner.clone()], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
         let re_str = re_stringified.as_ok_inner().expect("should be Ok");
         assert!(re_str.as_str().is_some());
     }

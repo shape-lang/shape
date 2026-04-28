@@ -501,11 +501,10 @@ mod tests {
     fn test_sha256_known_digest() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha256").unwrap();
-        let result = sha_fn(
+        let result = module.invoke_export("sha256", 
             &[ValueWord::from_string(Arc::new("hello".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // Known SHA-256 digest for "hello"
         assert_eq!(
@@ -518,8 +517,7 @@ mod tests {
     fn test_sha256_empty_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha256").unwrap();
-        let result = sha_fn(&[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap();
+        let result = module.invoke_export("sha256", &[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap().unwrap();
         assert_eq!(
             result.as_str(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
@@ -530,22 +528,20 @@ mod tests {
     fn test_sha256_requires_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha256").unwrap();
-        assert!(sha_fn(&[ValueWord::from_f64(42.0)], &ctx).is_err());
+        assert!(module.invoke_export("sha256", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_hmac_sha256() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let hmac_fn = module.get_export("hmac_sha256").unwrap();
-        let result = hmac_fn(
+        let result = module.invoke_export("hmac_sha256", 
             &[
                 ValueWord::from_string(Arc::new("hello".to_string())),
                 ValueWord::from_string(Arc::new("secret".to_string())),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // HMAC-SHA256("hello", "secret") is a known value
         let digest = result.as_str().unwrap();
@@ -556,33 +552,30 @@ mod tests {
     fn test_hmac_sha256_requires_both_args() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let hmac_fn = module.get_export("hmac_sha256").unwrap();
         assert!(
-            hmac_fn(
+            module.invoke_export("hmac_sha256", 
                 &[ValueWord::from_string(Arc::new("data".to_string()))],
                 &ctx
-            )
+            ).unwrap()
             .is_err()
         );
-        assert!(hmac_fn(&[], &ctx).is_err());
+        assert!(module.invoke_export("hmac_sha256", &[], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_base64_roundtrip() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let encode_fn = module.get_export("base64_encode").unwrap();
-        let decode_fn = module.get_export("base64_decode").unwrap();
 
         let original = "Hello, World!";
-        let encoded = encode_fn(
+        let encoded = module.invoke_export("base64_encode", 
             &[ValueWord::from_string(Arc::new(original.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(encoded.as_str(), Some("SGVsbG8sIFdvcmxkIQ=="));
 
-        let decoded = decode_fn(&[encoded], &ctx).unwrap();
+        let decoded = module.invoke_export("base64_decode", &[encoded], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some(original));
     }
@@ -591,8 +584,7 @@ mod tests {
     fn test_base64_decode_invalid() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let decode_fn = module.get_export("base64_decode").unwrap();
-        let result = decode_fn(&[ValueWord::from_string(Arc::new("!!!".to_string()))], &ctx);
+        let result = module.invoke_export("base64_decode", &[ValueWord::from_string(Arc::new("!!!".to_string()))], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -600,18 +592,16 @@ mod tests {
     fn test_hex_roundtrip() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let encode_fn = module.get_export("hex_encode").unwrap();
-        let decode_fn = module.get_export("hex_decode").unwrap();
 
         let original = "hello";
-        let encoded = encode_fn(
+        let encoded = module.invoke_export("hex_encode", 
             &[ValueWord::from_string(Arc::new(original.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(encoded.as_str(), Some("68656c6c6f"));
 
-        let decoded = decode_fn(&[encoded], &ctx).unwrap();
+        let decoded = module.invoke_export("hex_decode", &[encoded], &ctx).unwrap().unwrap();
         let inner = decoded.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some(original));
     }
@@ -620,11 +610,10 @@ mod tests {
     fn test_hex_decode_invalid() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let decode_fn = module.get_export("hex_decode").unwrap();
-        let result = decode_fn(
+        let result = module.invoke_export("hex_decode", 
             &[ValueWord::from_string(Arc::new("zzzz".to_string()))],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
@@ -661,11 +650,10 @@ mod tests {
     fn test_sha512_known_digest() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha512").unwrap();
-        let result = sha_fn(
+        let result = module.invoke_export("sha512", 
             &[ValueWord::from_string(Arc::new("hello".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // Known SHA-512 digest for "hello"
         assert_eq!(
@@ -680,8 +668,7 @@ mod tests {
     fn test_sha512_empty_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha512").unwrap();
-        let result = sha_fn(&[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap();
+        let result = module.invoke_export("sha512", &[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap().unwrap();
         // SHA-512 of empty string
         assert_eq!(
             result.as_str(),
@@ -695,19 +682,17 @@ mod tests {
     fn test_sha512_requires_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha512").unwrap();
-        assert!(sha_fn(&[ValueWord::from_f64(42.0)], &ctx).is_err());
+        assert!(module.invoke_export("sha512", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_sha1_known_digest() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha1").unwrap();
-        let result = sha_fn(
+        let result = module.invoke_export("sha1", 
             &[ValueWord::from_string(Arc::new("hello".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // Known SHA-1 digest for "hello"
         assert_eq!(
@@ -720,8 +705,7 @@ mod tests {
     fn test_sha1_empty_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha1").unwrap();
-        let result = sha_fn(&[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap();
+        let result = module.invoke_export("sha1", &[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap().unwrap();
         assert_eq!(
             result.as_str(),
             Some("da39a3ee5e6b4b0d3255bfef95601890afd80709")
@@ -732,19 +716,17 @@ mod tests {
     fn test_sha1_requires_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sha_fn = module.get_export("sha1").unwrap();
-        assert!(sha_fn(&[ValueWord::from_f64(42.0)], &ctx).is_err());
+        assert!(module.invoke_export("sha1", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_md5_known_digest() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let md5_fn = module.get_export("md5").unwrap();
-        let result = md5_fn(
+        let result = module.invoke_export("md5", 
             &[ValueWord::from_string(Arc::new("hello".to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         // Known MD5 digest for "hello"
         assert_eq!(result.as_str(), Some("5d41402abc4b2a76b9719d911017c592"));
@@ -754,8 +736,7 @@ mod tests {
     fn test_md5_empty_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let md5_fn = module.get_export("md5").unwrap();
-        let result = md5_fn(&[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap();
+        let result = module.invoke_export("md5", &[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some("d41d8cd98f00b204e9800998ecf8427e"));
     }
 
@@ -763,16 +744,14 @@ mod tests {
     fn test_md5_requires_string() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let md5_fn = module.get_export("md5").unwrap();
-        assert!(md5_fn(&[ValueWord::from_f64(42.0)], &ctx).is_err());
+        assert!(module.invoke_export("md5", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_random_bytes_length() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let rb_fn = module.get_export("random_bytes").unwrap();
-        let result = rb_fn(&[ValueWord::from_i64(16)], &ctx).unwrap();
+        let result = module.invoke_export("random_bytes", &[ValueWord::from_i64(16)], &ctx).unwrap().unwrap();
         let hex_str = result.as_str().unwrap();
         // 16 bytes = 32 hex chars
         assert_eq!(hex_str.len(), 32);
@@ -782,8 +761,7 @@ mod tests {
     fn test_random_bytes_zero() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let rb_fn = module.get_export("random_bytes").unwrap();
-        let result = rb_fn(&[ValueWord::from_i64(0)], &ctx).unwrap();
+        let result = module.invoke_export("random_bytes", &[ValueWord::from_i64(0)], &ctx).unwrap().unwrap();
         assert_eq!(result.as_str(), Some(""));
     }
 
@@ -791,32 +769,28 @@ mod tests {
     fn test_random_bytes_negative_rejected() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let rb_fn = module.get_export("random_bytes").unwrap();
-        assert!(rb_fn(&[ValueWord::from_i64(-1)], &ctx).is_err());
+        assert!(module.invoke_export("random_bytes", &[ValueWord::from_i64(-1)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_random_bytes_too_large_rejected() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let rb_fn = module.get_export("random_bytes").unwrap();
-        assert!(rb_fn(&[ValueWord::from_i64(65537)], &ctx).is_err());
+        assert!(module.invoke_export("random_bytes", &[ValueWord::from_i64(65537)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_random_bytes_requires_int() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let rb_fn = module.get_export("random_bytes").unwrap();
-        assert!(rb_fn(&[ValueWord::from_string(Arc::new("10".to_string()))], &ctx).is_err());
+        assert!(module.invoke_export("random_bytes", &[ValueWord::from_string(Arc::new("10".to_string()))], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_ed25519_generate_keypair() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let gen_fn = module.get_export("ed25519_generate_keypair").unwrap();
-        let result = gen_fn(&[], &ctx).unwrap();
+        let result = module.invoke_export("ed25519_generate_keypair", &[], &ctx).unwrap().unwrap();
 
         // Result should be a HashMap with public_key and secret_key
         let hm = result.as_hashmap_data().expect("should be a HashMap");
@@ -834,8 +808,7 @@ mod tests {
         let ctx = test_ctx();
 
         // Generate a keypair
-        let gen_fn = module.get_export("ed25519_generate_keypair").unwrap();
-        let keypair = gen_fn(&[], &ctx).unwrap();
+        let keypair = module.invoke_export("ed25519_generate_keypair", &[], &ctx).unwrap().unwrap();
         let hm = keypair.as_hashmap_data().unwrap();
 
         let pub_key = hm.shape_get("public_key").unwrap().clone();
@@ -844,14 +817,12 @@ mod tests {
         let message = ValueWord::from_string(Arc::new("test message".to_string()));
 
         // Sign
-        let sign_fn = module.get_export("ed25519_sign").unwrap();
-        let signature = sign_fn(&[message.clone(), sec_key], &ctx).unwrap();
+        let signature = module.invoke_export("ed25519_sign", &[message.clone(), sec_key], &ctx).unwrap().unwrap();
         // 64 bytes = 128 hex chars
         assert_eq!(signature.as_str().unwrap().len(), 128);
 
         // Verify — should succeed
-        let verify_fn = module.get_export("ed25519_verify").unwrap();
-        let valid = verify_fn(&[message, signature, pub_key], &ctx).unwrap();
+        let valid = module.invoke_export("ed25519_verify", &[message, signature, pub_key], &ctx).unwrap().unwrap();
         assert_eq!(valid.as_bool(), Some(true));
     }
 
@@ -860,8 +831,7 @@ mod tests {
         let module = create_crypto_module();
         let ctx = test_ctx();
 
-        let gen_fn = module.get_export("ed25519_generate_keypair").unwrap();
-        let keypair = gen_fn(&[], &ctx).unwrap();
+        let keypair = module.invoke_export("ed25519_generate_keypair", &[], &ctx).unwrap().unwrap();
         let hm = keypair.as_hashmap_data().unwrap();
 
         let pub_key = hm.shape_get("public_key").unwrap().clone();
@@ -870,11 +840,9 @@ mod tests {
         let message = ValueWord::from_string(Arc::new("correct message".to_string()));
         let wrong_message = ValueWord::from_string(Arc::new("wrong message".to_string()));
 
-        let sign_fn = module.get_export("ed25519_sign").unwrap();
-        let signature = sign_fn(&[message, sec_key], &ctx).unwrap();
+        let signature = module.invoke_export("ed25519_sign", &[message, sec_key], &ctx).unwrap().unwrap();
 
-        let verify_fn = module.get_export("ed25519_verify").unwrap();
-        let valid = verify_fn(&[wrong_message, signature, pub_key], &ctx).unwrap();
+        let valid = module.invoke_export("ed25519_verify", &[wrong_message, signature, pub_key], &ctx).unwrap().unwrap();
         assert_eq!(valid.as_bool(), Some(false));
     }
 
@@ -882,26 +850,25 @@ mod tests {
     fn test_ed25519_sign_invalid_secret_key() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let sign_fn = module.get_export("ed25519_sign").unwrap();
 
         // Too short
-        let result = sign_fn(
+        let result = module.invoke_export("ed25519_sign", 
             &[
                 ValueWord::from_string(Arc::new("msg".to_string())),
                 ValueWord::from_string(Arc::new("abcd".to_string())),
             ],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
 
         // Invalid hex
-        let result = sign_fn(
+        let result = module.invoke_export("ed25519_sign", 
             &[
                 ValueWord::from_string(Arc::new("msg".to_string())),
                 ValueWord::from_string(Arc::new("zzzz".to_string())),
             ],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
@@ -909,21 +876,20 @@ mod tests {
     fn test_ed25519_verify_invalid_inputs() {
         let module = create_crypto_module();
         let ctx = test_ctx();
-        let verify_fn = module.get_export("ed25519_verify").unwrap();
 
         // Missing arguments
-        assert!(verify_fn(&[ValueWord::from_string(Arc::new("msg".to_string()))], &ctx).is_err());
+        assert!(module.invoke_export("ed25519_verify", &[ValueWord::from_string(Arc::new("msg".to_string()))], &ctx).unwrap().is_err());
 
         // Invalid hex in signature
         assert!(
-            verify_fn(
+            module.invoke_export("ed25519_verify", 
                 &[
                     ValueWord::from_string(Arc::new("msg".to_string())),
                     ValueWord::from_string(Arc::new("not_hex".to_string())),
                     ValueWord::from_string(Arc::new("ab".repeat(32))),
                 ],
                 &ctx
-            )
+            ).unwrap()
             .is_err()
         );
     }

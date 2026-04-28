@@ -210,8 +210,7 @@ mod tests {
     fn test_time_now_returns_instant() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let now_fn = module.get_export("now").unwrap();
-        let result = now_fn(&[], &ctx).unwrap();
+        let result = module.invoke_export("now", &[], &ctx).unwrap().unwrap();
         assert_eq!(result.type_name(), "instant");
         assert!(result.as_instant().is_some());
     }
@@ -220,8 +219,7 @@ mod tests {
     fn test_time_stopwatch_returns_instant() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let sw_fn = module.get_export("stopwatch").unwrap();
-        let result = sw_fn(&[], &ctx).unwrap();
+        let result = module.invoke_export("stopwatch", &[], &ctx).unwrap().unwrap();
         assert_eq!(result.type_name(), "instant");
     }
 
@@ -229,8 +227,7 @@ mod tests {
     fn test_time_millis_returns_positive_number() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let millis_fn = module.get_export("millis").unwrap();
-        let result = millis_fn(&[], &ctx).unwrap();
+        let result = module.invoke_export("millis", &[], &ctx).unwrap().unwrap();
         let ms = result.as_f64().unwrap();
         assert!(ms > 0.0);
         // Should be after year 2020 in millis
@@ -241,8 +238,7 @@ mod tests {
     fn test_time_sleep_sync_requires_number() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let sleep_fn = module.get_export("sleep_sync").unwrap();
-        let result = sleep_fn(&[], &ctx);
+        let result = module.invoke_export("sleep_sync", &[], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -250,8 +246,7 @@ mod tests {
     fn test_time_sleep_sync_rejects_negative() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let sleep_fn = module.get_export("sleep_sync").unwrap();
-        let result = sleep_fn(&[ValueWord::from_f64(-100.0)], &ctx);
+        let result = module.invoke_export("sleep_sync", &[ValueWord::from_f64(-100.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -259,8 +254,7 @@ mod tests {
     fn test_time_sleep_sync_zero_is_valid() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let sleep_fn = module.get_export("sleep_sync").unwrap();
-        let result = sleep_fn(&[ValueWord::from_f64(0.0)], &ctx);
+        let result = module.invoke_export("sleep_sync", &[ValueWord::from_f64(0.0)], &ctx).unwrap();
         assert!(result.is_ok());
     }
 
@@ -275,13 +269,12 @@ mod tests {
     fn test_time_benchmark_returns_object() {
         let module = create_time_module();
         let ctx = test_ctx();
-        let bench_fn = module.get_export("benchmark").unwrap();
         // Pass a dummy value (not a real callable, but the module-level benchmark
         // just measures timing overhead)
-        let result = bench_fn(
+        let result = module.invoke_export("benchmark", 
             &[ValueWord::from_f64(0.0), ValueWord::from_f64(100.0)],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert_eq!(result.type_name(), "object");
     }

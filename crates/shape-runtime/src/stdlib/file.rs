@@ -318,29 +318,27 @@ mod tests {
     fn test_file_read_write_roundtrip() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let write_fn = module.get_export("write_text").unwrap();
-        let read_fn = module.get_export("read_text").unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         let path_str = path.to_str().unwrap();
 
         // Write
-        let result = write_fn(
+        let result = module.invoke_export("write_text", 
             &[
                 ValueWord::from_string(Arc::new(path_str.to_string())),
                 ValueWord::from_string(Arc::new("hello world".to_string())),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         assert!(result.as_ok_inner().is_some());
 
         // Read back
-        let result = read_fn(
+        let result = module.invoke_export("read_text", 
             &[ValueWord::from_string(Arc::new(path_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("hello world"));
@@ -350,26 +348,24 @@ mod tests {
     fn test_file_read_lines() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let write_fn = module.get_export("write_text").unwrap();
-        let read_lines_fn = module.get_export("read_lines").unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lines.txt");
         let path_str = path.to_str().unwrap();
 
-        write_fn(
+        module.invoke_export("write_text", 
             &[
                 ValueWord::from_string(Arc::new(path_str.to_string())),
                 ValueWord::from_string(Arc::new("line1\nline2\nline3".to_string())),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
-        let result = read_lines_fn(
+        let result = module.invoke_export("read_lines", 
             &[ValueWord::from_string(Arc::new(path_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
@@ -383,36 +379,33 @@ mod tests {
     fn test_file_append() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let write_fn = module.get_export("write_text").unwrap();
-        let append_fn = module.get_export("append").unwrap();
-        let read_fn = module.get_export("read_text").unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("append.txt");
         let path_str = path.to_str().unwrap();
 
-        write_fn(
+        module.invoke_export("write_text", 
             &[
                 ValueWord::from_string(Arc::new(path_str.to_string())),
                 ValueWord::from_string(Arc::new("hello".to_string())),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
-        append_fn(
+        module.invoke_export("append", 
             &[
                 ValueWord::from_string(Arc::new(path_str.to_string())),
                 ValueWord::from_string(Arc::new(" world".to_string())),
             ],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
-        let result = read_fn(
+        let result = module.invoke_export("read_text", 
             &[ValueWord::from_string(Arc::new(path_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         assert_eq!(inner.as_str(), Some("hello world"));
@@ -422,8 +415,6 @@ mod tests {
     fn test_file_read_bytes_write_bytes_roundtrip() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let write_fn = module.get_export("write_bytes").unwrap();
-        let read_fn = module.get_export("read_bytes").unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bytes.bin");
@@ -435,16 +426,16 @@ mod tests {
             ValueWord::from_f64(255.0),
         ]));
 
-        write_fn(
+        module.invoke_export("write_bytes", 
             &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
-        let result = read_fn(
+        let result = module.invoke_export("read_bytes", 
             &[ValueWord::from_string(Arc::new(path_str.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let arr = inner.as_any_array().expect("should be array").to_generic();
@@ -458,7 +449,6 @@ mod tests {
     fn test_file_write_bytes_validates_range() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let write_fn = module.get_export("write_bytes").unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.bin");
@@ -466,18 +456,18 @@ mod tests {
 
         // 256 is out of range
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(256.0)]));
-        let result = write_fn(
+        let result = module.invoke_export("write_bytes", 
             &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
 
         // Negative is out of range
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(-1.0)]));
-        let result = write_fn(
+        let result = module.invoke_export("write_bytes", 
             &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
@@ -485,13 +475,12 @@ mod tests {
     fn test_file_read_nonexistent() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let read_fn = module.get_export("read_text").unwrap();
-        let result = read_fn(
+        let result = module.invoke_export("read_text", 
             &[ValueWord::from_string(Arc::new(
                 "/nonexistent/path/file.txt".to_string(),
             ))],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
@@ -499,9 +488,8 @@ mod tests {
     fn test_file_requires_string_args() {
         let module = create_file_module();
         let ctx = test_ctx();
-        let read_fn = module.get_export("read_text").unwrap();
-        assert!(read_fn(&[ValueWord::from_f64(42.0)], &ctx).is_err());
-        assert!(read_fn(&[], &ctx).is_err());
+        assert!(module.invoke_export("read_text", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
+        assert!(module.invoke_export("read_text", &[], &ctx).unwrap().is_err());
     }
 
     #[test]

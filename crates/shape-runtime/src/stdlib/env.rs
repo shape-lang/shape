@@ -180,9 +180,8 @@ mod tests {
     fn test_env_get_path() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("get").unwrap();
         // PATH should always be set
-        let result = f(&[s("PATH")], &ctx).unwrap();
+        let result = module.invoke_export("get", &[s("PATH")], &ctx).unwrap().unwrap();
         let inner = result.as_some_inner().expect("PATH should be set");
         assert!(!inner.as_str().unwrap().is_empty());
     }
@@ -191,8 +190,7 @@ mod tests {
     fn test_env_get_missing() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("get").unwrap();
-        let result = f(&[s("__SHAPE_NONEXISTENT_VAR_12345__")], &ctx).unwrap();
+        let result = module.invoke_export("get", &[s("__SHAPE_NONEXISTENT_VAR_12345__")], &ctx).unwrap().unwrap();
         assert!(result.is_none());
     }
 
@@ -200,16 +198,14 @@ mod tests {
     fn test_env_get_requires_string() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("get").unwrap();
-        assert!(f(&[ValueWord::from_f64(42.0)], &ctx).is_err());
+        assert!(module.invoke_export("get", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_env_has_path() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("has").unwrap();
-        let result = f(&[s("PATH")], &ctx).unwrap();
+        let result = module.invoke_export("has", &[s("PATH")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -217,8 +213,7 @@ mod tests {
     fn test_env_has_missing() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("has").unwrap();
-        let result = f(&[s("__SHAPE_NONEXISTENT_VAR_12345__")], &ctx).unwrap();
+        let result = module.invoke_export("has", &[s("__SHAPE_NONEXISTENT_VAR_12345__")], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(false));
     }
 
@@ -226,8 +221,7 @@ mod tests {
     fn test_env_all_returns_hashmap() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("all").unwrap();
-        let result = f(&[], &ctx).unwrap();
+        let result = module.invoke_export("all", &[], &ctx).unwrap().unwrap();
         let (keys, _values, _index) = result.as_hashmap().expect("should be hashmap");
         // Should have at least PATH
         assert!(!keys.is_empty());
@@ -237,8 +231,7 @@ mod tests {
     fn test_env_args_returns_array() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("args").unwrap();
-        let result = f(&[], &ctx).unwrap();
+        let result = module.invoke_export("args", &[], &ctx).unwrap().unwrap();
         let arr = result.as_any_array().expect("should be array").to_generic();
         // At least the binary name
         assert!(!arr.is_empty());
@@ -248,8 +241,7 @@ mod tests {
     fn test_env_cwd_returns_string() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("cwd").unwrap();
-        let result = f(&[], &ctx).unwrap();
+        let result = module.invoke_export("cwd", &[], &ctx).unwrap().unwrap();
         let cwd = result.as_str().expect("should be string");
         assert!(!cwd.is_empty());
     }
@@ -258,8 +250,7 @@ mod tests {
     fn test_env_os_returns_string() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("os").unwrap();
-        let result = f(&[], &ctx).unwrap();
+        let result = module.invoke_export("os", &[], &ctx).unwrap().unwrap();
         let os = result.as_str().expect("should be string");
         assert!(!os.is_empty());
         // Should be one of the known OS values
@@ -274,8 +265,7 @@ mod tests {
     fn test_env_arch_returns_string() {
         let module = create_env_module();
         let ctx = test_ctx();
-        let f = module.get_export("arch").unwrap();
-        let result = f(&[], &ctx).unwrap();
+        let result = module.invoke_export("arch", &[], &ctx).unwrap().unwrap();
         let arch = result.as_str().expect("should be string");
         assert!(!arch.is_empty());
     }

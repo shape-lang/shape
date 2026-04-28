@@ -391,10 +391,9 @@ mod tests {
     #[test]
     fn test_csv_parse_simple() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3\n4,5,6".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let rows = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 3);
         // First row
@@ -419,11 +418,10 @@ mod tests {
     #[test]
     fn test_csv_parse_quoted_fields() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input =
             ValueWord::from_string(Arc::new("\"hello, world\",\"foo\"\"bar\"\n".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let rows = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 1);
         let row0 = rows[0]
@@ -437,10 +435,9 @@ mod tests {
     #[test]
     fn test_csv_parse_empty() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
         let rows = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 0);
     }
@@ -448,19 +445,17 @@ mod tests {
     #[test]
     fn test_csv_parse_requires_string() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_csv_parse_records() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse_records").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("name,age\nAlice,30\nBob,25".to_string()));
-        let result = parse_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("parse_records", &[input], &ctx).unwrap().unwrap();
         let records = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(records.len(), 2);
 
@@ -487,16 +482,14 @@ mod tests {
     #[test]
     fn test_csv_parse_records_requires_string() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse_records").unwrap();
         let ctx = test_ctx();
-        let result = parse_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("parse_records", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_csv_stringify_simple() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_array(shape_value::vmarray_from_vec(vec![
@@ -508,7 +501,7 @@ mod tests {
                 ValueWord::from_string(Arc::new("2".to_string())),
             ])),
         ]));
-        let result = stringify_fn(&[data], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[data], &ctx).unwrap().unwrap();
         let output = result.as_str().expect("should be string");
         assert_eq!(output, "a,b\n1,2\n");
     }
@@ -516,14 +509,13 @@ mod tests {
     #[test]
     fn test_csv_stringify_with_delimiter() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("a".to_string())),
             ValueWord::from_string(Arc::new("b".to_string())),
         ]))]));
         let delimiter = ValueWord::from_string(Arc::new("\t".to_string()));
-        let result = stringify_fn(&[data, delimiter], &ctx).unwrap();
+        let result = module.invoke_export("stringify", &[data, delimiter], &ctx).unwrap().unwrap();
         let output = result.as_str().expect("should be string");
         assert_eq!(output, "a\tb\n");
     }
@@ -531,16 +523,14 @@ mod tests {
     #[test]
     fn test_csv_stringify_requires_array() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let result = stringify_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("stringify", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_csv_stringify_records() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify_records").unwrap();
         let ctx = test_ctx();
         let record1 = ValueWord::from_hashmap_pairs(
             vec![
@@ -563,7 +553,7 @@ mod tests {
             ],
         );
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![record1, record2]));
-        let result = stringify_fn(&[data], &ctx).unwrap();
+        let result = module.invoke_export("stringify_records", &[data], &ctx).unwrap().unwrap();
         let output = result.as_str().expect("should be string");
         // Should contain header row and two data rows
         let lines: Vec<&str> = output.trim().lines().collect();
@@ -576,7 +566,6 @@ mod tests {
     #[test]
     fn test_csv_stringify_records_with_explicit_headers() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify_records").unwrap();
         let ctx = test_ctx();
         let record = ValueWord::from_hashmap_pairs(
             vec![
@@ -593,7 +582,7 @@ mod tests {
             ValueWord::from_string(Arc::new("age".to_string())),
             ValueWord::from_string(Arc::new("name".to_string())),
         ]));
-        let result = stringify_fn(&[data, headers], &ctx).unwrap();
+        let result = module.invoke_export("stringify_records", &[data, headers], &ctx).unwrap().unwrap();
         let output = result.as_str().expect("should be string");
         let lines: Vec<&str> = output.trim().lines().collect();
         assert_eq!(lines[0], "age,name");
@@ -603,10 +592,9 @@ mod tests {
     #[test]
     fn test_csv_stringify_records_empty() {
         let module = create_csv_module();
-        let stringify_fn = module.get_export("stringify_records").unwrap();
         let ctx = test_ctx();
         let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
-        let result = stringify_fn(&[data], &ctx).unwrap();
+        let result = module.invoke_export("stringify_records", &[data], &ctx).unwrap().unwrap();
         let output = result.as_str().expect("should be string");
         assert_eq!(output, "");
     }
@@ -614,48 +602,44 @@ mod tests {
     #[test]
     fn test_csv_is_valid_true() {
         let module = create_csv_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3".to_string()));
-        let result = is_valid_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_csv_is_valid_empty() {
         let module = create_csv_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = is_valid_fn(&[input], &ctx).unwrap();
+        let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
         assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_csv_is_valid_requires_string() {
         let module = create_csv_module();
-        let is_valid_fn = module.get_export("is_valid").unwrap();
         let ctx = test_ctx();
-        let result = is_valid_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("is_valid", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_csv_read_file() {
         let module = create_csv_module();
-        let read_fn = module.get_export("read_file").unwrap();
         let ctx = test_ctx();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.csv");
         std::fs::write(&path, "a,b\n1,2\n3,4").unwrap();
 
-        let result = read_fn(
+        let result = module.invoke_export("read_file", 
             &[ValueWord::from_string(Arc::new(
                 path.to_str().unwrap().to_string(),
             ))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
         let rows = inner.as_any_array().expect("should be array").to_generic();
@@ -671,23 +655,21 @@ mod tests {
     #[test]
     fn test_csv_read_file_nonexistent() {
         let module = create_csv_module();
-        let read_fn = module.get_export("read_file").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(
+        let result = module.invoke_export("read_file", 
             &[ValueWord::from_string(Arc::new(
                 "/nonexistent/path/file.csv".to_string(),
             ))],
             &ctx,
-        );
+        ).unwrap();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_csv_read_file_requires_string() {
         let module = create_csv_module();
-        let read_fn = module.get_export("read_file").unwrap();
         let ctx = test_ctx();
-        let result = read_fn(&[ValueWord::from_f64(42.0)], &ctx);
+        let result = module.invoke_export("read_file", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
         assert!(result.is_err());
     }
 
@@ -737,18 +719,16 @@ mod tests {
     #[test]
     fn test_csv_roundtrip() {
         let module = create_csv_module();
-        let parse_fn = module.get_export("parse").unwrap();
-        let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
 
         let csv_text = "name,age,city\nAlice,30,NYC\nBob,25,LA\n";
-        let parsed = parse_fn(
+        let parsed = module.invoke_export("parse", 
             &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
-        let re_stringified = stringify_fn(&[parsed], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify", &[parsed], &ctx).unwrap().unwrap();
         let output = re_stringified.as_str().expect("should be string");
         assert_eq!(output, csv_text);
     }
@@ -756,22 +736,20 @@ mod tests {
     #[test]
     fn test_csv_records_roundtrip() {
         let module = create_csv_module();
-        let parse_records_fn = module.get_export("parse_records").unwrap();
-        let stringify_records_fn = module.get_export("stringify_records").unwrap();
         let ctx = test_ctx();
 
         let csv_text = "name,age\nAlice,30\nBob,25\n";
-        let parsed = parse_records_fn(
+        let parsed = module.invoke_export("parse_records", 
             &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
             &ctx,
-        )
+        ).unwrap()
         .unwrap();
 
         let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("name".to_string())),
             ValueWord::from_string(Arc::new("age".to_string())),
         ]));
-        let re_stringified = stringify_records_fn(&[parsed, headers], &ctx).unwrap();
+        let re_stringified = module.invoke_export("stringify_records", &[parsed, headers], &ctx).unwrap().unwrap();
         let output = re_stringified.as_str().expect("should be string");
         assert_eq!(output, csv_text);
     }

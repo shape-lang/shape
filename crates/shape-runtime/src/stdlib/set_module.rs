@@ -435,69 +435,54 @@ mod tests {
     fn test_set_add_contains_size() {
         let module = create_set_module();
         let ctx = test_ctx();
-        let new_fn = module.get_export("new").unwrap();
-        let add_fn = module.get_export("add").unwrap();
-        let contains_fn = module.get_export("contains").unwrap();
-        let size_fn = module.get_export("size").unwrap();
 
-        let s = new_fn(&[], &ctx).unwrap();
+        let s = module.invoke_export("new", &[], &ctx).unwrap().unwrap();
         let a = ValueWord::from_string(Arc::new("a".to_string()));
-        let s = add_fn(&[s, a.clone()], &ctx).unwrap();
-        let s = add_fn(&[s.clone(), a.clone()], &ctx).unwrap(); // dup
+        let s = module.invoke_export("add", &[s, a.clone()], &ctx).unwrap().unwrap();
+        let s = module.invoke_export("add", &[s.clone(), a.clone()], &ctx).unwrap().unwrap(); // dup
         assert_eq!(
-            contains_fn(&[s.clone(), a.clone()], &ctx)
+            module.invoke_export("contains", &[s.clone(), a.clone()], &ctx).unwrap()
                 .unwrap()
                 .as_bool(),
             Some(true)
         );
-        assert_eq!(size_fn(&[s], &ctx).unwrap().as_i64(), Some(1));
+        assert_eq!(module.invoke_export("size", &[s], &ctx).unwrap().unwrap().as_i64(), Some(1));
     }
 
     #[test]
     fn test_set_to_array_and_remove() {
         let module = create_set_module();
         let ctx = test_ctx();
-        let new_fn = module.get_export("new").unwrap();
-        let add_fn = module.get_export("add").unwrap();
-        let remove_fn = module.get_export("remove").unwrap();
-        let to_array_fn = module.get_export("to_array").unwrap();
-        let size_fn = module.get_export("size").unwrap();
 
-        let s = new_fn(&[], &ctx).unwrap();
-        let s = add_fn(&[s, ValueWord::from_i64(1)], &ctx).unwrap();
-        let s = add_fn(&[s, ValueWord::from_i64(2)], &ctx).unwrap();
-        let arr = to_array_fn(&[s.clone()], &ctx).unwrap();
+        let s = module.invoke_export("new", &[], &ctx).unwrap().unwrap();
+        let s = module.invoke_export("add", &[s, ValueWord::from_i64(1)], &ctx).unwrap().unwrap();
+        let s = module.invoke_export("add", &[s, ValueWord::from_i64(2)], &ctx).unwrap().unwrap();
+        let arr = module.invoke_export("to_array", &[s.clone()], &ctx).unwrap().unwrap();
         assert_eq!(arr.as_any_array().unwrap().to_generic().len(), 2);
 
-        let s = remove_fn(&[s, ValueWord::from_i64(1)], &ctx).unwrap();
-        assert_eq!(size_fn(&[s], &ctx).unwrap().as_i64(), Some(1));
+        let s = module.invoke_export("remove", &[s, ValueWord::from_i64(1)], &ctx).unwrap().unwrap();
+        assert_eq!(module.invoke_export("size", &[s], &ctx).unwrap().unwrap().as_i64(), Some(1));
     }
 
     #[test]
     fn test_set_union_intersection_difference() {
         let module = create_set_module();
         let ctx = test_ctx();
-        let new_fn = module.get_export("new").unwrap();
-        let add_fn = module.get_export("add").unwrap();
-        let union_fn = module.get_export("union").unwrap();
-        let intersection_fn = module.get_export("intersection").unwrap();
-        let difference_fn = module.get_export("difference").unwrap();
-        let size_fn = module.get_export("size").unwrap();
 
-        let mut a = new_fn(&[], &ctx).unwrap();
-        a = add_fn(&[a, ValueWord::from_i64(1)], &ctx).unwrap();
-        a = add_fn(&[a, ValueWord::from_i64(2)], &ctx).unwrap();
-        let mut b = new_fn(&[], &ctx).unwrap();
-        b = add_fn(&[b, ValueWord::from_i64(2)], &ctx).unwrap();
-        b = add_fn(&[b, ValueWord::from_i64(3)], &ctx).unwrap();
+        let mut a = module.invoke_export("new", &[], &ctx).unwrap().unwrap();
+        a = module.invoke_export("add", &[a, ValueWord::from_i64(1)], &ctx).unwrap().unwrap();
+        a = module.invoke_export("add", &[a, ValueWord::from_i64(2)], &ctx).unwrap().unwrap();
+        let mut b = module.invoke_export("new", &[], &ctx).unwrap().unwrap();
+        b = module.invoke_export("add", &[b, ValueWord::from_i64(2)], &ctx).unwrap().unwrap();
+        b = module.invoke_export("add", &[b, ValueWord::from_i64(3)], &ctx).unwrap().unwrap();
 
-        let u = union_fn(&[a.clone(), b.clone()], &ctx).unwrap();
-        assert_eq!(size_fn(&[u], &ctx).unwrap().as_i64(), Some(3));
+        let u = module.invoke_export("union", &[a.clone(), b.clone()], &ctx).unwrap().unwrap();
+        assert_eq!(module.invoke_export("size", &[u], &ctx).unwrap().unwrap().as_i64(), Some(3));
 
-        let i = intersection_fn(&[a.clone(), b.clone()], &ctx).unwrap();
-        assert_eq!(size_fn(&[i], &ctx).unwrap().as_i64(), Some(1));
+        let i = module.invoke_export("intersection", &[a.clone(), b.clone()], &ctx).unwrap().unwrap();
+        assert_eq!(module.invoke_export("size", &[i], &ctx).unwrap().unwrap().as_i64(), Some(1));
 
-        let d = difference_fn(&[a, b], &ctx).unwrap();
-        assert_eq!(size_fn(&[d], &ctx).unwrap().as_i64(), Some(1));
+        let d = module.invoke_export("difference", &[a, b], &ctx).unwrap().unwrap();
+        assert_eq!(module.invoke_export("size", &[d], &ctx).unwrap().unwrap().as_i64(), Some(1));
     }
 }
