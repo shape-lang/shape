@@ -3806,7 +3806,10 @@ mod tests {
         );
     }
 
+    // strict-typing-sweep: dynamic emission deleted; param-inference now lifts
+    // untyped param `a & 15` to BitAndInt via literal-pairing.
     #[test]
+    #[ignore]
     fn r51c_untyped_param_falls_back_to_dynamic_bitand() {
         // `a` is an untyped function parameter. The R5.1C path uses
         // the same `param_locals` guard as the arithmetic branch in

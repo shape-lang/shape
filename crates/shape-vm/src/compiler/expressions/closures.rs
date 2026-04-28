@@ -23,7 +23,7 @@ use super::super::BytecodeCompiler;
 /// contexts, or if the binary op pairs the param with another unknown
 /// (e.g. `|x, y| x + y`). The closure body still compiles in those cases
 /// — strict-typing simply errors at the offending binary op as before.
-fn infer_param_type_from_body(
+pub(crate) fn infer_param_type_from_body(
     param_name: &str,
     body: &[shape_ast::ast::Statement],
 ) -> Option<TypeAnnotation> {
@@ -69,6 +69,45 @@ fn infer_param_type_from_body(
             }
             Expr::Array(elements, _) => elements.iter().find_map(|e| scan_expr(name, e)),
             Expr::Return(Some(e), _) => scan_expr(name, e),
+            // Match: when the scrutinee is the bare `name`, look at any
+            // arm-pattern binding of an identifier and propagate its
+            // body/guard usage back to `name`'s type. Conservatively
+            // handles the common idiom `match v { x where x > 0 => x }`
+            // where `v` and `x` are aliased through pattern binding.
+            Expr::Match(match_expr, _) => {
+                if let Expr::Identifier(scrutinee_name, _) = match_expr.scrutinee.as_ref() {
+                    if scrutinee_name == name {
+                        // Look at each arm; if its pattern is a single
+                        // identifier `x`, scan the guard + body for
+                        // `<x> op <literal>` pairings.
+                        for arm in &match_expr.arms {
+                            if let shape_ast::ast::Pattern::Identifier(bound_name) =
+                                &arm.pattern
+                            {
+                                if let Some(guard) = arm.guard.as_ref() {
+                                    if let Some(t) = scan_expr(bound_name, guard) {
+                                        return Some(t);
+                                    }
+                                }
+                                if let Some(t) = scan_expr(bound_name, &arm.body) {
+                                    return Some(t);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Otherwise just recurse into scrutinee + arms looking
+                // for the original name.
+                scan_expr(name, &match_expr.scrutinee)
+                    .or_else(|| {
+                        match_expr.arms.iter().find_map(|arm| {
+                            arm.guard
+                                .as_ref()
+                                .and_then(|g| scan_expr(name, g))
+                                .or_else(|| scan_expr(name, &arm.body))
+                        })
+                    })
+            }
             _ => None,
         }
     }

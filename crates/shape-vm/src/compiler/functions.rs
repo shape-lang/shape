@@ -1190,6 +1190,27 @@ impl BytecodeCompiler {
                             .and_then(|hint| hint.clone());
                         if let Some(type_name) = inferred_type_name {
                             self.set_local_type_info(local_idx, &type_name);
+                        } else {
+                            // Strict-typing-sweep: inference engine may
+                            // have produced a Type::Variable (which
+                            // inferred_type_to_hint_name discards).
+                            // Fall back to a body-level literal-pairing
+                            // scan — the same heuristic closure
+                            // synthesis uses — so e.g.
+                            // `function add_ten(x) { x + 10 }` types
+                            // x as int from the literal pairing.
+                            if let Some(ann) =
+                                crate::compiler::expressions::closures::infer_param_type_from_body(
+                                    name,
+                                    &func_def.body,
+                                )
+                            {
+                                if let Some(type_name) =
+                                    Self::tracked_type_name_from_annotation(&ann)
+                                {
+                                    self.set_local_type_info(local_idx, &type_name);
+                                }
+                            }
                         }
                     }
                 }

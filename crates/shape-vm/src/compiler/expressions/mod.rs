@@ -78,7 +78,7 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
 mod advanced;
 mod assignment;
 mod binary_ops;
-mod closures;
+pub(crate) mod closures;
 mod collections;
 mod conditionals;
 mod control_flow;
