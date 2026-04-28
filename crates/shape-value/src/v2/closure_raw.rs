@@ -310,7 +310,7 @@ pub unsafe fn retain_typed_closure(ptr: *const u8) {
 ///   instead to avoid a double-decrement.
 #[inline]
 pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
-    use crate::v2::closure_layout::SharedCell;
+    use crate::v2::closure_layout::CaptureKind;
 
     // SAFETY: caller upholds that `ptr` is a live block. Reading the
     // HeapHeader and calling `release` is always safe on such a block.
@@ -319,54 +319,41 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
         return;
     }
 
-    // Refcount hit zero — walk each capture and release whichever resource
-    // the mask says it owns. All three masks are mutually exclusive per
-    // index (enforced by ClosureLayout's constructor), so a single mask
-    // branch fires per capture index.
+    // Refcount hit zero — walk each capture and dispatch on its
+    // `CaptureKind`. The three branches are mutually exclusive per
+    // capture index by construction in `ClosureLayout::from_capture_types`,
+    // so each slot is released exactly once.
     for i in 0..layout.capture_count() {
-        let off = layout.heap_capture_offset(i);
-        // SAFETY: every mask-participating capture lives at an 8-byte Ptr
-        // slot (see ClosureLayout constructor invariants); the 8-byte
-        // read at `heap_capture_offset(i)` is in-bounds.
-        if layout.is_heap_capture(i) {
-            let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
-            // Delegate refcount release to the standard raw-bits path so
-            // that inline (non-Arc) ValueWord patterns are ignored and
-            // owned vs shared heap pointers are handled correctly.
-            release_raw_value_bits(bits);
-        } else if layout.is_owned_mutable_capture(i) {
-            // SAFETY: OwnedMutable slots hold `*mut ValueWord` obtained
-            // via `Box::into_raw`. We reclaim the box here exactly once;
-            // the block is frozen (refcount == 0) so no other thread can
-            // be reading this slot concurrently.
-            let raw = unsafe { std::ptr::read(ptr.add(off) as *const *mut crate::ValueWord) };
-            if !raw.is_null() {
-                // SAFETY: `raw` came from `Box::into_raw` on a
-                // `Box<ValueWord>`; reconstructing the box and dropping
-                // it releases the cell allocation. The inner ValueWord
-                // is just a `u64` alias, so its Drop has no side effects
-                // — any heap refcount share encoded into the bits must
-                // have been released by the compiler-generated prologue
-                // before the closure's last release (A.1B's territory).
-                unsafe {
-                    drop(Box::from_raw(raw));
+        match layout.capture_storage_kind(i) {
+            CaptureKind::Immutable => {
+                // Immutable captures: only Ptr slots own a refcount share
+                // (tracked by `heap_capture_mask`). Non-Ptr immutable
+                // slots are pure value carriers — releasing them is a
+                // no-op.
+                if layout.is_heap_capture(i) {
+                    let off = layout.heap_capture_offset(i);
+                    // SAFETY: heap_capture_mask bits are only set for
+                    // Ptr-shaped 8-byte slots; the read is in-bounds.
+                    let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
+                    release_raw_value_bits(bits);
                 }
             }
-        } else if layout.is_shared_capture(i) {
-            // SAFETY: Shared slots hold `*const SharedCell` obtained via
-            // `Arc::into_raw`. Reconstructing the Arc and dropping it
-            // decrements the strong count by one; if this was the last
-            // share the `SharedCell` (parking_lot Mutex<ValueWord>) is
-            // freed alongside the block.
-            let raw = unsafe { std::ptr::read(ptr.add(off) as *const *const SharedCell) };
-            if !raw.is_null() {
-                // SAFETY: `raw` came from `Arc::into_raw(Arc::new(...))`
-                // and represents exactly one strong-count share. The
-                // closure's slot was the sole owner of that share, so
-                // reclaiming it here is balanced.
-                unsafe {
-                    drop(Arc::from_raw(raw));
-                }
+            CaptureKind::OwnedMutable => {
+                // SAFETY: OwnedMutable slots hold typed `*mut T` from
+                // `alloc_owned_mutable_<kind>`. `drop_owned_mutable_capture`
+                // dispatches on `capture_inner_kind(i)` to reconstruct the
+                // matching `Box<T>` and reclaim it; for `Ptr` interior
+                // kind it releases the heap-refcount share encoded in
+                // the cell's payload first.
+                unsafe { drop_owned_mutable_capture(layout, ptr, i) };
+            }
+            CaptureKind::Shared => {
+                // SAFETY: Shared slots hold `*const SharedCell` from
+                // `Arc::into_raw`. `drop_shared_capture` releases any
+                // heap-refcount share encoded in the cell's payload (for
+                // Ptr interior kinds), then reclaims the Arc strong-count
+                // share — freeing the cell when this was the last share.
+                unsafe { drop_shared_capture(layout, ptr, i) };
             }
         }
     }
