@@ -21,6 +21,9 @@ mod a1d2_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod a1e_tests;
 
+#[cfg(all(test, feature = "deep-tests"))]
+mod c2_tests;
+
 // Re-export the main struct and public functions
 pub use accessors::{
     JitParityEntry, JitParityTarget, JitPreflightReport, build_full_builtin_parity_matrix,

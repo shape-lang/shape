@@ -842,30 +842,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `Arc::from_raw` in `release_typed_closure`) only
                 // runs after the closure's refcount hits zero, which
                 // is strictly after the JIT body returns.
-                if let Some(&kind) = self.shared_capture_slots.get(slot) {
-                    // Wave C.2: per-FieldKind direct load at the cell's
-                    // 8-byte payload offset. We keep the inline lock /
-                    // unlock fast path — the JIT already owns the lock
-                    // here, and routing through the
-                    // `read_shared_cell_<kind>` FFI would re-acquire it.
-                    // The kind selects the Cranelift load width
-                    // (matching the C.1 ABI: F64 → F64; I64/U64/Ptr →
-                    // I64; I32/U32 → I32; sub-32 → I8/I16). The
-                    // payload's upper bytes were sign-/zero-extended on
-                    // write (see Wave-B writers); reading at the kind's
-                    // native width simply truncates back.
+                if self.shared_capture_slots.contains_key(slot) {
+                    // Wave C.2 note: SharedCells are read/written by BOTH
+                    // the outer-scope SharedCow paths (`shared_local_slots`)
+                    // and the closure-body Shared-capture paths
+                    // (`shared_capture_slots`) on the SAME cell. Until
+                    // both ends migrate to per-FieldKind native
+                    // encoding, the cell payload encoding has to stay
+                    // uniform: legacy NaN-boxed I64 bits at offset 8.
+                    // The kind side-table entry is populated for the
+                    // capture slot (see `register_owned_mutable_capture_slots`)
+                    // and ready for the follow-up wave; the codegen
+                    // here intentionally stays legacy for now.
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let cell_ptr = self.builder.use_var(*var);
                     self.emit_shared_lock(cell_ptr);
-                    let load_ty = cell_load_type_for_field_kind(kind);
-                    let raw = self.builder.ins().load(
-                        load_ty,
+                    let value = self.builder.ins().load(
+                        types::I64,
                         MemFlags::trusted(),
                         cell_ptr,
                         SHARED_CELL_VALUE_OFFSET,
                     );
                     self.emit_shared_unlock(cell_ptr);
-                    return Ok(self.normalize_cell_read_inline(raw, kind));
+                    return Ok(value);
                 }
                 // Session 1 Commit 3: outer-scope Shared local slot.
                 // Structurally parallel to the A.1E `shared_capture_slots`
@@ -1022,24 +1021,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // still owns its one strong share for frame lifetime).
                 //
                 // SAFETY: see `read_place` Shared branch.
-                if let Some(&kind) = self.shared_capture_slots.get(slot) {
-                    // Wave C.2: per-FieldKind direct store at the
-                    // cell's 8-byte payload offset, with inline lock /
-                    // unlock. Unbox the slot-form SSA value to the
-                    // native interior, sign-/zero-extend to 8 bytes (so
-                    // the upper bytes remain consistent for any future
-                    // i64-shaped read), and store at the matching 8-byte
-                    // payload offset.
+                if self.shared_capture_slots.contains_key(slot) {
+                    // Wave C.2 note: see `read_place`'s shared_capture_slots
+                    // branch. The cell encoding stays legacy NaN-boxed I64
+                    // until both ends (outer SharedCow + closure-body
+                    // Shared captures) migrate together.
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let var = *self.locals.get(slot).ok_or_else(|| {
                         format!("MirToIR: unknown local slot {}", slot)
                     })?;
                     let cell_ptr = self.builder.use_var(var);
-                    let store_val = self.unbox_for_shared_inline_write(val, kind);
+                    let bits = self.coerce_value_to_i64_bits(val);
                     self.emit_shared_lock(cell_ptr);
                     self.builder.ins().store(
                         MemFlags::trusted(),
-                        store_val,
+                        bits,
                         cell_ptr,
                         SHARED_CELL_VALUE_OFFSET,
                     );
