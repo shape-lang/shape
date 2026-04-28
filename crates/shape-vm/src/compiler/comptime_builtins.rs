@@ -12,6 +12,7 @@
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_from_nb_pairs;
 use shape_runtime::type_system::BuiltinTypes;
+use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -143,16 +144,20 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
 
     // implements(type_name: string, trait_name: string) -> bool
     // Checks the TypeRegistry's trait impl data captured at compile time.
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "implements",
-        move |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Check if a type implements a trait at compile time",
+        vec![],
+        ConcreteType::Bool,
+        move |nb_args, _ctx| {
             let type_name = match nb_args.first().and_then(|nb| nb.as_str()) {
                 Some(s) => s.to_string(),
-                None => return Ok(ValueWord::from_bool(false)),
+                None => return Ok(TypedReturn::Bool(false)),
             };
             let trait_name = match nb_args.get(1).and_then(|nb| nb.as_str()) {
                 Some(s) => s.to_string(),
-                None => return Ok(ValueWord::from_bool(false)),
+                None => return Ok(TypedReturn::Bool(false)),
             };
 
             let has_impl = |ty: &str| {
@@ -165,39 +170,47 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             };
 
             if has_impl(&type_name) {
-                return Ok(ValueWord::from_bool(true));
+                return Ok(TypedReturn::Bool(true));
             }
 
             // Numeric widening: integer-family aliases can satisfy number-family impls.
             if BuiltinTypes::is_integer_type_name(&type_name) {
                 for widen_to in &["number", "float", "f64"] {
                     if has_impl(widen_to) {
-                        return Ok(ValueWord::from_bool(true));
+                        return Ok(TypedReturn::Bool(true));
                     }
                 }
             }
 
-            Ok(ValueWord::from_bool(false))
+            Ok(TypedReturn::Bool(false))
         },
     );
 
     // warning(msg: string) -> Unit
     // Emits a compile-time warning message to stderr.
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "warning",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Emit a compile-time warning",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             if let Some(msg) = nb_args.first().and_then(|nb| nb.as_str()) {
                 eprintln!("[comptime warning] {}", msg);
             }
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // error(msg: string) -> never (returns an error)
     // Emits a compile-time error. This aborts comptime execution.
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "error",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Emit a compile-time error and abort comptime execution",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let msg = match nb_args.first() {
                 Some(nb) => match nb.as_str() {
                     Some(s) => s.to_string(),
@@ -218,22 +231,34 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
         "target_os".to_string(),
         "version".to_string(),
     ]);
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "build_config",
-        |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
-            Ok(typed_object_from_nb_pairs(&[
+        "Return build-time configuration",
+        vec![],
+        ConcreteType::Object,
+        |_args, _ctx| {
+            // The comptime compiler resolves field access via a predeclared schema
+            // (registered above), so we need to materialize an Object-shaped
+            // ValueWord with the matching schema. Using TypedReturn::ValueWord
+            // pass-through preserves the existing typed_object_from_nb_pairs path.
+            Ok(TypedReturn::ValueWord(typed_object_from_nb_pairs(&[
                 ("debug", ValueWord::from_bool(cfg!(debug_assertions))),
                 ("version", nb_str(env!("CARGO_PKG_VERSION"))),
                 ("target_os", nb_str(std::env::consts::OS)),
                 ("target_arch", nb_str(std::env::consts::ARCH)),
-            ]))
+            ])))
         },
     );
 
     // Internal comptime directive: emit an extend statement payload (JSON AST).
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_extend",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: emit extend directive payload",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let json = nb_args
                 .first()
                 .and_then(|nb| nb.as_str())
@@ -241,24 +266,32 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             let extend: shape_ast::ast::ExtendStatement =
                 serde_json::from_str(json).map_err(|e| format!("invalid extend payload: {}", e))?;
             push_comptime_directive(ComptimeDirective::Extend(extend))?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: remove the current annotation target.
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_remove",
-        |_nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: remove the current annotation target",
+        vec![],
+        ConcreteType::Unit,
+        |_nb_args, _ctx| {
             push_comptime_directive(ComptimeDirective::RemoveTarget)?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: set a parameter type by parameter name.
     // __emit_set_param_type(param_name: string, type_payload: string)
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_set_param_type",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: set a parameter type by name",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let param_name = nb_args
                 .first()
                 .and_then(|nb| nb.as_str())
@@ -274,15 +307,19 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 param_name,
                 type_annotation,
             })?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: set a parameter default value.
     // __emit_set_param_value(param_name: string, value: any)
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_set_param_value",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: set a parameter default value by name",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let param_name = nb_args
                 .first()
                 .and_then(|nb| nb.as_str())
@@ -294,49 +331,61 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 "__emit_set_param_value expects a value as second arg".to_string()
             })?;
             push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: set function return type.
     // __emit_set_return_type(type_payload: string)
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_set_return_type",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: set the function return type",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
                 "__emit_set_return_type expects a type annotation string".to_string()
             })?;
             let type_annotation = parse_type_annotation_payload(payload)?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: replace function body from serialized AST payload.
     // __emit_replace_body(body_payload: string)
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_replace_body",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: replace function body from AST payload",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
                 "__emit_replace_body expects a function body source string".to_string()
             })?;
             let body = parse_function_body_payload(payload)?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
     // Internal comptime directive: replace module items from source payload.
     // __emit_replace_module(module_payload: string)
-    module.add_function(
+    register_typed_function(
+        &mut module,
         "__emit_replace_module",
-        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+        "Internal: replace module items from source payload",
+        vec![],
+        ConcreteType::Unit,
+        |nb_args, _ctx| {
             let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
                 "__emit_replace_module expects a module body source string".to_string()
             })?;
             let items = parse_module_items_payload(payload)?;
             push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
-            Ok(ValueWord::unit())
+            Ok(TypedReturn::Unit)
         },
     );
 
