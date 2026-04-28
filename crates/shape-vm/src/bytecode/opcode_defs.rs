@@ -773,6 +773,281 @@ define_opcodes! {
     /// the write only. Operand: Local(idx). Pops the value to write.
     StoreSharedCapture = 0x135, Variable, pops: 1, pushes: 0;
 
+    // ===== Phase 3c Wave D.1: per-FieldKind OwnedMutable capture opcodes =====
+    //
+    // Typed counterparts of the legacy single-form `LoadOwnedMutableCapture`
+    // (0x132) / `StoreOwnedMutableCapture` (0x133), which both treat the
+    // closure cell as a `*mut ValueWord` (8-byte tagged word).
+    //
+    // The Wave B storage migration replaced the `Box<ValueWord>` cell with
+    // per-FieldKind `Box<T>` cells (see
+    // `shape_value::v2::closure_raw::alloc_owned_mutable_<kind>`). Each
+    // typed cell holds a native scalar (`i64`, `f64`, `i8`, `bool`,
+    // ValueWord-bits, ...) without any tag overhead. The 22 opcodes below
+    // are the typed load/store path for those cells, one pair per
+    // FieldKind, in the canonical order:
+    //
+    //   I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr
+    //
+    // Operand layout: `Local(u16)` — same capture-array index as the legacy
+    // opcodes. The capture's `inner_kind` (recorded in
+    // `ClosureLayout::capture_inner_kinds`) selects the typed opcode the
+    // compiler emits at this site (Wave E).
+    //
+    // SAFETY invariants — enforced per-opcode at compile time via the
+    // closure layout's `capture_inner_kind(i)` selector:
+    //   * `Load/StoreOwnedMutableCapture<Kind>{i}` is emitted only when
+    //     the current function's capture `i` has
+    //     `CaptureKind::OwnedMutable` AND `inner_kind == FieldKind::<Kind>`.
+    //     The upvalue at index `i` MUST contain raw `*mut <T>` bits matching
+    //     `<Kind>` (see Wave B's `alloc_owned_mutable_<kind>` allocator and
+    //     the per-kind init path in `op_make_closure`).
+    //   * The legacy `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture`
+    //     (0x132/0x133) remain live and emit-compatible: any function the
+    //     compiler has not yet migrated to the typed path keeps using the
+    //     dynamic ValueWord cell + ValueWord opcodes. Wave G removes the
+    //     legacy opcodes once Wave E flips every emit site.
+    //
+    // Stack effect: Load reads the typed cell and pushes a raw native value
+    // onto the stack via the matching `push_raw_<kind>` / `push_raw_u64`
+    // helper (sub-i64 ints sign- or zero-extended into the i64 path,
+    // matching the existing typed-opcode convention in `arithmetic/`).
+    // Store pops a native value via the matching `pop_raw_<kind>` /
+    // `pop_raw_u64` helper, truncates as needed for sub-i64 widths, and
+    // writes through the typed cell.
+
+    /// Load `i64` through an `OwnedMutable` capture's `*mut i64` cell.
+    /// Operand: Local(idx). Pushes the dereferenced i64 onto the stack as
+    /// a raw i64.
+    LoadOwnedMutableCaptureI64 = 0x140, Variable, pops: 0, pushes: 1;
+    /// Load `u64` through an `OwnedMutable` capture's `*mut u64` cell.
+    /// Operand: Local(idx). Pushes the dereferenced u64 bits onto the
+    /// stack as raw u64.
+    LoadOwnedMutableCaptureU64 = 0x141, Variable, pops: 0, pushes: 1;
+    /// Load `f64` through an `OwnedMutable` capture's `*mut f64` cell.
+    /// Operand: Local(idx). Pushes the dereferenced f64 onto the stack as
+    /// a raw f64.
+    LoadOwnedMutableCaptureF64 = 0x142, Variable, pops: 0, pushes: 1;
+    /// Load `i32` through an `OwnedMutable` capture's `*mut i32` cell.
+    /// Operand: Local(idx). Sign-extends the i32 to i64 and pushes it as
+    /// a raw i64 (sub-i64 ints share the i64 stack convention).
+    LoadOwnedMutableCaptureI32 = 0x143, Variable, pops: 0, pushes: 1;
+    /// Load `u32` through an `OwnedMutable` capture's `*mut u32` cell.
+    /// Operand: Local(idx). Zero-extends the u32 to i64 and pushes it as
+    /// a raw i64.
+    LoadOwnedMutableCaptureU32 = 0x144, Variable, pops: 0, pushes: 1;
+    /// Load `i16` through an `OwnedMutable` capture's `*mut i16` cell.
+    /// Operand: Local(idx). Sign-extends the i16 to i64 and pushes it as
+    /// a raw i64.
+    LoadOwnedMutableCaptureI16 = 0x145, Variable, pops: 0, pushes: 1;
+    /// Load `u16` through an `OwnedMutable` capture's `*mut u16` cell.
+    /// Operand: Local(idx). Zero-extends the u16 to i64 and pushes it as
+    /// a raw i64.
+    LoadOwnedMutableCaptureU16 = 0x146, Variable, pops: 0, pushes: 1;
+    /// Load `i8` through an `OwnedMutable` capture's `*mut i8` cell.
+    /// Operand: Local(idx). Sign-extends the i8 to i64 and pushes it as
+    /// a raw i64.
+    LoadOwnedMutableCaptureI8 = 0x147, Variable, pops: 0, pushes: 1;
+    /// Load `u8` through an `OwnedMutable` capture's `*mut u8` cell.
+    /// Operand: Local(idx). Zero-extends the u8 to i64 and pushes it as
+    /// a raw i64.
+    LoadOwnedMutableCaptureU8 = 0x148, Variable, pops: 0, pushes: 1;
+    /// Load `bool` through an `OwnedMutable` capture's `*mut bool` cell.
+    /// Operand: Local(idx). Pushes the dereferenced bool onto the stack
+    /// via the typed bool-push helper.
+    LoadOwnedMutableCaptureBool = 0x149, Variable, pops: 0, pushes: 1;
+    /// Load `Ptr` through an `OwnedMutable` capture's `*mut u64` cell.
+    /// Operand: Local(idx). Pushes the dereferenced 8-byte pointer-shaped
+    /// payload as raw u64 (a ValueWord bit pattern carrying a NaN-boxed
+    /// heap share or owned heap pointer). Refcount retain semantics for
+    /// `Ptr` payloads are the caller's responsibility — matches the
+    /// `read_owned_mutable_ptr` contract: this opcode does NOT clone.
+    LoadOwnedMutableCapturePtr = 0x14A, Variable, pops: 0, pushes: 1;
+
+    /// Store `i64` through an `OwnedMutable` capture's `*mut i64` cell.
+    /// Operand: Local(idx). Pops a raw i64 and writes it into the cell.
+    StoreOwnedMutableCaptureI64 = 0x14B, Variable, pops: 1, pushes: 0;
+    /// Store `u64` through an `OwnedMutable` capture's `*mut u64` cell.
+    /// Operand: Local(idx). Pops a raw u64 and writes it into the cell.
+    StoreOwnedMutableCaptureU64 = 0x14C, Variable, pops: 1, pushes: 0;
+    /// Store `f64` through an `OwnedMutable` capture's `*mut f64` cell.
+    /// Operand: Local(idx). Pops a raw f64 and writes it into the cell.
+    StoreOwnedMutableCaptureF64 = 0x14D, Variable, pops: 1, pushes: 0;
+    /// Store `i32` through an `OwnedMutable` capture's `*mut i32` cell.
+    /// Operand: Local(idx). Pops a raw i64 from the stack, truncates to
+    /// the low 32 bits, and writes the i32 payload.
+    StoreOwnedMutableCaptureI32 = 0x14E, Variable, pops: 1, pushes: 0;
+    /// Store `u32` through an `OwnedMutable` capture's `*mut u32` cell.
+    /// Operand: Local(idx). Pops a raw i64, truncates to the low 32 bits,
+    /// and writes the u32 payload.
+    StoreOwnedMutableCaptureU32 = 0x14F, Variable, pops: 1, pushes: 0;
+    /// Store `i16` through an `OwnedMutable` capture's `*mut i16` cell.
+    /// Operand: Local(idx). Pops a raw i64, truncates to the low 16 bits,
+    /// and writes the i16 payload.
+    StoreOwnedMutableCaptureI16 = 0x150, Variable, pops: 1, pushes: 0;
+    /// Store `u16` through an `OwnedMutable` capture's `*mut u16` cell.
+    /// Operand: Local(idx). Pops a raw i64, truncates to the low 16 bits,
+    /// and writes the u16 payload.
+    StoreOwnedMutableCaptureU16 = 0x151, Variable, pops: 1, pushes: 0;
+    /// Store `i8` through an `OwnedMutable` capture's `*mut i8` cell.
+    /// Operand: Local(idx). Pops a raw i64, truncates to the low 8 bits,
+    /// and writes the i8 payload.
+    StoreOwnedMutableCaptureI8 = 0x152, Variable, pops: 1, pushes: 0;
+    /// Store `u8` through an `OwnedMutable` capture's `*mut u8` cell.
+    /// Operand: Local(idx). Pops a raw i64, truncates to the low 8 bits,
+    /// and writes the u8 payload.
+    StoreOwnedMutableCaptureU8 = 0x153, Variable, pops: 1, pushes: 0;
+    /// Store `bool` through an `OwnedMutable` capture's `*mut bool` cell.
+    /// Operand: Local(idx). Pops a bool via the typed bool-pop helper and
+    /// writes it into the cell.
+    StoreOwnedMutableCaptureBool = 0x154, Variable, pops: 1, pushes: 0;
+    /// Store `Ptr` through an `OwnedMutable` capture's `*mut u64` cell.
+    /// Operand: Local(idx). Pops a raw u64 (a ValueWord bit pattern
+    /// carrying a NaN-boxed heap share or owned heap pointer) and writes
+    /// it into the cell. Refcount semantics are the caller's
+    /// responsibility — matches the `write_owned_mutable_ptr` contract:
+    /// this opcode does NOT release the previous payload nor retain the
+    /// new one.
+    StoreOwnedMutableCapturePtr = 0x155, Variable, pops: 1, pushes: 0;
+
+    // ===== Track D.2: per-FieldKind typed Shared capture opcodes =====
+    //
+    // These are the typed counterparts of the legacy
+    // `LoadSharedCapture` / `StoreSharedCapture` (0x134 / 0x135). For each
+    // payload `FieldKind` (I64, U64, F64, I32, U32, I16, U16, I8, U8,
+    // Bool, Ptr) we have a Load/Store pair that:
+    //
+    // * recovers the `*const SharedCell` pointer bits from the capture
+    //   slot via `read_capture_raw_pointer_bits(idx)`,
+    // * delegates to the lock-gated `read_shared_<kind>` /
+    //   `write_shared_<kind>` helper in
+    //   `shape_value::v2::closure_raw`. The helper acquires the
+    //   `parking_lot::Mutex` internally, performs the typed access, and
+    //   releases the lock before returning. The handler MUST NOT take
+    //   the lock externally — that would double-lock.
+    //
+    // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
+    // Load reads from the lock-gated cell and pushes a raw native value
+    // onto the stack via the matching `push_raw_<kind>`/`push_raw_u64`
+    // helper. Store pops a native value via the matching
+    // `pop_raw_<kind>`/`pop_raw_u64` helper, then writes it through the
+    // lock-gated helper.
+    //
+    // SAFETY invariants — enforced by the compiler (Wave E codegen):
+    //   * `LoadSharedCapture<Kind>` / `StoreSharedCapture<Kind>` are only
+    //     emitted when the current function's capture `i` has
+    //     `CaptureKind::Shared` and a payload `FieldKind` matching
+    //     `<Kind>` in its layout.
+    //   * The upvalue slot at index `i` MUST hold raw `*const SharedCell`
+    //     bits produced by `Arc::into_raw(Arc::new(SharedCell::new(...)))`.
+    //   * The cell's interior `FieldKind` must equal `<Kind>` — the
+    //     helper writes the bit pattern matching the declared kind, and
+    //     a mismatched reader will reinterpret bytes incorrectly.
+    //
+    // Opcode codes 0x156..=0x16B (22 codes total). Ordering matches D.1:
+    // I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr — Load then
+    // Store paired (LoadI64 = 0x156, StoreI64 = 0x161, LoadU64 = 0x157,
+    // StoreU64 = 0x162, ...). We keep the kinds contiguous so the
+    // dispatch table reads as two parallel ranges.
+
+    /// Load an `i64` through a `Shared` capture cell — locks the mutex,
+    /// reads the i64 payload, unlocks, pushes the raw i64 onto the stack.
+    /// Operand: Local(idx).
+    LoadSharedCaptureI64 = 0x156, Variable, pops: 0, pushes: 1;
+    /// Load a `u64` through a `Shared` capture cell — locks, reads the
+    /// u64 payload, unlocks, pushes the raw u64 bits.
+    /// Operand: Local(idx).
+    LoadSharedCaptureU64 = 0x157, Variable, pops: 0, pushes: 1;
+    /// Load an `f64` through a `Shared` capture cell — locks, reads the
+    /// f64 payload, unlocks, pushes the raw f64.
+    /// Operand: Local(idx).
+    LoadSharedCaptureF64 = 0x158, Variable, pops: 0, pushes: 1;
+    /// Load an `i32` through a `Shared` capture cell — locks, reads the
+    /// low 4 bytes of the payload as i32, unlocks, sign-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureI32 = 0x159, Variable, pops: 0, pushes: 1;
+    /// Load a `u32` through a `Shared` capture cell — locks, reads the
+    /// low 4 bytes of the payload as u32, unlocks, zero-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureU32 = 0x15A, Variable, pops: 0, pushes: 1;
+    /// Load an `i16` through a `Shared` capture cell — locks, reads the
+    /// low 2 bytes of the payload as i16, unlocks, sign-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureI16 = 0x15B, Variable, pops: 0, pushes: 1;
+    /// Load a `u16` through a `Shared` capture cell — locks, reads the
+    /// low 2 bytes of the payload as u16, unlocks, zero-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureU16 = 0x15C, Variable, pops: 0, pushes: 1;
+    /// Load an `i8` through a `Shared` capture cell — locks, reads the
+    /// low byte of the payload as i8, unlocks, sign-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureI8 = 0x15D, Variable, pops: 0, pushes: 1;
+    /// Load a `u8` through a `Shared` capture cell — locks, reads the
+    /// low byte of the payload as u8, unlocks, zero-extends, pushes.
+    /// Operand: Local(idx).
+    LoadSharedCaptureU8 = 0x15E, Variable, pops: 0, pushes: 1;
+    /// Load a `bool` through a `Shared` capture cell — locks, reads the
+    /// low byte of the payload (zero ⇒ false; non-zero ⇒ true), unlocks,
+    /// pushes a raw NaN-tagged bool onto the stack.
+    /// Operand: Local(idx).
+    LoadSharedCaptureBool = 0x15F, Variable, pops: 0, pushes: 1;
+    /// Load a `Ptr` through a `Shared` capture cell — locks, reads the 8
+    /// payload bytes as a raw u64 (a ValueWord bit pattern carrying a
+    /// NaN-boxed Arc/Box pointer), unlocks, pushes the raw bits. Refcount
+    /// retain semantics for `Ptr` payloads are the caller's
+    /// responsibility (the helper does NOT clone — match the
+    /// `read_shared_ptr` contract).
+    /// Operand: Local(idx).
+    LoadSharedCapturePtr = 0x160, Variable, pops: 0, pushes: 1;
+
+    /// Store an `i64` through a `Shared` capture cell — pops a raw i64
+    /// from the stack, locks, writes the 8-byte i64 payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureI64 = 0x161, Variable, pops: 1, pushes: 0;
+    /// Store a `u64` through a `Shared` capture cell — pops a raw u64,
+    /// locks, writes the 8-byte u64 payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureU64 = 0x162, Variable, pops: 1, pushes: 0;
+    /// Store an `f64` through a `Shared` capture cell — pops a raw f64,
+    /// locks, writes the 8-byte f64 payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureF64 = 0x163, Variable, pops: 1, pushes: 0;
+    /// Store an `i32` through a `Shared` capture cell — pops a raw i32,
+    /// sign-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureI32 = 0x164, Variable, pops: 1, pushes: 0;
+    /// Store a `u32` through a `Shared` capture cell — pops a raw u32,
+    /// zero-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureU32 = 0x165, Variable, pops: 1, pushes: 0;
+    /// Store an `i16` through a `Shared` capture cell — pops a raw i16,
+    /// sign-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureI16 = 0x166, Variable, pops: 1, pushes: 0;
+    /// Store a `u16` through a `Shared` capture cell — pops a raw u16,
+    /// zero-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureU16 = 0x167, Variable, pops: 1, pushes: 0;
+    /// Store an `i8` through a `Shared` capture cell — pops a raw i8,
+    /// sign-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureI8 = 0x168, Variable, pops: 1, pushes: 0;
+    /// Store a `u8` through a `Shared` capture cell — pops a raw u8,
+    /// zero-extends to 8 bytes, locks, writes payload, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureU8 = 0x169, Variable, pops: 1, pushes: 0;
+    /// Store a `bool` through a `Shared` capture cell — pops a raw bool,
+    /// locks, writes the 8-byte payload as 0 or 1, unlocks.
+    /// Operand: Local(idx).
+    StoreSharedCaptureBool = 0x16A, Variable, pops: 1, pushes: 0;
+    /// Store a `Ptr` through a `Shared` capture cell — pops raw 8-byte
+    /// bits (a ValueWord), locks, writes the payload, unlocks. The
+    /// caller is responsible for refcount semantics on Ptr payloads —
+    /// matches the `write_shared_ptr` contract: this opcode does NOT
+    /// release the previous payload nor retain the new one.
+    /// Operand: Local(idx).
+    StoreSharedCapturePtr = 0x16B, Variable, pops: 1, pushes: 0;
+
     // ===== Track A.1C.1: Shared outer-scope (`var`) cell opcodes =====
     //
     // These are the *outer-scope* counterpart to A.1B's capture-side
