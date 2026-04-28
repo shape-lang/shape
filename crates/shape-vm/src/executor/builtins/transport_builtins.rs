@@ -15,7 +15,8 @@
 //! - transport.memo_stats(handle) -> { cache_hits, cache_misses, evictions, total_requests }
 //! - transport.memo_invalidate(handle) -> ()
 
-use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
+use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoHandleKind, IoResource};
 use shape_wire::transport::factory::TransportKind;
@@ -25,6 +26,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::transport_provider;
+
+/// Wrap a legacy-shaped module function pointer
+/// `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>` into a
+/// typed body that round-trips the result through TypedReturn::ValueWord.
+fn wrap_legacy<F>(
+    f: F,
+) -> impl for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+       + Send
+       + Sync
+       + 'static
+where
+    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    move |args, ctx| f(args, ctx).map(TypedReturn::ValueWord)
+}
 
 /// Type-erased transport handle stored in `IoResource::Custom`.
 struct TransportHandle {
@@ -43,211 +62,210 @@ pub fn create_transport_module() -> ModuleExports {
     module.description = "Network transport for distributed Shape".to_string();
 
     // transport.tcp() -> Transport
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tcp",
-        transport_tcp,
-        ModuleFunction {
-            description: "Create a TCP transport handle".to_string(),
-            params: vec![],
-            return_type: Some("Transport".to_string()),
-        },
+        "Create a TCP transport handle",
+        vec![],
+        ConcreteType::Named("Transport".to_string()),
+        wrap_legacy(transport_tcp),
     );
 
     // transport.quic() -> Transport  (requires `quic` feature)
     #[cfg(feature = "quic")]
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "quic",
-        transport_quic,
-        ModuleFunction {
-            description: "Create a QUIC transport handle (multiplexed, encrypted)".to_string(),
-            params: vec![],
-            return_type: Some("Transport".to_string()),
-        },
+        "Create a QUIC transport handle (multiplexed, encrypted)",
+        vec![],
+        ConcreteType::Named("Transport".to_string()),
+        wrap_legacy(transport_quic),
     );
 
     // transport.send(transport, destination, payload) -> Result<Array<int>, string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "send",
-        transport_send,
-        ModuleFunction {
-            description: "Send a payload to a destination and wait for a length-prefixed response"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "transport".to_string(),
-                    type_name: "Transport".to_string(),
-                    required: true,
-                    description: "Transport handle from transport.tcp()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "destination".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Remote address as host:port".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "payload".to_string(),
-                    type_name: "Array<int>".to_string(),
-                    required: true,
-                    description: "Byte array to send".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<Array<int>, string>".to_string()),
-        },
+        "Send a payload to a destination and wait for a length-prefixed response",
+        vec![
+            ModuleParam {
+                name: "transport".to_string(),
+                type_name: "Transport".to_string(),
+                required: true,
+                description: "Transport handle from transport.tcp()".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "destination".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Remote address as host:port".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "payload".to_string(),
+                type_name: "Array<int>".to_string(),
+                required: true,
+                description: "Byte array to send".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Result2(
+            Box::new(ConcreteType::ArrayInt),
+            Box::new(ConcreteType::String),
+        ),
+        wrap_legacy(transport_send),
     );
 
     // transport.connect(transport, destination) -> Result<Connection, string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "connect",
-        transport_connect,
-        ModuleFunction {
-            description: "Establish a persistent TCP connection to a remote node".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "transport".to_string(),
-                    type_name: "Transport".to_string(),
-                    required: true,
-                    description: "Transport handle from transport.tcp()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "destination".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Remote address as host:port".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<Connection, string>".to_string()),
-        },
+        "Establish a persistent TCP connection to a remote node",
+        vec![
+            ModuleParam {
+                name: "transport".to_string(),
+                type_name: "Transport".to_string(),
+                required: true,
+                description: "Transport handle from transport.tcp()".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "destination".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Remote address as host:port".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Result2(
+            Box::new(ConcreteType::Named("Connection".to_string())),
+            Box::new(ConcreteType::String),
+        ),
+        wrap_legacy(transport_connect),
     );
 
     // transport.connection_send(conn, payload) -> Result<(), string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "connection_send",
-        connection_send_fn,
-        ModuleFunction {
-            description: "Send a length-prefixed payload over an established connection"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "conn".to_string(),
-                    type_name: "Connection".to_string(),
-                    required: true,
-                    description: "Connection handle from transport.connect()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "payload".to_string(),
-                    type_name: "Array<int>".to_string(),
-                    required: true,
-                    description: "Byte array to send".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<(), string>".to_string()),
-        },
-    );
-
-    // transport.connection_recv(conn, timeout?) -> Result<Array<int>, string>
-    module.add_function_with_schema(
-        "connection_recv",
-        connection_recv_fn,
-        ModuleFunction {
-            description: "Receive a length-prefixed payload from an established connection"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "conn".to_string(),
-                    type_name: "Connection".to_string(),
-                    required: true,
-                    description: "Connection handle from transport.connect()".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "timeout".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Timeout in milliseconds (None = wait indefinitely)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<Array<int>, string>".to_string()),
-        },
-    );
-
-    // transport.connection_close(conn) -> Result<(), string>
-    module.add_function_with_schema(
-        "connection_close",
-        connection_close_fn,
-        ModuleFunction {
-            description: "Close an established connection".to_string(),
-            params: vec![ModuleParam {
+        "Send a length-prefixed payload over an established connection",
+        vec![
+            ModuleParam {
                 name: "conn".to_string(),
                 type_name: "Connection".to_string(),
                 required: true,
                 description: "Connection handle from transport.connect()".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("Result<(), string>".to_string()),
-        },
+            },
+            ModuleParam {
+                name: "payload".to_string(),
+                type_name: "Array<int>".to_string(),
+                required: true,
+                description: "Byte array to send".to_string(),
+                ..Default::default()
+            },
+        ],
+        // Original LSP surface was "Result<(), string>"; ConcreteType::Result2
+        // emits "Result<unit, string>". Use Named to preserve the literal.
+        ConcreteType::Named("Result<(), string>".to_string()),
+        wrap_legacy(connection_send_fn),
+    );
+
+    // transport.connection_recv(conn, timeout?) -> Result<Array<int>, string>
+    register_typed_function(
+        &mut module,
+        "connection_recv",
+        "Receive a length-prefixed payload from an established connection",
+        vec![
+            ModuleParam {
+                name: "conn".to_string(),
+                type_name: "Connection".to_string(),
+                required: true,
+                description: "Connection handle from transport.connect()".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "timeout".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Timeout in milliseconds (None = wait indefinitely)".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Result2(
+            Box::new(ConcreteType::ArrayInt),
+            Box::new(ConcreteType::String),
+        ),
+        wrap_legacy(connection_recv_fn),
+    );
+
+    // transport.connection_close(conn) -> Result<(), string>
+    register_typed_function(
+        &mut module,
+        "connection_close",
+        "Close an established connection",
+        vec![ModuleParam {
+            name: "conn".to_string(),
+            type_name: "Connection".to_string(),
+            required: true,
+            description: "Connection handle from transport.connect()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("Result<(), string>".to_string()),
+        wrap_legacy(connection_close_fn),
     );
 
     // transport.memoized(max_entries?) -> MemoTransport
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "memoized",
-        transport_memoized,
-        ModuleFunction {
-            description: "Create a memoized TCP transport that caches send results".to_string(),
-            params: vec![ModuleParam {
-                name: "max_entries".to_string(),
-                type_name: "int".to_string(),
-                required: false,
-                description: "Maximum cache entries (default 1024)".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("MemoTransport".to_string()),
-        },
+        "Create a memoized TCP transport that caches send results",
+        vec![ModuleParam {
+            name: "max_entries".to_string(),
+            type_name: "int".to_string(),
+            required: false,
+            description: "Maximum cache entries (default 1024)".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("MemoTransport".to_string()),
+        wrap_legacy(transport_memoized),
     );
 
     // transport.memo_stats(handle) -> { cache_hits, cache_misses, evictions, total_requests }
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "memo_stats",
-        transport_memo_stats,
-        ModuleFunction {
-            description: "Return cache statistics for a memoized transport".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "MemoTransport".to_string(),
-                required: true,
-                description: "Memoized transport handle from transport.memoized()".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some(
-                "{ cache_hits: int, cache_misses: int, evictions: int, total_requests: int }"
-                    .to_string(),
-            ),
-        },
+        "Return cache statistics for a memoized transport",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "MemoTransport".to_string(),
+            required: true,
+            description: "Memoized transport handle from transport.memoized()".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named(
+            "{ cache_hits: int, cache_misses: int, evictions: int, total_requests: int }"
+                .to_string(),
+        ),
+        wrap_legacy(transport_memo_stats),
     );
 
     // transport.memo_invalidate(handle) -> ()
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "memo_invalidate",
-        transport_memo_invalidate,
-        ModuleFunction {
-            description: "Clear all cached entries in a memoized transport".to_string(),
-            params: vec![ModuleParam {
-                name: "handle".to_string(),
-                type_name: "MemoTransport".to_string(),
-                required: true,
-                description: "Memoized transport handle from transport.memoized()".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("()".to_string()),
-        },
+        "Clear all cached entries in a memoized transport",
+        vec![ModuleParam {
+            name: "handle".to_string(),
+            type_name: "MemoTransport".to_string(),
+            required: true,
+            description: "Memoized transport handle from transport.memoized()".to_string(),
+            ..Default::default()
+        }],
+        // Preserve the literal "()" surface as-is.
+        ConcreteType::Named("()".to_string()),
+        wrap_legacy(transport_memo_invalidate),
     );
 
     module

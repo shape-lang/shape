@@ -9,7 +9,8 @@
 //! - remote.ping(addr) -> Result<{ shape_version: string, wire_protocol: int }, string>
 //! - remote.__call(addr, fn_ref, args) -> Result<_, string>
 
-use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
+use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_runtime::wire_conversion::wire_to_nb;
 use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::transport::Transport;
@@ -18,6 +19,23 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::transport_provider;
+
+/// Wrap a legacy-shaped module function pointer into a typed body that
+/// round-trips the result through TypedReturn::ValueWord.
+fn wrap_legacy<F>(
+    f: F,
+) -> impl for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+       + Send
+       + Sync
+       + 'static
+where
+    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    move |args, ctx| f(args, ctx).map(TypedReturn::ValueWord)
+}
 
 // ---------------------------------------------------------------------------
 // Thread-local program reference for remote.__call()
@@ -62,83 +80,82 @@ pub fn create_remote_module() -> ModuleExports {
     module.description = "Remote execution on Shape serve instances".to_string();
 
     // remote.execute(addr, code) -> Result<{ value, stdout, error }, string>
-    module.add_function_with_schema(
+    // The original LSP surface is a complex inline-record + Result<…, string>;
+    // ConcreteType::Named preserves the literal string for LSP/schema fidelity.
+    register_typed_function(
+        &mut module,
         "execute",
-        remote_execute,
-        ModuleFunction {
-            description: "Execute Shape code on a remote server".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "addr".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Remote server address as host:port".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "code".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Shape source code to execute remotely".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some(
-                "Result<{ value, stdout: string?, error: string? }, string>".to_string(),
-            ),
-        },
-    );
-
-    // remote.ping(addr) -> Result<{ shape_version: string, wire_protocol: int }, string>
-    module.add_function_with_schema(
-        "ping",
-        remote_ping,
-        ModuleFunction {
-            description: "Ping a remote Shape server and get server info".to_string(),
-            params: vec![ModuleParam {
+        "Execute Shape code on a remote server",
+        vec![
+            ModuleParam {
                 name: "addr".to_string(),
                 type_name: "string".to_string(),
                 required: true,
                 description: "Remote server address as host:port".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some(
-                "Result<{ shape_version: string, wire_protocol: int }, string>".to_string(),
-            ),
-        },
+            },
+            ModuleParam {
+                name: "code".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Shape source code to execute remotely".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named(
+            "Result<{ value, stdout: string?, error: string? }, string>".to_string(),
+        ),
+        wrap_legacy(remote_execute),
+    );
+
+    // remote.ping(addr) -> Result<{ shape_version: string, wire_protocol: int }, string>
+    register_typed_function(
+        &mut module,
+        "ping",
+        "Ping a remote Shape server and get server info",
+        vec![ModuleParam {
+            name: "addr".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Remote server address as host:port".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Named(
+            "Result<{ shape_version: string, wire_protocol: int }, string>".to_string(),
+        ),
+        wrap_legacy(remote_ping),
     );
 
     // remote.__call(addr, fn_ref, args) -> Result<_, string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "__call",
-        remote_call,
-        ModuleFunction {
-            description: "Call a function on a remote Shape server".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "addr".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Remote server address as host:port".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "fn_ref".to_string(),
-                    type_name: "Function".to_string(),
-                    required: true,
-                    description: "Function reference to call remotely".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "args".to_string(),
-                    type_name: "Array<_>".to_string(),
-                    required: true,
-                    description: "Arguments to pass to the remote function".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<_, string>".to_string()),
-        },
+        "Call a function on a remote Shape server",
+        vec![
+            ModuleParam {
+                name: "addr".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Remote server address as host:port".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "fn_ref".to_string(),
+                type_name: "Function".to_string(),
+                required: true,
+                description: "Function reference to call remotely".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "args".to_string(),
+                type_name: "Array<_>".to_string(),
+                required: true,
+                description: "Arguments to pass to the remote function".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Result<_, string>".to_string()),
+        wrap_legacy(remote_call),
     );
 
     module
