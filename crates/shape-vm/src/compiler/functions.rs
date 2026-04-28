@@ -1190,7 +1190,19 @@ impl BytecodeCompiler {
                             .and_then(|hint| hint.clone());
                         if let Some(type_name) = inferred_type_name {
                             self.set_local_type_info(local_idx, &type_name);
-                        } else {
+                            // Strict-typing-sweep: when inference produces a
+                            // concrete primitive name, the param is no longer
+                            // ambiguous — drop the param_locals guard so
+                            // typed binary-op dispatch trusts the type info.
+                            if Self::tracker_type_name_is_primitive(&type_name) {
+                                self.param_locals.remove(&local_idx);
+                            }
+                        } else if let Some(ann) =
+                            crate::compiler::expressions::closures::infer_param_type_from_body(
+                                name,
+                                &func_def.body,
+                            )
+                        {
                             // Strict-typing-sweep: inference engine may
                             // have produced a Type::Variable (which
                             // inferred_type_to_hint_name discards).
@@ -1199,16 +1211,12 @@ impl BytecodeCompiler {
                             // synthesis uses — so e.g.
                             // `function add_ten(x) { x + 10 }` types
                             // x as int from the literal pairing.
-                            if let Some(ann) =
-                                crate::compiler::expressions::closures::infer_param_type_from_body(
-                                    name,
-                                    &func_def.body,
-                                )
+                            if let Some(type_name) =
+                                Self::tracked_type_name_from_annotation(&ann)
                             {
-                                if let Some(type_name) =
-                                    Self::tracked_type_name_from_annotation(&ann)
-                                {
-                                    self.set_local_type_info(local_idx, &type_name);
+                                self.set_local_type_info(local_idx, &type_name);
+                                if Self::tracker_type_name_is_primitive(&type_name) {
+                                    self.param_locals.remove(&local_idx);
                                 }
                             }
                         }

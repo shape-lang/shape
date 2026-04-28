@@ -769,6 +769,21 @@ impl BytecodeCompiler {
 
     /// Convert a source annotation to a tracked type name when we have a
     /// canonical runtime representation for it.
+    /// Strict-typing-sweep: whether a type-name string identifies a
+    /// concrete primitive scalar that the typed-op dispatch paths trust.
+    /// Used to drop the `param_locals` guard once we've successfully
+    /// inferred a primitive type for an unannotated parameter.
+    pub(super) fn tracker_type_name_is_primitive(name: &str) -> bool {
+        matches!(
+            name,
+            "int" | "i8" | "i16" | "i32" | "i64"
+            | "u8" | "u16" | "u32" | "u64"
+            | "number" | "f32" | "f64"
+            | "bool" | "string" | "decimal" | "bigint"
+            | "DateTime" | "Duration" | "TimeSpan"
+        )
+    }
+
     pub(super) fn tracked_type_name_from_annotation(type_ann: &TypeAnnotation) -> Option<String> {
         match type_ann {
             TypeAnnotation::Basic(name) => Some(name.clone()),
