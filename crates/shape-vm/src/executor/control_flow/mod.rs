@@ -1527,6 +1527,118 @@ mod a1b_make_closure_tests {
         drop(vm);
     }
 
+    /// Wave D (D.3) deliverable test: a closure with two
+    /// `OwnedMutable` captures of distinct interior `FieldKind`s
+    /// (I64 and F64).
+    ///
+    /// Verifies that:
+    /// 1. `op_make_closure` dispatches per-`capture_inner_kind` and
+    ///    routes the two captures to the correct
+    ///    `closure_raw::alloc_owned_mutable_<kind>` helper (the box
+    ///    sizes differ — `*mut i64` vs `*mut f64` — but the slot
+    ///    pointer bits are 8 bytes either way).
+    /// 2. The native values are stored verbatim (no NaN-boxing) and
+    ///    read back through Wave B's typed
+    ///    `read_owned_mutable_<kind>` helpers.
+    /// 3. `release_typed_closure` reclaims both typed boxes on the
+    ///    closure's last refcount release without a leak or double-
+    ///    free panic on Drop.
+    #[test]
+    fn d3_make_closure_owned_mutable_multi_kind_typed_alloc() {
+        let mut program = BytecodeProgram::default();
+        let c_int = program.add_constant(Constant::Int(7));
+        let c_num = program.add_constant(Constant::Number(2.5));
+
+        // Top-level: PushConst 7 (capture 0 = i64) ;
+        //            PushConst 2.5 (capture 1 = f64) ;
+        //            MakeClosure(F) ; Halt.
+        program.instructions.push(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(c_int)),
+        ));
+        program.instructions.push(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(c_num)),
+        ));
+        let makeclosure_placeholder_idx = program.instructions.len();
+        program.instructions.push(Instruction::simple(OpCode::Halt));
+        program.instructions.push(Instruction::simple(OpCode::Halt));
+
+        // Closure body is never executed (we only inspect the resulting
+        // ClosureRaw) — placeholder PushConst + ReturnValue.
+        let body = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_int))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64, ConcreteType::F64],
+            &[CaptureKind::OwnedMutable, CaptureKind::OwnedMutable],
+        );
+        let fid = register_closure_function(
+            &mut program,
+            2,
+            vec![true, true],
+            layout,
+            body,
+        );
+        program.instructions[makeclosure_placeholder_idx] = Instruction::new(
+            OpCode::MakeClosure,
+            Some(Operand::Function(shape_value::FunctionId::new(fid))),
+        );
+        program.top_level_locals_count = 0;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap().clone();
+
+        // Result is a ClosureRaw with two OwnedMutable captures.
+        let hv = result.as_heap_ref().expect("closure on stack");
+        assert!(
+            matches!(hv, HeapValue::ClosureRaw(_)),
+            "D.3 expects multi-kind OwnedMutable closure to be ClosureRaw, got {}",
+            hv.type_name()
+        );
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.capture_count(), 2);
+
+        // Capture 0: I64 — read back via the typed helper.
+        let cell_0 = handle
+            .capture_owned_mutable_ptr(0)
+            .expect("OwnedMutable slot 0");
+        assert!(!cell_0.is_null());
+        // SAFETY: the slot was produced by `alloc_owned_mutable_i64`,
+        // so reading the cell as `*mut i64` is the correctly-typed
+        // access. The closure block's refcount keeps the box alive.
+        let v0 = unsafe {
+            shape_value::v2::closure_raw::read_owned_mutable_i64(cell_0 as *mut i64)
+        };
+        assert_eq!(v0, 7, "I64 capture should round-trip through the typed cell");
+
+        // Capture 1: F64 — read back via the typed helper.
+        let cell_1 = handle
+            .capture_owned_mutable_ptr(1)
+            .expect("OwnedMutable slot 1");
+        assert!(!cell_1.is_null());
+        // SAFETY: the slot was produced by `alloc_owned_mutable_f64`;
+        // reading as `*mut f64` is the correctly-typed access.
+        let v1 = unsafe {
+            shape_value::v2::closure_raw::read_owned_mutable_f64(cell_1 as *mut f64)
+        };
+        assert_eq!(v1, 2.5, "F64 capture should round-trip through the typed cell");
+
+        // Refcount before drop is 1 (the stack share). After dropping
+        // result, `release_typed_closure` reclaims the block via
+        // `drop_owned_mutable_capture` per slot — which dispatches on
+        // `capture_inner_kind` and reconstructs the typed `Box<T>`.
+        // A mismatched dispatch (e.g. `Box<u64>::from_raw` on a
+        // `Box<f64>` allocation) would corrupt the allocator; running
+        // under address sanitiser / miri catches it. Without those,
+        // the test at least confirms no panic on drop.
+        assert_eq!(handle.refcount(), 1);
+        drop(result);
+        drop(vm);
+    }
+
     // Track A.1C.2: the A.1B `a1b_make_closure_shared_allocates_arc_and_
     // releases` test previously exercised op_make_closure's Shared
     // branch by pushing an initial VALUE and expecting the branch to
