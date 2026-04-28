@@ -1357,6 +1357,32 @@ impl BytecodeCompiler {
             }
         }
 
+        // Phase 3d: TypedObject self-field type propagation.
+        // For `expr.field`, when the receiver is an identifier with a known
+        // schema in the tracker (e.g. `self` in a trait method body, or any
+        // typed local), look up the field type in the schema registry and
+        // map it to a concrete type annotation. This plugs a strict-typing
+        // hole where `infer_expr_type` for `self.name` would fall through
+        // to the runtime inference engine — which doesn't know `self`'s
+        // type — and return Unknown.
+        if let Expr::PropertyAccess { object, property, optional, .. } = expr {
+            if !*optional {
+                if let Some(schema_id) = self.tracker_schema_id_for_expr(object) {
+                    if let Some(field_ty) = self
+                        .type_tracker
+                        .schema_registry()
+                        .get_by_id(schema_id)
+                        .and_then(|schema| schema.get_field(property))
+                        .map(|field| field.field_type.clone())
+                    {
+                        if let Some(ann) = field_type_to_annotation(&field_ty) {
+                            return Ok(Type::Concrete(ann));
+                        }
+                    }
+                }
+            }
+        }
+
         self.type_inference.infer_expr(expr).map_err(|e| {
             shape_ast::error::ShapeError::SemanticError {
                 message: format!("Type inference failed: {:?}", e),
@@ -1385,5 +1411,73 @@ impl BytecodeCompiler {
             }
         }
         None
+    }
+
+    /// Phase 3d helper: look up a tracker-recorded schema_id for an
+    /// expression. Currently handles the identifier case (locals + module
+    /// bindings), which covers the `self.field` use case in trait method
+    /// bodies.
+    fn tracker_schema_id_for_expr(&self, expr: &Expr) -> Option<u32> {
+        if let Expr::Identifier(name, _) = expr {
+            if let Some(local_idx) = self.resolve_local(name) {
+                if let Some(info) = self.type_tracker.get_local_type(local_idx) {
+                    if let Some(id) = info.schema_id {
+                        return Some(id);
+                    }
+                    // Fall back to looking up the schema by tracked type_name
+                    if let Some(ref tn) = info.type_name {
+                        if let Some(schema) =
+                            self.type_tracker.schema_registry().get(tn)
+                        {
+                            return Some(schema.id);
+                        }
+                    }
+                }
+            }
+            if let Some(&binding_idx) = self.module_bindings.get(name) {
+                if let Some(info) = self.type_tracker.get_binding_type(binding_idx) {
+                    if let Some(id) = info.schema_id {
+                        return Some(id);
+                    }
+                    if let Some(ref tn) = info.type_name {
+                        if let Some(schema) =
+                            self.type_tracker.schema_registry().get(tn)
+                        {
+                            return Some(schema.id);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Phase 3d helper: map a `FieldType` to a `TypeAnnotation` concrete enough
+/// for `infer_expr_type` consumers (string-concat path, numeric coercion,
+/// etc.). Returns None when the field type doesn't have a useful primitive
+/// annotation (e.g. arrays / objects / Any), in which case the caller falls
+/// back to the inference engine.
+fn field_type_to_annotation(
+    ft: &shape_runtime::type_schema::FieldType,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_schema::FieldType;
+    match ft {
+        FieldType::String => Some(TypeAnnotation::Basic("string".to_string())),
+        FieldType::I64 => Some(TypeAnnotation::Basic("int".to_string())),
+        FieldType::F64 => Some(TypeAnnotation::Basic("number".to_string())),
+        FieldType::Bool => Some(TypeAnnotation::Basic("bool".to_string())),
+        FieldType::Decimal => Some(TypeAnnotation::Basic("decimal".to_string())),
+        FieldType::Timestamp => Some(TypeAnnotation::Basic("DateTime".to_string())),
+        FieldType::Object(name) => Some(TypeAnnotation::Basic(name.clone())),
+        FieldType::I8 => Some(TypeAnnotation::Basic("i8".to_string())),
+        FieldType::U8 => Some(TypeAnnotation::Basic("u8".to_string())),
+        FieldType::I16 => Some(TypeAnnotation::Basic("i16".to_string())),
+        FieldType::U16 => Some(TypeAnnotation::Basic("u16".to_string())),
+        FieldType::I32 => Some(TypeAnnotation::Basic("i32".to_string())),
+        FieldType::U32 => Some(TypeAnnotation::Basic("u32".to_string())),
+        FieldType::U64 => Some(TypeAnnotation::Basic("u64".to_string())),
+        FieldType::Array(_) | FieldType::Any => None,
     }
 }
