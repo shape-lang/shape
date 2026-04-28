@@ -3,7 +3,8 @@
 //! Exports: msgpack.encode(value), msgpack.decode(data),
 //!          msgpack.encode_bytes(value), msgpack.decode_bytes(data)
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -50,10 +51,19 @@ pub fn create_msgpack_module() -> ModuleExports {
     module.description = "MessagePack binary serialization".to_string();
 
     // msgpack.encode(value: any) -> Result<string>
-    // Encodes a value to MessagePack and returns a hex-encoded string.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "encode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Encode a value to MessagePack (hex-encoded string)",
+        vec![ModuleParam {
+            name: "value".to_string(),
+            type_name: "any".to_string(),
+            required: true,
+            description: "Value to encode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "msgpack.encode() requires a value argument".to_string())?;
@@ -63,58 +73,59 @@ pub fn create_msgpack_module() -> ModuleExports {
                 .map_err(|e| format!("msgpack.encode() failed: {}", e))?;
             let hex_str = hex::encode(&bytes);
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(
-                hex_str,
-            ))))
-        },
-        ModuleFunction {
-            description: "Encode a value to MessagePack (hex-encoded string)".to_string(),
-            params: vec![ModuleParam {
-                name: "value".to_string(),
-                type_name: "any".to_string(),
-                required: true,
-                description: "Value to encode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(hex_str))))
         },
     );
 
     // msgpack.decode(data: string) -> Result<any>
-    // Decodes a hex-encoded MessagePack string to a value.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "decode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decode a hex-encoded MessagePack string to a value",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Hex-encoded MessagePack data".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::Any)),
+        |args, _ctx| {
             let hex_str = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "msgpack.decode() requires a string argument".to_string())?;
 
-            let bytes =
-                hex::decode(hex_str).map_err(|e| format!("msgpack.decode() invalid hex: {}", e))?;
+            let bytes = hex::decode(hex_str)
+                .map_err(|e| format!("msgpack.decode() invalid hex: {}", e))?;
             let json_value: serde_json::Value = rmp_serde::from_slice(&bytes)
                 .map_err(|e| format!("msgpack.decode() failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(json_value_to_valueword(json_value)))
-        },
-        ModuleFunction {
-            description: "Decode a hex-encoded MessagePack string to a value".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Hex-encoded MessagePack data".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<any>".to_string()),
+            // The decoded payload is a recursive serde_json::Value that
+            // lowers to nested HashMap/Array ValueWords. Phase 4d may
+            // promote this to a typed `Any` enum modelled like the json
+            // module's typed `Json`; for now we keep the existing
+            // hand-rolled lowering and wrap the resulting ValueWord.
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                json_value_to_valueword(json_value),
+            ))))
         },
     );
 
     // msgpack.encode_bytes(value: any) -> Result<Array<int>>
-    // Encodes a value to MessagePack and returns raw bytes as an array of ints.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "encode_bytes",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Encode a value to MessagePack as a byte array",
+        vec![ModuleParam {
+            name: "value".to_string(),
+            type_name: "any".to_string(),
+            required: true,
+            description: "Value to encode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::ArrayInt)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "msgpack.encode_bytes() requires a value argument".to_string())?;
@@ -123,31 +134,25 @@ pub fn create_msgpack_module() -> ModuleExports {
             let bytes = rmp_serde::to_vec(&json_value)
                 .map_err(|e| format!("msgpack.encode_bytes() failed: {}", e))?;
 
-            let items: ArgVec = ArgVec::from_vec(bytes
-                .iter()
-                .map(|&b| ValueWord::from_i64(b as i64))
-                .collect());
-
-            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))))
-        },
-        ModuleFunction {
-            description: "Encode a value to MessagePack as a byte array".to_string(),
-            params: vec![ModuleParam {
-                name: "value".to_string(),
-                type_name: "any".to_string(),
-                required: true,
-                description: "Value to encode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<Array<int>>".to_string()),
+            let items: Vec<i64> = bytes.iter().map(|&b| b as i64).collect();
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayI64(items))))
         },
     );
 
     // msgpack.decode_bytes(data: Array<int>) -> Result<any>
-    // Decodes MessagePack from a byte array to a value.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "decode_bytes",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decode MessagePack from a byte array to a value",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Array of byte values (0-255)".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::Any)),
+        |args, _ctx| {
             let arr = args.first().and_then(|a| a.as_any_array()).ok_or_else(|| {
                 "msgpack.decode_bytes() requires an Array<int> argument".to_string()
             })?;
@@ -173,18 +178,9 @@ pub fn create_msgpack_module() -> ModuleExports {
             let json_value: serde_json::Value = rmp_serde::from_slice(&bytes)
                 .map_err(|e| format!("msgpack.decode_bytes() failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(json_value_to_valueword(json_value)))
-        },
-        ModuleFunction {
-            description: "Decode MessagePack from a byte array to a value".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Array of byte values (0-255)".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<any>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                json_value_to_valueword(json_value),
+            ))))
         },
     );
 
