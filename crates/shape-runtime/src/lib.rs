@@ -54,6 +54,7 @@ pub mod lookahead_guard;
 pub mod metadata;
 pub mod module_bindings;
 pub mod module_exports;
+pub mod typed_module_exports;
 pub mod module_loader;
 pub mod module_manifest;
 pub mod multi_table;

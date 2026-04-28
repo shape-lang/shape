@@ -360,6 +360,15 @@ pub struct ModuleExports {
     /// Extensions can use this to declare types that the runtime can use
     /// for TypedObject creation and field validation.
     pub type_schemas: Vec<TypeSchema>,
+    /// Typed-return ABI registry (Phase 4b).
+    ///
+    /// Parallel registry for exports that declare a concrete return type
+    /// via [`crate::typed_module_exports::TypedReturn`]. Every entry here
+    /// is also present in `exports` as an auto-wrapped `ModuleFn` so the
+    /// VM invoke path remains unchanged. Phase 4c will migrate the
+    /// remaining ~65 sum-typed and polymorphic exports and then delete
+    /// the legacy `add_function*` surface.
+    pub typed_exports: crate::typed_module_exports::TypedModuleExports,
 }
 
 impl ModuleExports {
@@ -376,7 +385,23 @@ impl ModuleExports {
             module_artifacts: Vec::new(),
             method_intrinsics: HashMap::new(),
             type_schemas: Vec::new(),
+            typed_exports: crate::typed_module_exports::TypedModuleExports::new(),
         }
+    }
+
+    /// Mutable access to the typed-return registry. Used by
+    /// [`crate::typed_module_exports::register_typed_function`] to record
+    /// the typed-body entry alongside the auto-wrapped legacy
+    /// `ModuleFn`.
+    pub fn typed_exports_mut(
+        &mut self,
+    ) -> &mut crate::typed_module_exports::TypedModuleExports {
+        &mut self.typed_exports
+    }
+
+    /// Read-only access to the typed-return registry.
+    pub fn typed_exports(&self) -> &crate::typed_module_exports::TypedModuleExports {
+        &self.typed_exports
     }
 
     /// Register an exported function.
