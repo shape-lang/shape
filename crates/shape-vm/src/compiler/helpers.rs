@@ -1944,12 +1944,23 @@ impl BytecodeCompiler {
                 ));
                 return Ok(());
             }
+            // Wave E: dispatch to Wave D.1's typed
+            // `StoreOwnedMutableCapture<Kind>` opcodes (codes 0x14B-0x155)
+            // by looking up the cell's interior `FieldKind` from
+            // `owned_mutable_capture_inner_kinds` (populated alongside
+            // `owned_mutable_closure_captures` at closure-construction
+            // time). Falls back to the legacy `StoreOwnedMutableCapture`
+            // (0x133) for unresolved capture types — Wave G removes the
+            // legacy opcode after every emit path is type-aware. The
+            // Shared (`var`) capture path above stays on legacy
+            // `StoreSharedCapture` (0x135) — atomic flip is follow-up #17.
             if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name) {
                 debug_assert_eq!(upvalue_idx, owned_idx);
-                self.emit(Instruction::new(
-                    OpCode::StoreOwnedMutableCapture,
-                    Some(Operand::Local(owned_idx)),
-                ));
+                let opcode = match self.owned_mutable_capture_inner_kinds.get(name).copied() {
+                    Some(kind) => owned_mutable_typed_store_opcode(kind),
+                    None => OpCode::StoreOwnedMutableCapture,
+                };
+                self.emit(Instruction::new(opcode, Some(Operand::Local(owned_idx))));
                 return Ok(());
             }
             self.emit(Instruction::new(

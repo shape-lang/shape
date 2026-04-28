@@ -285,18 +285,36 @@ impl BytecodeCompiler {
                         ));
                         return Ok(());
                     }
-                    // Track A.1C.2b: OwnedMutable (let mut) captures route
-                    // through the A.1B StoreOwnedMutableCapture opcode,
-                    // which writes through the `*mut ValueWord` pointer
-                    // held in the capture slot.
+                    // Track A.1C.2b + Wave E: OwnedMutable (let mut)
+                    // captures route through Wave D.1's per-`FieldKind`
+                    // typed `StoreOwnedMutableCapture<Kind>` opcodes
+                    // (codes 0x14B-0x155). The interior `FieldKind` is
+                    // looked up in `owned_mutable_capture_inner_kinds`
+                    // (populated at closure-construction time from the
+                    // captured binding's resolved `ConcreteType`); each
+                    // typed opcode pops raw native bytes from the stack
+                    // and writes through the matching native cell. Falls
+                    // back to legacy `StoreOwnedMutableCapture` (0x133)
+                    // for unresolved capture types — Wave G removes the
+                    // legacy opcode after every emit path is type-aware.
+                    // The Shared (`var`) write path above stays on the
+                    // legacy `StoreSharedCapture` (0x135) — atomic flip
+                    // is follow-up #17.
                     if let Some(&owned_idx) =
                         self.owned_mutable_closure_captures.get(name.as_str())
                     {
                         debug_assert_eq!(upvalue_idx, owned_idx);
-                        self.emit(Instruction::new(
-                            OpCode::StoreOwnedMutableCapture,
-                            Some(Operand::Local(owned_idx)),
-                        ));
+                        let opcode = match self
+                            .owned_mutable_capture_inner_kinds
+                            .get(name.as_str())
+                            .copied()
+                        {
+                            Some(kind) => {
+                                crate::compiler::helpers::owned_mutable_typed_store_opcode(kind)
+                            }
+                            None => OpCode::StoreOwnedMutableCapture,
+                        };
+                        self.emit(Instruction::new(opcode, Some(Operand::Local(owned_idx))));
                         return Ok(());
                     }
                     self.emit(Instruction::new(
