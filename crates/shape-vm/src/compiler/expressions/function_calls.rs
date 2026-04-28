@@ -15,7 +15,9 @@ use shape_ast::ast::{BinaryOp, Expr, InterpolationMode, Literal, Span, Spanned, 
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::{BuiltinTypes, Type};
+use shape_value::v2::ConcreteType;
 use shape_value::{ValueWord, ValueWordExt};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
@@ -793,12 +795,16 @@ impl BytecodeCompiler {
             // The cycle detector in `ensure_monomorphic_function` prevents
             // transitive re-entry on the same `(fn_name, type_args)` pair
             // if a dispatch helper ever tries to resolve the specialization
-            // from inside its own body. On any failure mode (unresolved
-            // type args, cycle, compile error) we fall back to the
+            // from inside its own body. On a soft failure (unresolved type
+            // args, cycle, benign compile error) we fall back to the
             // unspecialized callee — the caller already surfaces a clean
             // diagnostic when the body is empty.
+            //
+            // Phase 3a: a hard error (trait-bound violation) is propagated
+            // up so the user sees a precise diagnostic instead of a
+            // recursion / stack-overflow at runtime.
             if let Some(specialized_idx) =
-                self.try_monomorphize_free_function_call(&call_name, args)
+                self.try_monomorphize_free_function_call(&call_name, args)?
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
@@ -2676,17 +2682,31 @@ impl BytecodeCompiler {
     ///
     /// Mirrors `try_monomorphize_method_call` but without a receiver — the
     /// callee's params are unified directly against the call-site arg types.
-    fn try_monomorphize_free_function_call(
+    ///
+    /// Returns:
+    ///   - `Ok(Some(idx))` — specialized function compiled, dispatch directly
+    ///   - `Ok(None)`     — soft fallback: resolution incomplete, cycle, or
+    ///                      benign compile error in the body. Caller falls
+    ///                      back to the generic template.
+    ///   - `Err(e)`       — hard error: trait-bound violation. Phase 3a
+    ///                      surfaces these so the user sees a precise
+    ///                      diagnostic instead of "stack overflow" from a
+    ///                      silently-empty generic body.
+    pub(crate) fn try_monomorphize_free_function_call(
         &mut self,
         func_name: &str,
         args: &[Expr],
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         // 1. Only generic, non-const type-param functions participate.
         let type_params: Vec<String> = {
-            let def = self.function_defs.get(func_name)?;
-            let tps = def.type_params.as_ref()?;
+            let Some(def) = self.function_defs.get(func_name) else {
+                return Ok(None);
+            };
+            let Some(tps) = def.type_params.as_ref() else {
+                return Ok(None);
+            };
             if tps.is_empty() {
-                return None;
+                return Ok(None);
             }
             tps.iter()
                 .filter(|tp| !tp.is_const())
@@ -2694,7 +2714,7 @@ impl BytecodeCompiler {
                 .collect()
         };
         if type_params.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // 2. Per-arg concrete types (None for anything the resolver can't
@@ -2703,18 +2723,37 @@ impl BytecodeCompiler {
 
         // 3. Unify call-site arg types against the declared param annotations
         //    to bind each type param to a concrete type.
-        let resolution =
-            resolve_call_site_type_args(self, func_name, &arg_types, &type_params)?;
+        let Some(resolution) =
+            resolve_call_site_type_args(self, func_name, &arg_types, &type_params)
+        else {
+            return Ok(None);
+        };
 
         // 4. All type args must be concrete. When resolution yields nothing,
         //    fall back to the unspecialized (empty) template and let the
         //    caller diagnose — it's never correct to emit a specialized
         //    call with missing bindings.
         if resolution.type_args.is_empty() {
-            return None;
+            return Ok(None);
         }
         if resolution.type_args.len() != type_params.len() {
-            return None;
+            return Ok(None);
+        }
+
+        // 4.5. Phase 3a — pre-check trait bounds against the resolved type
+        //      args. This is intentionally separate from the cache call
+        //      below so a bound violation surfaces cleanly even when
+        //      `ensure_monomorphic_function` would otherwise tunnel a
+        //      different SemanticError through (recursion guards, cycle
+        //      detection, etc.). Construct the same `subs` map the cache
+        //      builds and run the shared validator.
+        if let Some(original_def) = self.function_defs.get(func_name).cloned() {
+            let subs: HashMap<String, ConcreteType> = type_params
+                .iter()
+                .cloned()
+                .zip(resolution.type_args.iter().cloned())
+                .collect();
+            self.check_trait_bounds_at_specialization(func_name, &original_def, &subs)?;
         }
 
         // 5. Produce / reuse the specialization. On cycle or compile error,
@@ -2731,11 +2770,11 @@ impl BytecodeCompiler {
                 // at runtime but routes through the compiler an extra time
                 // while the cache entry is not yet finalized.
                 if self.current_function == Some(idx) {
-                    return None;
+                    return Ok(None);
                 }
-                Some(idx)
+                Ok(Some(idx))
             }
-            Err(_) => None,
+            Err(_) => Ok(None),
         }
     }
 

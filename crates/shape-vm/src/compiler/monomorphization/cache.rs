@@ -17,12 +17,14 @@
 //!
 //! Use [`build_mono_key`] to construct keys consistently across the compiler.
 
+use shape_ast::ast::TypeAnnotation;
 use shape_ast::error::{Result, ShapeError};
 use shape_value::v2::ConcreteType;
 use std::collections::HashMap;
 
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::substitution;
+use crate::compiler::monomorphization::substitution::concrete_to_annotation;
 use crate::compiler::monomorphization::type_resolution::{
     ClosureSpec, ComptimeConstValue, build_mono_key_full, build_mono_key_with_consts,
     comptime_const_value_from_literal_expr, split_type_and_const_param_names,
@@ -126,7 +128,91 @@ pub fn build_mono_key_with_closures(
     build_mono_key_full(base_fn_name, type_args, &[], closure_specs)
 }
 
+/// Phase 3a (Option β): map a `ConcreteType` to the type-name string used by
+/// `type_implements_trait`. The mapping mirrors what
+/// [`concrete_to_annotation`] produces for the primitive cases — `I64 →
+/// "int"`, `F64 → "number"`, `String → "string"`, etc. — so trait-impl
+/// lookups against the registered primitive impls (registered in
+/// `register_operator_traits`) hit.
+///
+/// Composite types (`Array<int>`, `HashMap<…>`) collapse to their head name
+/// for now (e.g. `"Array"`). The trait registry's keys are head-name based,
+/// so e.g. `impl Iterable for Array` succeeds for any element type.
+fn concrete_type_to_type_name(ct: &ConcreteType) -> String {
+    match concrete_to_annotation(ct) {
+        TypeAnnotation::Basic(name) => name,
+        TypeAnnotation::Reference(path) => path.name().to_string(),
+        TypeAnnotation::Generic { name, .. } => name.name().to_string(),
+        // Tuple/Function/Closure/etc. — fall back to the mono-key form, which
+        // is at least stable. Trait impls for these are not in scope for
+        // Phase 3a (no `<T: Tup3>` bounds exist).
+        _ => ct.mono_key(),
+    }
+}
+
 impl BytecodeCompiler {
+    /// Phase 3a (Option β foundation): enforce trait bounds on a generic
+    /// function's type parameters at the specialization site.
+    ///
+    /// Each `<T: Bound>` declaration on a generic function constrains the
+    /// concrete type a call site may bind. If the resolved `ConcreteType`
+    /// for a bounded param does not implement every declared bound, this
+    /// returns a precise diagnostic — Rust-style monomorphizing dispatch
+    /// (no `dyn Trait`).
+    ///
+    /// Bounds are checked against the per-process trait registry on
+    /// `type_inference.env`. Primitive impls of `Eq`/`Ord` (and any
+    /// user-declared `impl Trait for Type` blocks already processed) are
+    /// visible there.
+    ///
+    /// Const-kind params have empty bounds (per
+    /// `TypeParam::trait_bounds`), so they are skipped.
+    pub(crate) fn check_trait_bounds_at_specialization(
+        &self,
+        base_fn_name: &str,
+        original_def: &shape_ast::ast::FunctionDef,
+        subs: &HashMap<String, ConcreteType>,
+    ) -> Result<()> {
+        let Some(type_params) = original_def.type_params.as_ref() else {
+            return Ok(());
+        };
+        for tp in type_params {
+            if tp.is_const() {
+                continue;
+            }
+            let bounds = tp.trait_bounds();
+            if bounds.is_empty() {
+                continue;
+            }
+            let Some(bound_ct) = subs.get(tp.name()) else {
+                continue;
+            };
+            let target_type_name = concrete_type_to_type_name(bound_ct);
+            for bound in bounds {
+                let trait_name = bound.name();
+                if !self
+                    .type_inference
+                    .env
+                    .type_implements_trait(&target_type_name, trait_name)
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "trait bound not satisfied: type `{}` does not implement trait `{}` \
+                             (required by `{}<{}: {}>`)",
+                            target_type_name,
+                            trait_name,
+                            base_fn_name,
+                            tp.name(),
+                            trait_name,
+                        ),
+                        location: None,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure a monomorphized specialization of `base_fn_name` for the given
     /// concrete type arguments exists in the bytecode program. Returns the
     /// function index of the specialized function.
@@ -270,6 +356,10 @@ impl BytecodeCompiler {
             .cloned()
             .zip(type_args.iter().cloned())
             .collect();
+
+        // Phase 3a (Option β foundation): trait-bound checking at the
+        // specialization site. See `check_trait_bounds_at_specialization`.
+        self.check_trait_bounds_at_specialization(base_fn_name, &original_def, &subs)?;
 
         // Substitute type parameters throughout the cloned AST. Agent 2's
         // helper renames the function deterministically using
@@ -453,6 +543,9 @@ impl BytecodeCompiler {
             .zip(type_args.iter().cloned())
             .collect();
 
+        // Phase 3a — bound check (same as type-only path) before substitution.
+        self.check_trait_bounds_at_specialization(base_fn_name, &original_def, &type_subs)?;
+
         // Now that const generic params carry real names (B.2 `TypeParam::Const`),
         // key `const_subs` by the declared name. The substitution pass in
         // `substitution::substitute_function_def_with_consts` rewrites any
@@ -603,6 +696,17 @@ impl BytecodeCompiler {
             .cloned()
             .zip(type_args.iter().cloned())
             .collect();
+
+        // Phase 3a — bound check on the (type-kind) generic params before
+        // proceeding. Closure-aware path is the soft-fail variant — bounds
+        // violations would also be caught by the type-only fallback path,
+        // but rejecting here avoids needless work and yields the same hard
+        // error from the eventual `ensure_monomorphic_function` call.
+        if let Err(e) =
+            self.check_trait_bounds_at_specialization(base_fn_name, &original_def, &subs)
+        {
+            return Err(e);
+        }
 
         // Substitute type params first.
         let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);

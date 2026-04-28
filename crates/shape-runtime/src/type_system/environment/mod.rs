@@ -559,6 +559,38 @@ impl TypeEnvironment {
             annotations: vec![],
         };
         self.define_trait(&ord_trait);
+
+        // Phase 3a (Option β foundation): register built-in Eq/Ord impls for
+        // primitive types. These are bookkeeping-only — the bytecode compiler
+        // already has typed opcodes (`EqInt`, `LtNumber`, `EqString`, …) for
+        // primitive comparisons, so the body of a monomorphized `clamp::int`
+        // never actually dispatches via `Ord::cmp`. The impls exist so that
+        // call-site bound checking on `<T: Ord>` succeeds when `T` resolves
+        // to one of these primitives.
+        //
+        // The set is deliberately conservative: only types that have direct
+        // typed comparison opcodes are registered. Decimal/BigInt/DateTime
+        // can be added later when their stdlib impls land.
+        let comparable_types = ["int", "i8", "i16", "i32", "i64",
+                                "u8", "u16", "u32", "u64",
+                                "number", "f32", "f64",
+                                "bool", "string"];
+        for type_name in &comparable_types {
+            // Methods are no-ops at registration time; the typed opcode path
+            // services the actual comparison. We pass the trait's required
+            // method name so `register_trait_impl`'s arity/name validation
+            // succeeds.
+            let _ = self.type_registry.register_trait_impl(
+                "Eq",
+                type_name,
+                vec!["eq".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Ord",
+                type_name,
+                vec!["cmp".to_string()],
+            );
+        }
     }
 
     /// Register the Numeric marker trait and built-in implementations.

@@ -786,3 +786,222 @@ mod e2e_tests {
     }
 
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3a (Option β foundation) — trait-method dispatch via monomorphizing
+// generics with trait bounds.
+//
+// These tests deliberately use `eval` / `compile` (no prelude) so they
+// exercise the bound-checking + monomorphization path in isolation from the
+// stdlib's pre-existing 82-failure cluster, which is owned by Phase 3b.
+//
+// What's verified:
+//   1. `fn clamp<T: Ord>(...)` parses, type-checks, and specializes for
+//      `int` and `number`. Both call sites produce direct `Call(fn_id)`
+//      dispatch (one per concrete T).
+//   2. The specialized body's `x < lo` lowers to typed primitive opcodes
+//      (`LtInt` / `LtNumber`) — i.e., dispatch is monomorphized, not
+//      vtable-routed.
+//   3. Calling `<T: Ord>` with a non-Ord type (a TypedObject without an
+//      `impl Ord`) fails compilation with a precise diagnostic.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod phase_3a_trait_bounds {
+    use crate::bytecode::OpCode;
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::{eval, eval_result};
+    use shape_value::ValueWordExt;
+
+    /// Smoke: `fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T` is callable with
+    /// both `int` and `number` arguments. Each call site produces a distinct
+    /// monomorphized specialization (`clamp::i64`, `clamp::f64`).
+    #[test]
+    fn clamp_with_ord_bound_specializes_for_int_and_number() {
+        let source = r#"
+            fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { lo }
+                else if x > hi { hi }
+                else { x }
+            }
+
+            let a = clamp(15, 0, 10)
+            let b = clamp(0.5, 0.0, 1.0)
+            a
+        "#;
+
+        // Compile through the public `compile` so we can inspect cache keys.
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+
+        let cache_keys = &bytecode.monomorphization_keys;
+        let clamp_specs: Vec<&String> = cache_keys
+            .iter()
+            .filter(|k| k.contains("clamp"))
+            .collect();
+        assert!(
+            clamp_specs.iter().any(|k| k.contains("i64")),
+            "missing clamp::i64 specialization, got: {:?}",
+            clamp_specs
+        );
+        assert!(
+            clamp_specs.iter().any(|k| k.contains("f64")),
+            "missing clamp::f64 specialization, got: {:?}",
+            clamp_specs
+        );
+
+        // The resulting top-level value is `a` = clamp(15, 0, 10) → 10.
+        let val = eval(source);
+        assert_eq!(val.as_i64(), Some(10), "clamp(15, 0, 10) should be 10");
+    }
+
+    /// The monomorphized body of `clamp::i64` contains typed primitive
+    /// comparison opcodes (`LtInt` / `GtInt`), proving that dispatch on `T`
+    /// resolves to direct typed ops at the specialization site — no
+    /// runtime trait-method indirection.
+    #[test]
+    fn specialized_body_uses_typed_int_compare_opcodes() {
+        let source = r#"
+            fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { lo }
+                else if x > hi { hi }
+                else { x }
+            }
+            clamp(15, 0, 10)
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+
+        // Find the function index for the i64 specialization.
+        let i64_idx = bytecode
+            .monomorphization_keys
+            .iter()
+            .position(|k| k.contains("clamp") && k.contains("i64"));
+        assert!(i64_idx.is_some(), "clamp::i64 must be in the cache");
+
+        // Look up the specialized Function in `functions` and assert its
+        // bytecode contains LtInt / GtInt — typed integer comparisons. The
+        // `Function` struct holds (entry_point, body_length) into the
+        // top-level `instructions` vec.
+        let spec_fn = bytecode
+            .functions
+            .iter()
+            .find(|f| f.name.contains("clamp") && f.name.contains("i64"))
+            .expect("clamp::i64 function not found");
+        let body = &bytecode.instructions[spec_fn.entry_point
+            ..spec_fn.entry_point + spec_fn.body_length];
+        let opcodes: Vec<OpCode> = body.iter().map(|ins| ins.opcode).collect();
+        assert!(
+            opcodes.iter().any(|op| matches!(op, OpCode::LtInt)),
+            "specialized clamp::i64 body should emit LtInt; got: {:?}",
+            opcodes
+        );
+        assert!(
+            opcodes.iter().any(|op| matches!(op, OpCode::GtInt)),
+            "specialized clamp::i64 body should emit GtInt; got: {:?}",
+            opcodes
+        );
+    }
+
+    /// The monomorphized body of `clamp::f64` contains typed primitive
+    /// `LtNumber` / `GtNumber` opcodes — same proof at f64 width.
+    #[test]
+    fn specialized_body_uses_typed_number_compare_opcodes() {
+        let source = r#"
+            fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { lo }
+                else if x > hi { hi }
+                else { x }
+            }
+            clamp(0.5, 0.0, 1.0)
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+
+        let spec_fn = bytecode
+            .functions
+            .iter()
+            .find(|f| f.name.contains("clamp") && f.name.contains("f64"))
+            .expect("clamp::f64 function not found");
+        let body = &bytecode.instructions[spec_fn.entry_point
+            ..spec_fn.entry_point + spec_fn.body_length];
+        let opcodes: Vec<OpCode> = body.iter().map(|ins| ins.opcode).collect();
+        assert!(
+            opcodes.iter().any(|op| matches!(op, OpCode::LtNumber)),
+            "specialized clamp::f64 body should emit LtNumber; got: {:?}",
+            opcodes
+        );
+        assert!(
+            opcodes.iter().any(|op| matches!(op, OpCode::GtNumber)),
+            "specialized clamp::f64 body should emit GtNumber; got: {:?}",
+            opcodes
+        );
+    }
+
+    /// Negative test: calling `<T: NonExistentTrait>` with `int` must fail
+    /// compilation with a precise bound-violation diagnostic. We use a
+    /// trait that no primitive implements — `Iterable`. Primitives like
+    /// `int` never have `impl Iterable for int`, so the bound rejects.
+    ///
+    /// (We use `Iterable` instead of an ad-hoc trait because user-declared
+    /// traits without prelude have visibility quirks; `Iterable` is
+    /// pre-registered by `register_iterable_trait` so it's reliably
+    /// present in the trait registry without any imports.)
+    #[test]
+    fn calling_iterable_bounded_fn_with_int_fails() {
+        let source = r#"
+            fn require_iter<T: Iterable>(x: T) -> T { x }
+            require_iter(42)
+        "#;
+        let result = eval_result(source);
+        assert!(
+            result.is_err(),
+            "expected compile error: int does not impl Iterable"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("trait bound not satisfied")
+                && msg.contains("int")
+                && msg.contains("Iterable"),
+            "expected bound-violation diagnostic, got: {msg}"
+        );
+    }
+
+    /// Multiple call sites with the same concrete T must share one
+    /// specialization (cache hit on the second call).
+    #[test]
+    fn two_int_callsites_share_one_specialization() {
+        let source = r#"
+            fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { lo }
+                else if x > hi { hi }
+                else { x }
+            }
+            let a = clamp(5, 0, 10)
+            let b = clamp(20, 0, 10)
+            a + b
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+
+        let i64_specs: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("clamp") && k.contains("i64"))
+            .collect();
+        assert_eq!(
+            i64_specs.len(),
+            1,
+            "two int call sites must share one clamp::i64 specialization, got: {:?}",
+            i64_specs
+        );
+
+        // Verify runtime semantics: 5 + 10 == 15.
+        let val = eval(source);
+        assert_eq!(val.as_i64(), Some(15));
+    }
+}
