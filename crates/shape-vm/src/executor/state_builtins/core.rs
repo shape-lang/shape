@@ -14,12 +14,33 @@ use super::introspection::{
     state_capture_module_stub, state_capture_stub, state_locals_stub, state_resume_frame_stub,
     state_resume_stub,
 };
-use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
 use shape_runtime::state_diff;
 use shape_runtime::type_schema::{FieldType, TypeSchema};
+use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use crate::executor::objects::raw_helpers;
 use std::sync::Arc;
+
+/// Wrap a legacy-shaped module function pointer
+/// `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>` into a
+/// typed body that round-trips the result through TypedReturn::ValueWord.
+/// Phase 4c.2: drives the registration call to register_typed_function while
+/// the body still produces ValueWord directly.
+fn wrap_legacy<F>(
+    f: F,
+) -> impl for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+       + Send
+       + Sync
+       + 'static
+where
+    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    move |args, ctx| f(args, ctx).map(TypedReturn::ValueWord)
+}
 
 // ---------------------------------------------------------------------------
 // Module constructor
@@ -76,271 +97,260 @@ pub fn create_state_module() -> ModuleExports {
 
     // -- Content addressing --
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "hash",
-        state_hash,
-        ModuleFunction {
-            description: "SHA-256 content hash of any value".to_string(),
-            params: vec![ModuleParam {
-                name: "value".into(),
-                type_name: "any".into(),
-                required: true,
-                description: "Value to hash".into(),
-                ..Default::default()
-            }],
-            return_type: Some("string".into()),
-        },
+        "SHA-256 content hash of any value",
+        vec![ModuleParam {
+            name: "value".into(),
+            type_name: "any".into(),
+            required: true,
+            description: "Value to hash".into(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(state_hash),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "fn_hash",
-        state_fn_hash,
-        ModuleFunction {
-            description: "Get a function's content hash from its FunctionBlob".to_string(),
-            params: vec![ModuleParam {
-                name: "f".into(),
-                type_name: "any".into(),
-                required: true,
-                description: "Function value".into(),
-                ..Default::default()
-            }],
-            return_type: Some("string".into()),
-        },
+        "Get a function's content hash from its FunctionBlob",
+        vec![ModuleParam {
+            name: "f".into(),
+            type_name: "any".into(),
+            required: true,
+            description: "Function value".into(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(state_fn_hash),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "schema_hash",
-        state_schema_hash,
-        ModuleFunction {
-            description: "Content hash of a type's schema definition".to_string(),
-            params: vec![ModuleParam {
-                name: "type_name".into(),
-                type_name: "string".into(),
-                required: true,
-                description: "Name of the type to hash".into(),
-                ..Default::default()
-            }],
-            return_type: Some("string".into()),
-        },
+        "Content hash of a type's schema definition",
+        vec![ModuleParam {
+            name: "type_name".into(),
+            type_name: "string".into(),
+            required: true,
+            description: "Name of the type to hash".into(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        wrap_legacy(state_schema_hash),
     );
 
     // -- Serialization --
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "serialize",
-        state_serialize,
-        ModuleFunction {
-            description: "Serialize a value to MessagePack bytes".to_string(),
-            params: vec![ModuleParam {
-                name: "value".into(),
-                type_name: "any".into(),
-                required: true,
-                description: "Value to serialize".into(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".into()),
-        },
+        "Serialize a value to MessagePack bytes",
+        vec![ModuleParam {
+            name: "value".into(),
+            type_name: "any".into(),
+            required: true,
+            description: "Value to serialize".into(),
+            ..Default::default()
+        }],
+        ConcreteType::ArrayInt,
+        wrap_legacy(state_serialize),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "deserialize",
-        state_deserialize,
-        ModuleFunction {
-            description: "Deserialize MessagePack bytes back to a value".to_string(),
-            params: vec![ModuleParam {
-                name: "bytes".into(),
-                type_name: "Array<int>".into(),
-                required: true,
-                description: "MessagePack byte array".into(),
-                ..Default::default()
-            }],
-            return_type: Some("any".into()),
-        },
+        "Deserialize MessagePack bytes back to a value",
+        vec![ModuleParam {
+            name: "bytes".into(),
+            type_name: "Array<int>".into(),
+            required: true,
+            description: "MessagePack byte array".into(),
+            ..Default::default()
+        }],
+        ConcreteType::Any,
+        wrap_legacy(state_deserialize),
     );
 
     // -- Diffing --
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "diff",
-        state_diff,
-        ModuleFunction {
-            description: "Compute delta between two values using content-hash trees".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "old".into(),
-                    type_name: "any".into(),
-                    required: true,
-                    description: "Old value".into(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "new".into(),
-                    type_name: "any".into(),
-                    required: true,
-                    description: "New value".into(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Delta".into()),
-        },
+        "Compute delta between two values using content-hash trees",
+        vec![
+            ModuleParam {
+                name: "old".into(),
+                type_name: "any".into(),
+                required: true,
+                description: "Old value".into(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "new".into(),
+                type_name: "any".into(),
+                required: true,
+                description: "New value".into(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Delta".into()),
+        wrap_legacy(state_diff),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "patch",
-        state_patch,
-        ModuleFunction {
-            description: "Apply a delta to a base value, producing the updated value".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "base".into(),
-                    type_name: "any".into(),
-                    required: true,
-                    description: "Base value".into(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "delta".into(),
-                    type_name: "Delta".into(),
-                    required: true,
-                    description: "Delta to apply".into(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("any".into()),
-        },
+        "Apply a delta to a base value, producing the updated value",
+        vec![
+            ModuleParam {
+                name: "base".into(),
+                type_name: "any".into(),
+                required: true,
+                description: "Base value".into(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "delta".into(),
+                type_name: "Delta".into(),
+                required: true,
+                description: "Delta to apply".into(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Any,
+        wrap_legacy(state_patch),
     );
 
     // -- Capture primitives (stubs — need live VM access) --
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "capture",
-        state_capture_stub,
-        ModuleFunction {
-            description: "Capture current function's frame state".to_string(),
-            params: vec![],
-            return_type: Some("FrameState".into()),
-        },
+        "Capture current function's frame state",
+        vec![],
+        ConcreteType::Named("FrameState".into()),
+        wrap_legacy(state_capture_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "capture_all",
-        state_capture_all_stub,
-        ModuleFunction {
-            description: "Capture full VM execution state".to_string(),
-            params: vec![],
-            return_type: Some("VmState".into()),
-        },
+        "Capture full VM execution state",
+        vec![],
+        ConcreteType::Named("VmState".into()),
+        wrap_legacy(state_capture_all_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "capture_module",
-        state_capture_module_stub,
-        ModuleFunction {
-            description: "Capture module-level bindings and type schemas".to_string(),
-            params: vec![],
-            return_type: Some("ModuleState".into()),
-        },
+        "Capture module-level bindings and type schemas",
+        vec![],
+        ConcreteType::Named("ModuleState".into()),
+        wrap_legacy(state_capture_module_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "capture_call",
-        state_capture_call_stub,
-        ModuleFunction {
-            description: "Build a ready-to-call payload without executing".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "f".into(),
-                    type_name: "any".into(),
-                    required: true,
-                    description: "Function to capture".into(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "args".into(),
-                    type_name: "Array<any>".into(),
-                    required: true,
-                    description: "Arguments for the call".into(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("CallPayload".into()),
-        },
+        "Build a ready-to-call payload without executing",
+        vec![
+            ModuleParam {
+                name: "f".into(),
+                type_name: "any".into(),
+                required: true,
+                description: "Function to capture".into(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "args".into(),
+                type_name: "Array<any>".into(),
+                required: true,
+                description: "Arguments for the call".into(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("CallPayload".into()),
+        wrap_legacy(state_capture_call_stub),
     );
 
     // -- Resume primitives (stubs) --
-
-    module.add_function_with_schema(
+    //
+    // Note: state.resume's original schema declared return_type: None
+    // (the function does not return — it deopts into resumed VM state).
+    // Phase 4c.2 surfaces this via ConcreteType::Named("never") so the
+    // schema metadata gets a string label; previously the schema reported
+    // None. Consumers that special-cased None should treat "never" as the
+    // equivalent surface.
+    register_typed_function(
+        &mut module,
         "resume",
-        state_resume_stub,
-        ModuleFunction {
-            description: "Resume full VM state (does not return)".to_string(),
-            params: vec![ModuleParam {
-                name: "vm".into(),
-                type_name: "VmState".into(),
-                required: true,
-                description: "VM state to resume".into(),
-                ..Default::default()
-            }],
-            return_type: None,
-        },
+        "Resume full VM state (does not return)",
+        vec![ModuleParam {
+            name: "vm".into(),
+            type_name: "VmState".into(),
+            required: true,
+            description: "VM state to resume".into(),
+            ..Default::default()
+        }],
+        ConcreteType::Named("never".into()),
+        wrap_legacy(state_resume_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "resume_frame",
-        state_resume_frame_stub,
-        ModuleFunction {
-            description: "Re-enter a captured function frame and return its result".to_string(),
-            params: vec![ModuleParam {
-                name: "f".into(),
-                type_name: "FrameState".into(),
-                required: true,
-                description: "Frame state to resume".into(),
-                ..Default::default()
-            }],
-            return_type: Some("any".into()),
-        },
+        "Re-enter a captured function frame and return its result",
+        vec![ModuleParam {
+            name: "f".into(),
+            type_name: "FrameState".into(),
+            required: true,
+            description: "Frame state to resume".into(),
+            ..Default::default()
+        }],
+        ConcreteType::Any,
+        wrap_legacy(state_resume_frame_stub),
     );
 
     // -- Introspection (stubs) --
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "caller",
-        state_caller_stub,
-        ModuleFunction {
-            description: "Get a reference to the calling function".to_string(),
-            params: vec![],
-            return_type: Some("FunctionRef?".into()),
-        },
+        "Get a reference to the calling function",
+        vec![],
+        ConcreteType::Named("FunctionRef?".into()),
+        wrap_legacy(state_caller_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "args",
-        state_args_stub,
-        ModuleFunction {
-            description: "Get the current function's arguments as an array".to_string(),
-            params: vec![],
-            return_type: Some("Array<any>".into()),
-        },
+        "Get the current function's arguments as an array",
+        vec![],
+        ConcreteType::Named("Array<any>".into()),
+        wrap_legacy(state_args_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "locals",
-        state_locals_stub,
-        ModuleFunction {
-            description: "Get the current scope's local variables as a map".to_string(),
-            params: vec![],
-            return_type: Some("Map<string, any>".into()),
-        },
+        "Get the current scope's local variables as a map",
+        vec![],
+        ConcreteType::Named("Map<string, any>".into()),
+        wrap_legacy(state_locals_stub),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "snapshot",
-        state_capture_all_stub,
-        ModuleFunction {
-            description: "Create a snapshot of the current execution state. This is a suspension point: the engine saves all state and returns Snapshot::Hash(id). When resumed from a snapshot, execution continues here and returns Snapshot::Resumed.".to_string(),
-            params: vec![],
-            return_type: Some("Snapshot".into()),
-        },
+        "Create a snapshot of the current execution state. This is a suspension point: the engine saves all state and returns Snapshot::Hash(id). When resumed from a snapshot, execution continues here and returns Snapshot::Resumed.",
+        vec![],
+        ConcreteType::Named("Snapshot".into()),
+        wrap_legacy(state_capture_all_stub),
     );
 
     module
