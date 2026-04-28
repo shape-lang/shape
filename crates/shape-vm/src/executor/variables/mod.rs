@@ -365,6 +365,69 @@ impl VirtualMachine {
             SetIndexRef => self.op_set_index_ref(instruction)?,
             LoadOwnedMutableCapture => self.op_load_owned_mutable_capture(instruction)?,
             StoreOwnedMutableCapture => self.op_store_owned_mutable_capture(instruction)?,
+            // D.1: typed OwnedMutable capture opcodes (0x140..=0x155).
+            LoadOwnedMutableCaptureI64 => {
+                self.op_load_owned_mutable_capture_i64(instruction)?
+            }
+            LoadOwnedMutableCaptureU64 => {
+                self.op_load_owned_mutable_capture_u64(instruction)?
+            }
+            LoadOwnedMutableCaptureF64 => {
+                self.op_load_owned_mutable_capture_f64(instruction)?
+            }
+            LoadOwnedMutableCaptureI32 => {
+                self.op_load_owned_mutable_capture_i32(instruction)?
+            }
+            LoadOwnedMutableCaptureU32 => {
+                self.op_load_owned_mutable_capture_u32(instruction)?
+            }
+            LoadOwnedMutableCaptureI16 => {
+                self.op_load_owned_mutable_capture_i16(instruction)?
+            }
+            LoadOwnedMutableCaptureU16 => {
+                self.op_load_owned_mutable_capture_u16(instruction)?
+            }
+            LoadOwnedMutableCaptureI8 => self.op_load_owned_mutable_capture_i8(instruction)?,
+            LoadOwnedMutableCaptureU8 => self.op_load_owned_mutable_capture_u8(instruction)?,
+            LoadOwnedMutableCaptureBool => {
+                self.op_load_owned_mutable_capture_bool(instruction)?
+            }
+            LoadOwnedMutableCapturePtr => {
+                self.op_load_owned_mutable_capture_ptr(instruction)?
+            }
+            StoreOwnedMutableCaptureI64 => {
+                self.op_store_owned_mutable_capture_i64(instruction)?
+            }
+            StoreOwnedMutableCaptureU64 => {
+                self.op_store_owned_mutable_capture_u64(instruction)?
+            }
+            StoreOwnedMutableCaptureF64 => {
+                self.op_store_owned_mutable_capture_f64(instruction)?
+            }
+            StoreOwnedMutableCaptureI32 => {
+                self.op_store_owned_mutable_capture_i32(instruction)?
+            }
+            StoreOwnedMutableCaptureU32 => {
+                self.op_store_owned_mutable_capture_u32(instruction)?
+            }
+            StoreOwnedMutableCaptureI16 => {
+                self.op_store_owned_mutable_capture_i16(instruction)?
+            }
+            StoreOwnedMutableCaptureU16 => {
+                self.op_store_owned_mutable_capture_u16(instruction)?
+            }
+            StoreOwnedMutableCaptureI8 => {
+                self.op_store_owned_mutable_capture_i8(instruction)?
+            }
+            StoreOwnedMutableCaptureU8 => {
+                self.op_store_owned_mutable_capture_u8(instruction)?
+            }
+            StoreOwnedMutableCaptureBool => {
+                self.op_store_owned_mutable_capture_bool(instruction)?
+            }
+            StoreOwnedMutableCapturePtr => {
+                self.op_store_owned_mutable_capture_ptr(instruction)?
+            }
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
             // D.2: typed Shared capture opcodes (0x156..=0x16B).

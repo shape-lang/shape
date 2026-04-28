@@ -510,6 +510,28 @@ impl VirtualMachine {
             | SetIndexRef
             | LoadOwnedMutableCapture
             | StoreOwnedMutableCapture
+            | LoadOwnedMutableCaptureI64
+            | LoadOwnedMutableCaptureU64
+            | LoadOwnedMutableCaptureF64
+            | LoadOwnedMutableCaptureI32
+            | LoadOwnedMutableCaptureU32
+            | LoadOwnedMutableCaptureI16
+            | LoadOwnedMutableCaptureU16
+            | LoadOwnedMutableCaptureI8
+            | LoadOwnedMutableCaptureU8
+            | LoadOwnedMutableCaptureBool
+            | LoadOwnedMutableCapturePtr
+            | StoreOwnedMutableCaptureI64
+            | StoreOwnedMutableCaptureU64
+            | StoreOwnedMutableCaptureF64
+            | StoreOwnedMutableCaptureI32
+            | StoreOwnedMutableCaptureU32
+            | StoreOwnedMutableCaptureI16
+            | StoreOwnedMutableCaptureU16
+            | StoreOwnedMutableCaptureI8
+            | StoreOwnedMutableCaptureU8
+            | StoreOwnedMutableCaptureBool
+            | StoreOwnedMutableCapturePtr
             | LoadSharedCapture
             | StoreSharedCapture
             | LoadSharedCaptureI64
