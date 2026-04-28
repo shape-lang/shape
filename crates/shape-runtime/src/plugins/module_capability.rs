@@ -99,7 +99,8 @@ impl PluginModule {
 
     /// Build a runtime `ModuleExports` wrapper for VM module dispatch.
     pub fn to_module_exports(&self) -> crate::module_exports::ModuleExports {
-        use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
+        use crate::module_exports::{ModuleExports, ModuleParam};
+        use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 
         let mut module = ModuleExports::new(self.schema.module_name.clone());
         module.description = format!("Plugin module exported by '{}'", self.name);
@@ -114,30 +115,45 @@ impl PluginModule {
             let fn_name = function.name.clone();
             let invoker_ref = Arc::clone(&invoker);
 
-            let schema = ModuleFunction {
-                description: function.description.clone(),
-                params: function
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ty)| ModuleParam {
-                        name: format!("arg{}", idx),
-                        type_name: ty.clone(),
-                        required: true,
-                        description: String::new(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                return_type: function.return_type.clone(),
-            };
+            let params: Vec<ModuleParam> = function
+                .params
+                .iter()
+                .enumerate()
+                .map(|(idx, ty)| ModuleParam {
+                    name: format!("arg{}", idx),
+                    type_name: ty.clone(),
+                    required: true,
+                    description: String::new(),
+                    ..Default::default()
+                })
+                .collect();
+
+            // Plugin manifests carry a stringly-typed return name (e.g.
+            // "string", "Result<DataTable, string>", "MyExtType"). We
+            // surface that verbatim via ConcreteType::Named so the LSP and
+            // schema-string round-trip is preserved bit-for-bit. Body
+            // marshalling stays via TypedReturn::ValueWord pass-through —
+            // plugins build their own ValueWord results across the FFI
+            // boundary in invoke_nb, so there's no native Rust value to
+            // promote to a structured TypedReturn variant here.
+            let return_type_str = function
+                .return_type
+                .clone()
+                .unwrap_or_else(|| "any".to_string());
+            let return_type = ConcreteType::Named(return_type_str);
 
             let fn_name_for_closure = fn_name.clone();
-            module.add_function_with_schema(
+            register_typed_function(
+                &mut module,
                 fn_name,
-                move |args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
-                    invoker_ref.invoke_nb(&fn_name_for_closure, args)
+                function.description.clone(),
+                params,
+                return_type,
+                move |args, _ctx| {
+                    invoker_ref
+                        .invoke_nb(&fn_name_for_closure, args)
+                        .map(TypedReturn::ValueWord)
                 },
-                schema,
             );
         }
 

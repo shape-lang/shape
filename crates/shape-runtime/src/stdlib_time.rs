@@ -6,8 +6,10 @@
 //! async `time.sleep` retains its dedicated async ABI (Phase 4c will
 //! generalize the typed ABI to async).
 
-use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{
+    ConcreteType, TypedReturn, register_typed_async_function, register_typed_function,
+};
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Create the `time` module with precision timing functions.
@@ -25,10 +27,19 @@ pub fn create_time_module() -> ModuleExports {
         |_args, _ctx| Ok(TypedReturn::Instant(std::time::Instant::now())),
     );
 
-    // time.sleep(ms: number) -> unit (async via tokio) — left on legacy
-    // async ABI; Phase 4c generalizes typed ABI to async.
-    module.add_async_function_with_schema(
+    // time.sleep(ms: number) -> unit (async via tokio).
+    register_typed_async_function(
+        &mut module,
         "sleep",
+        "Sleep for the specified number of milliseconds (async)",
+        vec![ModuleParam {
+            name: "ms".to_string(),
+            type_name: "number".to_string(),
+            required: true,
+            description: "Duration in milliseconds".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
         |args: Vec<ValueWord>| async move {
             let ms = args
                 .first()
@@ -40,18 +51,7 @@ pub fn create_time_module() -> ModuleExports {
                 return Err("time.sleep() duration must be non-negative".to_string());
             }
             tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
-            Ok(ValueWord::unit())
-        },
-        ModuleFunction {
-            description: "Sleep for the specified number of milliseconds (async)".to_string(),
-            params: vec![ModuleParam {
-                name: "ms".to_string(),
-                type_name: "number".to_string(),
-                required: true,
-                description: "Duration in milliseconds".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("unit".to_string()),
+            Ok(TypedReturn::Unit)
         },
     );
 
