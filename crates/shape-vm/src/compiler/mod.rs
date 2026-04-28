@@ -1150,7 +1150,7 @@ mod compiler_impl_reference_model;
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1158,7 +1158,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,

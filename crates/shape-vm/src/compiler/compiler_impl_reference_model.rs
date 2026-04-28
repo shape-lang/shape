@@ -773,12 +773,14 @@ impl BytecodeCompiler {
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<Option<String>>>,
+        HashMap<String, String>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
         let (types, _) = inference.infer_program_best_effort(program);
         let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
         let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
+        let inferred_return_type_hints = Self::infer_return_type_hints_from_types(program, &types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -842,7 +844,7 @@ impl BytecodeCompiler {
             }
         }
 
-        (inferred_ref_params, result, inferred_param_type_hints)
+        (inferred_ref_params, result, inferred_param_type_hints, inferred_return_type_hints)
     }
 
     pub(super) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
@@ -889,6 +891,28 @@ impl BytecodeCompiler {
             hints.insert(name, param_hints);
         }
 
+        hints
+    }
+
+    /// Phase 3e: extract a hint name for each function's inferred return
+    /// type. Used to populate `type_tracker.function_return_types` so call
+    /// expressions can recover numeric types (and string/bool primitives
+    /// via `set_function_return_type`) when the source has no explicit
+    /// return-type annotation.
+    pub(super) fn infer_return_type_hints_from_types(
+        program: &Program,
+        inferred_types: &HashMap<String, Type>,
+    ) -> HashMap<String, String> {
+        let funcs = Self::collect_program_functions(program);
+        let mut hints = HashMap::new();
+        for (name, _) in funcs {
+            let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
+                continue;
+            };
+            if let Some(rt_name) = Self::inferred_type_to_hint_name(returns) {
+                hints.insert(name, rt_name);
+            }
+        }
         hints
     }
 
@@ -1127,13 +1151,24 @@ impl BytecodeCompiler {
             }
         }
 
-        let (inferred_ref_params, inferred_ref_mutates, inferred_param_type_hints) =
-            Self::infer_reference_model(&program);
+        let (
+            inferred_ref_params,
+            inferred_ref_mutates,
+            inferred_param_type_hints,
+            inferred_return_type_hints,
+        ) = Self::infer_reference_model(&program);
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
+        // Phase 3e: register inferred return types so function-call
+        // compilation can recover the numeric type even for sources with
+        // no explicit `-> T` annotation.
+        for (fn_name, ret_ty) in &inferred_return_type_hints {
+            self.type_tracker
+                .register_function_return_type(fn_name, ret_ty);
+        }
 
         // Two-phase TypedObject field hoisting:
         //
