@@ -5,12 +5,14 @@
 //! - `Place::Field(base, idx)` → **inline** typed struct access when byte offset is known, FFI fallback otherwise
 //! - `Place::Index(base, operand)` → **inline** array access (no FFI call)
 
+use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 
 use super::MirToIR;
 // v2-boundary: inline array access still uses NaN-boxed heap pointer layout
 use crate::ffi::jit_kinds::JIT_ALLOC_DATA_OFFSET;
 use shape_value::tag_bits::UNIFIED_PTR_MASK;
+use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::mir::types::*;
 
 /// Byte offset of the `data` field within `UnifiedValue<T>` (kind u16 + flags u8 + _reserved u8 + refcount u32 = 8).
@@ -194,6 +196,209 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             self.builder.ins().uextend(types::I64, val)
         } else {
             val
+        }
+    }
+
+    // ── Wave C.2: per-FieldKind cell helpers ─────────────────────────
+    //
+    // The C.1 FFI takes/returns native Cranelift types per kind:
+    //   F64                       → F64
+    //   I64 / U64 / Ptr           → I64
+    //   I32 / U32                 → I32
+    //   I16 / U16 / I8 / U8 / Bool → I32 (sub-32 widened at the boundary)
+    //
+    // The MIR-level downstream pipeline expects a different "slot form":
+    //   F64                → native F64
+    //   I64                → NaN-boxed I64 (TAG_INT)  — `compile_binop_int64`
+    //                         extracts a 48-bit signed payload from the SSA
+    //                         bits; until Wave E retargets the int binop
+    //                         picker to native I64, we re-box on read.
+    //   U64                → raw I64 (no NaN-box; downstream falls through
+    //                         to the generic FFI path which handles it).
+    //   I32 / U32          → native I32
+    //   I16 / U16          → native I16
+    //   I8 / U8 / Bool     → native I8
+    //   Ptr                → native I64 (heap pointer / NaN-boxed handle)
+    //
+    // These helpers bridge the two representations on read and on write.
+
+    fn owned_mut_read_func(&self, kind: FieldKind) -> FuncRef {
+        match kind {
+            FieldKind::I64 => self.ffi.read_owned_mut_cell_i64,
+            FieldKind::U64 => self.ffi.read_owned_mut_cell_u64,
+            FieldKind::F64 => self.ffi.read_owned_mut_cell_f64,
+            FieldKind::I32 => self.ffi.read_owned_mut_cell_i32,
+            FieldKind::U32 => self.ffi.read_owned_mut_cell_u32,
+            FieldKind::I16 => self.ffi.read_owned_mut_cell_i16,
+            FieldKind::U16 => self.ffi.read_owned_mut_cell_u16,
+            FieldKind::I8 => self.ffi.read_owned_mut_cell_i8,
+            FieldKind::U8 => self.ffi.read_owned_mut_cell_u8,
+            FieldKind::Bool => self.ffi.read_owned_mut_cell_bool,
+            FieldKind::Ptr => self.ffi.read_owned_mut_cell_ptr,
+        }
+    }
+
+    fn owned_mut_write_func(&self, kind: FieldKind) -> FuncRef {
+        match kind {
+            FieldKind::I64 => self.ffi.write_owned_mut_cell_i64,
+            FieldKind::U64 => self.ffi.write_owned_mut_cell_u64,
+            FieldKind::F64 => self.ffi.write_owned_mut_cell_f64,
+            FieldKind::I32 => self.ffi.write_owned_mut_cell_i32,
+            FieldKind::U32 => self.ffi.write_owned_mut_cell_u32,
+            FieldKind::I16 => self.ffi.write_owned_mut_cell_i16,
+            FieldKind::U16 => self.ffi.write_owned_mut_cell_u16,
+            FieldKind::I8 => self.ffi.write_owned_mut_cell_i8,
+            FieldKind::U8 => self.ffi.write_owned_mut_cell_u8,
+            FieldKind::Bool => self.ffi.write_owned_mut_cell_bool,
+            FieldKind::Ptr => self.ffi.write_owned_mut_cell_ptr,
+        }
+    }
+
+    fn shared_read_func(&self, kind: FieldKind) -> FuncRef {
+        match kind {
+            FieldKind::I64 => self.ffi.read_shared_cell_i64,
+            FieldKind::U64 => self.ffi.read_shared_cell_u64,
+            FieldKind::F64 => self.ffi.read_shared_cell_f64,
+            FieldKind::I32 => self.ffi.read_shared_cell_i32,
+            FieldKind::U32 => self.ffi.read_shared_cell_u32,
+            FieldKind::I16 => self.ffi.read_shared_cell_i16,
+            FieldKind::U16 => self.ffi.read_shared_cell_u16,
+            FieldKind::I8 => self.ffi.read_shared_cell_i8,
+            FieldKind::U8 => self.ffi.read_shared_cell_u8,
+            FieldKind::Bool => self.ffi.read_shared_cell_bool,
+            FieldKind::Ptr => self.ffi.read_shared_cell_ptr,
+        }
+    }
+
+    fn shared_write_func(&self, kind: FieldKind) -> FuncRef {
+        match kind {
+            FieldKind::I64 => self.ffi.write_shared_cell_i64,
+            FieldKind::U64 => self.ffi.write_shared_cell_u64,
+            FieldKind::F64 => self.ffi.write_shared_cell_f64,
+            FieldKind::I32 => self.ffi.write_shared_cell_i32,
+            FieldKind::U32 => self.ffi.write_shared_cell_u32,
+            FieldKind::I16 => self.ffi.write_shared_cell_i16,
+            FieldKind::U16 => self.ffi.write_shared_cell_u16,
+            FieldKind::I8 => self.ffi.write_shared_cell_i8,
+            FieldKind::U8 => self.ffi.write_shared_cell_u8,
+            FieldKind::Bool => self.ffi.write_shared_cell_bool,
+            FieldKind::Ptr => self.ffi.write_shared_cell_ptr,
+        }
+    }
+
+    /// Bring the FFI's native return value into the slot form the rest of
+    /// the MIR pipeline expects (see comment block above for the table).
+    pub(super) fn normalize_cell_read(&mut self, raw: Value, kind: FieldKind) -> Value {
+        match kind {
+            // Native widths — passthrough.
+            FieldKind::F64 | FieldKind::U64 | FieldKind::Ptr => raw,
+            FieldKind::I32 | FieldKind::U32 => raw,
+            // Sub-32 ints come back from the FFI widened to I32 — narrow
+            // to the slot's native Cranelift width.
+            FieldKind::I16 | FieldKind::U16 => {
+                self.builder.ins().ireduce(types::I16, raw)
+            }
+            FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
+                self.builder.ins().ireduce(types::I8, raw)
+            }
+            // Re-NaN-box the raw native int so `compile_binop_int64`
+            // (which extracts a 48-bit signed payload via `<<16, >>16`)
+            // sees the bit pattern it expects. Mask payload to 48 bits +
+            // OR the TAG_BASE | (TAG_INT<<TAG_SHIFT) tag.
+            FieldKind::I64 => {
+                let payload_mask = self.builder.ins().iconst(
+                    types::I64,
+                    shape_value::tag_bits::PAYLOAD_MASK as i64,
+                );
+                let payload = self.builder.ins().band(raw, payload_mask);
+                let tag = self.builder.ins().iconst(
+                    types::I64,
+                    (shape_value::tag_bits::TAG_BASE
+                        | (shape_value::tag_bits::TAG_INT
+                            << shape_value::tag_bits::TAG_SHIFT))
+                        as i64,
+                );
+                self.builder.ins().bor(tag, payload)
+            }
+        }
+    }
+
+    /// Inverse of `normalize_cell_read`: take the slot-form SSA value
+    /// `val` and produce the native interior payload to hand to the
+    /// per-kind FFI writer. The output's Cranelift type matches the
+    /// FFI's parameter type.
+    pub(super) fn unbox_for_cell_write(&mut self, val: Value, kind: FieldKind) -> Value {
+        let val_ty = self.builder.func.dfg.value_type(val);
+        match kind {
+            FieldKind::F64 => {
+                if val_ty == types::F64 {
+                    val
+                } else if val_ty == types::I64 {
+                    // NaN-boxed F64 — bitcast back.
+                    self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                } else {
+                    val
+                }
+            }
+            FieldKind::I64 => {
+                // Slot-form is NaN-boxed I64. Extract the 48-bit signed
+                // payload via `<<16, >>16` (matches `compile_binop_int64`
+                // operand prep).
+                let widened = if val_ty == types::I64 {
+                    val
+                } else {
+                    self.builder.ins().sextend(types::I64, val)
+                };
+                let l = self.builder.ins().ishl_imm(widened, 16);
+                self.builder.ins().sshr_imm(l, 16)
+            }
+            FieldKind::U64 | FieldKind::Ptr => {
+                if val_ty == types::I64 {
+                    val
+                } else if val_ty == types::F64 {
+                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                } else {
+                    self.builder.ins().uextend(types::I64, val)
+                }
+            }
+            FieldKind::I32 | FieldKind::U32 => {
+                if val_ty == types::I32 {
+                    val
+                } else if val_ty == types::I64 {
+                    self.builder.ins().ireduce(types::I32, val)
+                } else if val_ty == types::I16 || val_ty == types::I8 {
+                    self.builder.ins().sextend(types::I32, val)
+                } else {
+                    val
+                }
+            }
+            FieldKind::I16
+            | FieldKind::U16
+            | FieldKind::I8
+            | FieldKind::U8
+            | FieldKind::Bool => {
+                // FFI param is I32 widened from sub-32. If we already
+                // hold I8/I16, sextend (signed) or uextend (unsigned/bool)
+                // to I32; if we hold I64/F64, normalise first.
+                let i32_val = if val_ty == types::I32 {
+                    val
+                } else if val_ty == types::I8 || val_ty == types::I16 {
+                    if matches!(kind, FieldKind::U16 | FieldKind::U8 | FieldKind::Bool) {
+                        self.builder.ins().uextend(types::I32, val)
+                    } else {
+                        self.builder.ins().sextend(types::I32, val)
+                    }
+                } else if val_ty == types::I64 {
+                    self.builder.ins().ireduce(types::I32, val)
+                } else if val_ty == types::F64 {
+                    let bits =
+                        self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    self.builder.ins().ireduce(types::I32, bits)
+                } else {
+                    val
+                };
+                i32_val
+            }
         }
     }
 
@@ -480,14 +685,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // runs after the closure's refcount hits zero (which
                 // happens strictly after every call using this cell
                 // returns).
-                if self.owned_mutable_capture_slots.contains_key(slot) {
+                if let Some(&kind) = self.owned_mutable_capture_slots.get(slot) {
+                    // Wave C.2: dispatch to the per-FieldKind FFI reader.
+                    // The cell now stores the native interior payload (not
+                    // NaN-boxed bits), so the read returns the native
+                    // Cranelift type per the C.1 ABI:
+                    //   F64                       -> F64
+                    //   I64 / U64 / Ptr           -> I64
+                    //   I32 / U32                 -> I32
+                    //   I16 / U16 / I8 / U8 / Bool -> I32 (sub-32 widened)
+                    // We then normalise to the value form the rest of the
+                    // pipeline expects for the slot kind: native widths
+                    // for F64 / I32 / I16 / I8 / Bool slots, NaN-boxed
+                    // I64 for `Int64` slots so `compile_binop_int64`
+                    // (which extracts a 48-bit signed payload from the
+                    // SSA bits) keeps working until Wave E aligns the
+                    // downstream binop pickers to native widths.
                     let cell_ptr = self.builder.use_var(*var);
-                    return Ok(self.builder.ins().load(
-                        types::I64,
-                        MemFlags::trusted(),
-                        cell_ptr,
-                        0,
-                    ));
+                    let read_func = self.owned_mut_read_func(kind);
+                    let inst = self.builder.ins().call(read_func, &[cell_ptr]);
+                    let raw = self.builder.inst_results(inst)[0];
+                    return Ok(self.normalize_cell_read(raw, kind));
                 }
                 // Track A.1E: Shared capture slots hold the raw
                 // `*const SharedCell` bits of an Arc-shared cell
@@ -652,15 +870,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // which have no heap refcount; heap-typed captures
                 // would need MIR-level Drop insertion to balance retain
                 // counts (deferred — matches interpreter parity).
-                if self.owned_mutable_capture_slots.contains_key(slot) {
+                if let Some(&kind) = self.owned_mutable_capture_slots.get(slot) {
+                    // Wave C.2: dispatch to the per-FieldKind FFI writer.
+                    // The incoming SSA value is in the slot's downstream
+                    // form (per `normalize_cell_read`'s output spec); we
+                    // unbox it to the native interior payload and call
+                    // the FFI helper which performs `std::ptr::write` at
+                    // the cell's native width. No NaN-boxing crosses the
+                    // cell boundary.
                     let var = *self.locals.get(slot).ok_or_else(|| {
                         format!("MirToIR: unknown local slot {}", slot)
                     })?;
                     let cell_ptr = self.builder.use_var(var);
-                    let bits = self.coerce_value_to_i64_bits(val);
+                    let native = self.unbox_for_cell_write(val, kind);
+                    let write_func = self.owned_mut_write_func(kind);
                     self.builder
                         .ins()
-                        .store(MemFlags::trusted(), bits, cell_ptr, 0);
+                        .call(write_func, &[cell_ptr, native]);
                     return Ok(());
                 }
                 // Track A.1E: Shared capture slot write — lock-gated
