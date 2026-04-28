@@ -2,7 +2,8 @@
 //!
 //! Exports: yaml.parse(text), yaml.parse_all(text), yaml.stringify(value), yaml.is_valid(text)
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use serde::Deserialize;
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
@@ -53,9 +54,19 @@ pub fn create_yaml_module() -> ModuleExports {
     module.description = "YAML parsing and serialization".to_string();
 
     // yaml.parse(text: string) -> Result<HashMap>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "parse",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Parse a YAML string into Shape values",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "YAML string to parse".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::HashMap)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -65,25 +76,24 @@ pub fn create_yaml_module() -> ModuleExports {
                 serde_yaml::from_str(text).map_err(|e| format!("yaml.parse() failed: {}", e))?;
 
             let result = yaml_value_to_nanboxed(parsed);
-            Ok(ValueWord::from_ok(result))
-        },
-        ModuleFunction {
-            description: "Parse a YAML string into Shape values".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "YAML string to parse".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<HashMap>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
         },
     );
 
     // yaml.parse_all(text: string) -> Result<Array>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "parse_all",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Parse a multi-document YAML string into an array of Shape values",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "YAML string with one or more documents".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::Array)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -96,28 +106,26 @@ pub fn create_yaml_module() -> ModuleExports {
                 documents.push(yaml_value_to_nanboxed(value));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayValueWord(
                 documents,
             ))))
-        },
-        ModuleFunction {
-            description: "Parse a multi-document YAML string into an array of Shape values"
-                .to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "YAML string with one or more documents".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<Array>".to_string()),
         },
     );
 
     // yaml.stringify(value: any) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stringify",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Serialize a Shape value to a YAML string",
+        vec![ModuleParam {
+            name: "value".to_string(),
+            type_name: "any".to_string(),
+            required: true,
+            description: "Value to serialize".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "yaml.stringify() requires a value argument".to_string())?;
@@ -126,43 +134,31 @@ pub fn create_yaml_module() -> ModuleExports {
             let output = serde_yaml::to_string(&json_value)
                 .map_err(|e| format!("yaml.stringify() failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(output))))
-        },
-        ModuleFunction {
-            description: "Serialize a Shape value to a YAML string".to_string(),
-            params: vec![ModuleParam {
-                name: "value".to_string(),
-                type_name: "any".to_string(),
-                required: true,
-                description: "Value to serialize".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
         },
     );
 
     // yaml.is_valid(text: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_valid",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if a string is valid YAML",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "String to validate as YAML".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "yaml.is_valid() requires a string argument".to_string())?;
 
             let valid = serde_yaml::from_str::<serde_yaml::Value>(text).is_ok();
-            Ok(ValueWord::from_bool(valid))
-        },
-        ModuleFunction {
-            description: "Check if a string is valid YAML".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "String to validate as YAML".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(valid))
         },
     );
 
