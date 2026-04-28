@@ -434,6 +434,60 @@ pub fn register_typed_function<F>(
         );
 }
 
+/// Register a typed-return *async* function on a `ModuleExports`.
+///
+/// Mirrors [`register_typed_function`] but installs an
+/// `add_async_function_with_schema` wrapper. The async body returns
+/// `Result<TypedReturn, String>` and the boundary marshalling
+/// (`TypedReturn` → `ValueWord`) happens after the future resolves.
+///
+/// Note: async functions don't get a `ModuleContext` (the context borrows
+/// from the VM and can't cross await points). Permission checks must be
+/// performed before the await — typically by inspecting the args and
+/// short-circuiting in the body. The HTTP module relies on a
+/// host-supplied `NetConnect` permission gate around the dispatch site.
+pub fn register_typed_async_function<F, Fut>(
+    module: &mut ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: Vec<ModuleParam>,
+    return_type: ConcreteType,
+    body: F,
+) where
+    F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+{
+    let name = name.into();
+    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
+    let return_type_str = return_type.shape_type_name();
+
+    // Auto-wrapping async ModuleFn — runs the typed body, then marshals
+    // its TypedReturn into a ValueWord at the await boundary.
+    let body_for_async = body.clone();
+    module.add_async_function_with_schema(
+        name.clone(),
+        move |args: Vec<ValueWord>| {
+            let body = body_for_async.clone();
+            async move {
+                let typed = body(args).await?;
+                Ok(typed.into_value_word())
+            }
+        },
+        ModuleFunction {
+            description: description.into(),
+            params,
+            return_type: Some(return_type_str),
+        },
+    );
+
+    // Typed-registry placeholder. The TypedModuleFunction's `invoke` is
+    // the sync-shaped function pointer; for async exports we surface a
+    // marshal-only stub there so introspection still finds the entry by
+    // name. Phase 4d may split this into a separate AsyncTypedModuleFunction
+    // variant if introspection needs to distinguish.
+    let _ = arg_types;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,7 +5,8 @@
 //! All functions are async. Uses reqwest under the hood.
 //! Policy gated: requires NetConnect permission.
 
-use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_async_function};
 use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -101,9 +102,16 @@ pub fn create_http_module() -> ModuleExports {
         ..Default::default()
     };
 
+    let response_ty =
+        ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
+
     // http.get(url: string, options?: object) -> Result<HttpResponse>
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "get",
+        "Perform an HTTP GET request",
+        vec![url_param.clone(), options_param.clone()],
+        response_ty.clone(),
         |args: Vec<ValueWord>| async move {
             let url = args
                 .first()
@@ -138,18 +146,19 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.get() body read failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(build_response(status, headers, body)))
-        },
-        ModuleFunction {
-            description: "Perform an HTTP GET request".to_string(),
-            params: vec![url_param.clone(), options_param.clone()],
-            return_type: Some("Result<HttpResponse>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                build_response(status, headers, body),
+            ))))
         },
     );
 
     // http.post(url: string, body?: any, options?: object) -> Result<HttpResponse>
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "post",
+        "Perform an HTTP POST request",
+        vec![url_param.clone(), body_param.clone(), options_param.clone()],
+        response_ty.clone(),
         |args: Vec<ValueWord>| async move {
             let url = args
                 .first()
@@ -199,18 +208,19 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.post() body read failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(build_response(status, headers, body)))
-        },
-        ModuleFunction {
-            description: "Perform an HTTP POST request".to_string(),
-            params: vec![url_param.clone(), body_param.clone(), options_param.clone()],
-            return_type: Some("Result<HttpResponse>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                build_response(status, headers, body),
+            ))))
         },
     );
 
     // http.put(url: string, body?: any, options?: object) -> Result<HttpResponse>
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "put",
+        "Perform an HTTP PUT request",
+        vec![url_param.clone(), body_param, options_param.clone()],
+        response_ty.clone(),
         |args: Vec<ValueWord>| async move {
             let url = args
                 .first()
@@ -258,18 +268,19 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.put() body read failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(build_response(status, headers, body)))
-        },
-        ModuleFunction {
-            description: "Perform an HTTP PUT request".to_string(),
-            params: vec![url_param.clone(), body_param, options_param.clone()],
-            return_type: Some("Result<HttpResponse>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                build_response(status, headers, body),
+            ))))
         },
     );
 
     // http.delete(url: string, options?: object) -> Result<HttpResponse>
-    module.add_async_function_with_schema(
+    register_typed_async_function(
+        &mut module,
         "delete",
+        "Perform an HTTP DELETE request",
+        vec![url_param, options_param],
+        response_ty,
         |args: Vec<ValueWord>| async move {
             let url = args
                 .first()
@@ -304,12 +315,9 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.delete() body read failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(build_response(status, headers, body)))
-        },
-        ModuleFunction {
-            description: "Perform an HTTP DELETE request".to_string(),
-            params: vec![url_param, options_param],
-            return_type: Some("Result<HttpResponse>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
+                build_response(status, headers, body),
+            ))))
         },
     );
 
