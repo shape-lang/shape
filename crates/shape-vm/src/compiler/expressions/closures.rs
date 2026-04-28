@@ -310,10 +310,17 @@ impl BytecodeCompiler {
                         p.type_annotation = Some(ann.clone());
                     }
                 }
-                // 2. Body-level literal-pairing heuristic.
+                // 2. Body-level literal-pairing heuristic. Pulls type
+                //    info from any binary op pairing the param with a
+                //    typed literal OR with a captured/outer-scope
+                //    identifier whose type is known.
                 if p.type_annotation.is_none() {
                     if let Some(name) = p.pattern.as_identifier() {
                         if let Some(ann) = infer_param_type_from_body(name, body) {
+                            p.type_annotation = Some(ann);
+                        } else if let Some(ann) =
+                            self.infer_param_type_from_body_with_outer_idents(name, body)
+                        {
                             p.type_annotation = Some(ann);
                         }
                     }
@@ -1136,6 +1143,96 @@ impl BytecodeCompiler {
         captured_vars.retain(|name| !param_names.contains(name));
 
         self.mint_closure_type_id(&captured_vars)
+    }
+
+    /// Strict-typing-sweep (Cluster 2 extension): same body scan as the
+    /// free `infer_param_type_from_body` helper but uses the compiler's
+    /// type tracker to resolve identifier operands against outer-scope
+    /// bindings. Catches `|x| x + n` where `n` is a captured int local.
+    pub(crate) fn infer_param_type_from_body_with_outer_idents(
+        &self,
+        param_name: &str,
+        body: &[shape_ast::ast::Statement],
+    ) -> Option<TypeAnnotation> {
+        use shape_ast::ast::Statement;
+        fn scan_expr(
+            compiler: &BytecodeCompiler,
+            name: &str,
+            expr: &Expr,
+        ) -> Option<TypeAnnotation> {
+            match expr {
+                Expr::BinaryOp { left, right, .. } => {
+                    let pair_match = if let Expr::Identifier(n, _) = left.as_ref() {
+                        if n == name {
+                            outer_ident_type_ann(compiler, right)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(ann) = pair_match {
+                        return Some(ann);
+                    }
+                    let pair_match = if let Expr::Identifier(n, _) = right.as_ref() {
+                        if n == name {
+                            outer_ident_type_ann(compiler, left)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(ann) = pair_match {
+                        return Some(ann);
+                    }
+                    scan_expr(compiler, name, left)
+                        .or_else(|| scan_expr(compiler, name, right))
+                }
+                Expr::UnaryOp { operand, .. } => scan_expr(compiler, name, operand),
+                Expr::FunctionCall { args, .. } => {
+                    args.iter().find_map(|a| scan_expr(compiler, name, a))
+                }
+                Expr::MethodCall { receiver, args, .. } => scan_expr(compiler, name, receiver)
+                    .or_else(|| args.iter().find_map(|a| scan_expr(compiler, name, a))),
+                Expr::Array(elements, _) => {
+                    elements.iter().find_map(|e| scan_expr(compiler, name, e))
+                }
+                Expr::Return(Some(e), _) => scan_expr(compiler, name, e),
+                _ => None,
+            }
+        }
+        fn scan_stmt(
+            compiler: &BytecodeCompiler,
+            name: &str,
+            stmt: &Statement,
+        ) -> Option<TypeAnnotation> {
+            match stmt {
+                Statement::Expression(expr, _) => scan_expr(compiler, name, expr),
+                Statement::Return(Some(e), _) => scan_expr(compiler, name, e),
+                Statement::VariableDecl(decl, _) => {
+                    decl.value.as_ref().and_then(|e| scan_expr(compiler, name, e))
+                }
+                Statement::Assignment(asgn, _) => scan_expr(compiler, name, &asgn.value),
+                _ => None,
+            }
+        }
+        /// Resolve an arbitrary expression to a `TypeAnnotation` when it's
+        /// an identifier whose outer-scope type is statically known.
+        /// Conservatively only handles `Expr::Identifier`.
+        fn outer_ident_type_ann(
+            compiler: &BytecodeCompiler,
+            expr: &Expr,
+        ) -> Option<TypeAnnotation> {
+            let other_name = match expr {
+                Expr::Identifier(n, _) => n,
+                _ => return None,
+            };
+            let ident_expr = Expr::Identifier(other_name.clone(), Span::DUMMY);
+            let ct = concrete_type_for_expr(compiler, &ident_expr)?;
+            concrete_type_to_type_annotation(&ct)
+        }
+        body.iter().find_map(|s| scan_stmt(self, param_name, s))
     }
 }
 
