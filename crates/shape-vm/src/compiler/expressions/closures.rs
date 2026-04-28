@@ -172,6 +172,188 @@ pub(crate) fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<Type
     }
 }
 
+/// Sweep phase 3c.1: extract a primitive scalar type-name from a
+/// runtime `Type`. Mirrors the subset of `numeric_ops::type_display_name`
+/// the closure return-type inference cares about.
+fn type_display_name_for_closure_inference(
+    ty: &shape_runtime::type_system::Type,
+) -> String {
+    use shape_runtime::type_system::Type;
+    match ty {
+        Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+        Type::Concrete(TypeAnnotation::Reference(name)) => name.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Sweep phase 3c.1: infer a return-type name for a closure expression
+/// based on its body, params, and the outer scope (via `compiler`).
+///
+/// Conservative; returns `None` when any operand or sub-expression cannot
+/// be statically resolved. Used by `update_callable_binding_from_expr` to
+/// populate `local_callable_return_types` so a `FunctionCall` against a
+/// `let f = |…|` binding can recover `f`'s return type for strict-typing
+/// binop dispatch (`f(5) + f(7)` etc.).
+///
+/// The helper:
+/// 1. Honours an explicit `-> T` return annotation when present.
+/// 2. Otherwise builds a `HashMap<String, String>` of param-name → tracked
+///    type-name from the closure's params (using their annotations or the
+///    body-level literal-pairing heuristic the closure compiler itself
+///    relies on).
+/// 3. Walks the body's terminal expression and resolves identifiers via
+///    that map first, then falls back to outer-scope resolution via
+///    `concrete_type_for_expr` (which recognises `let base = 100` as I64).
+/// 4. Recurses into binary ops, requiring both operand types to agree
+///    (and to be one of the primitive scalar names) for the result to be
+///    inferred.
+pub(crate) fn infer_closure_body_return_type_name(
+    compiler: &mut BytecodeCompiler,
+    params: &[shape_ast::ast::FunctionParameter],
+    body: &[shape_ast::ast::Statement],
+    explicit_return: Option<&TypeAnnotation>,
+) -> Option<String> {
+    use shape_ast::ast::{BinaryOp as Op, Literal, Statement};
+    use std::collections::HashMap;
+
+    if let Some(ann) = explicit_return {
+        if let Some(name) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
+            return Some(name);
+        }
+    }
+
+    // Build param-type map.
+    let mut param_types: HashMap<String, String> = HashMap::new();
+    for p in params {
+        let Some(ident) = p.pattern.as_identifier() else {
+            continue;
+        };
+        if let Some(ann) = &p.type_annotation {
+            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
+                param_types.insert(ident.to_string(), tn);
+                continue;
+            }
+        }
+        // Fallback: same body-literal-pairing heuristic the closure
+        // compiler uses for unannotated params (`|x| x + 1`).
+        if let Some(ann) = infer_param_type_from_body(ident, body) {
+            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(&ann) {
+                param_types.insert(ident.to_string(), tn);
+            }
+        }
+    }
+
+    fn lit_type(lit: &Literal) -> Option<String> {
+        Some(
+            match lit {
+                Literal::Int(_) => "int",
+                Literal::Number(_) => "number",
+                Literal::Bool(_) => "bool",
+                Literal::String(_) | Literal::FormattedString { .. } | Literal::ContentString { .. } => {
+                    "string"
+                }
+                Literal::Decimal(_) => "decimal",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    }
+
+    fn expr_type(
+        compiler: &mut BytecodeCompiler,
+        param_types: &HashMap<String, String>,
+        expr: &Expr,
+    ) -> Option<String> {
+        match expr {
+            Expr::Literal(lit, _) => lit_type(lit),
+            Expr::Identifier(name, _) => {
+                if let Some(tn) = param_types.get(name) {
+                    return Some(tn.clone());
+                }
+                // Outer-scope resolution: try `concrete_type_for_expr`
+                // first (covers tracker-recorded primitives + array
+                // element types), then fall back to the compiler's
+                // `infer_expr_type` (which consults the type-inference
+                // engine that ran on the program AST and can see
+                // `let base = 100` even when the type tracker has no
+                // entry for `base`).
+                let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
+                if let Some(ct) = concrete_type_for_expr(compiler, &ident_expr) {
+                    if let Some(tn) = concrete_type_to_type_annotation(&ct)
+                        .and_then(|ann| BytecodeCompiler::tracked_type_name_from_annotation(&ann))
+                    {
+                        return Some(tn);
+                    }
+                }
+                if let Ok(ty) = compiler.infer_expr_type(&ident_expr) {
+                    let display = type_display_name_for_closure_inference(&ty);
+                    if BytecodeCompiler::tracker_type_name_is_primitive(&display) {
+                        return Some(display);
+                    }
+                }
+                None
+            }
+            Expr::BinaryOp { left, right, op, .. } => {
+                let lt = expr_type(compiler, param_types, left)?;
+                let rt = expr_type(compiler, param_types, right)?;
+                match op {
+                    // Arithmetic on matching primitive scalar types
+                    // preserves the type. Comparison/logical ops yield
+                    // bool.
+                    Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
+                        if lt == rt && BytecodeCompiler::tracker_type_name_is_primitive(&lt) {
+                            Some(lt)
+                        } else {
+                            None
+                        }
+                    }
+                    Op::Equal
+                    | Op::NotEqual
+                    | Op::Less
+                    | Op::LessEq
+                    | Op::Greater
+                    | Op::GreaterEq
+                    | Op::And
+                    | Op::Or => Some("bool".to_string()),
+                    _ => None,
+                }
+            }
+            Expr::UnaryOp { operand, .. } => expr_type(compiler, param_types, operand),
+            Expr::Return(Some(inner), _) => expr_type(compiler, param_types, inner),
+            Expr::Block(block, _) => {
+                let last = block.items.last()?;
+                match last {
+                    shape_ast::ast::BlockItem::Expression(e) => {
+                        expr_type(compiler, param_types, e)
+                    }
+                    shape_ast::ast::BlockItem::Statement(s) => {
+                        stmt_type(compiler, param_types, s)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn stmt_type(
+        compiler: &mut BytecodeCompiler,
+        param_types: &HashMap<String, String>,
+        stmt: &Statement,
+    ) -> Option<String> {
+        match stmt {
+            Statement::Expression(e, _) => expr_type(compiler, param_types, e),
+            Statement::Return(Some(e), _) => expr_type(compiler, param_types, e),
+            _ => None,
+        }
+    }
+
+    // Find body's terminal expression: prefer last statement; if it's a
+    // `Return(e)` use e, else if it's an expression statement use it.
+    let last = body.last()?;
+    stmt_type(compiler, &param_types, last)
+}
+
 impl BytecodeCompiler {
     /// Compile a function expression (closure)
     ///

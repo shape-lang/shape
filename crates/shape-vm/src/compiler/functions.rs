@@ -1053,6 +1053,13 @@ impl BytecodeCompiler {
         // the outer scope unable to derive `CaptureKind`s. Restored after
         // the nested compilation completes.
         let saved_local_binding_semantics = self.type_tracker.snapshot_local_binding_semantics();
+        // Sweep phase 3c.1: snapshot outer-function local types so
+        // post-closure call sites in the outer scope can still resolve
+        // outer-scope identifier types. `compile_function`'s
+        // `clear_locals` below would otherwise erase entries like
+        // `base: int` from `let base = 100`, breaking strict-typing's
+        // closure-return-type inference for `let f = |x| x + base`.
+        let saved_local_types = self.type_tracker.snapshot_local_types();
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
@@ -1079,6 +1086,7 @@ impl BytecodeCompiler {
         self.inferred_ref_locals.clear();
         self.local_callable_pass_modes.clear();
         self.local_callable_return_reference_summaries.clear();
+        self.local_callable_return_types.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.immutable_locals.clear();
@@ -1332,6 +1340,13 @@ impl BytecodeCompiler {
                         self.param_locals = saved_param_locals;
                         self.current_function_params = saved_function_params;
                         self.pop_scope();
+                        // Sweep phase 3c.1: restore outer-function local
+                        // types AFTER pop_scope. pop_scope reads from
+                        // local_type_scopes to evict matching local_types
+                        // entries — restoring before pop_scope would let
+                        // the (about-to-be-popped) inner-closure scope's
+                        // slot indices evict outer-function entries.
+                        self.type_tracker.restore_local_types(saved_local_types);
                         self.locals = saved_locals;
                         self.current_function = saved_function;
                         self.current_function_is_async = saved_is_async;
@@ -1434,6 +1449,9 @@ impl BytecodeCompiler {
             .restore_local_binding_semantics(saved_local_binding_semantics);
         self.current_function_params = saved_function_params;
         self.pop_scope();
+        // Sweep phase 3c.1: restore outer-function local types AFTER
+        // pop_scope (see early-return path comment).
+        self.type_tracker.restore_local_types(saved_local_types);
         self.locals = saved_locals;
         self.current_function = saved_function;
         self.current_function_is_async = saved_is_async;

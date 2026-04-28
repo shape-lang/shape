@@ -45,6 +45,8 @@ impl BytecodeCompiler {
             local_callable_return_reference_summaries: HashMap::new(),
             module_binding_callable_pass_modes: HashMap::new(),
             module_binding_callable_return_reference_summaries: HashMap::new(),
+            local_callable_return_types: HashMap::new(),
+            module_binding_callable_return_types: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),

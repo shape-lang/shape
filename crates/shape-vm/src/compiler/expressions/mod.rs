@@ -1372,6 +1372,41 @@ impl BytecodeCompiler {
             {
                 return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
             }
+            // Sweep phase 3c.1: closure-binding return type. When the
+            // call target is a `let f = |…| …` local or module binding,
+            // its return type is recorded by
+            // `update_callable_binding_from_expr`. Without this lookup,
+            // `f(5) + f(7)` would fail strict typing as
+            // `unknown + unknown`.
+            if let Some(local_idx) = self.resolve_local(name) {
+                if let Some(rt_name) = self
+                    .local_callable_return_types
+                    .get(&local_idx)
+                    .cloned()
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+                }
+            }
+            if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+                if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+                    if let Some(rt_name) = self
+                        .module_binding_callable_return_types
+                        .get(&binding_idx)
+                        .cloned()
+                    {
+                        return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+                    }
+                }
+            }
+            if let Some(&binding_idx) = self.module_bindings.get(name) {
+                if let Some(rt_name) = self
+                    .module_binding_callable_return_types
+                    .get(&binding_idx)
+                    .cloned()
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+                }
+            }
         }
 
         // Phase 3e: BinaryOp Add of string-typed operands yields a string.

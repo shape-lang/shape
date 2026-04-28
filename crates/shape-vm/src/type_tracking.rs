@@ -828,6 +828,27 @@ impl VariableTypeInfo {
     }
 }
 
+/// Sweep phase 3c.1: snapshot of the type-tracker's local-types state
+/// captured before a nested function compilation that clears them.
+/// Wraps both the flat `local_types` map and the per-scope
+/// `local_type_scopes` stack so `pop_scope` semantics survive the
+/// round-trip.
+#[derive(Debug, Clone)]
+pub struct LocalTypesSnapshot {
+    pub local_types: HashMap<u16, VariableTypeInfo>,
+    pub local_type_scopes: Vec<HashMap<u16, VariableTypeInfo>>,
+}
+
+impl LocalTypesSnapshot {
+    pub fn len(&self) -> usize {
+        self.local_types.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.local_types.is_empty()
+    }
+}
+
 /// Tracks type information for variables during compilation
 #[derive(Debug)]
 pub struct TypeTracker {
@@ -1160,6 +1181,38 @@ impl TypeTracker {
     /// body compilation wipes the outer function's semantics.
     pub fn restore_local_binding_semantics(&mut self, snapshot: HashMap<u16, BindingSemantics>) {
         self.local_binding_semantics = snapshot;
+    }
+
+    /// Sweep phase 3c.1: snapshot the outer function's local type
+    /// information before entering a nested function compilation.
+    /// Pairs with [`restore_local_types`] to preserve typed-tracker
+    /// state (e.g. `let base = 100` → `int`) across
+    /// `compile_function`'s `clear_locals` call so post-closure
+    /// strict-typing-sweep code paths can still resolve outer-scope
+    /// identifier types — e.g. inferring `f`'s return type for
+    /// `let f = |x: int| x + base`.
+    ///
+    /// The snapshot covers both the flattened `local_types` map AND
+    /// the per-scope `local_type_scopes` stack — `pop_scope` (called
+    /// during closure compile teardown) reads from the scope stack to
+    /// know which `local_types` entries to evict, so a restore that
+    /// only re-installs `local_types` would have its outer-scope
+    /// entries silently re-evicted by the next `pop_scope` whose
+    /// scope stack still contains the inner-closure slot indices.
+    pub fn snapshot_local_types(&self) -> LocalTypesSnapshot {
+        LocalTypesSnapshot {
+            local_types: self.local_types.clone(),
+            local_type_scopes: self.local_type_scopes.clone(),
+        }
+    }
+
+    /// Sweep phase 3c.1: restore a previously-snapshotted local types
+    /// map and scope stack. Used by `compile_function` after a nested
+    /// closure body compilation wipes the outer function's type
+    /// information.
+    pub fn restore_local_types(&mut self, snapshot: LocalTypesSnapshot) {
+        self.local_types = snapshot.local_types;
+        self.local_type_scopes = snapshot.local_type_scopes;
     }
 
     /// Register an inline object schema from field names

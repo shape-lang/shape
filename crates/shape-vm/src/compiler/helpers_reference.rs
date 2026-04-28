@@ -673,6 +673,28 @@ impl BytecodeCompiler {
     ) {
         let pass_modes = self.callable_pass_modes_from_expr(expr);
         let return_summary = self.callable_return_reference_summary_from_expr(expr);
+        // Sweep phase 3c.1: when the initializer is a `FunctionExpr` (a
+        // closure literal), infer its body's return type so a later
+        // `FunctionCall { name: <slot's binding>, .. }` can recover the
+        // type for strict-typing binop dispatch. `f(5) + f(7)` over
+        // `let f = |x: int| x + base` previously failed with
+        // "unknown + unknown" because the call expression's return type
+        // wasn't tracked anywhere — only top-level function returns are
+        // registered in `function_return_types`.
+        let return_type_name: Option<String> = match expr {
+            shape_ast::ast::Expr::FunctionExpr {
+                params,
+                body,
+                return_type,
+                ..
+            } => crate::compiler::expressions::closures::infer_closure_body_return_type_name(
+                self,
+                params,
+                body,
+                return_type.as_ref(),
+            ),
+            _ => None,
+        };
         if is_local {
             if let Some(pass_modes) = pass_modes {
                 self.local_callable_pass_modes.insert(slot, pass_modes);
@@ -685,6 +707,12 @@ impl BytecodeCompiler {
             } else {
                 self.local_callable_return_reference_summaries.remove(&slot);
             }
+            if let Some(return_type_name) = return_type_name {
+                self.local_callable_return_types
+                    .insert(slot, return_type_name);
+            } else {
+                self.local_callable_return_types.remove(&slot);
+            }
         } else if let Some(pass_modes) = pass_modes {
             self.module_binding_callable_pass_modes
                 .insert(slot, pass_modes);
@@ -695,10 +723,17 @@ impl BytecodeCompiler {
                 self.module_binding_callable_return_reference_summaries
                     .remove(&slot);
             }
+            if let Some(return_type_name) = return_type_name {
+                self.module_binding_callable_return_types
+                    .insert(slot, return_type_name);
+            } else {
+                self.module_binding_callable_return_types.remove(&slot);
+            }
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
             self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
+            self.module_binding_callable_return_types.remove(&slot);
         }
     }
 
@@ -706,10 +741,12 @@ impl BytecodeCompiler {
         if is_local {
             self.local_callable_pass_modes.remove(&slot);
             self.local_callable_return_reference_summaries.remove(&slot);
+            self.local_callable_return_types.remove(&slot);
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
             self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
+            self.module_binding_callable_return_types.remove(&slot);
         }
     }
 

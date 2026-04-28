@@ -627,6 +627,17 @@ pub struct BytecodeCompiler {
     pub(crate) module_binding_callable_return_reference_summaries:
         HashMap<u16, FunctionReturnReferenceSummary>,
 
+    /// Sweep phase 3c.1: inferred return-type names for closures stored in
+    /// local slots. Populated when `update_callable_binding_from_expr`
+    /// observes a `FunctionExpr` initializer; consumed by `infer_expr_type`
+    /// so a `FunctionCall { name: f, .. }` against `let f = |…| body` can
+    /// recover the body's return type for strict-typing binop dispatch.
+    pub(crate) local_callable_return_types: HashMap<u16, String>,
+
+    /// Sweep phase 3c.1: inferred return-type names for closures stored in
+    /// module-binding slots (top-level / REPL `let f = |…|` style).
+    pub(crate) module_binding_callable_return_types: HashMap<u16, String>,
+
     /// Named functions that safely return one reference parameter unchanged.
     pub(crate) function_return_reference_summaries: HashMap<String, FunctionReturnReferenceSummary>,
 
