@@ -1439,18 +1439,36 @@ impl BytecodeCompiler {
     /// bindings), which covers the `self.field` use case in trait method
     /// bodies.
     fn tracker_schema_id_for_expr(&self, expr: &Expr) -> Option<u32> {
+        let lookup_by_name = |tn: &str| -> Option<u32> {
+            self.type_tracker
+                .schema_registry()
+                .get(tn)
+                .map(|s| s.id)
+                .or_else(|| {
+                    // Phase 3e: fall back to module-scope-resolved name
+                    // (e.g. `A` inside `mod m` resolves to `m::A`). The
+                    // schema is registered under the qualified form;
+                    // local/binding type_name often holds the bare form.
+                    let qualified = self.resolve_type_name(tn);
+                    if qualified != tn {
+                        self.type_tracker
+                            .schema_registry()
+                            .get(&qualified)
+                            .map(|s| s.id)
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Expr::Identifier(name, _) = expr {
             if let Some(local_idx) = self.resolve_local(name) {
                 if let Some(info) = self.type_tracker.get_local_type(local_idx) {
                     if let Some(id) = info.schema_id {
                         return Some(id);
                     }
-                    // Fall back to looking up the schema by tracked type_name
                     if let Some(ref tn) = info.type_name {
-                        if let Some(schema) =
-                            self.type_tracker.schema_registry().get(tn)
-                        {
-                            return Some(schema.id);
+                        if let Some(id) = lookup_by_name(tn) {
+                            return Some(id);
                         }
                     }
                 }
@@ -1461,10 +1479,8 @@ impl BytecodeCompiler {
                         return Some(id);
                     }
                     if let Some(ref tn) = info.type_name {
-                        if let Some(schema) =
-                            self.type_tracker.schema_registry().get(tn)
-                        {
-                            return Some(schema.id);
+                        if let Some(id) = lookup_by_name(tn) {
+                            return Some(id);
                         }
                     }
                 }
