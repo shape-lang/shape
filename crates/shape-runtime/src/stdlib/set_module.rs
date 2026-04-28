@@ -5,7 +5,8 @@
 //!          set.contains(s, item), set.union(a, b), set.intersection(a, b),
 //!          set.difference(a, b), set.to_array(s), set.size(s)
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Create an empty set (HashMap with no entries).
@@ -102,26 +103,63 @@ fn set_insert(set: &ValueWord, item: &ValueWord) -> Result<ValueWord, String> {
     Ok(ValueWord::from_hashmap_pairs(keys, values))
 }
 
+/// Helper: build the standard "set as ModuleParam" descriptor for `s`/`a`/`b`.
+fn set_param(name: &str, description: &str) -> ModuleParam {
+    ModuleParam {
+        name: name.to_string(),
+        type_name: "HashMap".to_string(),
+        required: true,
+        description: description.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Helper: build a `ModuleParam` for `item: any`.
+fn item_param(description: &str) -> ModuleParam {
+    ModuleParam {
+        name: "item".to_string(),
+        type_name: "any".to_string(),
+        required: true,
+        description: description.to_string(),
+        ..Default::default()
+    }
+}
+
 /// Create the `set` module with set operations.
+///
+/// Phase 4b: all 10 exports migrated to `TypedModuleExports`. Sets are
+/// HashMap-shaped; element types pass through user-provided values, so
+/// the return uses `TypedReturn::ValueWord` with `ConcreteType::HashMap`
+/// (8 of 10 exports). `contains` returns Bool, `size` returns Int,
+/// `to_array` returns ArrayValueWord (set elements as-is).
 pub fn create_set_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::set");
     module.description = "Unordered collection of unique elements".to_string();
 
     // set.new() -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "new",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(empty_set()),
-        ModuleFunction {
-            description: "Create a new empty set".to_string(),
-            params: vec![],
-            return_type: Some("HashMap".to_string()),
-        },
+        "Create a new empty set",
+        vec![],
+        ConcreteType::HashMap,
+        |_args, _ctx| Ok(TypedReturn::ValueWord(empty_set())),
     );
 
     // set.from_array(arr) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "from_array",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Create a set from an array (deduplicates)",
+        vec![ModuleParam {
+            name: "arr".to_string(),
+            type_name: "Array".to_string(),
+            required: true,
+            description: "Array of items to add to the set".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let items = args
                 .first()
                 .and_then(materialize_array_items)
@@ -131,60 +169,36 @@ pub fn create_set_module() -> ModuleExports {
             for item in items.iter() {
                 result = set_insert(&result, item)?;
             }
-            Ok(result)
-        },
-        ModuleFunction {
-            description: "Create a set from an array (deduplicates)".to_string(),
-            params: vec![ModuleParam {
-                name: "arr".to_string(),
-                type_name: "Array".to_string(),
-                required: true,
-                description: "Array of items to add to the set".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("HashMap".to_string()),
+            Ok(TypedReturn::ValueWord(result))
         },
     );
 
     // set.add(s, item) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "add",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Add an item to the set, returns new set",
+        vec![set_param("s", "The set"), item_param("Item to add")],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let s = args
                 .first()
                 .ok_or_else(|| "set.add() requires a set argument".to_string())?;
             let item = args
                 .get(1)
                 .ok_or_else(|| "set.add() requires an item argument".to_string())?;
-
-            set_insert(s, item)
-        },
-        ModuleFunction {
-            description: "Add an item to the set, returns new set".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "s".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "The set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "item".to_string(),
-                    type_name: "any".to_string(),
-                    required: true,
-                    description: "Item to add".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("HashMap".to_string()),
+            Ok(TypedReturn::ValueWord(set_insert(s, item)?))
         },
     );
 
     // set.remove(s, item) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "remove",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Remove an item from the set, returns new set",
+        vec![set_param("s", "The set"), item_param("Item to remove")],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let s = args
                 .first()
                 .ok_or_else(|| "set.remove() requires a set argument".to_string())?;
@@ -196,42 +210,27 @@ pub fn create_set_module() -> ModuleExports {
                 .as_hashmap_data()
                 .ok_or_else(|| "set.remove(): expected a set (HashMap)".to_string())?;
 
-            if let Some(idx) = data.find_key(item) {
+            let result = if let Some(idx) = data.find_key(item) {
                 let mut keys = data.keys.clone();
                 let mut values = data.values.clone();
                 keys.remove(idx);
                 values.remove(idx);
-                Ok(ValueWord::from_hashmap_pairs(keys, values))
+                ValueWord::from_hashmap_pairs(keys, values)
             } else {
-                Ok(s.clone())
-            }
-        },
-        ModuleFunction {
-            description: "Remove an item from the set, returns new set".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "s".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "The set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "item".to_string(),
-                    type_name: "any".to_string(),
-                    required: true,
-                    description: "Item to remove".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("HashMap".to_string()),
+                s.clone()
+            };
+            Ok(TypedReturn::ValueWord(result))
         },
     );
 
     // set.contains(s, item) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "contains",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if set contains an item",
+        vec![set_param("s", "The set"), item_param("Item to check")],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let s = args
                 .first()
                 .ok_or_else(|| "set.contains() requires a set argument".to_string())?;
@@ -243,34 +242,18 @@ pub fn create_set_module() -> ModuleExports {
                 .as_hashmap_data()
                 .ok_or_else(|| "set.contains(): expected a set (HashMap)".to_string())?;
 
-            Ok(ValueWord::from_bool(data.find_key(item).is_some()))
-        },
-        ModuleFunction {
-            description: "Check if set contains an item".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "s".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "The set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "item".to_string(),
-                    type_name: "any".to_string(),
-                    required: true,
-                    description: "Item to check".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(data.find_key(item).is_some()))
         },
     );
 
     // set.union(a, b) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "union",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Union of two sets",
+        vec![set_param("a", "First set"), set_param("b", "Second set")],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let a = args
                 .first()
                 .ok_or_else(|| "set.union() requires two set arguments".to_string())?;
@@ -291,34 +274,18 @@ pub fn create_set_module() -> ModuleExports {
                     result = set_insert(&result, key)?;
                 }
             }
-            Ok(result)
-        },
-        ModuleFunction {
-            description: "Union of two sets".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "a".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "First set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "b".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "Second set".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("HashMap".to_string()),
+            Ok(TypedReturn::ValueWord(result))
         },
     );
 
     // set.intersection(a, b) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "intersection",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Intersection of two sets",
+        vec![set_param("a", "First set"), set_param("b", "Second set")],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let a = args
                 .first()
                 .ok_or_else(|| "set.intersection() requires two set arguments".to_string())?;
@@ -339,34 +306,18 @@ pub fn create_set_module() -> ModuleExports {
                     result = set_insert(&result, key)?;
                 }
             }
-            Ok(result)
-        },
-        ModuleFunction {
-            description: "Intersection of two sets".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "a".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "First set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "b".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "Second set".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("HashMap".to_string()),
+            Ok(TypedReturn::ValueWord(result))
         },
     );
 
     // set.difference(a, b) -> set
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "difference",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Difference (a - b)",
+        vec![set_param("a", "First set"), set_param("b", "Second set")],
+        ConcreteType::HashMap,
+        |args, _ctx| {
             let a = args
                 .first()
                 .ok_or_else(|| "set.difference() requires two set arguments".to_string())?;
@@ -387,34 +338,18 @@ pub fn create_set_module() -> ModuleExports {
                     result = set_insert(&result, key)?;
                 }
             }
-            Ok(result)
-        },
-        ModuleFunction {
-            description: "Difference (a - b)".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "a".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "First set".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "b".to_string(),
-                    type_name: "HashMap".to_string(),
-                    required: true,
-                    description: "Second set".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("HashMap".to_string()),
+            Ok(TypedReturn::ValueWord(result))
         },
     );
 
     // set.to_array(s) -> Array
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "to_array",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Convert set to array",
+        vec![set_param("s", "The set")],
+        ConcreteType::Array,
+        |args, _ctx| {
             let s = args
                 .first()
                 .ok_or_else(|| "set.to_array() requires a set argument".to_string())?;
@@ -423,27 +358,18 @@ pub fn create_set_module() -> ModuleExports {
                 .as_hashmap_data()
                 .ok_or_else(|| "set.to_array(): expected a set (HashMap)".to_string())?;
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(
-                data.keys.clone(),
-            )))
-        },
-        ModuleFunction {
-            description: "Convert set to array".to_string(),
-            params: vec![ModuleParam {
-                name: "s".to_string(),
-                type_name: "HashMap".to_string(),
-                required: true,
-                description: "The set".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array".to_string()),
+            Ok(TypedReturn::ArrayValueWord(data.keys.clone()))
         },
     );
 
     // set.size(s) -> int
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "size",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Get the number of elements",
+        vec![set_param("s", "The set")],
+        ConcreteType::Int,
+        |args, _ctx| {
             let s = args
                 .first()
                 .ok_or_else(|| "set.size() requires a set argument".to_string())?;
@@ -452,20 +378,126 @@ pub fn create_set_module() -> ModuleExports {
                 .as_hashmap_data()
                 .ok_or_else(|| "set.size(): expected a set (HashMap)".to_string())?;
 
-            Ok(ValueWord::from_i64(data.keys.len() as i64))
-        },
-        ModuleFunction {
-            description: "Get the number of elements".to_string(),
-            params: vec![ModuleParam {
-                name: "s".to_string(),
-                type_name: "HashMap".to_string(),
-                required: true,
-                description: "The set".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("int".to_string()),
+            Ok(TypedReturn::I64(data.keys.len() as i64))
         },
     );
 
     module
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
+        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
+        crate::module_exports::ModuleContext {
+            schemas: registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+        }
+    }
+
+    #[test]
+    fn test_set_module_creation() {
+        let module = create_set_module();
+        assert_eq!(module.name, "std::core::set");
+        for export in [
+            "new",
+            "from_array",
+            "add",
+            "remove",
+            "contains",
+            "union",
+            "intersection",
+            "difference",
+            "to_array",
+            "size",
+        ] {
+            assert!(module.has_export(export), "missing {}", export);
+            assert!(
+                module.typed_exports().get(export).is_some(),
+                "{} should be in typed registry",
+                export
+            );
+        }
+        assert_eq!(module.typed_exports().functions.len(), 10);
+    }
+
+    #[test]
+    fn test_set_add_contains_size() {
+        let module = create_set_module();
+        let ctx = test_ctx();
+        let new_fn = module.get_export("new").unwrap();
+        let add_fn = module.get_export("add").unwrap();
+        let contains_fn = module.get_export("contains").unwrap();
+        let size_fn = module.get_export("size").unwrap();
+
+        let s = new_fn(&[], &ctx).unwrap();
+        let a = ValueWord::from_string(Arc::new("a".to_string()));
+        let s = add_fn(&[s, a.clone()], &ctx).unwrap();
+        let s = add_fn(&[s.clone(), a.clone()], &ctx).unwrap(); // dup
+        assert_eq!(
+            contains_fn(&[s.clone(), a.clone()], &ctx)
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(size_fn(&[s], &ctx).unwrap().as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_set_to_array_and_remove() {
+        let module = create_set_module();
+        let ctx = test_ctx();
+        let new_fn = module.get_export("new").unwrap();
+        let add_fn = module.get_export("add").unwrap();
+        let remove_fn = module.get_export("remove").unwrap();
+        let to_array_fn = module.get_export("to_array").unwrap();
+        let size_fn = module.get_export("size").unwrap();
+
+        let s = new_fn(&[], &ctx).unwrap();
+        let s = add_fn(&[s, ValueWord::from_i64(1)], &ctx).unwrap();
+        let s = add_fn(&[s, ValueWord::from_i64(2)], &ctx).unwrap();
+        let arr = to_array_fn(&[s.clone()], &ctx).unwrap();
+        assert_eq!(arr.as_any_array().unwrap().to_generic().len(), 2);
+
+        let s = remove_fn(&[s, ValueWord::from_i64(1)], &ctx).unwrap();
+        assert_eq!(size_fn(&[s], &ctx).unwrap().as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_set_union_intersection_difference() {
+        let module = create_set_module();
+        let ctx = test_ctx();
+        let new_fn = module.get_export("new").unwrap();
+        let add_fn = module.get_export("add").unwrap();
+        let union_fn = module.get_export("union").unwrap();
+        let intersection_fn = module.get_export("intersection").unwrap();
+        let difference_fn = module.get_export("difference").unwrap();
+        let size_fn = module.get_export("size").unwrap();
+
+        let mut a = new_fn(&[], &ctx).unwrap();
+        a = add_fn(&[a, ValueWord::from_i64(1)], &ctx).unwrap();
+        a = add_fn(&[a, ValueWord::from_i64(2)], &ctx).unwrap();
+        let mut b = new_fn(&[], &ctx).unwrap();
+        b = add_fn(&[b, ValueWord::from_i64(2)], &ctx).unwrap();
+        b = add_fn(&[b, ValueWord::from_i64(3)], &ctx).unwrap();
+
+        let u = union_fn(&[a.clone(), b.clone()], &ctx).unwrap();
+        assert_eq!(size_fn(&[u], &ctx).unwrap().as_i64(), Some(3));
+
+        let i = intersection_fn(&[a.clone(), b.clone()], &ctx).unwrap();
+        assert_eq!(size_fn(&[i], &ctx).unwrap().as_i64(), Some(1));
+
+        let d = difference_fn(&[a, b], &ctx).unwrap();
+        assert_eq!(size_fn(&[d], &ctx).unwrap().as_i64(), Some(1));
+    }
 }

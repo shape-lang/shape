@@ -92,6 +92,19 @@ pub enum TypedReturn {
     /// is `{name: string, data: string}` — once Phase 4c adds nested
     /// `TypedReturn::ObjectPairs` array support this can shrink.
     ArrayValueWord(Vec<ValueWord>),
+    /// Generic HashMap with ValueWord keys and values. Used by `set_module`
+    /// where set elements pass through as-is (they may be any user type).
+    /// The typed return shape is `HashMap` but the elements aren't
+    /// necessarily strings.
+    HashMapValueWord {
+        keys: Vec<ValueWord>,
+        values: Vec<ValueWord>,
+    },
+    /// Pass-through: hand-rolled ValueWord. Escape hatch for borderline
+    /// cases where the function body still needs the legacy
+    /// `ValueWord::from_*` API (e.g., set operations that construct from
+    /// other set inputs). Phase 4c will narrow these.
+    ValueWord(ValueWord),
 }
 
 impl TypedReturn {
@@ -166,6 +179,10 @@ impl TypedReturn {
             TypedReturn::ArrayValueWord(items) => {
                 ValueWord::from_array(shape_value::vmarray_from_vec(items))
             }
+            TypedReturn::HashMapValueWord { keys, values } => {
+                ValueWord::from_hashmap_pairs(keys, values)
+            }
+            TypedReturn::ValueWord(v) => v,
         }
     }
 }
@@ -199,6 +216,11 @@ pub enum ConcreteType {
     /// `Array<{name: string, data: string}>`). Carries the user-visible
     /// type-name string for documentation/LSP.
     ArrayObject(String),
+    /// Untyped HashMap (e.g. set_module returns where elements are
+    /// user-provided). Surfaces as `HashMap` in the LSP.
+    HashMap,
+    /// Untyped Array (escape hatch for borderline cases).
+    Array,
 }
 
 impl ConcreteType {
@@ -221,6 +243,8 @@ impl ConcreteType {
             ConcreteType::Object => "object".to_string(),
             ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),
+            ConcreteType::HashMap => "HashMap".to_string(),
+            ConcreteType::Array => "Array".to_string(),
         }
     }
 }
