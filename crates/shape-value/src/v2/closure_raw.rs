@@ -406,6 +406,418 @@ pub unsafe fn dealloc_typed_closure_no_drop(ptr: *mut u8, layout: &ClosureLayout
     unsafe { std::alloc::dealloc(ptr, alloc_layout) };
 }
 
+// ---------------------------------------------------------------------------
+// Per-FieldKind shared-capture payload helpers (Wave B / phase-3c-closure-y1).
+//
+// A `CaptureKind::Shared` capture stores `*const SharedCell` in its closure
+// slot; the cell's 8-byte payload at `SHARED_CELL_VALUE_OFFSET` is reinterpreted
+// through the *interior* `FieldKind` (`ClosureLayout::capture_inner_kind`).
+// These helpers acquire the cell's spinlock, perform a single 8-byte
+// load/store at the constant offset, and release the lock — keeping the JIT's
+// hardcoded offset stable while letting the interpreter operate on raw
+// native values rather than NaN-boxed `ValueWord`s.
+//
+// All read helpers return raw native values (i64/f64/bool/etc.), not
+// `ValueWord`. Sub-8-byte integer payloads are written zero-extended to 8
+// bytes (so a SharedCell read as i64 round-trips losslessly through any
+// narrower kind, but a sub-8-byte writer truncates to its declared width).
+// ---------------------------------------------------------------------------
+
+/// Pointer to the 8-byte payload of a `SharedCell`.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` (not freed, not aliased with
+/// `&mut`). The returned pointer is only valid for as long as `cell`.
+#[inline]
+unsafe fn shared_cell_payload_ptr(cell: *const SharedCell) -> *const u8 {
+    // SAFETY: caller upholds `cell` is live; the payload offset is a
+    // compile-time constant.
+    unsafe { (cell as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) }
+}
+
+/// Read a `f64` from a `SharedCell`'s payload while holding its lock.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `F64`. Bit patterns written through any other `write_shared_<kind>` will
+/// be misinterpreted on read.
+#[inline]
+pub unsafe fn read_shared_f64(cell: *const SharedCell) -> f64 {
+    // SAFETY: caller upholds `cell` is live; we briefly reborrow `&*cell`
+    // to acquire the lock via the standard guard API. The guard releases
+    // on drop after the load completes.
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    // SAFETY: payload is 8-byte aligned (offset 8 with 8-aligned base) and
+    // 8 bytes long; we read it through the raw pointer rather than through
+    // the guard's `&ValueWord` Deref so we control the bit-level
+    // reinterpretation.
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const f64) }
+}
+
+/// Write a `f64` to a `SharedCell`'s payload while holding its lock.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `F64`.
+#[inline]
+pub unsafe fn write_shared_f64(cell: *const SharedCell, value: f64) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    // SAFETY: payload is 8-byte aligned and 8 bytes long.
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut f64, value) };
+}
+
+/// Read an `i64` from a `SharedCell`'s payload.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I64`.
+#[inline]
+pub unsafe fn read_shared_i64(cell: *const SharedCell) -> i64 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const i64) }
+}
+
+/// Write an `i64` to a `SharedCell`'s payload.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I64`.
+#[inline]
+pub unsafe fn write_shared_i64(cell: *const SharedCell, value: i64) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut i64, value) };
+}
+
+/// Read a `u64` from a `SharedCell`'s payload.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U64`.
+#[inline]
+pub unsafe fn read_shared_u64(cell: *const SharedCell) -> u64 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u64) }
+}
+
+/// Write a `u64` to a `SharedCell`'s payload.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U64`.
+#[inline]
+pub unsafe fn write_shared_u64(cell: *const SharedCell, value: u64) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, value) };
+}
+
+/// Read an `i32` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I32`.
+#[inline]
+pub unsafe fn read_shared_i32(cell: *const SharedCell) -> i32 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    // SAFETY: read the low 4 bytes of the 8-byte payload. Per the
+    // `write_shared_i32` contract the low bytes hold the signed value
+    // (sign-extended to 8 bytes on write).
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const i32) }
+}
+
+/// Write an `i32` to a `SharedCell`'s payload, sign-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I32`.
+#[inline]
+pub unsafe fn write_shared_i32(cell: *const SharedCell, value: i32) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    // Sign-extend to 8 bytes so the high half holds the sign bit and an
+    // i64-shaped reader (e.g. the JIT lowering, if one ever emerges)
+    // observes the correct value.
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut i64, value as i64) };
+}
+
+/// Read a `u32` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U32`.
+#[inline]
+pub unsafe fn read_shared_u32(cell: *const SharedCell) -> u32 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u32) }
+}
+
+/// Write a `u32` to a `SharedCell`'s payload, zero-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U32`.
+#[inline]
+pub unsafe fn write_shared_u32(cell: *const SharedCell, value: u32) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, value as u64) };
+}
+
+/// Read an `i16` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I16`.
+#[inline]
+pub unsafe fn read_shared_i16(cell: *const SharedCell) -> i16 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const i16) }
+}
+
+/// Write an `i16` to a `SharedCell`'s payload, sign-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I16`.
+#[inline]
+pub unsafe fn write_shared_i16(cell: *const SharedCell, value: i16) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut i64, value as i64) };
+}
+
+/// Read a `u16` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U16`.
+#[inline]
+pub unsafe fn read_shared_u16(cell: *const SharedCell) -> u16 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u16) }
+}
+
+/// Write a `u16` to a `SharedCell`'s payload, zero-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U16`.
+#[inline]
+pub unsafe fn write_shared_u16(cell: *const SharedCell, value: u16) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, value as u64) };
+}
+
+/// Read an `i8` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I8`.
+#[inline]
+pub unsafe fn read_shared_i8(cell: *const SharedCell) -> i8 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const i8) }
+}
+
+/// Write an `i8` to a `SharedCell`'s payload, sign-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `I8`.
+#[inline]
+pub unsafe fn write_shared_i8(cell: *const SharedCell, value: i8) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut i64, value as i64) };
+}
+
+/// Read a `u8` from a `SharedCell`'s payload, truncating the upper bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U8`.
+#[inline]
+pub unsafe fn read_shared_u8(cell: *const SharedCell) -> u8 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u8) }
+}
+
+/// Write a `u8` to a `SharedCell`'s payload, zero-extending to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `U8`.
+#[inline]
+pub unsafe fn write_shared_u8(cell: *const SharedCell, value: u8) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, value as u64) };
+}
+
+/// Read a `bool` from a `SharedCell`'s payload — `false` iff every byte of
+/// the 8-byte payload is zero, `true` otherwise. (`write_shared_bool`
+/// stores `0` or `1`, so this is just the standard "any non-zero byte"
+/// test.)
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `Bool`.
+#[inline]
+pub unsafe fn read_shared_bool(cell: *const SharedCell) -> bool {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    // SAFETY: read just the low byte; the writer zeros the upper 7 bytes
+    // so this is a single u8 load.
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u8) != 0 }
+}
+
+/// Write a `bool` to a `SharedCell`'s payload as a 0/1 byte, zero-extended
+/// to 8 bytes.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `Bool`.
+#[inline]
+pub unsafe fn write_shared_bool(cell: *const SharedCell, value: bool) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    let byte: u64 = if value { 1 } else { 0 };
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, byte) };
+}
+
+/// Read the raw 8-byte pointer payload of a `SharedCell` whose interior
+/// `FieldKind` is `Ptr`. The returned `u64` is a `ValueWord` bit pattern
+/// (NaN-boxed Arc/Box pointer) that can be `clone_from_bits`'d to obtain a
+/// retained share.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `Ptr`.
+#[inline]
+pub unsafe fn read_shared_ptr(cell: *const SharedCell) -> u64 {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::read(shared_cell_payload_ptr(cell) as *const u64) }
+}
+
+/// Write a raw 8-byte pointer payload to a `SharedCell` whose interior
+/// `FieldKind` is `Ptr`. The caller is responsible for refcount semantics
+/// — this writer does NOT release the previous payload nor retain the new
+/// one. For `Ptr` payloads the standard pattern is to read the old bits,
+/// release them, then write the new (already-retained) bits.
+///
+/// # Safety
+///
+/// `cell` must point to a live `SharedCell` whose interior `FieldKind` is
+/// `Ptr`.
+#[inline]
+pub unsafe fn write_shared_ptr(cell: *const SharedCell, bits: u64) {
+    let cell_ref = unsafe { &*cell };
+    let _g = cell_ref.lock();
+    unsafe { std::ptr::write(shared_cell_payload_ptr(cell) as *mut u64, bits) };
+}
+
+/// Release a `Shared` capture: read the cell pointer at the slot, decode
+/// the interior `FieldKind`, drop any heap refcount share carried by a
+/// `Ptr` payload, and finally `Arc::from_raw` + drop the cell to release
+/// its strong-count share.
+///
+/// This is the per-capture handler invoked by `release_typed_closure`'s
+/// dispatch on `capture_storage_kind(i)`. The contract pairs with
+/// `drop_owned_mutable_capture` (defined by the parallel-track migration of
+/// owned-mutable storage) — both are reached only when the closure
+/// refcount has hit zero, and each handler is responsible for fully
+/// reclaiming its slot's resources.
+///
+/// # Safety
+///
+/// - `base` must point to a live `TypedClosureHeader` block whose layout
+///   matches `layout`, and capture `i` must be `CaptureKind::Shared`
+///   (mask bit `shared_capture_mask & (1 << i)` set).
+/// - The slot at `base.add(layout.heap_capture_offset(i))` must contain
+///   a non-null `*const SharedCell` produced by `Arc::into_raw` on a
+///   freshly-allocated `Arc<SharedCell>` (or null, in which case the
+///   release is a no-op).
+/// - For `Ptr` interior kind the payload bits must be a valid `ValueWord`
+///   bit pattern for which `release_raw_value_bits` semantics apply.
+/// - After this call the slot must not be read again (the `Arc::from_raw`
+///   may have freed the underlying `SharedCell`).
+#[inline]
+pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usize) {
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: caller upholds that `base` + `off` is in-bounds for an
+    // 8-byte read (per `ClosureLayout` invariants Shared captures live at
+    // an 8-byte Ptr slot).
+    let cell_ptr = unsafe { std::ptr::read(base.add(off) as *const *const SharedCell) };
+    if cell_ptr.is_null() {
+        return;
+    }
+
+    // For Ptr payloads we must release the heap refcount share encoded in
+    // the cell's 8-byte payload before reclaiming the cell allocation
+    // itself. Other interior kinds are scalar bytes — no refcount.
+    let inner_kind = layout.capture_inner_kind(i);
+    if inner_kind == FieldKind::Ptr {
+        // SAFETY: cell_ptr is non-null and was produced by Arc::into_raw,
+        // so reborrowing it as `&SharedCell` is sound while the strong
+        // count is still ≥ 1 (it is — we still hold the share we are
+        // about to reclaim).
+        let cell_ref = unsafe { &*cell_ptr };
+        let bits = {
+            let _g = cell_ref.lock();
+            // SAFETY: payload offset is 8, payload is 8 bytes wide.
+            unsafe { std::ptr::read(shared_cell_payload_ptr(cell_ptr) as *const u64) }
+        };
+        // The stored Ptr payload owns one heap refcount share (mirroring
+        // how `release_typed_closure`'s heap_capture_mask path treats
+        // immutable Ptr captures). Releasing it here keeps the bookkeeping
+        // balanced.
+        release_raw_value_bits(bits);
+    }
+
+    // Reclaim the Arc strong-count share. If we held the last share the
+    // SharedCell is freed here; otherwise the strong count just drops by
+    // one.
+    // SAFETY: cell_ptr came from `Arc::into_raw(Arc::new(SharedCell::new(...)))`
+    // (per the Shared-capture construction contract) and represents
+    // exactly one strong-count share owned by this slot.
+    unsafe { drop(Arc::from_raw(cell_ptr)) };
+}
+
 /// Release a raw `ValueWord` u64 bit pattern, mirroring the VM's
 /// `raw_helpers::drop_raw_bits`. Inline values are a no-op; heap-tagged
 /// values (owned or shared) drop the corresponding refcount share.
@@ -966,9 +1378,9 @@ pub unsafe fn write_owned_mutable_ptr(ptr: *mut u64, value: u64) {
 // interior kind is `Ptr`, the heap-refcount share encoded in the cell's
 // bits is released first.
 //
-// `drop_shared_capture` is left as a stub for the parallel migration agent
-// (`migrate-shared-storage`) to fill in. The signature below is the
-// contract `release_typed_closure` relies on.
+// `drop_shared_capture` is implemented above (alongside the per-FieldKind
+// SharedCell payload helpers in the Shared-storage migration block); it
+// shares the same `(layout, base, i)` contract.
 // ---------------------------------------------------------------------------
 
 /// Drop the `OwnedMutable` capture at index `i` of a closure block.
@@ -1054,54 +1466,6 @@ pub unsafe fn drop_owned_mutable_capture(layout: &ClosureLayout, base: *mut u8, 
             // SAFETY: reclaim the now-empty `Box<u64>`.
             unsafe { drop(Box::from_raw(cell)) };
         }
-    }
-}
-
-/// Drop the `Shared` capture at index `i` of a closure block.
-///
-/// # Status (Wave B coordination)
-///
-/// Stub. The OwnedMutable migration agent (this file's author) declares
-/// the signature `release_typed_closure` dispatches against; the parallel
-/// `migrate-shared-storage` agent fills in the body.
-///
-/// # Contract for the parallel agent
-///
-/// Read `*const SharedCell` from `base.add(layout.heap_capture_offset(i))`.
-/// If non-null, reclaim the Arc share via `Arc::from_raw` (which
-/// decrements `strong_count` and, if it was the last share, drops the
-/// underlying `SharedCell` containing the interior `ValueWord` payload).
-/// The interior payload may itself carry a heap-refcount share — when
-/// the last Arc share drops, the `SharedCell`'s Drop must release that
-/// share. Whether `SharedCell::Drop` performs that release or whether
-/// this helper performs it before reclaiming the Arc is the parallel
-/// agent's design choice; either way it must happen exactly once.
-///
-/// # Safety
-///
-/// - `base` must point to a live `TypedClosureHeader` block whose layout
-///   matches `layout` and has at least `i + 1` captures.
-/// - `layout.capture_kinds[i]` must be `CaptureKind::Shared`.
-/// - The slot at `layout.heap_capture_offset(i)` must contain either a
-///   null pointer (no-op) or a non-null pointer produced by
-///   `Arc::into_raw` representing exactly one strong-count share.
-/// - The block must currently be in the refcount-zero teardown phase —
-///   no other thread may concurrently access this slot.
-#[inline]
-pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usize) {
-    use crate::v2::closure_layout::SharedCell;
-    let off = layout.heap_capture_offset(i);
-    // SAFETY: caller upholds slot is in-bounds, 8-byte aligned, and either
-    // null or a valid `Arc::into_raw` result.
-    let raw = unsafe { std::ptr::read(base.add(off) as *const *const SharedCell) };
-    if !raw.is_null() {
-        // SAFETY: `raw` came from `Arc::into_raw(Arc::new(...))` and
-        // represents exactly one strong-count share. Reclaim the Arc
-        // here — its Drop releases the strong share and (if last) frees
-        // the cell along with any heap refcount the interior payload
-        // owned. The parallel `migrate-shared-storage` agent will
-        // refine this body once SharedCell switches to typed storage.
-        unsafe { drop(Arc::from_raw(raw)) };
     }
 }
 
