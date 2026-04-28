@@ -1357,6 +1357,23 @@ impl BytecodeCompiler {
             }
         }
 
+        // Phase 3e: function call return type from the tracker. The
+        // runtime type-inference engine doesn't always see freshly
+        // declared user functions; the tracker's
+        // `function_return_types` is populated by the inference
+        // pre-pass (`infer_return_type_hints_from_types`) and serves as
+        // the authoritative source for inferred return types in the
+        // compiler's strict-typing decisions.
+        if let Expr::FunctionCall { name, .. } = expr {
+            if let Some(rt_name) = self
+                .type_tracker
+                .get_function_return_type(name)
+                .cloned()
+            {
+                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+            }
+        }
+
         // Phase 3e: BinaryOp Add of string-typed operands yields a string.
         // The runtime type-inference engine doesn't know about let-mut
         // accumulator types from the tracker, so chained concats like

@@ -893,10 +893,15 @@ impl BytecodeCompiler {
                     // CallMethod("add") so the executor's PHF-backed
                     // datetime/timespan method registry handles the
                     // type combinations. Replaces the generic Add path.
+                    //
+                    // Phase 3e: accept both PascalCase and lowercase
+                    // forms — the compiler's tracker uses PascalCase
+                    // but the runtime inference engine returns lowercase.
                     let is_temporal = |n: &Option<String>| {
                         matches!(
                             n.as_deref(),
                             Some("DateTime") | Some("Duration") | Some("TimeSpan")
+                                | Some("datetime") | Some("duration") | Some("timespan")
                         )
                     };
                     if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
@@ -1211,7 +1216,16 @@ impl BytecodeCompiler {
                     if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
                         let lt_name = type_display_name(&lt);
                         let rt_name = type_display_name(&rt);
-                        let is_temporal = |n: &str| matches!(n, "DateTime" | "Duration" | "TimeSpan");
+                        // Phase 3e: accept both PascalCase ("DateTime") and
+                        // lowercase ("datetime") forms — the compiler's
+                        // tracker uses PascalCase but the runtime
+                        // inference engine returns lowercase for
+                        // Expr::DateTime / Expr::Duration literals.
+                        let is_temporal = |n: &str| matches!(
+                            n,
+                            "DateTime" | "Duration" | "TimeSpan"
+                                | "datetime" | "duration" | "timespan"
+                        );
                         if is_temporal(&lt_name) || is_temporal(&rt_name) {
                             self.compile_expr(left)?;
                             self.compile_expr(right)?;
