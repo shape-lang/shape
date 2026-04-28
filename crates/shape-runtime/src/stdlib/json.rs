@@ -8,8 +8,9 @@
 //! TypedObject for the supplied schema; nested unknown objects fall back to
 //! the typed `Json` enum rather than an untyped HashMap.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::heap_value::HeapValue;
 use shape_value::{ArgVec, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
@@ -219,9 +220,19 @@ pub fn create_json_module() -> ModuleExports {
     // Always returns a typed `Json` enum value — sweep phase 4a removed the
     // legacy untyped fallback. The schema-driven form lives in
     // `__parse_typed(text, schema_id)`.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "parse",
-        |args: &[ValueWord], ctx: &ModuleContext| {
+        "Parse a JSON string into Shape values",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "JSON string to parse".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::Named("Json".to_string()))),
+        |args, ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -230,35 +241,40 @@ pub fn create_json_module() -> ModuleExports {
             let parsed: serde_json::Value =
                 serde_json::from_str(text).map_err(|e| format!("json.parse() failed: {}", e))?;
 
-            let json_schema = ctx
-                .schemas
-                .get("Json")
-                .ok_or_else(|| {
-                    "json.parse() requires the `Json` enum schema (load std::core::json_value)"
-                        .to_string()
-                })?;
+            let json_schema = ctx.schemas.get("Json").ok_or_else(|| {
+                "json.parse() requires the `Json` enum schema (load std::core::json_value)"
+                    .to_string()
+            })?;
             let result = json_value_to_enum(parsed, json_schema.id as u64);
 
-            Ok(ValueWord::from_ok(result))
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
         },
-        ModuleFunction {
-            description: "Parse a JSON string into Shape values".to_string(),
-            params: vec![ModuleParam {
+    );
+
+    // json.__parse_typed(text: string, schema_id: number) -> Result<any>
+    // Internal: deserializes JSON directly into a typed struct using the schema.
+    register_typed_function(
+        &mut module,
+        "__parse_typed",
+        "Parse a JSON string into a typed struct",
+        vec![
+            ModuleParam {
                 name: "text".to_string(),
                 type_name: "string".to_string(),
                 required: true,
                 description: "JSON string to parse".to_string(),
                 ..Default::default()
-            }],
-            return_type: Some("Result<Json>".to_string()),
-        },
-    );
-
-    // json.__parse_typed(text: string, schema_id: number) -> Result<T>
-    // Internal: deserializes JSON directly into a typed struct using the schema.
-    module.add_function_with_schema(
-        "__parse_typed",
-        |args: &[ValueWord], ctx: &ModuleContext| {
+            },
+            ModuleParam {
+                name: "schema_id".to_string(),
+                type_name: "number".to_string(),
+                required: true,
+                description: "Schema ID of the target type".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Result(Box::new(ConcreteType::Any)),
+        |args, ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -288,34 +304,34 @@ pub fn create_json_module() -> ModuleExports {
                 .ok_or_else(|| format!("json.__parse_typed(): unknown schema id {}", schema_id))?;
 
             let result = json_object_to_typed(schema_id, schema, &map, ctx.schemas)?;
-            Ok(ValueWord::from_ok(result))
-        },
-        ModuleFunction {
-            description: "Parse a JSON string into a typed struct".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "JSON string to parse".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "schema_id".to_string(),
-                    type_name: "number".to_string(),
-                    required: true,
-                    description: "Schema ID of the target type".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<any>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
         },
     );
 
     // json.stringify(value: any, pretty?: bool) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stringify",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Serialize a Shape value to a JSON string",
+        vec![
+            ModuleParam {
+                name: "value".to_string(),
+                type_name: "any".to_string(),
+                required: true,
+                description: "Value to serialize".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "pretty".to_string(),
+                type_name: "bool".to_string(),
+                required: false,
+                description: "Pretty-print with indentation (default: false)".to_string(),
+                default_snippet: Some("false".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "json.stringify() requires a value argument".to_string())?;
@@ -331,53 +347,31 @@ pub fn create_json_module() -> ModuleExports {
             }
             .map_err(|e| format!("json.stringify() failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(output))))
-        },
-        ModuleFunction {
-            description: "Serialize a Shape value to a JSON string".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "value".to_string(),
-                    type_name: "any".to_string(),
-                    required: true,
-                    description: "Value to serialize".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pretty".to_string(),
-                    type_name: "bool".to_string(),
-                    required: false,
-                    description: "Pretty-print with indentation (default: false)".to_string(),
-                    default_snippet: Some("false".to_string()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
         },
     );
 
     // json.is_valid(text: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_valid",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if a string is valid JSON",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "String to validate as JSON".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "json.is_valid() requires a string argument".to_string())?;
 
             let valid = serde_json::from_str::<serde_json::Value>(text).is_ok();
-            Ok(ValueWord::from_bool(valid))
-        },
-        ModuleFunction {
-            description: "Check if a string is valid JSON".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "String to validate as JSON".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(valid))
         },
     );
 
