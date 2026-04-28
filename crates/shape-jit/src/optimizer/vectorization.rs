@@ -51,13 +51,7 @@ pub struct SIMDPlan {
 fn is_numeric_arith(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::AddDynamic
-            | OpCode::SubDynamic
-            | OpCode::MulDynamic
-            | OpCode::DivDynamic
-            | OpCode::ModDynamic
-            | OpCode::PowDynamic
-            | OpCode::AddInt
+        OpCode::AddInt
             | OpCode::SubInt
             | OpCode::MulInt
             | OpCode::DivInt
@@ -78,10 +72,10 @@ fn is_numeric_arith(op: OpCode) -> bool {
 /// f64 operation that can be vectorized.
 fn opcode_to_simd_op(op: OpCode) -> Option<SIMDOp> {
     match op {
-        OpCode::AddDynamic | OpCode::AddNumber => Some(SIMDOp::Add),
-        OpCode::SubDynamic | OpCode::SubNumber => Some(SIMDOp::Sub),
-        OpCode::MulDynamic | OpCode::MulNumber => Some(SIMDOp::Mul),
-        OpCode::DivDynamic | OpCode::DivNumber => Some(SIMDOp::Div),
+        OpCode::AddNumber => Some(SIMDOp::Add),
+        OpCode::SubNumber => Some(SIMDOp::Sub),
+        OpCode::MulNumber => Some(SIMDOp::Mul),
+        OpCode::DivNumber => Some(SIMDOp::Div),
         _ => None,
     }
 }
@@ -108,10 +102,6 @@ fn is_simd_body_safe(op: OpCode) -> bool {
             | OpCode::Dup
             | OpCode::Swap
             // Simple f64 arithmetic
-            | OpCode::AddDynamic
-            | OpCode::SubDynamic
-            | OpCode::MulDynamic
-            | OpCode::DivDynamic
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
@@ -126,10 +116,6 @@ fn is_simd_body_safe(op: OpCode) -> bool {
             | OpCode::IntToNumber
             | OpCode::NumberToInt
             // Comparisons (for loop condition)
-            | OpCode::LtDynamic
-            | OpCode::LteDynamic
-            | OpCode::GtDynamic
-            | OpCode::GteDynamic
             | OpCode::LtInt
             | OpCode::LteInt
             | OpCode::GtInt

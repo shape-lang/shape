@@ -100,102 +100,14 @@ fn test_new_typed_array_mixed_falls_back() {
     assert!(result.to_array_arc().is_some());
 }
 
-// R5.6: `Vec<number> +/-/*// Vec<number>` and `Vec<int> + Vec<int>` via
-// the dynamic-fallback match arms were deleted because the compiler
-// retargets those shapes to `BuiltinCall(IntrinsicVec*)` at compile time
-// (R5.4E). The retarget emission is pinned by
+// R5.6 + Strict-typing-sweep Phase 2: Vec arithmetic and broadcasts that
+// went through the `*Dynamic` fallback (Vec*Vec, Vec*scalar, scalar*Vec,
+// Vec<int> + Vec<number>) had their runtime paths deleted alongside the
+// dynamic opcodes. The compiler retargets these shapes at compile time to
+// `BuiltinCall(IntrinsicVec*)` (R5.4E), which is pinned by
 // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` in
-// `operator_overload.rs`; the kernel semantics are covered by
-// `shape-runtime::intrinsics::vector::tests` (incl. overflow tests).
-
-// ===== SIMD Arithmetic: Vec * scalar broadcast =====
-
-#[test]
-fn test_float_array_scalar_mul() {
-    // [1.0, 2.0, 3.0] * 10.0 = [10.0, 20.0, 30.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::Number(10.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[10.0, 20.0, 30.0]);
-}
-
-#[test]
-fn test_scalar_mul_float_array() {
-    // 10.0 * [1.0, 2.0, 3.0] = [10.0, 20.0, 30.0] (commutative)
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Number(10.0),
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[10.0, 20.0, 30.0]);
-}
-
-#[test]
-fn test_float_array_scalar_add() {
-    // [1.0, 2.0, 3.0] + 10.0 = [11.0, 12.0, 13.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::Number(10.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[11.0, 12.0, 13.0]);
-}
-
-#[test]
-fn test_float_array_scalar_div() {
-    // [10.0, 20.0, 30.0] / 10.0 = [1.0, 2.0, 3.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::DivDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[10.0, 20.0, 30.0])),
-        Constant::Number(10.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1.0, 2.0, 3.0]);
-}
-
-// ===== Mixed int/float arithmetic =====
-
-#[test]
-fn test_int_array_plus_float_array_promotes() {
-    // Vec<int>[1, 2, 3] + Vec<number>[0.5, 0.5, 0.5] => Vec<number>[1.5, 2.5, 3.5]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::AddDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[1, 2, 3])),
-        Constant::Value(float_array(&[0.5, 0.5, 0.5])),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1.5, 2.5, 3.5]);
-}
+// `operator_overload.rs`. Kernel semantics live in
+// `shape-runtime::intrinsics::vector::tests` (incl. overflow).
 
 // ===== FloatArray methods =====
 

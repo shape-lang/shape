@@ -2180,37 +2180,11 @@ mod tests {
         assert_eq!(result.as_i64(), Some(200));
     }
 
-    #[test]
-    fn test_store_typed_load_trusted_roundtrip() {
-        // End-to-end: StoreLocalTyped + LoadLocalTrusted form the typed
-        // access pair. Verify multiple slots work together.
-        let mut program = BytecodeProgram::default();
-        let c_int = program.add_constant(Constant::Int(7));
-        let c_float = program.add_constant(Constant::Number(1.5));
-        program.instructions = vec![
-            // Store int to slot 0
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_int))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I64)),
-            ),
-            // Store float to slot 1
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c_float))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(1, NumericWidth::F64)),
-            ),
-            // Load slot 0 (int), load slot 1 (float), add them
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(1))),
-            Instruction::simple(OpCode::AddDynamic),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 2;
-        let result = run_program(program);
-        // int(7) + float(1.5) = 8.5 via generic Add (promotes to f64)
-        assert_eq!(result.as_f64(), Some(8.5));
-    }
+    // RETIRED: test_store_typed_load_trusted_roundtrip
+    // The strict-typing sweep deleted the *Dynamic arithmetic opcodes;
+    // mixing int + float at the bytecode level no longer has a path. The
+    // typed `StoreLocalTyped + LoadLocalTrusted` pair is exercised by the
+    // surrounding tests using single-typed slots.
 
     // ===== Documentation: LoadLocalF64 / StoreLocalF64 =====
     //

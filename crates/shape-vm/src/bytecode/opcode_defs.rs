@@ -84,19 +84,11 @@ define_opcodes! {
     /// Swap top two values
     Swap = 0x04, Stack, pops: 2, pushes: 2;
 
-    // ===== Dynamic Arithmetic Operations (runtime type dispatch) =====
-    /// Dynamic add -- runtime-dispatched when operand types unresolvable at compile time.
-    AddDynamic = 0x10, Arithmetic, pops: 2, pushes: 1;
-    /// Dynamic subtract -- runtime-dispatched when operand types unresolvable at compile time.
-    SubDynamic = 0x11, Arithmetic, pops: 2, pushes: 1;
-    /// Dynamic multiply -- runtime-dispatched when operand types unresolvable at compile time.
-    MulDynamic = 0x12, Arithmetic, pops: 2, pushes: 1;
-    /// Dynamic divide -- runtime-dispatched when operand types unresolvable at compile time.
-    DivDynamic = 0x13, Arithmetic, pops: 2, pushes: 1;
-    /// Dynamic modulo -- runtime-dispatched when operand types unresolvable at compile time.
-    ModDynamic = 0x14, Arithmetic, pops: 2, pushes: 1;
-    /// Dynamic power -- runtime-dispatched when operand types unresolvable at compile time.
-    PowDynamic = 0x16, Arithmetic, pops: 2, pushes: 1;
+    // ===== Dynamic Arithmetic Operations (DELETED - strict-typing sweep Phase 2) =====
+    // 0x10 (AddDynamic), 0x11 (SubDynamic), 0x12 (MulDynamic),
+    // 0x13 (DivDynamic), 0x14 (ModDynamic), 0x16 (PowDynamic)
+    // were deleted; the compiler now emits typed opcodes (AddInt/AddNumber/...)
+    // exclusively, or fails with a strict-typing error.
     /// Bitwise AND
     BitAnd = 0x17, Arithmetic, pops: 2, pushes: 1;
     /// Bitwise OR
@@ -110,19 +102,11 @@ define_opcodes! {
     /// Bitwise XOR
     BitXor = 0x1C, Arithmetic, pops: 2, pushes: 1;
 
-    // ===== Dynamic Comparison Operations (runtime type dispatch) =====
-    /// Dynamic greater-than -- runtime-dispatched when operand types unresolvable at compile time.
-    GtDynamic = 0x20, Comparison, pops: 2, pushes: 1;
-    /// Dynamic less-than -- runtime-dispatched when operand types unresolvable at compile time.
-    LtDynamic = 0x21, Comparison, pops: 2, pushes: 1;
-    /// Dynamic greater-than-or-equal -- runtime-dispatched when operand types unresolvable at compile time.
-    GteDynamic = 0x22, Comparison, pops: 2, pushes: 1;
-    /// Dynamic less-than-or-equal -- runtime-dispatched when operand types unresolvable at compile time.
-    LteDynamic = 0x23, Comparison, pops: 2, pushes: 1;
-    /// Dynamic equality -- runtime-dispatched via vw_equals.
-    EqDynamic = 0x24, Comparison, pops: 2, pushes: 1;
-    /// Dynamic not-equal -- runtime-dispatched via vw_equals + negation.
-    NeqDynamic = 0x25, Comparison, pops: 2, pushes: 1;
+    // ===== Dynamic Comparison Operations (DELETED - strict-typing sweep Phase 2) =====
+    // 0x20 (GtDynamic), 0x21 (LtDynamic), 0x22 (GteDynamic),
+    // 0x23 (LteDynamic), 0x24 (EqDynamic), 0x25 (NeqDynamic)
+    // were deleted; the compiler now emits typed comparison opcodes
+    // (GtInt/EqString/...) exclusively, or fails with a strict-typing error.
 
     // ===== Typed Comparison Operations (compiler-guaranteed types, zero dispatch) =====
     /// Greater than (int × int → bool)

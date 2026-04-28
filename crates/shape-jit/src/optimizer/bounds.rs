@@ -139,13 +139,7 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::Not
         | OpCode::Length => (1, 1),
         // Binary arithmetic/comparison/indexed read
-        OpCode::AddDynamic
-        | OpCode::SubDynamic
-        | OpCode::MulDynamic
-        | OpCode::DivDynamic
-        | OpCode::ModDynamic
-        | OpCode::PowDynamic
-        | OpCode::AddInt
+        OpCode::AddInt
         | OpCode::SubInt
         | OpCode::MulInt
         | OpCode::DivInt
@@ -157,12 +151,6 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::GtDynamic
-        | OpCode::LtDynamic
-        | OpCode::GteDynamic
-        | OpCode::LteDynamic
-        | OpCode::EqDynamic
-        | OpCode::NeqDynamic
         | OpCode::GtInt
         | OpCode::LtInt
         | OpCode::GteInt
@@ -254,17 +242,11 @@ fn get_prop_array_source(
 }
 
 fn is_add_op(op: OpCode) -> bool {
-    matches!(
-        op,
-        OpCode::AddDynamic | OpCode::AddInt | OpCode::AddNumber
-    )
+    matches!(op, OpCode::AddInt | OpCode::AddNumber)
 }
 
 fn is_mul_op(op: OpCode) -> bool {
-    matches!(
-        op,
-        OpCode::MulDynamic | OpCode::MulInt | OpCode::MulNumber
-    )
+    matches!(op, OpCode::MulInt | OpCode::MulNumber)
 }
 
 fn producer_local_slot(
@@ -395,20 +377,14 @@ fn expr_is_non_negative(
             };
             expr_is_non_negative(program, operand_idx, non_negative_locals, depth + 1)
         }
-        OpCode::AddDynamic
-        | OpCode::AddInt
-        | OpCode::MulDynamic
-        | OpCode::MulInt => {
+        OpCode::AddInt | OpCode::MulInt => {
             let Some(rhs_idx) = producer_index_for_stack_pos(program, producer_idx, 0) else {
                 return false;
             };
             let Some(lhs_idx) = producer_index_for_stack_pos(program, producer_idx, 1) else {
                 return false;
             };
-            if matches!(
-                instr.opcode,
-                OpCode::MulDynamic | OpCode::MulInt
-            ) {
+            if matches!(instr.opcode, OpCode::MulInt) {
                 let lhs_local = producer_local_slot(program, lhs_idx, 0);
                 let rhs_local = producer_local_slot(program, rhs_idx, 0);
                 if matches!((lhs_local, rhs_local), (Some(l), Some(r)) if l == r) {
@@ -470,10 +446,7 @@ fn iv_has_non_negative_progress(
         ) {
             continue;
         }
-        if !matches!(
-            arith.opcode,
-            OpCode::AddDynamic | OpCode::AddInt
-        ) {
+        if !matches!(arith.opcode, OpCode::AddInt) {
             continue;
         }
         let step_slot = match (

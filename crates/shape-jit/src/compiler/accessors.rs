@@ -115,24 +115,12 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::Pop,
     OpCode::Dup,
     OpCode::Swap,
-    OpCode::AddDynamic,
-    OpCode::SubDynamic,
-    OpCode::MulDynamic,
-    OpCode::DivDynamic,
-    OpCode::ModDynamic,
-    OpCode::PowDynamic,
     OpCode::BitAnd,
     OpCode::BitOr,
     OpCode::BitShl,
     OpCode::BitShr,
     OpCode::BitNot,
     OpCode::BitXor,
-    OpCode::GtDynamic,
-    OpCode::LtDynamic,
-    OpCode::GteDynamic,
-    OpCode::LteDynamic,
-    OpCode::EqDynamic,
-    OpCode::NeqDynamic,
     OpCode::GtInt,
     OpCode::GtNumber,
     OpCode::GtDecimal,
@@ -824,7 +812,7 @@ mod tests {
     fn preflight_instructions_compatible_slice() {
         let instructions = vec![
             Instruction::simple(OpCode::PushConst),
-            Instruction::simple(OpCode::AddDynamic),
+            Instruction::simple(OpCode::AddInt),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let report = preflight_instructions(&instructions);
@@ -1016,7 +1004,7 @@ mod tests {
         let program = BytecodeProgram {
             instructions: vec![
                 Instruction::simple(OpCode::PushConst),
-                Instruction::simple(OpCode::AddDynamic),
+                Instruction::simple(OpCode::AddInt),
                 Instruction::simple(OpCode::ReturnValue),
             ],
             ..Default::default()

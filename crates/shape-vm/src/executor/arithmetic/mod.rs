@@ -2,73 +2,34 @@
 //!
 //! Handles: Add, Sub, Mul, Div, Mod, Neg, Pow
 //!
-//! # Dynamic fallback (post-R5.6)
-//!
-//! After R5.6, [`exec_arithmetic_dynamic_fallback`] handles only
-//! legitimately-dynamic arithmetic: polyglot values, comptime unresolved
-//! types, and unresolved type-vars / mixed-type arithmetic. Every typed
-//! shape has a direct compile-time retarget:
+//! Strict-typing sweep (Phase 2): the `*Dynamic` arithmetic opcodes
+//! (`AddDynamic`, `SubDynamic`, ...) and their executor fallback
+//! (`exec_arithmetic_dynamic_fallback`) have been deleted. Compile-time
+//! type proof now drives every numeric path:
 //!
 //! - Int+Int / Number+Number / Decimal+Decimal → typed opcodes in
+//!   `exec_typed_arithmetic` (the hot path for production code).
+//! - Compact/width-parameterised opcodes (`AddTyped`, ...) →
+//!   `exec_compact_typed_arithmetic`.
+//! - Bitwise int+int (proven) → `BitAndInt` / `BitOrInt` / ... in
 //!   `exec_typed_arithmetic`.
-//! - Bitwise int+int → `BitAndInt` / `BitOrInt` / ... (R5.1).
+//! - Bitwise (unproven int) → `exec_dyn_bit_dispatch` (the only
+//!   remaining dynamic-style arithmetic dispatch).
 //! - User operator traits → `CallMethod` (R5.2).
-//! - DateTime / Duration / TimeSpan arithmetic (let-locals and typed
-//!   function parameters) → `CallMethod` into `datetime_methods.rs`
-//!   (R5.3). Untyped function returns of temporal values still land on
-//!   the fallback via the temporal arms in `try_heap_arithmetic`.
-//! - `Vec<number> +/-/*// Vec<number>`, `Vec<int> + Vec<int>`,
-//!   `Mat +/- Mat`, `Mat * Mat` → `BuiltinCall` intrinsics (R5.4).
-//! - `string + int/number/bool` (proved string LHS) → `StringConcatInt`
-//!   / `StringConcatNumber` / `StringConcatBool` (R5.5).
-//!
-//! The handler name is suffixed `_dynamic_fallback` to make that
-//! contract visible at every call site.
-//!
-//! See §R5 in `/home/dev/.claude/plans/v2-residuals-closeout.md` and
-//! `/home/dev/.claude/plans/v2-nanbox-removal-plan.md` for context.
-//!
-//! # Typed path
-//!
-//! Typed opcodes (`AddInt`, `AddNumber`, `AddDecimal`, ...) live in
-//! `exec_typed_arithmetic`. That is the hot path for production code.
-//! Compact/width-parameterised opcodes (`AddTyped`, ...) live in
-//! `exec_compact_typed_arithmetic`.
+//! - DateTime / Duration / TimeSpan arithmetic → `CallMethod` into
+//!   `datetime_methods.rs` (R5.3).
+//! - `Vec<number>` ops, `Vec<int> + Vec<int>`, `Mat +/- Mat`, `Mat * Mat`
+//!   → `BuiltinCall` intrinsics (R5.4).
+//! - `string + int/number/bool` → `StringConcatInt` / `StringConcatNumber`
+//!   / `StringConcatBool` (R5.5).
 
 use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
     executor::VirtualMachine,
-    executor::objects::raw_helpers,
 };
-use shape_value::heap_value::HeapValue;
-use shape_value::{TemporalData, TypedArrayData, VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use crate::constants::EXACT_F64_INT_LIMIT;
-
-/// Get the IC profiling tag byte for a ValueWord.
-/// F64 (untagged) returns 0xFF (sentinel), otherwise returns the 3-bit tag.
-#[inline(always)]
-fn ic_tag(v: &ValueWord) -> u8 {
-    let bits = v.raw_bits();
-    if !shape_value::tag_bits::is_tagged(bits) {
-        0xFF
-    } else {
-        shape_value::tag_bits::get_tag(bits) as u8
-    }
-}
-
-/// Heap-typed binary op tag for the `try_heap_arithmetic` helper.
-/// Distinct from `OpCode` because the helper only cares about the
-/// operator shape (Add/Sub/Mul/Div) and not about the dispatch-level
-/// Dynamic variant.
-#[derive(Clone, Copy, Debug)]
-enum HeapBinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
 
 /// Produce a `VMError::RuntimeError` for mixed int/float operations where the
 /// integer operand is too large to convert losslessly to f64.
@@ -91,14 +52,6 @@ enum NumericDomain {
     Int(i128),
     Float(f64),
     Decimal(rust_decimal::Decimal),
-}
-
-/// Unwrap TypeAnnotatedValue wrapper to get the inner value.
-/// This is needed because `: number` annotations wrap values, and the
-/// Heap tag doesn't match any arithmetic dispatch case.
-#[inline(always)]
-fn unwrap_annotated(nb: ValueWord) -> ValueWord {
-    raw_helpers::unwrap_annotated_bits(nb.raw_bits())
 }
 
 macro_rules! define_compact_width_dispatch {
@@ -256,209 +209,6 @@ impl VirtualMachine {
                 use rust_decimal::prelude::ToPrimitive;
                 let bf = bd.to_f64().unwrap_or(0.0);
                 Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-        }
-    }
-
-    /// Dispatch a numeric binary operation with zero-check on the divisor.
-    ///
-    /// Shared implementation for div and mod: handles Int/Float/Decimal domain
-    /// dispatch, zero-check, int/float cross-coercion, and decimal promotion.
-    #[inline(always)]
-    fn dispatch_numeric_binary_with_zero_check(
-        a: &ValueWord,
-        b: &ValueWord,
-        op_name: &str,
-        int_op: impl FnOnce(i128, i128) -> Option<i128>,
-        float_op: impl Fn(f64, f64) -> f64,
-        decimal_op: impl FnOnce(rust_decimal::Decimal, rust_decimal::Decimal) -> rust_decimal::Decimal,
-    ) -> Result<Option<ValueWord>, VMError> {
-        let a_num = match Self::numeric_domain(a) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let b_num = match Self::numeric_domain(b) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        match (a_num, b_num) {
-            (NumericDomain::Int(ai), NumericDomain::Int(bi)) => {
-                if bi == 0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                let out = int_op(ai, bi)
-                    .ok_or_else(|| VMError::RuntimeError(format!("Integer overflow in '{}'", op_name)))?;
-                Self::integer_result_boxed(out, op_name).map(Some)
-            }
-            (NumericDomain::Float(af), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-            (NumericDomain::Int(ai), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                let af = Self::arith_i128_to_lossless_f64(ai)
-                    .ok_or_else(|| cannot_apply_without_cast(op_name, ai))?;
-                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-            (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
-                let bf = Self::arith_i128_to_lossless_f64(bi)
-                    .ok_or_else(|| cannot_apply_without_cast(op_name, bi))?;
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
-                let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
-            }
-            (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
-                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                use rust_decimal::prelude::ToPrimitive;
-                let af = ad.to_f64().unwrap_or(0.0);
-                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-            (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let bf = bd.to_f64().unwrap_or(0.0);
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn numeric_div_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
-        Self::dispatch_numeric_binary_with_zero_check(
-            a, b, "/",
-            |a, b| a.checked_div(b),
-            |a, b| a / b,
-            |a, b| a / b,
-        )
-    }
-
-    #[inline(always)]
-    fn numeric_mod_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
-        Self::dispatch_numeric_binary_with_zero_check(
-            a, b, "%",
-            |a, b| a.checked_rem(b),
-            |a, b| a % b,
-            |a, b| a % b,
-        )
-    }
-
-    #[inline(always)]
-    fn checked_pow_i128(mut base: i128, mut exp: u32) -> Option<i128> {
-        let mut out: i128 = 1;
-        while exp > 0 {
-            if (exp & 1) == 1 {
-                out = out.checked_mul(base)?;
-            }
-            exp >>= 1;
-            if exp > 0 {
-                base = base.checked_mul(base)?;
-            }
-        }
-        Some(out)
-    }
-
-    #[inline(always)]
-    fn numeric_pow_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
-        let a_num = match Self::numeric_domain(a) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let b_num = match Self::numeric_domain(b) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        match (a_num, b_num) {
-            (NumericDomain::Int(base), NumericDomain::Int(exp)) => {
-                if exp >= 0 && exp <= u32::MAX as i128 {
-                    let out = Self::checked_pow_i128(base, exp as u32)
-                        .ok_or_else(|| VMError::RuntimeError("Integer overflow in '**'".into()))?;
-                    return Self::integer_result_boxed(out, "**").map(Some);
-                }
-                let base_f = Self::arith_i128_to_lossless_f64(base)
-                    .ok_or_else(|| cannot_apply_without_cast("**", base))?;
-                let exp_f = Self::arith_i128_to_lossless_f64(exp)
-                    .ok_or_else(|| cannot_apply_without_cast("**", exp))?;
-                Ok(Some(ValueWord::from_f64(base_f.powf(exp_f))))
-            }
-            (NumericDomain::Float(base), NumericDomain::Float(exp)) => {
-                Ok(Some(ValueWord::from_f64(base.powf(exp))))
-            }
-            (NumericDomain::Int(base), NumericDomain::Float(exp)) => {
-                let base_f = Self::arith_i128_to_lossless_f64(base)
-                    .ok_or_else(|| cannot_apply_without_cast("**", base))?;
-                Ok(Some(ValueWord::from_f64(base_f.powf(exp))))
-            }
-            (NumericDomain::Float(base), NumericDomain::Int(exp)) => {
-                let exp_f = Self::arith_i128_to_lossless_f64(exp)
-                    .ok_or_else(|| cannot_apply_without_cast("**", exp))?;
-                Ok(Some(ValueWord::from_f64(base.powf(exp_f))))
-            }
-            // Decimal power — convert to f64 for the operation, return decimal
-            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let base_f = ad.to_f64().unwrap_or(0.0);
-                let exp_f = bd.to_f64().unwrap_or(0.0);
-                use rust_decimal::prelude::FromPrimitive;
-                Ok(Some(ValueWord::from_decimal(
-                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
-                )))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Int(exp)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let base_f = ad.to_f64().unwrap_or(0.0);
-                let exp_f = exp as f64;
-                use rust_decimal::prelude::FromPrimitive;
-                Ok(Some(ValueWord::from_decimal(
-                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
-                )))
-            }
-            (NumericDomain::Int(base), NumericDomain::Decimal(bd)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let base_f = base as f64;
-                let exp_f = bd.to_f64().unwrap_or(0.0);
-                use rust_decimal::prelude::FromPrimitive;
-                Ok(Some(ValueWord::from_decimal(
-                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
-                )))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Float(exp)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let base_f = ad.to_f64().unwrap_or(0.0);
-                Ok(Some(ValueWord::from_f64(base_f.powf(exp))))
-            }
-            (NumericDomain::Float(base), NumericDomain::Decimal(bd)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let exp_f = bd.to_f64().unwrap_or(0.0);
-                Ok(Some(ValueWord::from_f64(base.powf(exp_f))))
             }
         }
     }
@@ -1229,460 +979,29 @@ impl VirtualMachine {
         }
     }
 
-    /// Try the arithmetic IC fast path for a binary operation.
+    /// Bitwise dynamic op dispatch: routes BitAnd/BitOr/BitXor/BitShl/BitShr
+    /// to the binary helper and BitNot to the unary helper.
     ///
-    /// If the feedback vector shows a monomorphic I48+I48 or F64+F64 pattern
-    /// and the stack values match, execute the operation directly without
-    /// going through the full generic dispatch. Returns `Some(())` on hit
-    /// (result already pushed), `None` on miss.
+    /// Strict-typing sweep (Phase 2): the arithmetic and comparison `*Dynamic`
+    /// opcodes have been deleted. Bitwise dynamic dispatch remains for the
+    /// (rare) case where the compiler cannot prove `int` operand types and
+    /// so cannot emit `BitAndInt`/etc.
     #[inline(always)]
-    fn try_arithmetic_ic_fast_path(
-        &mut self,
-        i48_op: unsafe fn(&ValueWord, &ValueWord) -> ValueWord,
-        f64_op: fn(f64, f64) -> f64,
-    ) -> Result<Option<()>, VMError> {
-        use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-        use shape_value::tag_bits::TAG_INT;
-
-        let hint = arithmetic_ic_check(self, self.ip);
-        if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-            let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
-            let a = &slice[0];
-            let b = &slice[1];
-            if a.is_i64() && b.is_i64() {
-                let result = unsafe { i48_op(a, b) };
-                self.sp -= 2;
-                let ip = self.ip;
-                if let Some(fv) = self.current_feedback_vector() {
-                    fv.record_arithmetic(ip, TAG_INT as u8, TAG_INT as u8);
-                }
-                self.push_raw_u64(result)?;
-                return Ok(Some(()));
-            }
-        } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-            let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
-            let a = &slice[0];
-            let b = &slice[1];
-            if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-                self.sp -= 2;
-                let ip = self.ip;
-                if let Some(fv) = self.current_feedback_vector() {
-                    fv.record_arithmetic(ip, 0xFF, 0xFF);
-                }
-                self.push_raw_u64(ValueWord::from_f64(f64_op(af, bf)))?;
-                return Ok(Some(()));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Dynamic arithmetic dispatch for `*Dynamic` opcodes only.
-    ///
-    /// Post-R5.6: user operator traits, DateTime arithmetic, Matrix/Vec
-    /// arithmetic, and typed string+scalar concat are all retargeted at
-    /// compile time to dedicated opcodes / method dispatch / intrinsic
-    /// calls, so the Dynamic path is only reached for:
-    ///
-    ///   * (int, int) / (f64, f64) / (decimal, decimal) numeric
-    ///     arithmetic where the compiler could not prove types
-    ///     (polyglot / comptime / unresolved type-vars).
-    ///   * (string, string | char) concat on Add.
-    ///   * Live mixed-heap shapes that have no typed retarget yet:
-    ///     `Vec<int> + Vec<number>`, `Matrix * Vec<number>`, vector and
-    ///     matrix scalar-broadcasts.
-    ///   * The string+scalar residual paths documented on the heap-arm
-    ///     match below (flag-off / commutative / untyped-param).
-    ///
-    /// See the module-level docstring for the full R5 retarget set.
-    #[inline(always)]
-    pub(in crate::executor) fn exec_arithmetic_dynamic_fallback(
+    pub(in crate::executor) fn exec_dyn_bit_dispatch(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
-            AddDynamic => {
-                if self
-                    .try_arithmetic_ic_fast_path(ValueWord::add_i64, |a, b| a + b)?
-                    .is_some()
-                {
-                    return Ok(());
-                }
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                {
-                    let ip = self.ip;
-                    if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
-                    }
-                }
-                if let Some(result) = Self::numeric_binary_result(
-                    &a_nb,
-                    &b_nb,
-                    "+",
-                    |a, b| a.checked_add(b),
-                    |a, b| a + b,
-                )? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) = Self::try_string_concat(&a_nb, &b_nb) {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Add, &a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '+' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
-            SubDynamic => {
-                if self
-                    .try_arithmetic_ic_fast_path(ValueWord::sub_i64, |a, b| a - b)?
-                    .is_some()
-                {
-                    return Ok(());
-                }
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                {
-                    let ip = self.ip;
-                    if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
-                    }
-                }
-                if let Some(result) = Self::numeric_binary_result(
-                    &a_nb,
-                    &b_nb,
-                    "-",
-                    |a, b| a.checked_sub(b),
-                    |a, b| a - b,
-                )? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Sub, &a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '-' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
-            MulDynamic => {
-                if self
-                    .try_arithmetic_ic_fast_path(ValueWord::mul_i64, |a, b| a * b)?
-                    .is_some()
-                {
-                    return Ok(());
-                }
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                {
-                    let ip = self.ip;
-                    if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
-                    }
-                }
-                if let Some(result) = Self::numeric_binary_result(
-                    &a_nb,
-                    &b_nb,
-                    "*",
-                    |a, b| a.checked_mul(b),
-                    |a, b| a * b,
-                )? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Mul, &a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '*' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
-            DivDynamic => {
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                if let Some(result) = Self::numeric_div_result(&a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                if let Some(result) = self.try_heap_arithmetic(HeapBinOp::Div, &a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '/' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
-            ModDynamic => {
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                if let Some(result) = Self::numeric_mod_result(&a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '%' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
-            PowDynamic => {
-                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
-                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
-                if let Some(result) = Self::numeric_pow_result(&a_nb, &b_nb)? {
-                    return self.push_raw_u64(result);
-                }
-                Err(VMError::RuntimeError(format!(
-                    "Cannot apply '**' to {} and {}",
-                    a_nb.type_name(),
-                    b_nb.type_name()
-                )))
-            }
             BitXor | BitAnd | BitOr | BitShl | BitShr => {
                 self.exec_dyn_bit_binary(instruction.opcode)
             }
             BitNot => self.exec_dyn_bit_unary(),
             _ => unreachable!(
-                "exec_arithmetic_dynamic_fallback called with non-arithmetic opcode: {:?}",
+                "exec_dyn_bit_dispatch called with non-bitwise opcode: {:?}",
                 instruction.opcode
             ),
         }
-    }
-
-    /// String / char concat fallback used by `AddDynamic`.
-    fn try_string_concat(a: &ValueWord, b: &ValueWord) -> Option<ValueWord> {
-        let (Some(a_heap), Some(b_heap)) = (unsafe {
-            raw_helpers::extract_heap_ref(a.raw_bits())
-        }, unsafe {
-            raw_helpers::extract_heap_ref(b.raw_bits())
-        }) else {
-            return None;
-        };
-        let s = match (a_heap, b_heap) {
-            (HeapValue::String(x), HeapValue::String(y)) => format!("{}{}", x, y),
-            (HeapValue::String(x), HeapValue::Char(c)) => format!("{}{}", x, c),
-            (HeapValue::Char(c), HeapValue::String(y)) => format!("{}{}", c, y),
-            (HeapValue::Char(a), HeapValue::Char(b)) => format!("{}{}", a, b),
-            _ => return None,
-        };
-        Some(ValueWord::from_string(Arc::new(s)))
-    }
-
-    /// Heap-typed arithmetic paths that remain live after R5.6.
-    ///
-    /// After R5.1-R5.5 retargeted the load-bearing typed cases (typed
-    /// bitwise, user operator traits, DateTime, Matrix/Vec, string+scalar),
-    /// the only arms that still legitimately fire here are the ones the
-    /// compiler does not yet retarget:
-    ///
-    ///   * `Vec<int> + Vec<number>` / `Vec<number> + Vec<int>` — mixed-
-    ///     kind promotion, not in R5.4's retarget set.
-    ///   * `Matrix * Vec<number>` — mixed heap-kind dispatch.
-    ///   * `Vec<number> op scalar` / `scalar op Vec<number>` broadcast.
-    ///   * `Matrix * scalar` / `scalar * Matrix` broadcast.
-    ///   * `string + scalar` residual paths (flag-off, commutative
-    ///     `scalar + string`, and untyped-param sites); see R5.5.
-    ///
-    /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.6.
-    fn try_heap_arithmetic(
-        &mut self,
-        op: HeapBinOp,
-        a: &ValueWord,
-        b: &ValueWord,
-    ) -> Result<Option<ValueWord>, VMError> {
-        use HeapBinOp::*;
-        let ah = unsafe { raw_helpers::extract_heap_ref(a.raw_bits()) };
-        let bh = unsafe { raw_helpers::extract_heap_ref(b.raw_bits()) };
-        // Case 1: both heap — remaining live mixed-kind shapes.
-        if let (Some(ah), Some(bh)) = (ah, bh) {
-            match (op, ah, bh) {
-                // DateTime +/- TimeSpan / TimeSpan +/- TimeSpan / DateTime - DateTime.
-                //
-                // R5.3B's typed-retarget fires for let-locals and typed function
-                // parameters, but not for untyped function returns (where
-                // `make_dt()` returns a DateTime without the compiler tracking
-                // the return type). These arms catch that residual case.
-                (
-                    Add,
-                    HeapValue::Temporal(TemporalData::DateTime(dt)),
-                    HeapValue::Temporal(TemporalData::TimeSpan(dur)),
-                )
-                | (
-                    Add,
-                    HeapValue::Temporal(TemporalData::TimeSpan(dur)),
-                    HeapValue::Temporal(TemporalData::DateTime(dt)),
-                ) => {
-                    let out = dt.checked_add_signed(*dur).ok_or_else(|| {
-                        VMError::RuntimeError("DateTime overflow in addition".into())
-                    })?;
-                    return Ok(Some(ValueWord::from_time(out)));
-                }
-                (
-                    Add,
-                    HeapValue::Temporal(TemporalData::TimeSpan(a_dur)),
-                    HeapValue::Temporal(TemporalData::TimeSpan(b_dur)),
-                ) => {
-                    let out = a_dur.checked_add(b_dur).ok_or_else(|| {
-                        VMError::RuntimeError("Duration overflow in addition".into())
-                    })?;
-                    return Ok(Some(ValueWord::from_timespan(out)));
-                }
-                (
-                    Sub,
-                    HeapValue::Temporal(TemporalData::DateTime(dt)),
-                    HeapValue::Temporal(TemporalData::TimeSpan(dur)),
-                ) => {
-                    let out = dt.checked_sub_signed(*dur).ok_or_else(|| {
-                        VMError::RuntimeError("DateTime overflow in subtraction".into())
-                    })?;
-                    return Ok(Some(ValueWord::from_time(out)));
-                }
-                (
-                    Sub,
-                    HeapValue::Temporal(TemporalData::DateTime(a_dt)),
-                    HeapValue::Temporal(TemporalData::DateTime(b_dt)),
-                ) => {
-                    return Ok(Some(ValueWord::from_timespan(a_dt.signed_duration_since(*b_dt))));
-                }
-                (
-                    Sub,
-                    HeapValue::Temporal(TemporalData::TimeSpan(a_dur)),
-                    HeapValue::Temporal(TemporalData::TimeSpan(b_dur)),
-                ) => {
-                    let out = a_dur.checked_sub(b_dur).ok_or_else(|| {
-                        VMError::RuntimeError("Duration overflow in subtraction".into())
-                    })?;
-                    return Ok(Some(ValueWord::from_timespan(out)));
-                }
-                // Vec<int> + Vec<number> / Vec<number> + Vec<int> — promote to f64
-                (
-                    Add,
-                    HeapValue::TypedArray(TypedArrayData::I64(a_arr)),
-                    HeapValue::TypedArray(TypedArrayData::F64(b_arr)),
-                ) => {
-                    if a_arr.len() != b_arr.len() {
-                        return Err(VMError::RuntimeError(format!(
-                            "Vec length mismatch: {} vs {}", a_arr.len(), b_arr.len()
-                        )));
-                    }
-                    let af = shape_runtime::intrinsics::vector::i64_slice_to_f64(a_arr.as_slice());
-                    let r = shape_runtime::intrinsics::vector::simd_vec_add_f64(&af, b_arr.as_slice());
-                    return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                }
-                (
-                    Add,
-                    HeapValue::TypedArray(TypedArrayData::F64(a_arr)),
-                    HeapValue::TypedArray(TypedArrayData::I64(b_arr)),
-                ) => {
-                    if a_arr.len() != b_arr.len() {
-                        return Err(VMError::RuntimeError(format!(
-                            "Vec length mismatch: {} vs {}", a_arr.len(), b_arr.len()
-                        )));
-                    }
-                    let bf = shape_runtime::intrinsics::vector::i64_slice_to_f64(b_arr.as_slice());
-                    let r = shape_runtime::intrinsics::vector::simd_vec_add_f64(a_arr.as_slice(), &bf);
-                    return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                }
-                // Matrix * Vec<number>
-                (
-                    Mul,
-                    HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)),
-                    HeapValue::TypedArray(TypedArrayData::F64(b_arr)),
-                ) => {
-                    let r = shape_runtime::intrinsics::matrix_kernels::matrix_matvec(
-                        a_mat, b_arr.as_slice(),
-                    )
-                    .map_err(VMError::RuntimeError)?;
-                    return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                }
-                _ => {}
-            }
-        }
-        // Case 2: one heap, one scalar (broadcast / coerce).
-        if let Some(ah) = ah {
-            match (op, ah) {
-                // Vec<number> op scalar — broadcast SIMD
-                (_, HeapValue::TypedArray(TypedArrayData::F64(a_arr))) => {
-                    if let Some(s) = b.as_number_coerce() {
-                        let bv = vec![s; a_arr.len()];
-                        let r = match op {
-                            Add => shape_runtime::intrinsics::vector::simd_vec_add_f64(a_arr.as_slice(), &bv),
-                            Sub => shape_runtime::intrinsics::vector::simd_vec_sub_f64(a_arr.as_slice(), &bv),
-                            Mul => shape_runtime::intrinsics::vector::simd_vec_mul_f64(a_arr.as_slice(), &bv),
-                            Div => shape_runtime::intrinsics::vector::simd_vec_div_f64(a_arr.as_slice(), &bv),
-                            _ => return Ok(None),
-                        };
-                        return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                    }
-                }
-                // Matrix op scalar (right scalar)
-                (_, HeapValue::TypedArray(TypedArrayData::Matrix(a_mat))) => {
-                    if let Some(s) = b.as_number_coerce() {
-                        let r = match op {
-                            Mul => shape_runtime::intrinsics::matrix_kernels::matrix_scale(a_mat, s),
-                            _ => return Ok(None),
-                        };
-                        return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
-                    }
-                }
-                // string + scalar (int/number) concat.
-                //
-                // R5.5 retargeted the proved `string` LHS + `int` / `number`
-                // / `bool` RHS path to dedicated `StringConcatInt` /
-                // `StringConcatNumber` / `StringConcatBool` opcodes. This
-                // arm remains reachable for:
-                //   - `SHAPE_V2_STRING_COERCE_CONCAT=0` (flag-off fallback).
-                //   - Commutative `scalar + string` (typed path only covers
-                //     string-LHS).
-                //   - Paths where the compiler fails to resolve the operand
-                //     type name (untyped params / certain generic contexts).
-                (Add, HeapValue::String(s)) => {
-                    if let Some(i) = b.as_i64() {
-                        return Ok(Some(ValueWord::from_string(Arc::new(format!("{}{}", s, i)))));
-                    }
-                    if let Some(n) = b.as_f64() {
-                        let n_str = if n.fract() == 0.0 {
-                            format!("{}", n as i64)
-                        } else {
-                            format!("{}", n)
-                        };
-                        return Ok(Some(ValueWord::from_string(Arc::new(format!("{}{}", s, n_str)))));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(bh) = bh {
-            match (op, bh) {
-                // scalar op Vec<number> — broadcast SIMD
-                (_, HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
-                    if let Some(s) = a.as_number_coerce() {
-                        let av = vec![s; b_arr.len()];
-                        let r = match op {
-                            Add => shape_runtime::intrinsics::vector::simd_vec_add_f64(&av, b_arr.as_slice()),
-                            Sub => shape_runtime::intrinsics::vector::simd_vec_sub_f64(&av, b_arr.as_slice()),
-                            Mul => shape_runtime::intrinsics::vector::simd_vec_mul_f64(&av, b_arr.as_slice()),
-                            Div => shape_runtime::intrinsics::vector::simd_vec_div_f64(&av, b_arr.as_slice()),
-                            _ => return Ok(None),
-                        };
-                        return Ok(Some(ValueWord::from_float_array(Arc::new(r.into()))));
-                    }
-                }
-                // scalar * Matrix (left scalar)
-                (Mul, HeapValue::TypedArray(TypedArrayData::Matrix(b_mat))) => {
-                    if let Some(s) = a.as_number_coerce() {
-                        let r = shape_runtime::intrinsics::matrix_kernels::matrix_scale(b_mat, s);
-                        return Ok(Some(ValueWord::from_matrix(Arc::new(r))));
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(None)
     }
 
     /// Bitwise binary op fallback; int+int only.
@@ -1746,7 +1065,7 @@ mod tests {
         program.instructions = vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
-            Instruction::simple(OpCode::AddDynamic),
+            Instruction::simple(OpCode::StringConcatTyped),
             Instruction::simple(OpCode::Halt),
         ];
 

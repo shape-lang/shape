@@ -238,15 +238,8 @@ fn test_r5_2a_user_add_compiles_to_call_method_not_add_dynamic() {
     // because both operands are proven `number`. So scanning the whole vector
     // for `AddDynamic` is sufficient here; any future regression in the user-
     // trait retarget would surface as `AddDynamic` in this program.
-    assert!(
-        !ops.contains(&OpCode::AddDynamic),
-        "R5.2A regression: user-defined `impl Add for Vec2` fell through to \
-         AddDynamic instead of being retargeted to CallMethod at compile time. \
-         Ops emitted: {:?}",
-        ops
-    );
-
-    // `CallMethod` must appear at least once — for the top-level `a + b`.
+    // Phase 2: the `AddDynamic` opcode no longer exists; the only post-Phase-2
+    // signal that the retarget fired is the presence of `CallMethod`.
     let call_method_count = ops.iter().filter(|&&o| o == OpCode::CallMethod).count();
     assert!(
         call_method_count >= 1,
@@ -319,13 +312,8 @@ fn test_r5_2b_user_add_retargets_single_schema_fallback() {
     // whole instruction vector is safe: every `+` inside `Vec2::add`
     // operates on proven-numeric operands and emits `AddNumber`; any
     // `AddDynamic` would be the R5.2B gap regressing.
-    assert!(
-        !ops.contains(&OpCode::AddDynamic),
-        "R5.2B regression: Add branch's CoercedNeedsGeneric | NoPlan arm \
-         fell through to AddDynamic instead of retargeting to CallMethod. \
-         Ops emitted: {:?}",
-        ops
-    );
+    // Phase 2: the `AddDynamic` opcode no longer exists; the only post-Phase-2
+    // signal that the retarget fired is the presence of `CallMethod`.
 
     // `CallMethod` must appear at least once — for the top-level
     // `a + { ... }` retargeted to `a.add(rhs)`.
@@ -388,13 +376,7 @@ fn test_r5_3b_datetime_arithmetic_retargets_to_call_method() {
             "#,
         );
         let ops = all_opcodes(&program);
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "R5.3B regression: let-local DateTime + Duration fell through \
-             to AddDynamic instead of retargeting to CallMethod. \
-             Ops emitted: {:?}",
-            ops
-        );
+        // Phase 2: `*Dynamic` opcodes deleted; CallMethod presence is the signal.
         assert!(
             ops.contains(&OpCode::CallMethod),
             "R5.3B regression: let-local DateTime + Duration did not emit \
@@ -418,13 +400,6 @@ fn test_r5_3b_datetime_arithmetic_retargets_to_call_method() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            !ops.contains(&OpCode::SubDynamic),
-            "R5.3B regression: typed-param DateTime - Duration fell through \
-             to SubDynamic instead of retargeting to CallMethod. \
-             Ops emitted: {:?}",
-            ops
-        );
-        assert!(
             ops.contains(&OpCode::CallMethod),
             "R5.3B regression: typed-param DateTime - Duration did not emit \
              CallMethod. Ops emitted: {:?}",
@@ -444,13 +419,6 @@ fn test_r5_3b_datetime_arithmetic_retargets_to_call_method() {
             "#,
         );
         let ops = all_opcodes(&program);
-        assert!(
-            !ops.contains(&OpCode::SubDynamic),
-            "R5.3B regression: typed-param DateTime - DateTime fell through \
-             to SubDynamic instead of retargeting to CallMethod. \
-             Ops emitted: {:?}",
-            ops
-        );
         assert!(
             ops.contains(&OpCode::CallMethod),
             "R5.3B regression: typed-param DateTime - DateTime did not emit \
@@ -529,12 +497,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
              Ops emitted: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "R5.4E retarget: Mat+Mat must NOT emit AddDynamic after the \
-             compile-time retarget. Ops emitted: {:?}",
-            ops
-        );
     }
 
     // Case 2: `Mat<number> - Mat<number>` → IntrinsicMatSub.
@@ -549,12 +511,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
             has_builtin_call(&program, BuiltinFunction::IntrinsicMatSub),
             "R5.4E retarget: Mat-Mat must emit BuiltinCall(IntrinsicMatSub). \
              Ops emitted: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::SubDynamic),
-            "R5.4E retarget: Mat-Mat must NOT emit SubDynamic after the \
-             compile-time retarget. Ops emitted: {:?}",
             ops
         );
     }
@@ -573,12 +529,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
              BuiltinCall(IntrinsicVecAdd). Ops emitted: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "R5.4E retarget: Vec<number>+Vec<number> must NOT emit \
-             AddDynamic after the compile-time retarget. Ops emitted: {:?}",
-            ops
-        );
     }
 
     // Case 4: `Vec<number> - Vec<number>` → IntrinsicVecSub.
@@ -593,12 +543,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
             has_builtin_call(&program, BuiltinFunction::IntrinsicVecSub),
             "R5.4E retarget: Vec<number>-Vec<number> must emit \
              BuiltinCall(IntrinsicVecSub). Ops emitted: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::SubDynamic),
-            "R5.4E retarget: Vec<number>-Vec<number> must NOT emit \
-             SubDynamic after the compile-time retarget. Ops emitted: {:?}",
             ops
         );
     }
@@ -620,12 +564,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
              BuiltinCall(IntrinsicVecMul). Ops emitted: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::MulDynamic),
-            "R5.4E retarget: Vec<number>*Vec<number> must NOT emit \
-             MulDynamic after the compile-time retarget. Ops emitted: {:?}",
-            ops
-        );
     }
 
     // Case 6: `Vec<number> / Vec<number>` → IntrinsicVecDiv.
@@ -640,12 +578,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
             has_builtin_call(&program, BuiltinFunction::IntrinsicVecDiv),
             "R5.4E retarget: Vec<number>/Vec<number> must emit \
              BuiltinCall(IntrinsicVecDiv). Ops emitted: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::DivDynamic),
-            "R5.4E retarget: Vec<number>/Vec<number> must NOT emit \
-             DivDynamic after the compile-time retarget. Ops emitted: {:?}",
             ops
         );
     }
@@ -665,12 +597,6 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
             has_builtin_call(&program, BuiltinFunction::IntrinsicVecAddI64),
             "R5.4E retarget: Vec<int>+Vec<int> must emit \
              BuiltinCall(IntrinsicVecAddI64). Ops emitted: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "R5.4E retarget: Vec<int>+Vec<int> must NOT emit AddDynamic \
-             after the compile-time retarget. Ops emitted: {:?}",
             ops
         );
     }

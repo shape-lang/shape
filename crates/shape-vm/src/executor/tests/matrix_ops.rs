@@ -342,66 +342,13 @@ fn test_matrix_inverse() {
 // Arithmetic operators
 // ============================================================
 
-// R5.6: `Mat+Mat`, `Mat-Mat`, `Mat*Mat` via the dynamic-fallback match
-// arms were deleted because the compiler retargets those shapes to
-// `BuiltinCall(IntrinsicMat*)` at compile time (R5.4E). Runtime coverage
-// is provided end-to-end by `test_r5_4e_mat_add_runtime_returns_correct_values`
-// and the kernel-level tests in
-// `shape-runtime::intrinsics::matrix_kernels::tests`.
-
-#[test]
-fn test_matrix_scale_right() {
-    // [[1,2],[3,4]] * 2.0 => [[2,4],[6,8]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-        Constant::Number(2.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(&mat.data[..], &[2.0, 4.0, 6.0, 8.0]);
-}
-
-#[test]
-fn test_matrix_scale_left() {
-    // 3.0 * [[1,2],[3,4]] => [[3,6],[9,12]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Number(3.0),
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let mat = result.as_matrix().unwrap();
-    assert_eq!(&mat.data[..], &[3.0, 6.0, 9.0, 12.0]);
-}
-
-#[test]
-fn test_matrix_matvec() {
-    // [[1,2],[3,4]] * FloatArray([1, 1]) => FloatArray([3, 7])
-    let mut vec_data = AlignedVec::with_capacity(2);
-    vec_data.push(1.0);
-    vec_data.push(1.0);
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::MulDynamic),
-    ];
-    let constants = vec![
-        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-        Constant::Value(ValueWord::from_float_array(Arc::new(vec_data.into()))),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(&arr[..], &[3.0, 7.0]);
-}
+// R5.6 + Strict-typing-sweep Phase 2: `Mat+Mat`, `Mat-Mat`, `Mat*Mat`,
+// `Mat * scalar`, `scalar * Mat`, and `Mat * FloatArray` dynamic-dispatch
+// runtime paths were deleted with the `*Dynamic` opcodes. The compiler
+// retargets these shapes to `BuiltinCall(IntrinsicMat*)` at compile time
+// (R5.4E). Runtime coverage lives in
+// `test_r5_4e_mat_add_runtime_returns_correct_values` and the kernel-level
+// tests in `shape-runtime::intrinsics::matrix_kernels::tests`.
 
 // ============================================================
 // Non-square matrix operations

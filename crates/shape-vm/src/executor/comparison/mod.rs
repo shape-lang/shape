@@ -2,36 +2,23 @@
 //!
 //! Handles: Gt, Lt, Gte, Lte, Eq, Neq
 //!
-//! # Dynamic fallback
+//! Strict-typing sweep (Phase 2): the `*Dynamic` comparison opcodes
+//! (`GtDynamic`, `LtDynamic`, `EqDynamic`, ...) and their executor
+//! fallback (`exec_comparison_dynamic_fallback`) have been deleted.
+//! Compile-time type proof now drives every comparison path:
 //!
-//! The [`exec_comparison_dynamic_fallback`] handler only services the
-//! `*Dynamic` opcodes (`GtDynamic`, `LtDynamic`, ...). The V3 compiler
-//! migration (see `emit_binary_op` in
-//! `crates/shape-runtime/src/compiler/expressions/binary_ops.rs`) routes every
-//! compiled comparison site through a shim that emits typed opcodes when the
-//! compiler can prove both operand types. The only remaining emitters of the
-//! Dynamic variants are the three class-(a)/(b) sites audited in commit
-//! `c1d7727` (V3.6) — polyglot boundaries, comptime evaluation, and a small
-//! set of pattern/prelude paths.
-//!
-//! No class-(c) compiler bugs remained after V3.6. Typed code never reaches
-//! the dispatch in this file. The handler name is suffixed
-//! `_dynamic_fallback` to make that contract visible at every call site.
-//!
-//! # Typed path
-//!
-//! Typed opcodes (`GtInt`, `GtNumber`, `EqString`, ...) live in
-//! `exec_typed_comparison` and are the hot path for production code.
+//! - Typed opcodes (`GtInt`, `GtNumber`, `EqString`, ...) live in
+//!   `exec_typed_comparison` and are the only path in production code.
+//! - Compact/width-parameterised typed comparisons live in
+//!   `exec_compact_typed_arithmetic` / `CmpTyped`.
 
 use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
 use shape_value::value_word_drop::vw_drop;
-use shape_value::{FilterLiteral, FilterNode, FilterOp, VMError, ValueWord, ValueWordExt};
-use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP, TAG_REF};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 use crate::constants::EXACT_F64_INT_LIMIT;
 
@@ -91,56 +78,6 @@ impl VirtualMachine {
         }
 
         None
-    }
-
-    /// Try to build a FilterExpr from an ExprProxy comparison (ValueWord-native).
-    /// Returns Some(ValueWord) if one operand is ExprProxy and the other is a literal.
-    fn try_nb_expr_proxy_compare(a: &ValueWord, b: &ValueWord, op: FilterOp) -> Option<ValueWord> {
-        // ExprProxy op Literal
-        if let Some(col) = a.as_expr_proxy() {
-            if let Some(lit) = Self::nb_to_filter_literal(b) {
-                return Some(ValueWord::from_filter_expr(Arc::new(FilterNode::Compare {
-                    column: col.as_ref().clone(),
-                    op,
-                    value: lit,
-                })));
-            }
-        }
-        // Literal op ExprProxy -> flip
-        if let Some(col) = b.as_expr_proxy() {
-            if let Some(lit) = Self::nb_to_filter_literal(a) {
-                let flipped_op = match op {
-                    FilterOp::Gt => FilterOp::Lt,
-                    FilterOp::Lt => FilterOp::Gt,
-                    FilterOp::Gte => FilterOp::Lte,
-                    FilterOp::Lte => FilterOp::Gte,
-                    FilterOp::Eq => FilterOp::Eq,
-                    FilterOp::Neq => FilterOp::Neq,
-                };
-                return Some(ValueWord::from_filter_expr(Arc::new(FilterNode::Compare {
-                    column: col.as_ref().clone(),
-                    op: flipped_op,
-                    value: lit,
-                })));
-            }
-        }
-        None
-    }
-
-    /// Convert a ValueWord to a FilterLiteral (for SQL pushdown)
-    fn nb_to_filter_literal(value: &ValueWord) -> Option<FilterLiteral> {
-        let bits = value.raw_bits();
-        if !is_tagged(bits) {
-            return value.as_f64().map(FilterLiteral::Float);
-        }
-        match get_tag(bits) {
-            TAG_INT => Some(FilterLiteral::Int(value.as_i64().unwrap_or(0))),
-            TAG_BOOL => Some(FilterLiteral::Bool(value.as_bool().unwrap_or(false))),
-            TAG_NONE => Some(FilterLiteral::Null),
-            TAG_HEAP => value.as_str().map(|s| FilterLiteral::String(s.to_string())),
-            TAG_REF => None,
-            _ => None,
-        }
     }
 
     /// Execute typed comparison opcodes (compiler-guaranteed types, zero dispatch)
@@ -439,93 +376,6 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Dynamic comparison dispatch for `*Dynamic` opcodes only.
-    ///
-    /// Services the polyglot / comptime / untyped callers described in the
-    /// module-level rustdoc. Typed comparison opcodes (`GtInt`, `EqString`,
-    /// ...) do NOT reach this function — see V3.6 audit (commit `c1d7727`)
-    /// and `emit_binary_op` in the compiler.
-    #[inline(always)]
-    pub(in crate::executor) fn exec_comparison_dynamic_fallback(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        use OpCode::*;
-        match instruction.opcode {
-            GtDynamic => self.dyn_ord_cmp(FilterOp::Gt, ">", |o| o == Ordering::Greater, |a, b| a > b)?,
-            LtDynamic => self.dyn_ord_cmp(FilterOp::Lt, "<", |o| o == Ordering::Less, |a, b| a < b)?,
-            GteDynamic => self.dyn_ord_cmp(
-                FilterOp::Gte,
-                ">=",
-                |o| o == Ordering::Greater || o == Ordering::Equal,
-                |a, b| a >= b,
-            )?,
-            LteDynamic => self.dyn_ord_cmp(
-                FilterOp::Lte,
-                "<=",
-                |o| o == Ordering::Less || o == Ordering::Equal,
-                |a, b| a <= b,
-            )?,
-            EqDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                // Check ExprProxy first (rare SQL pushdown path)
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Eq) {
-                    self.push_raw_u64(expr)?;
-                } else {
-                    // vw_equals handles all types including heap (String, Array, Decimal, etc.)
-                    self.push_raw_bool(a_nb.vw_equals(&b_nb))?;
-                }
-            }
-            NeqDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Neq) {
-                    self.push_raw_u64(expr)?;
-                } else {
-                    self.push_raw_bool(!a_nb.vw_equals(&b_nb))?;
-                }
-            }
-            _ => unreachable!(
-                "exec_comparison_dynamic_fallback called with non-comparison opcode: {:?}",
-                instruction.opcode
-            ),
-        }
-        Ok(())
-    }
-
-    /// Shared ordered-compare helper for `Gt/Lt/Gte/Lte Dynamic`.
-    ///
-    /// Attempts in order: (1) `ExprProxy` SQL pushdown, (2) numeric
-    /// comparison (covers int/int, f64/f64, decimal/decimal), (3) lex string
-    /// comparison, (4) type error. The `ord_pred` closure turns a numeric
-    /// `Ordering` into a bool; `str_pred` is the direct string predicate.
-    #[inline]
-    fn dyn_ord_cmp(
-        &mut self,
-        op: FilterOp,
-        sym: &'static str,
-        ord_pred: impl FnOnce(Ordering) -> bool,
-        str_pred: impl FnOnce(&str, &str) -> bool,
-    ) -> Result<(), VMError> {
-        let b = self.pop_raw_u64()?;
-        let a = self.pop_raw_u64()?;
-        if let Some(expr) = Self::try_nb_expr_proxy_compare(&a, &b, op) {
-            return self.push_raw_u64(expr);
-        }
-        if let Some(ord) = Self::nb_compare_numeric(&a, &b) {
-            return self.push_raw_bool(ord_pred(ord));
-        }
-        if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
-            return self.push_raw_bool(str_pred(a_str, b_str));
-        }
-        Err(VMError::RuntimeError(format!(
-            "Cannot compare '{}' on {} and {}",
-            sym,
-            a.type_name(),
-            b.type_name()
-        )))
-    }
 }
 
 #[cfg(test)]

@@ -99,7 +99,7 @@ fn test_decimal_mod() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 10D
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3D
-        Instruction::simple(OpCode::ModDynamic),
+        Instruction::simple(OpCode::ModDecimal),
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![
@@ -114,23 +114,10 @@ fn test_decimal_mod() {
     );
 }
 
-#[test]
-fn test_decimal_mod_with_int() {
-    // 10D % 3 => 1D
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 10D
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3
-        Instruction::simple(OpCode::ModDynamic),
-        Instruction::simple(OpCode::Halt),
-    ];
-    let constants = vec![Constant::Decimal(Decimal::from(10)), Constant::Int(3)];
-
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(
-        result.as_decimal().expect("Expected Decimal"),
-        Decimal::from(1)
-    );
-}
+// RETIRED: test_decimal_mod_with_int — strict-typing sweep deleted the
+// `ModDynamic` opcode; mixed Decimal+Int arithmetic no longer has a runtime
+// coercion path (CLAUDE.md "NO runtime coercion" rule). Compile-time
+// `as decimal` cast is required.
 
 // ===== TypedObject storage/retrieval with Decimal =====
 

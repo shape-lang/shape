@@ -493,26 +493,33 @@ fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option
     Some(matched)
 }
 
-/// Map a `BinaryOp` to its `Dynamic`-family opcode. Returns `None` for ops
-/// that are NOT arithmetic/comparison (And/Or/BitOps/NullCoalesce/…) —
-/// those follow a separate code path in `compile_expr_binary_op`.
-fn dynamic_opcode_for(op: shape_ast::ast::BinaryOp) -> Option<OpCode> {
+/// Predicate: is `op` an arithmetic or comparison operator that
+/// `emit_binary_op` is responsible for emitting?
+///
+/// Returns `false` for And/Or (short-circuit), bitwise (separate path),
+/// NullCoalesce/ErrorContext/Pipe/Fuzzy* (dedicated emission paths).
+///
+/// Strict-typing sweep (Phase 2): the `*Dynamic` opcode family was deleted,
+/// so this helper just selects which BinaryOps the typed-emission shim
+/// handles. Previously this was `dynamic_opcode_for` returning the
+/// `*Dynamic` opcode; the same set of ops is the shim's responsibility.
+fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
     use shape_ast::ast::BinaryOp;
-    Some(match op {
-        BinaryOp::Add => OpCode::AddDynamic,
-        BinaryOp::Sub => OpCode::SubDynamic,
-        BinaryOp::Mul => OpCode::MulDynamic,
-        BinaryOp::Div => OpCode::DivDynamic,
-        BinaryOp::Mod => OpCode::ModDynamic,
-        BinaryOp::Pow => OpCode::PowDynamic,
-        BinaryOp::Greater => OpCode::GtDynamic,
-        BinaryOp::Less => OpCode::LtDynamic,
-        BinaryOp::GreaterEq => OpCode::GteDynamic,
-        BinaryOp::LessEq => OpCode::LteDynamic,
-        BinaryOp::Equal => OpCode::EqDynamic,
-        BinaryOp::NotEqual => OpCode::NeqDynamic,
-        _ => return None,
-    })
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow
+            | BinaryOp::Greater
+            | BinaryOp::Less
+            | BinaryOp::GreaterEq
+            | BinaryOp::LessEq
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+    )
 }
 
 /// Phase V3.1: unified typed-vs-dynamic binary-op emission shim.
@@ -576,9 +583,9 @@ pub(in crate::compiler) fn emit_binary_op(
     // Non-arithmetic / non-comparison ops are not the shim's responsibility.
     // And/Or short-circuit, bitwise ops emit dedicated opcodes, NullCoalesce
     // has its own jump sequence, etc.
-    let Some(dyn_opcode) = dynamic_opcode_for(op) else {
+    if !is_arith_or_cmp_op(op) {
         return Ok(false);
-    };
+    }
 
     // Priority 1: both operands are proven same numeric type — emit typed.
     if let (BinOperandKind::Numeric(lnt), BinOperandKind::Numeric(rnt)) = (lhs, rhs) {
@@ -620,23 +627,11 @@ pub(in crate::compiler) fn emit_binary_op(
         return Ok(true);
     }
 
-    // Fallback: emit the Dynamic-family opcode. This is the post-V3 home of
-    // the state-reset discipline that used to live in the per-op
-    // `emit_dynamic_*` helpers (deleted in V3.6). See the function-level
-    // rustdoc for the residual-emission audit (class-(a) polyglot / class-(b)
-    // comptime only; zero class-(c) inference bugs).
-    #[cfg(feature = "audit-dynamic-fallback")]
-    {
-        eprintln!(
-            "emit_binary_op: Dynamic fallback for {:?} (lhs={:?}, rhs={:?})",
-            op, lhs, rhs,
-        );
-    }
-    compiler.emit(Instruction::simple(dyn_opcode));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-    Ok(true)
+    // Strict-typing sweep (Phase 1+2): the `*Dynamic` opcode family was
+    // deleted. When the shim cannot pick a typed opcode it returns
+    // `Ok(false)` so the caller can route to a typed-error or a dedicated
+    // emission path (operator-trait dispatch, intrinsic retarget, etc.).
+    Ok(false)
 }
 
 /// Extract the core error message from a ShapeError, stripping redundant
@@ -1086,12 +1081,6 @@ impl BytecodeCompiler {
                         | OpCode::EqString
                         | OpCode::EqDecimal
                         | OpCode::IsNull
-                        | OpCode::GtDynamic
-                        | OpCode::LtDynamic
-                        | OpCode::GteDynamic
-                        | OpCode::LteDynamic
-                        | OpCode::EqDynamic
-                        | OpCode::NeqDynamic
                         | OpCode::Not
                 )
             })
@@ -3464,68 +3453,68 @@ mod tests {
         }
     }
 
+    // RETIRED (strict-typing sweep Phase 2):
+    // - emit_binary_op_lhs_known_rhs_unknown_emits_dynamic
+    // - emit_binary_op_both_unknown_emits_dynamic
+    // - emit_binary_op_mismatched_numeric_types_emits_dynamic
+    // The `*Dynamic` opcode family was deleted; the shim now returns
+    // Ok(false) for these cases so the caller can route to a typed-error
+    // or a dedicated emission path. The Ok(false) contract is verified by
+    // `emit_binary_op_returns_false_for_unsupported_ops` and the
+    // production-side strict-typing tests in
+    // `crates/shape-vm/src/compiler/expressions/binary_ops.rs`.
+
     #[test]
-    fn emit_binary_op_lhs_known_rhs_unknown_emits_dynamic() {
-        use crate::bytecode::OpCode;
+    fn emit_binary_op_unknown_operands_return_false() {
         use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
         use crate::type_tracking::NumericType;
         use shape_ast::ast::BinaryOp;
 
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Unknown,
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
-    }
-
-    #[test]
-    fn emit_binary_op_both_unknown_emits_dynamic() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Unknown,
-            BinOperandKind::Unknown,
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Equal,
-            BinOperandKind::Unknown,
-            BinOperandKind::Unknown,
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::EqDynamic);
-    }
-
-    #[test]
-    fn emit_binary_op_mismatched_numeric_types_emits_dynamic() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        // Int + Number with no coercion available: shim falls back to Dynamic.
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Number),
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
+        // Unknown operands, mismatched numeric types, and Bool/Equal all
+        // produce Ok(false) — no opcode emitted. The caller must convert
+        // this into a typed-error or route to a dedicated path.
+        let cases: &[(BinaryOp, BinOperandKind, BinOperandKind)] = &[
+            (
+                BinaryOp::Add,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Add,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Equal,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Add,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Numeric(NumericType::Number),
+            ),
+            (
+                BinaryOp::Equal,
+                BinOperandKind::Bool,
+                BinOperandKind::Bool,
+            ),
+        ];
+        for (op, lhs, rhs) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            let handled = emit_binary_op(&mut compiler, *op, *lhs, *rhs)
+                .expect("emit_binary_op should succeed");
+            assert!(
+                !handled,
+                "{:?} with {:?},{:?} must return Ok(false) post-Phase-2",
+                op, lhs, rhs
+            );
+            assert!(
+                compiler.program.instructions.is_empty(),
+                "no instruction must be emitted for {:?} with {:?},{:?}",
+                op, lhs, rhs
+            );
+        }
     }
 
     #[test]
@@ -3545,25 +3534,9 @@ mod tests {
         assert_eq!(last_emitted_opcode(&compiler), OpCode::StringConcatTyped);
     }
 
-    #[test]
-    fn emit_binary_op_bool_bool_equal_falls_back_to_dynamic() {
-        // V3.1: no typed EqBool opcode exists yet. Bool equality must fall
-        // back to EqDynamic. This test pins that contract so a future
-        // EqBool addition is a deliberate, reviewable change.
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Equal,
-            BinOperandKind::Bool,
-            BinOperandKind::Bool,
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::EqDynamic);
-    }
+    // RETIRED: emit_binary_op_bool_bool_equal_falls_back_to_dynamic
+    // The strict-typing sweep deleted `EqDynamic`. Bool/Bool/Equal now
+    // returns Ok(false) (covered by emit_binary_op_unknown_operands_return_false).
 
     #[test]
     fn emit_binary_op_returns_false_for_unsupported_ops() {
@@ -4009,11 +3982,7 @@ mod tests {
             "expected StringConcatInt for string + int, got ops: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "Dynamic AddDynamic must not be emitted when typed string+int path fires, ops: {:?}",
-            ops
-        );
+        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
     }
 
     #[test]
@@ -4040,11 +4009,7 @@ mod tests {
             "expected StringConcatNumber for string + number, got ops: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "AddDynamic must not be emitted when typed string+number path fires, ops: {:?}",
-            ops
-        );
+        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
     }
 
     #[test]
@@ -4066,44 +4031,13 @@ mod tests {
             "expected StringConcatBool for string + bool, got ops: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::AddDynamic),
-            "AddDynamic must not be emitted when typed string+bool path fires, ops: {:?}",
-            ops
-        );
+        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
     }
 
-    // strict-typing-sweep: dynamic emission deleted
-    #[test]
-    #[ignore]
-    fn r55_flag_off_falls_back_to_dynamic() {
-        // Flag off: string+scalar Add must route through the Dynamic
-        // `AddDynamic` path (which the `try_heap_arithmetic` Case 2
-        // handler still services for int/number RHS). Pins the
-        // regression-safety contract.
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            false,
-            r#"
-            fn concat_test() {
-                let s: string = "Cash: "
-                let c: int = 42
-                s + c
-            }
-            concat_test()
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::AddDynamic),
-            "flag off: expected Dynamic AddDynamic, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::StringConcatInt),
-            "flag off: typed StringConcatInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
+    // RETIRED: r55_flag_off_falls_back_to_dynamic
+    // The strict-typing sweep deleted the `AddDynamic` opcode. The flag-off
+    // path no longer has a runtime fallback; the compiler now emits a
+    // typed-error when the typed string+scalar concat path doesn't fire.
 
     #[test]
     fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {

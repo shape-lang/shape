@@ -433,13 +433,13 @@ impl VirtualMachine {
                 return self.exec_stack_ops(instruction);
             }
 
-            // Arithmetic (dynamic runtime dispatch -- types unresolvable at compile time).
-            // Post-V3.6: reserved for polyglot / comptime / untyped callers; the compiler
-            // routes every typed site through the V3 `emit_binary_op` shim, so typed
-            // Shape code never lands here.
-            AddDynamic | SubDynamic | MulDynamic | DivDynamic | ModDynamic | PowDynamic
-            | BitAnd | BitOr | BitXor | BitShl | BitShr | BitNot => {
-                return self.exec_arithmetic_dynamic_fallback(instruction);
+            // Bitwise dynamic ops (int-typed bitwise still routes here when operand
+            // types aren't proven at compile time). The strict-typing sweep
+            // (Phase 1+2) deleted the `*Dynamic` arithmetic/comparison opcodes;
+            // the bitwise variants remain because typed `BitAndInt`/etc. only
+            // fire when both operands are proven `int`.
+            BitAnd | BitOr | BitXor | BitShl | BitShr | BitNot => {
+                return self.exec_dyn_bit_dispatch(instruction);
             }
 
             // Typed arithmetic (compiler-guaranteed types, zero dispatch).
@@ -467,14 +467,6 @@ impl VirtualMachine {
             // CastWidth: integer width casting (bit truncation)
             CastWidth => {
                 return self.op_cast_width(instruction);
-            }
-
-            // Comparison (dynamic runtime dispatch -- types unresolvable at compile time).
-            // Post-V3.6: reserved for polyglot / comptime / untyped callers; typed sites
-            // are emitted through the V3 `emit_binary_op` shim and reach
-            // `exec_typed_comparison` below.
-            GtDynamic | LtDynamic | GteDynamic | LteDynamic | EqDynamic | NeqDynamic => {
-                return self.exec_comparison_dynamic_fallback(instruction);
             }
 
             // Typed comparison (compiler-guaranteed types, zero dispatch)

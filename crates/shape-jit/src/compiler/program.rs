@@ -66,22 +66,9 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
                 stats.typed += 1;
                 bump_breakdown(&mut stats.typed_breakdown, instr.opcode);
             }
-            // Generic arithmetic/comparison opcodes
-            OpCode::AddDynamic
-            | OpCode::SubDynamic
-            | OpCode::MulDynamic
-            | OpCode::DivDynamic
-            | OpCode::ModDynamic
-            | OpCode::PowDynamic
-            | OpCode::GtDynamic
-            | OpCode::LtDynamic
-            | OpCode::GteDynamic
-            | OpCode::LteDynamic
-            | OpCode::EqDynamic
-            | OpCode::NeqDynamic => {
-                stats.generic += 1;
-                bump_breakdown(&mut stats.generic_breakdown, instr.opcode);
-            }
+            // Generic arithmetic/comparison opcodes (DELETED in Phase 2 — left
+            // here as a no-op arm for future-proofing if a generic class is
+            // re-introduced).
             _ => {}
         }
     }

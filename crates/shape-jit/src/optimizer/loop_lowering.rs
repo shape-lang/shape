@@ -104,13 +104,7 @@ pub fn plan_loops(
             let op = program.instructions[i].opcode;
             if matches!(
                 op,
-                OpCode::AddDynamic
-                    | OpCode::SubDynamic
-                    | OpCode::MulDynamic
-                    | OpCode::DivDynamic
-                    | OpCode::ModDynamic
-                    | OpCode::PowDynamic
-                    | OpCode::AddInt
+                OpCode::AddInt
                     | OpCode::SubInt
                     | OpCode::MulInt
                     | OpCode::DivInt
