@@ -36,6 +36,8 @@ use crate::module_exports::{
 use shape_value::datatable::DataTable;
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// Typed return value from a native module function.
@@ -334,6 +336,30 @@ pub struct TypedModuleFunction {
     pub arg_types: Vec<String>,
 }
 
+/// One typed-return native module *async* function entry.
+///
+/// Mirrors [`TypedModuleFunction`] but the body returns a future that
+/// resolves to `Result<TypedReturn, String>`. Async exports do not get a
+/// `ModuleContext` (the context borrows from the VM and cannot cross
+/// await points); permission gating must happen synchronously around the
+/// dispatch site or up-front in the body before the await.
+#[derive(Clone)]
+pub struct TypedModuleAsyncFunction {
+    /// The typed async function body. Owns its arg vec to satisfy
+    /// `'static` future bounds.
+    pub invoke: Arc<
+        dyn Fn(
+                Vec<ValueWord>,
+            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    /// Declared return type (used for LSP and consistency checks).
+    pub return_type: ConcreteType,
+    /// Parameter type names (mirrors `ModuleParam::type_name`).
+    pub arg_types: Vec<String>,
+}
+
 /// Per-module registry of typed exports.
 ///
 /// Lives alongside the legacy [`ModuleExports::exports`] map. The
@@ -348,12 +374,16 @@ pub struct TypedModuleExports {
     /// `ModuleExports::exports` so every typed export also has a legacy
     /// entry.
     pub functions: HashMap<String, TypedModuleFunction>,
+    /// `name → TypedModuleAsyncFunction`. Sibling map for typed async
+    /// exports. Mirrors `ModuleExports::async_exports`.
+    pub async_functions: HashMap<String, TypedModuleAsyncFunction>,
 }
 
 impl TypedModuleExports {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            async_functions: HashMap::new(),
         }
     }
 
@@ -361,12 +391,19 @@ impl TypedModuleExports {
         self.functions.get(name)
     }
 
+    pub fn get_async(&self, name: &str) -> Option<&TypedModuleAsyncFunction> {
+        self.async_functions.get(name)
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.functions.keys().map(|s| s.as_str())
+        self.functions
+            .keys()
+            .chain(self.async_functions.keys())
+            .map(|s| s.as_str())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty()
+        self.functions.is_empty() && self.async_functions.is_empty()
     }
 }
 
@@ -480,12 +517,34 @@ pub fn register_typed_async_function<F, Fut>(
         },
     );
 
-    // Typed-registry placeholder. The TypedModuleFunction's `invoke` is
-    // the sync-shaped function pointer; for async exports we surface a
-    // marshal-only stub there so introspection still finds the entry by
-    // name. Phase 4d may split this into a separate AsyncTypedModuleFunction
-    // variant if introspection needs to distinguish.
-    let _ = arg_types;
+    // Typed-registry entry — sibling to the sync `functions` map.
+    // The typed body is wrapped to box+pin its future so all async
+    // exports share a uniform `Pin<Box<dyn Future<...>>>` invocation
+    // shape regardless of the concrete `Fut` type.
+    let body_for_typed = body;
+    let typed_invoke: Arc<
+        dyn Fn(
+                Vec<ValueWord>,
+            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+            + Send
+            + Sync,
+    > = Arc::new(move |args: Vec<ValueWord>| {
+        let fut = body_for_typed(args);
+        Box::pin(fut)
+            as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+    });
+
+    module
+        .typed_exports_mut()
+        .async_functions
+        .insert(
+            name,
+            TypedModuleAsyncFunction {
+                invoke: typed_invoke,
+                return_type,
+                arg_types,
+            },
+        );
 }
 
 #[cfg(test)]
@@ -621,6 +680,29 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(values[0].as_i64(), Some(42));
         assert_eq!(values[1].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn register_typed_async_function_populates_typed_registry() {
+        let mut module = ModuleExports::new("std::core::test_typed_async");
+        register_typed_async_function(
+            &mut module,
+            "get_n",
+            "Return a constant int via async path",
+            vec![],
+            ConcreteType::Int,
+            |_args: Vec<ValueWord>| async move { Ok(TypedReturn::I64(7)) },
+        );
+
+        // Legacy async surface still works (auto-wrapping).
+        assert!(module.is_async("get_n"));
+
+        // Typed async registry has the entry with the declared return type.
+        let typed_entry = module
+            .typed_exports()
+            .get_async("get_n")
+            .expect("typed async registry should hold the entry");
+        assert_eq!(typed_entry.return_type, ConcreteType::Int);
     }
 
     #[test]
