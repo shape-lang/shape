@@ -8,9 +8,10 @@
 //!
 //! Policy gated: read ops require FsRead, write ops require FsWrite.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::stdlib::runtime_policy::{FileSystemProvider, RealFileSystem};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use shape_value::{ValueWord, ValueWordExt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,12 +22,24 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     let mut module = ModuleExports::new("std::core::file");
     module.description = "High-level filesystem operations".to_string();
 
+    let path_param = || ModuleParam {
+        name: "path".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "Path to the file".to_string(),
+        ..Default::default()
+    };
+
     // file.read_text(path: string) -> Result<string>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "read_text",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Read the entire contents of a file as a UTF-8 string",
+            vec![path_param()],
+            ConcreteType::Result(Box::new(ConcreteType::String)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -45,18 +58,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 let text = String::from_utf8(bytes)
                     .map_err(|e| format!("file.read_text() invalid UTF-8: {}", e))?;
 
-                Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(text))))
-            },
-            ModuleFunction {
-                description: "Read the entire contents of a file as a UTF-8 string".to_string(),
-                params: vec![ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Path to the file".to_string(),
-                    ..Default::default()
-                }],
-                return_type: Some("Result<string>".to_string()),
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::String(text))))
             },
         );
     }
@@ -64,9 +66,22 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.write_text(path: string, content: string) -> Result<unit>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "write_text",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Write a string to a file, creating or truncating it",
+            vec![
+                path_param(),
+                ModuleParam {
+                    name: "content".to_string(),
+                    type_name: "string".to_string(),
+                    required: true,
+                    description: "Text content to write".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ConcreteType::Result(Box::new(ConcreteType::Unit)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -86,27 +101,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 fs.write(Path::new(path_str), content.as_bytes())
                     .map_err(|e| format!("file.write_text() failed: {}", e))?;
 
-                Ok(ValueWord::from_ok(ValueWord::unit()))
-            },
-            ModuleFunction {
-                description: "Write a string to a file, creating or truncating it".to_string(),
-                params: vec![
-                    ModuleParam {
-                        name: "path".to_string(),
-                        type_name: "string".to_string(),
-                        required: true,
-                        description: "Path to the file".to_string(),
-                        ..Default::default()
-                    },
-                    ModuleParam {
-                        name: "content".to_string(),
-                        type_name: "string".to_string(),
-                        required: true,
-                        description: "Text content to write".to_string(),
-                        ..Default::default()
-                    },
-                ],
-                return_type: Some("Result<unit>".to_string()),
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
             },
         );
     }
@@ -114,9 +109,13 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.read_lines(path: string) -> Result<Array<string>>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "read_lines",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Read a file and return its lines as an array of strings",
+            vec![path_param()],
+            ConcreteType::Result(Box::new(ConcreteType::ArrayString)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -135,23 +134,8 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 let text = String::from_utf8(bytes)
                     .map_err(|e| format!("file.read_lines() invalid UTF-8: {}", e))?;
 
-                let lines: ArgVec = ArgVec::from_vec(text
-                    .lines()
-                    .map(|l| ValueWord::from_string(Arc::new(l.to_string())))
-                    .collect());
-
-                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(lines.into_inner()))))
-            },
-            ModuleFunction {
-                description: "Read a file and return its lines as an array of strings".to_string(),
-                params: vec![ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Path to the file".to_string(),
-                    ..Default::default()
-                }],
-                return_type: Some("Result<Array<string>>".to_string()),
+                let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayString(lines))))
             },
         );
     }
@@ -159,9 +143,22 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.append(path: string, content: string) -> Result<unit>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "append",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Append a string to a file, creating it if it does not exist",
+            vec![
+                path_param(),
+                ModuleParam {
+                    name: "content".to_string(),
+                    type_name: "string".to_string(),
+                    required: true,
+                    description: "Text content to append".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ConcreteType::Result(Box::new(ConcreteType::Unit)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -181,28 +178,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 fs.append(Path::new(path_str), content.as_bytes())
                     .map_err(|e| format!("file.append() failed: {}", e))?;
 
-                Ok(ValueWord::from_ok(ValueWord::unit()))
-            },
-            ModuleFunction {
-                description: "Append a string to a file, creating it if it does not exist"
-                    .to_string(),
-                params: vec![
-                    ModuleParam {
-                        name: "path".to_string(),
-                        type_name: "string".to_string(),
-                        required: true,
-                        description: "Path to the file".to_string(),
-                        ..Default::default()
-                    },
-                    ModuleParam {
-                        name: "content".to_string(),
-                        type_name: "string".to_string(),
-                        required: true,
-                        description: "Text content to append".to_string(),
-                        ..Default::default()
-                    },
-                ],
-                return_type: Some("Result<unit>".to_string()),
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
             },
         );
     }
@@ -210,9 +186,13 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.read_bytes(path: string) -> Result<Array<number>>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "read_bytes",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Read the entire contents of a file as an array of byte values",
+            vec![path_param()],
+            ConcreteType::Result(Box::new(ConcreteType::ArrayNumber)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -228,24 +208,8 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                     .read(Path::new(path_str))
                     .map_err(|e| format!("file.read_bytes() failed: {}", e))?;
 
-                let arr: ArgVec = ArgVec::from_vec(bytes
-                    .iter()
-                    .map(|&b| ValueWord::from_f64(b as f64))
-                    .collect());
-
-                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr.into_inner()))))
-            },
-            ModuleFunction {
-                description: "Read the entire contents of a file as an array of byte values"
-                    .to_string(),
-                params: vec![ModuleParam {
-                    name: "path".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Path to the file".to_string(),
-                    ..Default::default()
-                }],
-                return_type: Some("Result<Array<number>>".to_string()),
+                let arr: Vec<f64> = bytes.iter().map(|&b| b as f64).collect();
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayF64(arr))))
             },
         );
     }
@@ -253,9 +217,22 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.write_bytes(path: string, data: Array<number>) -> Result<unit>
     {
         let fs = Arc::clone(&fs);
-        module.add_function_with_schema(
+        register_typed_function(
+            &mut module,
             "write_bytes",
-            move |args: &[ValueWord], ctx: &ModuleContext| {
+            "Write an array of byte values to a file",
+            vec![
+                path_param(),
+                ModuleParam {
+                    name: "data".to_string(),
+                    type_name: "Array<number>".to_string(),
+                    required: true,
+                    description: "Array of byte values (0-255)".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ConcreteType::Result(Box::new(ConcreteType::Unit)),
+            move |args, ctx| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
@@ -293,27 +270,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                 fs.write(Path::new(path_str), &bytes)
                     .map_err(|e| format!("file.write_bytes() failed: {}", e))?;
 
-                Ok(ValueWord::from_ok(ValueWord::unit()))
-            },
-            ModuleFunction {
-                description: "Write an array of byte values to a file".to_string(),
-                params: vec![
-                    ModuleParam {
-                        name: "path".to_string(),
-                        type_name: "string".to_string(),
-                        required: true,
-                        description: "Path to the file".to_string(),
-                        ..Default::default()
-                    },
-                    ModuleParam {
-                        name: "data".to_string(),
-                        type_name: "Array<number>".to_string(),
-                        required: true,
-                        description: "Array of byte values (0-255)".to_string(),
-                        ..Default::default()
-                    },
-                ],
-                return_type: Some("Result<unit>".to_string()),
+                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
             },
         );
     }
