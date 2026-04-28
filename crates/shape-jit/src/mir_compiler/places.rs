@@ -323,6 +323,119 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// Variant of `normalize_cell_read` for the inline Shared load
+    /// path. The Shared load uses `cell_load_type_for_field_kind` (the
+    /// kind's *native* Cranelift type — I8 for Bool, I16 for I16, etc.,
+    /// not the FFI's I32-widened param), so sub-32 narrowing is
+    /// unnecessary; we only need to NaN-box for `I64`.
+    pub(super) fn normalize_cell_read_inline(
+        &mut self,
+        raw: Value,
+        kind: FieldKind,
+    ) -> Value {
+        match kind {
+            FieldKind::F64
+            | FieldKind::U64
+            | FieldKind::Ptr
+            | FieldKind::I32
+            | FieldKind::U32
+            | FieldKind::I16
+            | FieldKind::U16
+            | FieldKind::I8
+            | FieldKind::U8
+            | FieldKind::Bool => raw,
+            FieldKind::I64 => {
+                let payload_mask = self.builder.ins().iconst(
+                    types::I64,
+                    shape_value::tag_bits::PAYLOAD_MASK as i64,
+                );
+                let payload = self.builder.ins().band(raw, payload_mask);
+                let tag = self.builder.ins().iconst(
+                    types::I64,
+                    (shape_value::tag_bits::TAG_BASE
+                        | (shape_value::tag_bits::TAG_INT
+                            << shape_value::tag_bits::TAG_SHIFT))
+                        as i64,
+                );
+                self.builder.ins().bor(tag, payload)
+            }
+        }
+    }
+
+    /// Inverse of `normalize_cell_read_inline`: produce a value at the
+    /// Shared cell's `cell_load_type_for_field_kind` width to store
+    /// directly into the cell. Unboxes from the slot's downstream form,
+    /// then sign-/zero-extends sub-32 ints to their native cell width.
+    pub(super) fn unbox_for_shared_inline_write(
+        &mut self,
+        val: Value,
+        kind: FieldKind,
+    ) -> Value {
+        let val_ty = self.builder.func.dfg.value_type(val);
+        match kind {
+            FieldKind::F64 => {
+                if val_ty == types::F64 {
+                    val
+                } else if val_ty == types::I64 {
+                    self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                } else {
+                    val
+                }
+            }
+            FieldKind::I64 => {
+                let widened = if val_ty == types::I64 {
+                    val
+                } else {
+                    self.builder.ins().sextend(types::I64, val)
+                };
+                let l = self.builder.ins().ishl_imm(widened, 16);
+                self.builder.ins().sshr_imm(l, 16)
+            }
+            FieldKind::U64 | FieldKind::Ptr => {
+                if val_ty == types::I64 {
+                    val
+                } else if val_ty == types::F64 {
+                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                } else {
+                    self.builder.ins().uextend(types::I64, val)
+                }
+            }
+            FieldKind::I32 | FieldKind::U32 => {
+                if val_ty == types::I32 {
+                    val
+                } else if val_ty == types::I64 {
+                    self.builder.ins().ireduce(types::I32, val)
+                } else if val_ty == types::I16 || val_ty == types::I8 {
+                    self.builder.ins().sextend(types::I32, val)
+                } else {
+                    val
+                }
+            }
+            FieldKind::I16 | FieldKind::U16 => {
+                if val_ty == types::I16 {
+                    val
+                } else if val_ty == types::I8 {
+                    self.builder.ins().sextend(types::I16, val)
+                } else if val_ty == types::I32 || val_ty == types::I64 {
+                    self.builder.ins().ireduce(types::I16, val)
+                } else {
+                    val
+                }
+            }
+            FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
+                if val_ty == types::I8 {
+                    val
+                } else if val_ty == types::I32 || val_ty == types::I64 {
+                    self.builder.ins().ireduce(types::I8, val)
+                } else if val_ty == types::I16 {
+                    self.builder.ins().ireduce(types::I8, val)
+                } else {
+                    val
+                }
+            }
+        }
+    }
+
     /// Inverse of `normalize_cell_read`: take the slot-form SSA value
     /// `val` and produce the native interior payload to hand to the
     /// per-kind FFI writer. The output's Cranelift type matches the
@@ -729,18 +842,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `Arc::from_raw` in `release_typed_closure`) only
                 // runs after the closure's refcount hits zero, which
                 // is strictly after the JIT body returns.
-                if self.shared_capture_slots.contains_key(slot) {
+                if let Some(&kind) = self.shared_capture_slots.get(slot) {
+                    // Wave C.2: per-FieldKind direct load at the cell's
+                    // 8-byte payload offset. We keep the inline lock /
+                    // unlock fast path — the JIT already owns the lock
+                    // here, and routing through the
+                    // `read_shared_cell_<kind>` FFI would re-acquire it.
+                    // The kind selects the Cranelift load width
+                    // (matching the C.1 ABI: F64 → F64; I64/U64/Ptr →
+                    // I64; I32/U32 → I32; sub-32 → I8/I16). The
+                    // payload's upper bytes were sign-/zero-extended on
+                    // write (see Wave-B writers); reading at the kind's
+                    // native width simply truncates back.
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let cell_ptr = self.builder.use_var(*var);
                     self.emit_shared_lock(cell_ptr);
-                    let value = self.builder.ins().load(
-                        types::I64,
+                    let load_ty = cell_load_type_for_field_kind(kind);
+                    let raw = self.builder.ins().load(
+                        load_ty,
                         MemFlags::trusted(),
                         cell_ptr,
                         SHARED_CELL_VALUE_OFFSET,
                     );
                     self.emit_shared_unlock(cell_ptr);
-                    return Ok(value);
+                    return Ok(self.normalize_cell_read_inline(raw, kind));
                 }
                 // Session 1 Commit 3: outer-scope Shared local slot.
                 // Structurally parallel to the A.1E `shared_capture_slots`
@@ -897,17 +1022,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // still owns its one strong share for frame lifetime).
                 //
                 // SAFETY: see `read_place` Shared branch.
-                if self.shared_capture_slots.contains_key(slot) {
+                if let Some(&kind) = self.shared_capture_slots.get(slot) {
+                    // Wave C.2: per-FieldKind direct store at the
+                    // cell's 8-byte payload offset, with inline lock /
+                    // unlock. Unbox the slot-form SSA value to the
+                    // native interior, sign-/zero-extend to 8 bytes (so
+                    // the upper bytes remain consistent for any future
+                    // i64-shaped read), and store at the matching 8-byte
+                    // payload offset.
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let var = *self.locals.get(slot).ok_or_else(|| {
                         format!("MirToIR: unknown local slot {}", slot)
                     })?;
                     let cell_ptr = self.builder.use_var(var);
-                    let bits = self.coerce_value_to_i64_bits(val);
+                    let store_val = self.unbox_for_shared_inline_write(val, kind);
                     self.emit_shared_lock(cell_ptr);
                     self.builder.ins().store(
                         MemFlags::trusted(),
-                        bits,
+                        store_val,
                         cell_ptr,
                         SHARED_CELL_VALUE_OFFSET,
                     );
@@ -1081,6 +1213,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             self.builder.def_var(*var, null);
         }
         Ok(())
+    }
+}
+
+/// Wave C.2: Cranelift type used for an inline load/store at a closure
+/// cell's payload offset. Returns the kind's *native* width — distinct
+/// from the FFI-boundary type which widens sub-32 ints to I32. Used by
+/// the inline Shared lock-gated load/store path; the OwnedMutable read
+/// path goes through the FFI directly so it observes the FFI-boundary
+/// types (see `owned_mut_read_func` and `normalize_cell_read`).
+fn cell_load_type_for_field_kind(kind: FieldKind) -> Type {
+    match kind {
+        FieldKind::F64 => types::F64,
+        FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => types::I64,
+        FieldKind::I32 | FieldKind::U32 => types::I32,
+        FieldKind::I16 | FieldKind::U16 => types::I16,
+        FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => types::I8,
     }
 }
 
