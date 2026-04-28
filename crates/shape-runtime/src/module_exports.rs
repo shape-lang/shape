@@ -7,8 +7,6 @@ use crate::type_schema::{TypeSchema, TypeSchemaRegistry};
 use shape_value::ValueWord;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 /// Raw callable invoker as a function pointer + opaque context.
@@ -251,27 +249,11 @@ pub type ModuleFn = Arc<
     dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String> + Send + Sync,
 >;
 
-/// An async module function callable from Shape.
-///
-/// Returns a boxed future that resolves to a ValueWord result.
-/// The VM executor awaits this using the current tokio runtime.
-///
-/// Note: async functions do not receive a `ModuleContext` because the context
-/// borrows from the VM and cannot be sent across await points.
-pub type AsyncModuleFn = Arc<
-    dyn Fn(&[ValueWord]) -> Pin<Box<dyn Future<Output = Result<ValueWord, String>> + Send>>
-        + Send
-        + Sync,
->;
-
 /// One entry in the VM's per-process module-function table
 /// (`module_fn_table`), indexed by `ValueWord::ModuleFunction(u32)`.
 ///
-/// Phase 4c.3 typed-dispatch refactor. The VM previously stored only
-/// [`ModuleFn`] (legacy ABI) here; entries are now sum-typed so the
-/// dispatch path can recognise typed-return and typed-async functions
-/// and skip the body-side `TypedReturn → ValueWord` round-trip when the
-/// caller doesn't need it.
+/// Phase 4c.4: the legacy `ModuleFn` ABI escape hatch was deleted. All
+/// stdlib and test fixtures route through the typed registry.
 ///
 /// - [`Self::Typed`]: synchronous typed-return native function. The
 ///   body returns [`crate::typed_module_exports::TypedReturn`] directly;
@@ -279,15 +261,10 @@ pub type AsyncModuleFn = Arc<
 /// - [`Self::TypedAsync`]: async typed-return native function. The body
 ///   returns a future of `TypedReturn`; the synchronous dispatch path
 ///   blocks on the future and marshals at the boundary.
-/// - [`Self::Legacy`]: legacy `ModuleFn` ABI — kept as an escape hatch
-///   for callers that haven't migrated. Phase 4c.2 migrated all 96
-///   shipped exports off this path; remaining users are intrinsic
-///   helpers and inline test fixtures.
 #[derive(Clone)]
 pub enum ModuleFnEntry {
     Typed(crate::typed_module_exports::TypedModuleFunction),
     TypedAsync(crate::typed_module_exports::TypedModuleAsyncFunction),
-    Legacy(ModuleFn),
 }
 
 /// Visibility policy for one extension export.
@@ -361,10 +338,6 @@ pub struct ModuleExports {
     pub name: String,
     /// Human-readable description of this module
     pub description: String,
-    /// Exported sync functions: name → implementation
-    pub exports: HashMap<String, ModuleFn>,
-    /// Exported async functions: name → implementation
-    pub async_exports: HashMap<String, AsyncModuleFn>,
     /// Function schemas for LSP + validation: name → schema
     pub schemas: HashMap<String, ModuleFunction>,
     /// Export visibility controls: name → visibility.
@@ -388,12 +361,13 @@ pub struct ModuleExports {
     pub type_schemas: Vec<TypeSchema>,
     /// Typed-return ABI registry (Phase 4b).
     ///
-    /// Parallel registry for exports that declare a concrete return type
-    /// via [`crate::typed_module_exports::TypedReturn`]. Every entry here
-    /// is also present in `exports` as an auto-wrapped `ModuleFn` so the
-    /// VM invoke path remains unchanged. Phase 4c will migrate the
-    /// remaining ~65 sum-typed and polymorphic exports and then delete
-    /// the legacy `add_function*` surface.
+    /// Authoritative registry for native-module function bodies. Every
+    /// export here declares its return type via
+    /// [`crate::typed_module_exports::TypedReturn`] / [`crate::typed_module_exports::ConcreteType`];
+    /// marshalling to `ValueWord` happens at the dispatch boundary
+    /// inside the VM, not in the body. Phase 4c.4 deleted the legacy
+    /// `exports`/`async_exports` `ModuleFn` parallel registry — every
+    /// callable function body lives here.
     pub typed_exports: crate::typed_module_exports::TypedModuleExports,
 }
 
@@ -403,8 +377,6 @@ impl ModuleExports {
         Self {
             name: name.into(),
             description: String::new(),
-            exports: HashMap::new(),
-            async_exports: HashMap::new(),
             schemas: HashMap::new(),
             export_visibility: HashMap::new(),
             shape_sources: Vec::new(),
@@ -417,8 +389,7 @@ impl ModuleExports {
 
     /// Mutable access to the typed-return registry. Used by
     /// [`crate::typed_module_exports::register_typed_function`] to record
-    /// the typed-body entry alongside the auto-wrapped legacy
-    /// `ModuleFn`.
+    /// the typed-body entry.
     pub fn typed_exports_mut(
         &mut self,
     ) -> &mut crate::typed_module_exports::TypedModuleExports {
@@ -430,89 +401,12 @@ impl ModuleExports {
         &self.typed_exports
     }
 
-    /// Register an exported function.
-    pub fn add_function<F>(&mut self, name: impl Into<String>, f: F) -> &mut Self
-    where
-        F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let name = name.into();
-        self.exports.insert(name.clone(), Arc::new(f));
-        self.export_visibility.entry(name).or_default();
-        self
-    }
-
-    /// Register an exported function with its schema.
-    pub fn add_function_with_schema<F>(
-        &mut self,
-        name: impl Into<String>,
-        f: F,
-        schema: ModuleFunction,
-    ) -> &mut Self
-    where
-        F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let name = name.into();
-        self.exports.insert(name.clone(), Arc::new(f));
-        self.schemas.insert(name.clone(), schema);
-        self.export_visibility.entry(name).or_default();
-        self
-    }
-
-    /// Register an async exported function.
-    pub fn add_async_function<F, Fut>(&mut self, name: impl Into<String>, f: F) -> &mut Self
-    where
-        F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<ValueWord, String>> + Send + 'static,
-    {
-        let name = name.into();
-        self.async_exports.insert(
-            name.clone(),
-            Arc::new(move |args: &[ValueWord]| {
-                let owned_args = args.to_vec();
-                Box::pin(f(owned_args))
-            }),
-        );
-        self.export_visibility.entry(name).or_default();
-        self
-    }
-
-    /// Register an async exported function with its schema.
-    pub fn add_async_function_with_schema<F, Fut>(
-        &mut self,
-        name: impl Into<String>,
-        f: F,
-        schema: ModuleFunction,
-    ) -> &mut Self
-    where
-        F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<ValueWord, String>> + Send + 'static,
-    {
-        let name = name.into();
-        self.async_exports.insert(
-            name.clone(),
-            Arc::new(move |args: &[ValueWord]| {
-                let owned_args = args.to_vec();
-                Box::pin(f(owned_args))
-            }),
-        );
-        self.schemas.insert(name.clone(), schema);
-        self.export_visibility.entry(name).or_default();
-        self
-    }
-
     /// Register only the LSP/validation schema and visibility for an
-    /// exported name, without populating the legacy `exports` /
-    /// `async_exports` tables. Used by the typed-registry path
-    /// (`register_typed_function`/`register_typed_async_function`)
-    /// — the actual function body lives in `typed_exports` and is
-    /// dispatched directly via `ModuleFnEntry::Typed` /
-    /// `ModuleFnEntry::TypedAsync`.
+    /// exported name. The actual function body lives in `typed_exports`
+    /// and is dispatched directly via `ModuleFnEntry::Typed` /
+    /// `ModuleFnEntry::TypedAsync` — see
+    /// `register_typed_function`/`register_typed_async_function` and the
+    /// test-only `register_test_function*` helpers.
     pub fn add_schema_only(
         &mut self,
         name: impl Into<String>,
@@ -628,57 +522,34 @@ impl ModuleExports {
         id
     }
 
-    /// Check if this module exports a given name (sync or async, typed
-    /// or legacy).
+    /// Check if this module exports a given name (sync or async).
     pub fn has_export(&self, name: &str) -> bool {
-        self.exports.contains_key(name)
-            || self.async_exports.contains_key(name)
-            || self.typed_exports.functions.contains_key(name)
+        self.typed_exports.functions.contains_key(name)
             || self.typed_exports.async_functions.contains_key(name)
     }
 
-    /// Get a sync exported function by name (legacy table only).
-    /// Returns None for typed exports — those are accessed via
-    /// `typed_exports().get(name)`.
-    pub fn get_export(&self, name: &str) -> Option<&ModuleFn> {
-        self.exports.get(name)
-    }
-
-    /// Invoke a sync export by name, dispatching transparently across
-    /// the legacy and typed registries.
+    /// Invoke a sync export by name through the typed registry, marshalling
+    /// the resulting `TypedReturn` to a `ValueWord` at the boundary.
     ///
-    /// Returns `None` if the export doesn't exist (or is async). Used
-    /// by stdlib-internal tests that previously did
+    /// Returns `None` if the export doesn't exist (or is async). Used by
+    /// stdlib-internal tests that previously did
     /// `module.get_export(name).unwrap()(&args, &ctx)` — the typed
-    /// migration breaks the `get_export` shape so this convenience
-    /// preserves the call surface.
+    /// migration removes the legacy `ModuleFn` accessor in favor of this
+    /// dispatch helper.
     pub fn invoke_export(
         &self,
         name: &str,
         args: &[ValueWord],
         ctx: &ModuleContext,
     ) -> Option<Result<ValueWord, String>> {
-        if let Some(legacy) = self.exports.get(name) {
-            return Some(legacy(args, ctx));
-        }
-        if let Some(typed) = self.typed_exports.functions.get(name) {
-            let typed_result = (typed.invoke)(args, ctx);
-            return Some(typed_result.map(|t| t.into_value_word()));
-        }
-        None
+        let typed = self.typed_exports.functions.get(name)?;
+        let typed_result = (typed.invoke)(args, ctx);
+        Some(typed_result.map(|t| t.into_value_word()))
     }
 
-    /// Get an async exported function by name (legacy table only).
-    /// Returns None for typed exports — those are accessed via
-    /// `typed_exports().get_async(name)`.
-    pub fn get_async_export(&self, name: &str) -> Option<&AsyncModuleFn> {
-        self.async_exports.get(name)
-    }
-
-    /// Check if a function is async (legacy or typed).
+    /// Check if a function is async.
     pub fn is_async(&self, name: &str) -> bool {
-        self.async_exports.contains_key(name)
-            || self.typed_exports.async_functions.contains_key(name)
+        self.typed_exports.async_functions.contains_key(name)
     }
 
     /// Get the schema for an exported function.
@@ -686,13 +557,12 @@ impl ModuleExports {
         self.schemas.get(name)
     }
 
-    /// List all export names (sync + async, typed + legacy).
+    /// List all export names (sync + async).
     pub fn export_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
-            .exports
+            .typed_exports
+            .functions
             .keys()
-            .chain(self.async_exports.keys())
-            .chain(self.typed_exports.functions.keys())
             .chain(self.typed_exports.async_functions.keys())
             .map(|s| s.as_str())
             .collect();
@@ -737,10 +607,14 @@ impl std::fmt::Debug for ModuleExports {
         f.debug_struct("ModuleExports")
             .field("name", &self.name)
             .field("description", &self.description)
-            .field("exports", &self.exports.keys().collect::<Vec<_>>())
             .field(
-                "async_exports",
-                &self.async_exports.keys().collect::<Vec<_>>(),
+                "typed_exports",
+                &self
+                    .typed_exports
+                    .functions
+                    .keys()
+                    .chain(self.typed_exports.async_functions.keys())
+                    .collect::<Vec<_>>(),
             )
             .field("schemas", &self.schemas.keys().collect::<Vec<_>>())
             .field(

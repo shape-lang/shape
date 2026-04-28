@@ -15,20 +15,16 @@
 //! boundary — not inside the function body. The function body returns
 //! e.g. `TypedReturn::String(s)` directly.
 //!
-//! ## Coexistence with the legacy registry
+//! ## Single registry (Phase 4c.4)
 //!
-//! Each [`TypedModuleFunction`] auto-registers a wrapping
-//! `ModuleFn` on the same [`crate::module_exports::ModuleExports`] under
-//! the same export name. From the VM's invoke path's point of view, the
-//! function looks identical to a hand-rolled `ModuleFn`. The difference is
-//! purely on the registration side: typed exports declare their return
-//! type concretely via `TypedReturn`, eliminating the ad-hoc
-//! `ValueWord::from_*` round-trip in the function body.
-//!
-//! Phase 4c will migrate the remaining ~65 sum-typed and polymorphic
-//! exports (parallel, regex, file, csv, http, yaml, toml, xml, arrow,
-//! msgpack) and then delete the legacy `ModuleExports::add_function*`
-//! surface. Until then the two registries coexist.
+//! Phase 4c.4 deleted the legacy `ModuleExports::exports` /
+//! `async_exports` parallel registry and the `add_function*` surface.
+//! All native module function bodies live in `TypedModuleExports`,
+//! dispatched through `ModuleFnEntry::Typed` / `ModuleFnEntry::TypedAsync`.
+//! Test fixtures that don't care about typed dispatch use the
+//! `register_test_function*` helpers, which wrap a legacy-style
+//! `Fn(...) -> Result<ValueWord, String>` body into a
+//! `TypedReturn::ValueWord` passthrough.
 
 use crate::module_exports::{
     ModuleContext, ModuleExports, ModuleFunction, ModuleParam,
@@ -412,13 +408,15 @@ impl TypedModuleExports {
 /// Adds:
 /// 1. A `TypedModuleFunction` entry to the typed registry on the module
 ///    (created lazily via `ModuleExports::typed_exports_mut`).
-/// 2. An auto-wrapping `ModuleFn` to the legacy
-///    `ModuleExports::exports` table that runs `body` and marshals the
-///    `TypedReturn` to a `ValueWord`. This keeps the existing VM invoke
-///    path unchanged.
-/// 3. A `ModuleFunction` schema (description + params + return type
+/// 2. A `ModuleFunction` schema (description + params + return type
 ///    string from `ConcreteType::shape_type_name`) on
-///    `ModuleExports::schemas`.
+///    `ModuleExports::schemas`, plus a default-Public visibility entry.
+///
+/// Phase 4c.4: the legacy `ModuleFn` auto-wrap was deleted. The VM's
+/// runtime dispatch path goes through `typed_exports.functions` directly
+/// via `ModuleFnEntry::Typed` — no `ValueWord` round-trip in the body.
+/// Tests that previously invoked through `module.get_export(name)` use
+/// `module.invoke_export(name, ...)` instead.
 pub fn register_typed_function<F>(
     module: &mut ModuleExports,
     name: impl Into<String>,
@@ -442,22 +440,8 @@ pub fn register_typed_function<F>(
     let arg_types = params.iter().map(|p| p.type_name.clone()).collect();
     let return_type_str = return_type.shape_type_name();
 
-    // Phase 4c.3 status: the VM's runtime dispatch path goes through
-    // `typed_exports.functions` directly via `ModuleFnEntry::Typed` —
-    // no `ValueWord` round-trip in the body. We still install an
-    // auto-wrapping legacy `ModuleFn` because stdlib unit tests and
-    // some helper paths invoke through `module.get_export(name)` /
-    // `module.invoke_export(name, ...)`. The architectural goal of
-    // eliminating the round-trip for the *runtime* path is achieved;
-    // the legacy table is now a test-and-mirror surface that Phase 4d
-    // / a follow-up sweep can audit and delete.
-    let body_for_wrapper = body_arc.clone();
-    module.add_function_with_schema(
+    module.add_schema_only(
         name.clone(),
-        move |args: &[ValueWord], ctx: &ModuleContext| {
-            let typed = body_for_wrapper(args, ctx)?;
-            Ok(typed.into_value_word())
-        },
         ModuleFunction {
             description: description.into(),
             params,
@@ -477,10 +461,14 @@ pub fn register_typed_function<F>(
 
 /// Register a typed-return *async* function on a `ModuleExports`.
 ///
-/// Mirrors [`register_typed_function`] but installs an
-/// `add_async_function_with_schema` wrapper. The async body returns
+/// Mirrors [`register_typed_function`] but installs an entry in
+/// `typed_exports.async_functions`. The async body returns
 /// `Result<TypedReturn, String>` and the boundary marshalling
 /// (`TypedReturn` → `ValueWord`) happens after the future resolves.
+///
+/// Phase 4c.4: the legacy `AsyncModuleFn` auto-wrap was deleted. The VM
+/// dispatches through `typed_exports.async_functions` directly via
+/// `ModuleFnEntry::TypedAsync`.
 ///
 /// Note: async functions don't get a `ModuleContext` (the context borrows
 /// from the VM and can't cross await points). Permission checks must be
@@ -502,21 +490,8 @@ pub fn register_typed_async_function<F, Fut>(
     let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
     let return_type_str = return_type.shape_type_name();
 
-    // Phase 4c.3 status: see `register_typed_function`. The runtime
-    // dispatch goes through `typed_exports.async_functions` directly,
-    // but stdlib tests / some helper code paths still consult the
-    // legacy `module.async_exports` table — so we keep installing the
-    // auto-wrapping `AsyncModuleFn` shim for compatibility.
-    let body_for_async = body.clone();
-    module.add_async_function_with_schema(
+    module.add_schema_only(
         name.clone(),
-        move |args: Vec<ValueWord>| {
-            let body = body_for_async.clone();
-            async move {
-                let typed = body(args).await?;
-                Ok(typed.into_value_word())
-            }
-        },
         ModuleFunction {
             description: description.into(),
             params,
@@ -528,7 +503,6 @@ pub fn register_typed_async_function<F, Fut>(
     // The typed body is wrapped to box+pin its future so all async
     // exports share a uniform `Pin<Box<dyn Future<...>>>` invocation
     // shape regardless of the concrete `Fut` type.
-    let body_for_typed = body;
     let typed_invoke: Arc<
         dyn Fn(
                 Vec<ValueWord>,
@@ -536,7 +510,7 @@ pub fn register_typed_async_function<F, Fut>(
             + Send
             + Sync,
     > = Arc::new(move |args: Vec<ValueWord>| {
-        let fut = body_for_typed(args);
+        let fut = body(args);
         Box::pin(fut)
             as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
     });
@@ -864,12 +838,13 @@ mod tests {
             },
         );
 
-        // Legacy invoke surface still works (auto-wrapping mirror —
-        // see Phase 4c.3 status comment in `register_typed_function`).
-        let f = module.get_export("echo").unwrap();
+        // Convenience invoke surface (used by stdlib unit tests).
         let arg = ValueWord::from_string(Arc::new("hi".to_string()));
         let ctx = empty_ctx();
-        let result = f(&[arg.clone()], &ctx).unwrap();
+        let result = module
+            .invoke_export("echo", &[arg.clone()], &ctx)
+            .expect("invoke_export should find typed export")
+            .expect("echo should succeed");
         assert_eq!(result.as_str(), Some("hi"));
 
         // Typed invoke surface (the runtime dispatch path).

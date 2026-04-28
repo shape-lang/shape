@@ -610,9 +610,9 @@ mod tests {
     fn test_remote_module_creation() {
         let module = create_remote_module();
         assert_eq!(module.name, "std::core::remote");
-        assert!(module.exports.contains_key("execute"));
-        assert!(module.exports.contains_key("ping"));
-        assert!(module.exports.contains_key("__call"));
+        assert!(module.has_export("execute"));
+        assert!(module.has_export("ping"));
+        assert!(module.has_export("__call"));
     }
 
     /// Track A.4: fabricate a wire payload representing a cross-node
