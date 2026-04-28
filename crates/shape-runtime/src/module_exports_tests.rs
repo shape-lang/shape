@@ -1,4 +1,7 @@
 use super::*;
+use crate::typed_module_exports::{
+    register_test_function, register_test_function_with_schema,
+};
 use shape_value::ValueWordExt;
 
 /// Build a dummy `ModuleContext` for unit tests that don't need schema
@@ -22,9 +25,13 @@ fn test_ctx() -> ModuleContext<'static> {
 #[test]
 fn test_module_exports_creation() {
     let mut module = ModuleExports::new("test");
-    module.add_function("hello", |_args: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::from_string(Arc::new("world".to_string())))
-    });
+    register_test_function(
+        &mut module,
+        "hello",
+        |_args: &[ValueWord], _ctx: &ModuleContext| {
+            Ok(ValueWord::from_string(Arc::new("world".to_string())))
+        },
+    );
 
     assert_eq!(module.name, "test");
     assert!(module.has_export("hello"));
@@ -34,17 +41,21 @@ fn test_module_exports_creation() {
 #[test]
 fn test_module_exports_call() {
     let mut module = ModuleExports::new("math");
-    module.add_function("add", |args: &[ValueWord], _ctx: &ModuleContext| {
-        let a = args
-            .get(0)
-            .and_then(|nb| nb.as_number_coerce())
-            .unwrap_or(0.0);
-        let b = args
-            .get(1)
-            .and_then(|nb| nb.as_number_coerce())
-            .unwrap_or(0.0);
-        Ok(ValueWord::from_f64(a + b))
-    });
+    register_test_function(
+        &mut module,
+        "add",
+        |args: &[ValueWord], _ctx: &ModuleContext| {
+            let a = args
+                .get(0)
+                .and_then(|nb| nb.as_number_coerce())
+                .unwrap_or(0.0);
+            let b = args
+                .get(1)
+                .and_then(|nb| nb.as_number_coerce())
+                .unwrap_or(0.0);
+            Ok(ValueWord::from_f64(a + b))
+        },
+    );
 
     let ctx = test_ctx();
     let result = module.invoke_export("add", &[ValueWord::from_f64(3.0), ValueWord::from_f64(4.0)], &ctx).unwrap().unwrap();
@@ -56,9 +67,13 @@ fn test_registry() {
     let mut registry = ModuleExportRegistry::new();
 
     let mut files_module = ModuleExports::new("files");
-    files_module.add_function("read", |_args: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::from_string(Arc::new("loaded".to_string())))
-    });
+    register_test_function(
+        &mut files_module,
+        "read",
+        |_args: &[ValueWord], _ctx: &ModuleContext| {
+            Ok(ValueWord::from_string(Arc::new("loaded".to_string())))
+        },
+    );
 
     registry.register(files_module);
 
@@ -73,7 +88,8 @@ fn test_registry() {
 #[test]
 fn test_function_schema() {
     let mut module = ModuleExports::new("test");
-    module.add_function_with_schema(
+    register_test_function_with_schema(
+        &mut module,
         "compute",
         |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::from_f64(42.0)),
         ModuleFunction {
@@ -115,12 +131,16 @@ fn test_function_schema() {
 #[test]
 fn test_export_names() {
     let mut module = ModuleExports::new("multi");
-    module.add_function("alpha", |_args: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::none())
-    });
-    module.add_function("beta", |_args: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::none())
-    });
+    register_test_function(
+        &mut module,
+        "alpha",
+        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
+    );
+    register_test_function(
+        &mut module,
+        "beta",
+        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
+    );
 
     let mut names = module.export_names();
     names.sort();
@@ -139,7 +159,8 @@ fn test_module_description() {
 fn test_module_clone() {
     let mut module = ModuleExports::new("original");
     module.description = "The original module".into();
-    module.add_function_with_schema(
+    register_test_function_with_schema(
+        &mut module,
         "greet",
         |_args: &[ValueWord], _ctx: &ModuleContext| {
             Ok(ValueWord::from_string(Arc::new("hello".to_string())))
@@ -252,7 +273,9 @@ fn test_new_module_has_empty_extension_fields() {
 #[test]
 fn test_export_visibility_defaults_to_public() {
     let mut module = ModuleExports::new("test");
-    module.add_function("ping", |_args, _ctx: &ModuleContext| Ok(ValueWord::unit()));
+    register_test_function(&mut module, "ping", |_args, _ctx: &ModuleContext| {
+        Ok(ValueWord::unit())
+    });
 
     assert_eq!(
         module.export_visibility("ping"),
@@ -265,11 +288,12 @@ fn test_export_visibility_defaults_to_public() {
 #[test]
 fn test_comptime_only_export_is_mode_gated() {
     let mut module = ModuleExports::new("test");
-    module
-        .add_function("connect_codegen", |_args, _ctx: &ModuleContext| {
-            Ok(ValueWord::unit())
-        })
-        .set_export_visibility("connect_codegen", ModuleExportVisibility::ComptimeOnly);
+    register_test_function(
+        &mut module,
+        "connect_codegen",
+        |_args, _ctx: &ModuleContext| Ok(ValueWord::unit()),
+    );
+    module.set_export_visibility("connect_codegen", ModuleExportVisibility::ComptimeOnly);
 
     assert!(!module.is_export_available("connect_codegen", false));
     assert!(module.is_export_available("connect_codegen", true));
@@ -289,11 +313,10 @@ fn test_comptime_only_export_is_mode_gated() {
 #[test]
 fn test_internal_export_hidden_from_public_surface() {
     let mut module = ModuleExports::new("test");
-    module
-        .add_function("__internal", |_args, _ctx: &ModuleContext| {
-            Ok(ValueWord::unit())
-        })
-        .set_export_visibility("__internal", ModuleExportVisibility::Internal);
+    register_test_function(&mut module, "__internal", |_args, _ctx: &ModuleContext| {
+        Ok(ValueWord::unit())
+    });
+    module.set_export_visibility("__internal", ModuleExportVisibility::Internal);
 
     assert!(module.is_export_available("__internal", false));
     assert!(module.is_export_available("__internal", true));
@@ -417,9 +440,11 @@ fn test_check_net_permission_enforces_scope_constraints() {
 fn test_registry_canonical_name_lookup() {
     let mut registry = ModuleExportRegistry::new();
     let mut module = ModuleExports::new("std::core::json");
-    module.add_function("parse", |_args: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::none())
-    });
+    register_test_function(
+        &mut module,
+        "parse",
+        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
+    );
     registry.register(module);
 
     // Lookup by canonical name
