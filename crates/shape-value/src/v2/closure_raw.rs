@@ -1965,4 +1965,170 @@ mod tests {
             );
         }
     }
+
+    // ------------------------------------------------------------------
+    // Wave B / phase-3c-closure-y1 — per-FieldKind OwnedMutable cell
+    // round-trip tests.
+    //
+    // Each test exercises one width/representation class:
+    //   - i64 (pure 8-byte integer)
+    //   - f64 (8-byte float)
+    //   - bool (1-byte scalar)
+    //   - ptr (8-byte ValueWord-encoded heap share)
+    //
+    // The tests construct a single-capture closure of CaptureKind::OwnedMutable,
+    // allocate the typed cell with `alloc_owned_mutable_<kind>`, write the
+    // pointer into the slot, exercise `read_owned_mutable_<kind>` /
+    // `write_owned_mutable_<kind>`, then drop the closure. Drop must free
+    // the box exactly once; for the Ptr case it must also release the
+    // interior heap-refcount share exactly once.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn owned_mutable_i64_alloc_write_read_drop_roundtrip() {
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
+
+        unsafe {
+            let ptr = alloc_typed_closure(1, 0, &layout);
+            // Allocate a typed cell via the new helper, store its raw
+            // pointer into the slot.
+            let cell = alloc_owned_mutable_i64(-9001);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut i64, cell);
+
+            // Read via helper.
+            assert_eq!(read_owned_mutable_i64(cell), -9001);
+            // Write via helper, read back.
+            write_owned_mutable_i64(cell, 42);
+            assert_eq!(read_owned_mutable_i64(cell), 42);
+
+            // Drop the closure; drop_owned_mutable_capture must reclaim
+            // the typed Box<i64>. miri/ASan would catch a leak or
+            // double-free.
+            release_typed_closure(ptr, &layout);
+            let _ = cell;
+        }
+    }
+
+    #[test]
+    fn owned_mutable_f64_alloc_write_read_drop_roundtrip() {
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::F64], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::F64);
+
+        unsafe {
+            let ptr = alloc_typed_closure(2, 0, &layout);
+            let cell = alloc_owned_mutable_f64(2.5);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut f64, cell);
+
+            assert_eq!(read_owned_mutable_f64(cell), 2.5);
+            write_owned_mutable_f64(cell, -1.75);
+            assert_eq!(read_owned_mutable_f64(cell), -1.75);
+
+            release_typed_closure(ptr, &layout);
+            let _ = cell;
+        }
+    }
+
+    #[test]
+    fn owned_mutable_bool_alloc_write_read_drop_roundtrip() {
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::Bool], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::Bool);
+
+        unsafe {
+            let ptr = alloc_typed_closure(3, 0, &layout);
+            let cell = alloc_owned_mutable_bool(true);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut bool, cell);
+
+            assert_eq!(read_owned_mutable_bool(cell), true);
+            write_owned_mutable_bool(cell, false);
+            assert_eq!(read_owned_mutable_bool(cell), false);
+
+            release_typed_closure(ptr, &layout);
+            let _ = cell;
+        }
+    }
+
+    #[test]
+    fn owned_mutable_ptr_releases_inner_heap_share_exactly_once() {
+        // Ptr interior: the cell stores a ValueWord bit pattern that
+        // owns one heap-refcount share of the inner HeapValue. Drop
+        // must release that share before reclaiming the box.
+        //
+        // Reference pattern: see `heap_capture_release_decrements_arc_refcount`
+        // for the analogous immutable-Ptr path. Here we put the share
+        // inside an OwnedMutable cell instead of the slot directly.
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
+
+        let s = ValueWord::from_string(Arc::new("tracked-owned-mut".to_string()));
+        let s_bits = s.into_raw_bits();
+
+        unsafe {
+            let ptr = alloc_typed_closure(4, 0, &layout);
+            // Bump the refcount so the cell carries its own share —
+            // mirrors the retain `emit_heap_closure` emits before the
+            // store.
+            let _dup = ValueWord::clone_from_bits(s_bits);
+            let _ = _dup; // ValueWord is u64 — refcount belongs to the cell now.
+            // Allocate a typed Ptr cell holding the ValueWord bits.
+            let cell = alloc_owned_mutable_ptr(s_bits);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut u64, cell);
+
+            // Round-trip read/write of the bit pattern. We do NOT
+            // release the previous bits via `write_owned_mutable_ptr`
+            // because this test stores the same bit pattern back —
+            // simulating a no-op write. (Real callers must release
+            // the previous bits; that's the documented contract.)
+            let read_bits = read_owned_mutable_ptr(cell);
+            assert_eq!(read_bits, s_bits);
+
+            // Drop the closure: drop_owned_mutable_capture must release
+            // the cell's interior heap share AND free the box.
+            release_typed_closure(ptr, &layout);
+
+            // The original `s_bits` share is still live; release it to
+            // free the String. miri/ASan would catch a double-release
+            // (closure released too aggressively) or a leak (closure
+            // forgot to release the inner share).
+            release_raw_value_bits(s_bits);
+            let _ = cell;
+        }
+    }
+
+    #[test]
+    fn owned_mutable_ptr_no_leak_when_block_dropped_with_one_share() {
+        // Stress test: closure is the SOLE owner of the interior share.
+        // Drop must release it cleanly with no leak (miri/ASan catch).
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
+
+        let s_arc: Arc<String> = Arc::new("sole-owner".to_string());
+        let s_bits = ValueWord::from_string(Arc::clone(&s_arc)).into_raw_bits();
+        // Drop our `s_arc` share so the closure cell is the only one left.
+        drop(s_arc);
+        // We can't observe strong_count anymore (no Arc handle), but the
+        // bit pattern still carries the live share.
+
+        unsafe {
+            let ptr = alloc_typed_closure(5, 0, &layout);
+            let cell = alloc_owned_mutable_ptr(s_bits);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut *mut u64, cell);
+
+            // Closure release: must run release_raw_value_bits on the
+            // interior, freeing the String.
+            release_typed_closure(ptr, &layout);
+            let _ = cell;
+        }
+        // miri / ASan would fire if the interior share leaked or was
+        // double-released.
+    }
 }
