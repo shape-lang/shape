@@ -1,10 +1,12 @@
 //! Native `unicode` module for Unicode text processing.
 //!
 //! Exports: unicode.normalize, unicode.category, unicode.is_letter, unicode.is_digit, unicode.graphemes
+//!
+//! Phase 4b: all 5 exports migrated to `TypedModuleExports`.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Create the `unicode` module.
 pub fn create_unicode_module() -> ModuleExports {
@@ -12,9 +14,34 @@ pub fn create_unicode_module() -> ModuleExports {
     module.description = "Unicode text processing utilities".to_string();
 
     // unicode.normalize(text: string, form: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "normalize",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Normalize a Unicode string to the specified form",
+        vec![
+            ModuleParam {
+                name: "text".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Text to normalize".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "form".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Normalization form: NFC, NFD, NFKC, or NFKD".to_string(),
+                allowed_values: Some(vec![
+                    "NFC".to_string(),
+                    "NFD".to_string(),
+                    "NFKC".to_string(),
+                    "NFKD".to_string(),
+                ]),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        |args, _ctx| {
             use unicode_normalization::UnicodeNormalization;
 
             let text = args
@@ -43,40 +70,24 @@ pub fn create_unicode_module() -> ModuleExports {
                 }
             };
 
-            Ok(ValueWord::from_string(Arc::new(normalized)))
-        },
-        ModuleFunction {
-            description: "Normalize a Unicode string to the specified form".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to normalize".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "form".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Normalization form: NFC, NFD, NFKC, or NFKD".to_string(),
-                    allowed_values: Some(vec![
-                        "NFC".to_string(),
-                        "NFD".to_string(),
-                        "NFKC".to_string(),
-                        "NFKD".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(normalized))
         },
     );
 
     // unicode.category(codepoint: int) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "category",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Get the Unicode general category of a codepoint",
+        vec![ModuleParam {
+            name: "codepoint".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            description: "Unicode codepoint (e.g., 65 for 'A')".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             let cp = args
                 .first()
                 .and_then(|a| a.as_i64().or_else(|| a.as_f64().map(|n| n as i64)))
@@ -87,76 +98,74 @@ pub fn create_unicode_module() -> ModuleExports {
             let ch = char::from_u32(cp as u32)
                 .ok_or_else(|| format!("unicode.category(): invalid codepoint {}", cp))?;
 
-            let category = unicode_general_category(ch);
-            Ok(ValueWord::from_string(Arc::new(category.to_string())))
-        },
-        ModuleFunction {
-            description: "Get the Unicode general category of a codepoint".to_string(),
-            params: vec![ModuleParam {
-                name: "codepoint".to_string(),
-                type_name: "int".to_string(),
-                required: true,
-                description: "Unicode codepoint (e.g., 65 for 'A')".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(unicode_general_category(ch).to_string()))
         },
     );
 
     // unicode.is_letter(char: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_letter",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if the first character is a Unicode letter",
+        vec![ModuleParam {
+            name: "char".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Single character string to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let s = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "unicode.is_letter() requires a string argument".to_string())?;
 
-            let result = s.chars().next().map_or(false, |c| c.is_alphabetic());
-            Ok(ValueWord::from_bool(result))
-        },
-        ModuleFunction {
-            description: "Check if the first character is a Unicode letter".to_string(),
-            params: vec![ModuleParam {
-                name: "char".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Single character string to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(
+                s.chars().next().map_or(false, |c| c.is_alphabetic()),
+            ))
         },
     );
 
     // unicode.is_digit(char: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_digit",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if the first character is a Unicode digit",
+        vec![ModuleParam {
+            name: "char".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Single character string to check".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let s = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "unicode.is_digit() requires a string argument".to_string())?;
 
-            let result = s.chars().next().map_or(false, |c| c.is_numeric());
-            Ok(ValueWord::from_bool(result))
-        },
-        ModuleFunction {
-            description: "Check if the first character is a Unicode digit".to_string(),
-            params: vec![ModuleParam {
-                name: "char".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Single character string to check".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(
+                s.chars().next().map_or(false, |c| c.is_numeric()),
+            ))
         },
     );
 
     // unicode.graphemes(text: string) -> Array<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "graphemes",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Split a string into Unicode grapheme clusters",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Text to split into grapheme clusters".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::ArrayString,
+        |args, _ctx| {
             use unicode_segmentation::UnicodeSegmentation;
 
             let text = args
@@ -164,23 +173,8 @@ pub fn create_unicode_module() -> ModuleExports {
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "unicode.graphemes() requires a string argument".to_string())?;
 
-            let clusters: ArgVec = ArgVec::from_vec(text
-                .graphemes(true)
-                .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
-                .collect());
-
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters.into_inner())))
-        },
-        ModuleFunction {
-            description: "Split a string into Unicode grapheme clusters".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Text to split into grapheme clusters".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<string>".to_string()),
+            let clusters: Vec<String> = text.graphemes(true).map(|g| g.to_string()).collect();
+            Ok(TypedReturn::ArrayString(clusters))
         },
     );
 
@@ -213,6 +207,7 @@ fn unicode_general_category(ch: char) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
         let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
@@ -364,5 +359,17 @@ mod tests {
         let result = f(&[input], &ctx).unwrap();
         let arr = result.as_any_array().unwrap().to_generic();
         assert_eq!(arr.len(), 2); // "e\u{0301}" and "a"
+    }
+
+    #[test]
+    fn test_unicode_typed_registry_populated() {
+        let module = create_unicode_module();
+        let typed = module.typed_exports();
+        assert!(typed.get("normalize").is_some());
+        assert!(typed.get("category").is_some());
+        assert!(typed.get("is_letter").is_some());
+        assert!(typed.get("is_digit").is_some());
+        assert!(typed.get("graphemes").is_some());
+        assert_eq!(typed.functions.len(), 5);
     }
 }

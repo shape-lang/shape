@@ -2,11 +2,16 @@
 //!
 //! Exports: compress.gzip, compress.gunzip, compress.zstd, compress.unzstd,
 //!          compress.deflate, compress.inflate
+//!
+//! Phase 4b: all 6 exports migrated to `TypedModuleExports`. The 3
+//! compress functions return `TypedReturn::Bytes` (semantically `Array<int>`
+//! of u8 widened to i64); the 3 decompress functions return
+//! `TypedReturn::String`.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use super::byte_utils::bytes_from_array;
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
-use std::sync::Arc;
-use super::byte_utils::{bytes_from_array, bytes_to_array};
 
 /// Create the `compress` module with compression/decompression functions.
 pub fn create_compress_module() -> ModuleExports {
@@ -14,9 +19,19 @@ pub fn create_compress_module() -> ModuleExports {
     module.description = "Data compression and decompression (gzip, zstd, deflate)".to_string();
 
     // compress.gzip(data: string) -> Array<int>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "gzip",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compress a string using gzip, returning a byte array",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "String data to compress".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bytes,
+        |args, _ctx| {
             use flate2::Compression;
             use flate2::write::GzEncoder;
             use std::io::Write;
@@ -34,25 +49,24 @@ pub fn create_compress_module() -> ModuleExports {
                 .finish()
                 .map_err(|e| format!("compress.gzip() failed: {}", e))?;
 
-            Ok(bytes_to_array(&compressed))
-        },
-        ModuleFunction {
-            description: "Compress a string using gzip, returning a byte array".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "String data to compress".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".to_string()),
+            Ok(TypedReturn::Bytes(compressed))
         },
     );
 
     // compress.gunzip(data: Array<int>) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "gunzip",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decompress a gzip byte array back to a string",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Gzip-compressed byte array".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use flate2::read::GzDecoder;
             use std::io::Read;
 
@@ -67,25 +81,34 @@ pub fn create_compress_module() -> ModuleExports {
                 .read_to_string(&mut output)
                 .map_err(|e| format!("compress.gunzip() failed: {}", e))?;
 
-            Ok(ValueWord::from_string(Arc::new(output)))
-        },
-        ModuleFunction {
-            description: "Decompress a gzip byte array back to a string".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Gzip-compressed byte array".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(output))
         },
     );
 
     // compress.zstd(data: string, level?: int) -> Array<int>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "zstd",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compress a string using Zstandard, returning a byte array",
+        vec![
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "String data to compress".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "level".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Compression level (default: 3)".to_string(),
+                default_snippet: Some("3".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Bytes,
+        |args, _ctx| {
             let data = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -99,35 +122,24 @@ pub fn create_compress_module() -> ModuleExports {
             let compressed = zstd::encode_all(data.as_bytes(), level)
                 .map_err(|e| format!("compress.zstd() failed: {}", e))?;
 
-            Ok(bytes_to_array(&compressed))
-        },
-        ModuleFunction {
-            description: "Compress a string using Zstandard, returning a byte array".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "String data to compress".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "level".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Compression level (default: 3)".to_string(),
-                    default_snippet: Some("3".to_string()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<int>".to_string()),
+            Ok(TypedReturn::Bytes(compressed))
         },
     );
 
     // compress.unzstd(data: Array<int>) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "unzstd",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decompress a Zstandard byte array back to a string",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Zstd-compressed byte array".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             let input = args
                 .first()
                 .ok_or_else(|| "compress.unzstd() requires an Array<int> argument".to_string())?;
@@ -139,25 +151,24 @@ pub fn create_compress_module() -> ModuleExports {
             let output = String::from_utf8(decompressed)
                 .map_err(|e| format!("compress.unzstd() invalid UTF-8: {}", e))?;
 
-            Ok(ValueWord::from_string(Arc::new(output)))
-        },
-        ModuleFunction {
-            description: "Decompress a Zstandard byte array back to a string".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Zstd-compressed byte array".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(output))
         },
     );
 
     // compress.deflate(data: string) -> Array<int>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "deflate",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compress a string using raw deflate, returning a byte array",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "String data to compress".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bytes,
+        |args, _ctx| {
             use flate2::Compression;
             use flate2::write::DeflateEncoder;
             use std::io::Write;
@@ -175,25 +186,24 @@ pub fn create_compress_module() -> ModuleExports {
                 .finish()
                 .map_err(|e| format!("compress.deflate() failed: {}", e))?;
 
-            Ok(bytes_to_array(&compressed))
-        },
-        ModuleFunction {
-            description: "Compress a string using raw deflate, returning a byte array".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "String data to compress".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".to_string()),
+            Ok(TypedReturn::Bytes(compressed))
         },
     );
 
     // compress.inflate(data: Array<int>) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "inflate",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decompress a raw deflate byte array back to a string",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Deflate-compressed byte array".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use flate2::read::DeflateDecoder;
             use std::io::Read;
 
@@ -209,18 +219,7 @@ pub fn create_compress_module() -> ModuleExports {
                 .read_to_string(&mut output)
                 .map_err(|e| format!("compress.inflate() failed: {}", e))?;
 
-            Ok(ValueWord::from_string(Arc::new(output)))
-        },
-        ModuleFunction {
-            description: "Decompress a raw deflate byte array back to a string".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Deflate-compressed byte array".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(output))
         },
     );
 
@@ -230,6 +229,8 @@ pub fn create_compress_module() -> ModuleExports {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
+    use std::sync::Arc;
 
     fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
         let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
@@ -395,5 +396,17 @@ mod tests {
 
         let gunzip_schema = module.get_schema("gunzip").unwrap();
         assert_eq!(gunzip_schema.return_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_compress_typed_registry_populated() {
+        let module = create_compress_module();
+        let typed = module.typed_exports();
+        assert_eq!(typed.functions.len(), 6);
+        assert_eq!(typed.get("gzip").unwrap().return_type, ConcreteType::Bytes);
+        assert_eq!(
+            typed.get("gunzip").unwrap().return_type,
+            ConcreteType::String
+        );
     }
 }
