@@ -3,7 +3,8 @@
 //! Exports: regex.match, regex.match_all, regex.replace, regex.replace_all,
 //!          regex.is_match, regex.split
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -41,10 +42,33 @@ pub fn create_regex_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::regex");
     module.description = "Regular expression matching and replacement".to_string();
 
+    let text_pattern_params = || {
+        vec![
+            ModuleParam {
+                name: "text".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Text to search".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "pattern".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Regular expression pattern".to_string(),
+                ..Default::default()
+            },
+        ]
+    };
+
     // regex.is_match(text: string, pattern: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_match",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Test whether the pattern matches anywhere in the text",
+        text_pattern_params(),
+        ConcreteType::Bool,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -58,34 +82,18 @@ pub fn create_regex_module() -> ModuleExports {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("regex.is_match() invalid pattern: {}", e))?;
 
-            Ok(ValueWord::from_bool(re.is_match(text)))
-        },
-        ModuleFunction {
-            description: "Test whether the pattern matches anywhere in the text".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to search".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(re.is_match(text)))
         },
     );
 
     // regex.match(text: string, pattern: string) -> Option<object>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "match",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Find the first match of the pattern, returning a match object or none",
+        text_pattern_params(),
+        ConcreteType::Option(Box::new(ConcreteType::Object)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -102,38 +110,25 @@ pub fn create_regex_module() -> ModuleExports {
             match re.captures(text) {
                 Some(caps) => {
                     let m = caps.get(0).unwrap();
-                    Ok(ValueWord::from_some(match_to_nanboxed(&m, &caps)))
+                    let obj = match_to_nanboxed(&m, &caps);
+                    Ok(TypedReturn::Some(Box::new(TypedReturn::ValueWord(obj))))
                 }
-                None => Ok(ValueWord::none()),
+                None => Ok(TypedReturn::None),
             }
-        },
-        ModuleFunction {
-            description: "Find the first match of the pattern, returning a match object or none"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to search".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Option<object>".to_string()),
         },
     );
 
-    // regex.find(text, pattern) — alias for `match` (since `match` is a keyword in Shape)
-    module.add_function(
+    // regex.find(text, pattern) — alias for `match` (since `match` is a
+    // keyword in Shape). The original installs without a schema; we mirror
+    // that via register_typed_function and accept the auto-installed
+    // schema as a small surface improvement.
+    register_typed_function(
+        &mut module,
         "find",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Alias for `match` (since `match` is a keyword in Shape)",
+        text_pattern_params(),
+        ConcreteType::Option(Box::new(ConcreteType::Object)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -147,17 +142,22 @@ pub fn create_regex_module() -> ModuleExports {
             match re.captures(text) {
                 Some(caps) => {
                     let m = caps.get(0).unwrap();
-                    Ok(ValueWord::from_some(match_to_nanboxed(&m, &caps)))
+                    let obj = match_to_nanboxed(&m, &caps);
+                    Ok(TypedReturn::Some(Box::new(TypedReturn::ValueWord(obj))))
                 }
-                None => Ok(ValueWord::none()),
+                None => Ok(TypedReturn::None),
             }
         },
     );
 
     // regex.match_all(text: string, pattern: string) -> Array<object>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "match_all",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Find all non-overlapping matches of the pattern",
+        text_pattern_params(),
+        ConcreteType::ArrayObject("Array<object>".to_string()),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -170,42 +170,52 @@ pub fn create_regex_module() -> ModuleExports {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("regex.match_all() invalid pattern: {}", e))?;
 
-            let matches: ArgVec = ArgVec::from_vec(re
+            let matches: Vec<ValueWord> = re
                 .captures_iter(text)
                 .map(|caps| {
                     let m = caps.get(0).unwrap();
                     match_to_nanboxed(&m, &caps)
                 })
-                .collect());
+                .collect();
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(matches.into_inner())))
-        },
-        ModuleFunction {
-            description: "Find all non-overlapping matches of the pattern".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to search".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<object>".to_string()),
+            Ok(TypedReturn::ArrayValueWord(matches))
         },
     );
 
+    let replace_params = || {
+        vec![
+            ModuleParam {
+                name: "text".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Text to search".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "pattern".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Regular expression pattern".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "replacement".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Replacement string (supports $1, $2 for capture groups)".to_string(),
+                ..Default::default()
+            },
+        ]
+    };
+
     // regex.replace(text: string, pattern: string, replacement: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "replace",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Replace the first match of the pattern with the replacement",
+        replace_params(),
+        ConcreteType::String,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -224,42 +234,18 @@ pub fn create_regex_module() -> ModuleExports {
                 .map_err(|e| format!("regex.replace() invalid pattern: {}", e))?;
 
             let result = re.replace(text, replacement);
-            Ok(ValueWord::from_string(Arc::new(result.into_owned())))
-        },
-        ModuleFunction {
-            description: "Replace the first match of the pattern with the replacement".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to search".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "replacement".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Replacement string (supports $1, $2 for capture groups)"
-                        .to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(result.into_owned()))
         },
     );
 
     // regex.replace_all(text: string, pattern: string, replacement: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "replace_all",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Replace all matches of the pattern with the replacement",
+        replace_params(),
+        ConcreteType::String,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -277,42 +263,33 @@ pub fn create_regex_module() -> ModuleExports {
                 .map_err(|e| format!("regex.replace_all() invalid pattern: {}", e))?;
 
             let result = re.replace_all(text, replacement);
-            Ok(ValueWord::from_string(Arc::new(result.into_owned())))
-        },
-        ModuleFunction {
-            description: "Replace all matches of the pattern with the replacement".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to search".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "replacement".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Replacement string (supports $1, $2 for capture groups)"
-                        .to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(result.into_owned()))
         },
     );
 
     // regex.split(text: string, pattern: string) -> Array<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "split",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Split the text at each match of the pattern",
+        vec![
+            ModuleParam {
+                name: "text".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Text to split".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "pattern".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Regular expression pattern to split on".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::ArrayString,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -326,32 +303,8 @@ pub fn create_regex_module() -> ModuleExports {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("regex.split() invalid pattern: {}", e))?;
 
-            let parts: ArgVec = ArgVec::from_vec(re
-                .split(text)
-                .map(|s| ValueWord::from_string(Arc::new(s.to_string())))
-                .collect());
-
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts.into_inner())))
-        },
-        ModuleFunction {
-            description: "Split the text at each match of the pattern".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "text".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text to split".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "pattern".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Regular expression pattern to split on".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<string>".to_string()),
+            let parts: Vec<String> = re.split(text).map(|s| s.to_string()).collect();
+            Ok(TypedReturn::ArrayString(parts))
         },
     );
 
