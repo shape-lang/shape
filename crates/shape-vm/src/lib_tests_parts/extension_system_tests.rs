@@ -1,7 +1,8 @@
 use crate::BytecodeExecutor;
-use shape_value::ValueWordExt;
 use crate::compiler::BytecodeCompiler;
 use shape_runtime::module_loader::ModuleLoader;
+use shape_runtime::typed_module_exports::register_test_function;
+use shape_value::ValueWordExt;
 
 /// `use example` should parse and compile without error.
 #[test]
@@ -54,7 +55,7 @@ fn test_extension_registration() {
     use shape_runtime::module_exports::ModuleExports;
 
     let mut ext = ModuleExports::new("test_ext");
-    ext.add_function(
+    register_test_function(&mut ext, 
         "hello",
         |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
             Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
@@ -70,7 +71,7 @@ fn test_extension_registration() {
     // We cannot directly inspect the private field, but we can verify
     // that a second registration also works without panic.
     let mut ext2 = ModuleExports::new("test_ext_2");
-    ext2.add_function(
+    register_test_function(&mut ext2, 
         "world",
         |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
             Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(

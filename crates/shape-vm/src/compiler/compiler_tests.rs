@@ -4,6 +4,7 @@ use crate::bytecode::{BuiltinFunction, Operand};
 use crate::executor::VirtualMachine;
 use crate::type_tracking::StorageHint;
 use shape_ast::parser::parse_program;
+use shape_runtime::typed_module_exports::register_test_function;
 use shape_value::{ValueWord, ValueWordExt, heap_value::NativeScalar};
 
 /// Compile and run Shape code, returning the top-level result.
@@ -271,7 +272,7 @@ fn test_extension_namespace_is_not_implicit_global() {
 #[test]
 fn test_use_namespace_enables_extension_namespace_access() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -293,7 +294,7 @@ fn test_use_namespace_enables_extension_namespace_access() {
 #[test]
 fn test_use_hierarchical_namespace_enables_tail_binding() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("std::core::snapshot");
-    ext.add_function("snapshot", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "snapshot", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -315,7 +316,7 @@ fn test_use_hierarchical_namespace_enables_tail_binding() {
 #[test]
 fn test_use_namespace_alias_enables_access() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -337,7 +338,7 @@ fn test_use_namespace_alias_enables_access() {
 #[test]
 fn test_use_namespace_still_enables_extension_namespace_access() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -359,7 +360,7 @@ fn test_use_namespace_still_enables_extension_namespace_access() {
 #[test]
 fn test_comptime_only_native_export_rejected_in_runtime_context() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function(
+    register_test_function(&mut ext, 
         "connect_codegen",
         |_args, _ctx: &shape_runtime::ModuleContext| Ok(shape_value::ValueWord::none()),
     );
@@ -391,7 +392,7 @@ fn test_comptime_only_native_export_rejected_in_runtime_context() {
 #[test]
 fn test_comptime_only_native_export_allowed_in_comptime_block() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function(
+    register_test_function(&mut ext, 
         "connect_codegen",
         |_args, _ctx: &shape_runtime::ModuleContext| Ok(shape_value::ValueWord::from_i64(7)),
     );
@@ -425,10 +426,10 @@ fn test_comptime_only_native_export_allowed_in_comptime_block() {
 #[test]
 fn test_namespace_import_registers_module_schema_compile_time() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
-    ext.add_function(
+    register_test_function(&mut ext, 
         "source_schema",
         |_args, _ctx: &shape_runtime::ModuleContext| Ok(shape_value::ValueWord::none()),
     );
@@ -480,7 +481,7 @@ fn test_namespace_import_registers_shape_artifact_exports_compile_time() {
 #[test]
 fn test_module_namespace_call_lowers_to_callvalue_not_callmethod() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -508,7 +509,7 @@ fn test_module_namespace_call_lowers_to_callvalue_not_callmethod() {
 #[test]
 fn test_dot_module_namespace_call_is_rejected() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 
@@ -528,7 +529,7 @@ fn test_dot_module_namespace_call_is_rejected() {
 #[test]
 fn test_local_value_shadowing_namespace_alias_keeps_dot_methods_and_fields() {
     let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
-    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+    register_test_function(&mut ext, "connect", |_args, _ctx: &shape_runtime::ModuleContext| {
         Ok(shape_value::ValueWord::none())
     });
 

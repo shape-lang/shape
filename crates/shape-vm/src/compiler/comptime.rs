@@ -949,6 +949,7 @@ fn nb_to_expr(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {
 mod tests {
     use super::*;
     use shape_ast::ast::{BinaryOp, Expr, Literal, Span, Statement};
+    use shape_runtime::typed_module_exports::register_test_function;
     use shape_value::heap_value::HeapValue;
 
     #[test]
@@ -1026,7 +1027,7 @@ mod tests {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("mock_db");
-        ext.add_function(
+        register_test_function(&mut ext, 
             "get_schema",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new(
@@ -1077,7 +1078,7 @@ mod tests {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("test_ext");
-        ext.add_function(
+        register_test_function(&mut ext, 
             "version",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new("1.0".to_string())))

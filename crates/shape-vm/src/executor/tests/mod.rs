@@ -1,5 +1,6 @@
 use super::*;
 use crate::bytecode::*;
+use shape_runtime::typed_module_exports::register_test_function;
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Shared test helpers (eval, eval_result, compile, etc.)
@@ -2639,7 +2640,7 @@ fn test_cte_compiles_and_runs() {
 #[test]
 fn test_module_context_can_invoke_shape_callable() {
     let mut extension = shape_runtime::module_exports::ModuleExports::new("bridge");
-    extension.add_function(
+    register_test_function(&mut extension, 
         "invoke_once",
         |args, ctx: &shape_runtime::module_exports::ModuleContext| {
             let callable = args

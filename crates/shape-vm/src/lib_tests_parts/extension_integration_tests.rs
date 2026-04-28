@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod extension_integration_tests {
     use super::*;
-    use shape_value::ValueWordExt;
     use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
+    use shape_runtime::typed_module_exports::register_test_function;
+    use shape_value::ValueWordExt;
 
     #[test]
     fn test_extension_shape_source_registered_as_virtual_module() {
@@ -78,7 +79,7 @@ mod extension_integration_tests {
     fn test_extension_module_registered() {
         // Extension module functions should be tracked
         let mut module = shape_runtime::module_exports::ModuleExports::new("test_db");
-        module.add_function(
+        register_test_function(&mut module, 
             "load",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::none())
@@ -98,7 +99,7 @@ mod extension_integration_tests {
     #[test]
     fn test_shape_artifact_function_can_call_module_namespace_export() {
         let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
-        module.add_function(
+        register_test_function(&mut module, 
             "__connect",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::from_i64(7))
@@ -170,7 +171,7 @@ pub @force_int() fn connect(const uri) { 1 }
     #[test]
     fn test_imported_module_comptime_set_return_expr_via_module_export() {
         let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
-        module.add_function(
+        register_test_function(&mut module, 
             "__connect_codegen",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
@@ -224,7 +225,7 @@ pub @db_schema() fn connect(const uri) { 1 }
     #[test]
     fn test_imported_module_comptime_handler_can_call_comptime_helper_fn() {
         let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
-        module.add_function(
+        register_test_function(&mut module, 
             "__connect_codegen",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
@@ -282,13 +283,13 @@ pub @db_schema() fn connect(const uri) { 1 }
     #[test]
     fn test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain() {
         let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
-        module.add_function(
+        register_test_function(&mut module, 
             "__connect",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::none())
             },
         );
-        module.add_function(
+        register_test_function(&mut module, 
             "__connect_codegen",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
