@@ -47,6 +47,21 @@ use std::collections::HashMap;
 /// holds exactly one strong-count share; closure Drop reclaims it with
 /// `Arc::from_raw(ptr).drop()`.
 ///
+/// # ⚠ JIT-coupled ABI: payload offset is part of the contract
+///
+/// The 8-byte payload sits at offset 8 (`SHARED_CELL_VALUE_OFFSET`). The
+/// JIT in `crates/shape-jit/src/mir_compiler/places.rs` and the inline
+/// lock/unlock lowering in `shape-jit::ffi::object::closure` both read
+/// offset 8 directly via Cranelift codegen with this constant baked in.
+/// Changing the layout requires updating the JIT in lockstep — the
+/// `const _: () = { ... }` static assertion below catches a drifting
+/// definition at compile time, but a mismatch in the JIT's hardcoded
+/// constants would still need a manual audit. Per-FieldKind read/write
+/// helpers in `closure_raw.rs::read_shared_*` / `write_shared_*`
+/// reinterpret the 8-byte payload through narrower `FieldKind` widths
+/// for sub-8-byte scalar inner types but never change the physical
+/// offset.
+///
 /// # ABI and layout (Track A.1E)
 ///
 /// Pre-A.1E this was a `parking_lot::Mutex<ValueWord>` type alias. The
@@ -118,6 +133,17 @@ pub const SHARED_CELL_STATE_OFFSET: i32 = 0;
 /// Byte offset of the value payload within [`SharedCell`]. The JIT's
 /// inline load/store targets this offset as a compile-time constant.
 pub const SHARED_CELL_VALUE_OFFSET: i32 = 8;
+
+const _: () = {
+    // Tie the public JIT-facing `SHARED_CELL_VALUE_OFFSET` constant to the
+    // actual struct field offset. If `SharedCell` is ever re-laid-out
+    // (e.g. by adding a field before `value`, or changing the padding)
+    // this assertion fires before the JIT can miscompile — and the
+    // narrower-`FieldKind` payload helpers in `closure_raw.rs::read_shared_*`
+    // / `write_shared_*` rely on the same constant for their reads.
+    assert!(SHARED_CELL_VALUE_OFFSET as usize == std::mem::offset_of!(SharedCell, value));
+    assert!(SHARED_CELL_STATE_OFFSET as usize == std::mem::offset_of!(SharedCell, state));
+};
 
 /// Locked state byte value.
 pub const SHARED_CELL_LOCKED: u8 = 1;
