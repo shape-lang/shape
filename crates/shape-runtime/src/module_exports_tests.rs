@@ -47,8 +47,7 @@ fn test_module_exports_call() {
     });
 
     let ctx = test_ctx();
-    let func = module.get_export("add").unwrap();
-    let result = func(&[ValueWord::from_f64(3.0), ValueWord::from_f64(4.0)], &ctx).unwrap();
+    let result = module.invoke_export("add", &[ValueWord::from_f64(3.0), ValueWord::from_f64(4.0)], &ctx).unwrap().unwrap();
     assert_eq!(result.as_number_coerce(), Some(7.0));
 }
 
