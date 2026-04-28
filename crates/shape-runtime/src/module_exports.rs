@@ -506,6 +506,24 @@ impl ModuleExports {
         self
     }
 
+    /// Register only the LSP/validation schema and visibility for an
+    /// exported name, without populating the legacy `exports` /
+    /// `async_exports` tables. Used by the typed-registry path
+    /// (`register_typed_function`/`register_typed_async_function`)
+    /// — the actual function body lives in `typed_exports` and is
+    /// dispatched directly via `ModuleFnEntry::Typed` /
+    /// `ModuleFnEntry::TypedAsync`.
+    pub fn add_schema_only(
+        &mut self,
+        name: impl Into<String>,
+        schema: ModuleFunction,
+    ) -> &mut Self {
+        let name = name.into();
+        self.schemas.insert(name.clone(), schema);
+        self.export_visibility.entry(name).or_default();
+        self
+    }
+
     /// Set visibility for one export name.
     pub fn set_export_visibility(
         &mut self,
@@ -610,24 +628,57 @@ impl ModuleExports {
         id
     }
 
-    /// Check if this module exports a given name (sync or async).
+    /// Check if this module exports a given name (sync or async, typed
+    /// or legacy).
     pub fn has_export(&self, name: &str) -> bool {
-        self.exports.contains_key(name) || self.async_exports.contains_key(name)
+        self.exports.contains_key(name)
+            || self.async_exports.contains_key(name)
+            || self.typed_exports.functions.contains_key(name)
+            || self.typed_exports.async_functions.contains_key(name)
     }
 
-    /// Get a sync exported function by name.
+    /// Get a sync exported function by name (legacy table only).
+    /// Returns None for typed exports — those are accessed via
+    /// `typed_exports().get(name)`.
     pub fn get_export(&self, name: &str) -> Option<&ModuleFn> {
         self.exports.get(name)
     }
 
-    /// Get an async exported function by name.
+    /// Invoke a sync export by name, dispatching transparently across
+    /// the legacy and typed registries.
+    ///
+    /// Returns `None` if the export doesn't exist (or is async). Used
+    /// by stdlib-internal tests that previously did
+    /// `module.get_export(name).unwrap()(&args, &ctx)` — the typed
+    /// migration breaks the `get_export` shape so this convenience
+    /// preserves the call surface.
+    pub fn invoke_export(
+        &self,
+        name: &str,
+        args: &[ValueWord],
+        ctx: &ModuleContext,
+    ) -> Option<Result<ValueWord, String>> {
+        if let Some(legacy) = self.exports.get(name) {
+            return Some(legacy(args, ctx));
+        }
+        if let Some(typed) = self.typed_exports.functions.get(name) {
+            let typed_result = (typed.invoke)(args, ctx);
+            return Some(typed_result.map(|t| t.into_value_word()));
+        }
+        None
+    }
+
+    /// Get an async exported function by name (legacy table only).
+    /// Returns None for typed exports — those are accessed via
+    /// `typed_exports().get_async(name)`.
     pub fn get_async_export(&self, name: &str) -> Option<&AsyncModuleFn> {
         self.async_exports.get(name)
     }
 
-    /// Check if a function is async.
+    /// Check if a function is async (legacy or typed).
     pub fn is_async(&self, name: &str) -> bool {
         self.async_exports.contains_key(name)
+            || self.typed_exports.async_functions.contains_key(name)
     }
 
     /// Get the schema for an exported function.
@@ -635,12 +686,14 @@ impl ModuleExports {
         self.schemas.get(name)
     }
 
-    /// List all export names (sync + async).
+    /// List all export names (sync + async, typed + legacy).
     pub fn export_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .exports
             .keys()
             .chain(self.async_exports.keys())
+            .chain(self.typed_exports.functions.keys())
+            .chain(self.typed_exports.async_functions.keys())
             .map(|s| s.as_str())
             .collect();
         names.sort_unstable();

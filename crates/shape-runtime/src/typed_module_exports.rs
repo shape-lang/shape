@@ -442,7 +442,15 @@ pub fn register_typed_function<F>(
     let arg_types = params.iter().map(|p| p.type_name.clone()).collect();
     let return_type_str = return_type.shape_type_name();
 
-    // 2. Auto-wrapping legacy ModuleFn (preserves the current invoke path).
+    // Phase 4c.3 status: the VM's runtime dispatch path goes through
+    // `typed_exports.functions` directly via `ModuleFnEntry::Typed` —
+    // no `ValueWord` round-trip in the body. We still install an
+    // auto-wrapping legacy `ModuleFn` because stdlib unit tests and
+    // some helper paths invoke through `module.get_export(name)` /
+    // `module.invoke_export(name, ...)`. The architectural goal of
+    // eliminating the round-trip for the *runtime* path is achieved;
+    // the legacy table is now a test-and-mirror surface that Phase 4d
+    // / a follow-up sweep can audit and delete.
     let body_for_wrapper = body_arc.clone();
     module.add_function_with_schema(
         name.clone(),
@@ -457,18 +465,14 @@ pub fn register_typed_function<F>(
         },
     );
 
-    // 1. Typed-registry entry, alongside the legacy entry.
-    module
-        .typed_exports_mut()
-        .functions
-        .insert(
-            name,
-            TypedModuleFunction {
-                invoke: body_arc,
-                return_type,
-                arg_types,
-            },
-        );
+    module.typed_exports_mut().functions.insert(
+        name,
+        TypedModuleFunction {
+            invoke: body_arc,
+            return_type,
+            arg_types,
+        },
+    );
 }
 
 /// Register a typed-return *async* function on a `ModuleExports`.
@@ -498,8 +502,11 @@ pub fn register_typed_async_function<F, Fut>(
     let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
     let return_type_str = return_type.shape_type_name();
 
-    // Auto-wrapping async ModuleFn — runs the typed body, then marshals
-    // its TypedReturn into a ValueWord at the await boundary.
+    // Phase 4c.3 status: see `register_typed_function`. The runtime
+    // dispatch goes through `typed_exports.async_functions` directly,
+    // but stdlib tests / some helper code paths still consult the
+    // legacy `module.async_exports` table — so we keep installing the
+    // auto-wrapping `AsyncModuleFn` shim for compatibility.
     let body_for_async = body.clone();
     module.add_async_function_with_schema(
         name.clone(),
@@ -730,12 +737,21 @@ mod tests {
             },
         );
 
-        // Legacy invoke surface still works.
+        // Legacy invoke surface still works (auto-wrapping mirror —
+        // see Phase 4c.3 status comment in `register_typed_function`).
         let f = module.get_export("echo").unwrap();
         let arg = ValueWord::from_string(Arc::new("hi".to_string()));
         let ctx = empty_ctx();
-        let result = f(&[arg], &ctx).unwrap();
+        let result = f(&[arg.clone()], &ctx).unwrap();
         assert_eq!(result.as_str(), Some("hi"));
+
+        // Typed invoke surface (the runtime dispatch path).
+        let typed_entry = module.typed_exports().get("echo").unwrap();
+        let typed_result = (typed_entry.invoke)(&[arg], &ctx).unwrap();
+        match typed_result {
+            TypedReturn::String(s) => assert_eq!(s, "hi"),
+            other => panic!("expected TypedReturn::String, got {:?}", other),
+        }
 
         // Schema is populated.
         let schema = module.get_schema("echo").unwrap();

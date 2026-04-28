@@ -23,13 +23,66 @@ impl VirtualMachine {
         // Expose module exports as methods on the module object type so
         // `module.fn(...)` dispatches via CallMethod without UFCS rewrites.
         // Register under the canonical type name only (`__mod_std::core::json`).
+        //
+        // Phase 4c.3: typed-export-aware. The `extension_methods` map
+        // still holds `ModuleFn`, so typed entries are wrapped here
+        // into a sync ModuleFn that runs the typed body and marshals
+        // its TypedReturn into a ValueWord at the boundary. This keeps
+        // the wrap parity with `populate_module_objects` while not
+        // depending on the legacy `module.exports`/`module.async_exports`
+        // tables.
         let canonical_type_name = format!("__mod_{}", module.name);
 
         let mut sync_methods: Vec<(String, shape_runtime::module_exports::ModuleFn)> = Vec::new();
+
+        // Track names already covered by a typed entry so legacy
+        // fallback iteration doesn't re-register them.
+        let typed = module.typed_exports();
+        let mut typed_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (export_name, typed_fn) in &typed.functions {
+            typed_names.insert(export_name.clone());
+            let typed_clone = typed_fn.clone();
+            let wrapped: shape_runtime::module_exports::ModuleFn = Arc::new(
+                move |args: &[ValueWord],
+                      ctx: &shape_runtime::module_exports::ModuleContext| {
+                    let typed_result = (typed_clone.invoke)(args, ctx)?;
+                    Ok(typed_result.into_value_word())
+                },
+            );
+            sync_methods.push((export_name.clone(), wrapped));
+        }
+        for (export_name, typed_async) in &typed.async_functions {
+            typed_names.insert(export_name.clone());
+            let invoke = typed_async.invoke.clone();
+            let wrapped: shape_runtime::module_exports::ModuleFn = Arc::new(
+                move |args: &[ValueWord],
+                      _ctx: &shape_runtime::module_exports::ModuleContext| {
+                    let owned = args.to_vec();
+                    let invoke = invoke.clone();
+                    let typed = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(invoke(owned))
+                    })?;
+                    Ok(typed.into_value_word())
+                },
+            );
+            sync_methods.push((export_name.clone(), wrapped));
+        }
+
+        // Legacy sync/async fallback for any export that ISN'T in the
+        // typed registry. Phase 4c.2 migrated all shipped stdlib
+        // exports off this path, but extension/test fixtures may still
+        // register via `add_function` / `add_async_function`.
         for (export_name, func) in &module.exports {
+            if typed_names.contains(export_name) {
+                continue;
+            }
             sync_methods.push((export_name.clone(), func.clone()));
         }
         for (export_name, async_fn) in &module.async_exports {
+            if typed_names.contains(export_name) {
+                continue;
+            }
             let async_fn = async_fn.clone();
             let wrapped: shape_runtime::module_exports::ModuleFn = Arc::new(
                 move |args: &[ValueWord], _ctx: &shape_runtime::module_exports::ModuleContext| {
