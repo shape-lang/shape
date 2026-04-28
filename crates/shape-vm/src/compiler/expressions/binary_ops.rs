@@ -107,23 +107,39 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
     Span::new(ls.start.min(rs.start), ls.end.max(rs.end))
 }
 
-/// Emit the appropriate runtime-dispatched opcode for the given binary
-/// operation, routing through the `emit_binary_op` shim.
-/// Returns `true` if the shim handled the op, `false` if the caller should
-/// fall through to `compile_binary_op()` for remaining ops (And/Or/BitOps/
-/// NullCoalesce/ErrorContext).
+/// Strict-typing sweep (Phase 1): produce a `ShapeError::SemanticError`
+/// for a binary operation whose operand types could not be proven at
+/// compile time. Replaces the former `*Dynamic`-emission shim
+/// (`emit_generic_via_helper` and direct `emit_binary_op(... Unknown,
+/// Unknown)` calls).
 ///
-/// V3.2 (Tranche A — arithmetic) + V3.3 (Tranche B — comparisons): all
-/// arithmetic and comparison arms now share a single shim call with
-/// `BinOperandKind::Unknown` operands. This path is only reached after typed
-/// emission has declined, so the shim's Dynamic-fallback branch emits
-/// byte-identical `*Dynamic` opcodes. The shim's return value (`Ok(true)`
-/// for handled ops, `Ok(false)` for non-arithmetic/non-comparison ops) is
-/// forwarded to the caller.
-fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bool {
-    use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-    emit_binary_op(compiler, *op, BinOperandKind::Unknown, BinOperandKind::Unknown)
-        .expect("emit_binary_op never returns Err")
+/// The error includes the operator symbol, both operand types (as
+/// inferred — falling back to `"unknown"` when inference declines), and a
+/// span covering both operands so editors can underline the offending
+/// expression.
+fn strict_typing_binop_error(
+    compiler: &mut BytecodeCompiler,
+    op: &BinaryOp,
+    left: &Expr,
+    right: &Expr,
+) -> ShapeError {
+    let lhs_type = compiler
+        .infer_expr_type(left)
+        .map(|t| type_display_name(&t))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let rhs_type = compiler
+        .infer_expr_type(right)
+        .map(|t| type_display_name(&t))
+        .unwrap_or_else(|_| "unknown".to_string());
+    ShapeError::SemanticError {
+        message: format!(
+            "Cannot infer types for binary operation `{:?}`: operand types are `{}` and `{}`. \
+             Strict typing requires both operands to have a known concrete type at compile time. \
+             Add a type annotation to disambiguate.",
+            op, lhs_type, rhs_type
+        ),
+        location: Some(compiler.span_to_source_location(combined_span(left, right))),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,23 +483,13 @@ impl BytecodeCompiler {
             return Ok(true);
         }
 
-        // Fallback: both operand types are unresolved. Compile operands and
-        // emit a runtime-dispatched equality (vw_equals in the executor).
-        // This covers generic stdlib code, untyped function params, etc.
-        //
-        // V3.3 (Tranche B): route through the `emit_binary_op` shim with
-        // `BinOperandKind::Unknown` operands. The typed-equality dispatch
-        // above has already declined, so the shim emits the matching
-        // `EqDynamic` / `NeqDynamic` opcode. V3.6 audit: this is a class-(a)
-        // / class-(b) fallback — `resolve_eq_type` returned `None` for both
-        // operands (untyped params, generic stdlib code, polyglot values).
-        self.compile_expr(left)?;
-        self.compile_expr(right)?;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        let op = if is_neq { BinaryOp::NotEqual } else { BinaryOp::Equal };
-        let _ = emit_binary_op(self, op, BinOperandKind::Unknown, BinOperandKind::Unknown)
-            .expect("emit_binary_op never returns Err for Equal/NotEqual");
-        Ok(true)
+        // Strict-typing sweep (Phase 1): the typed-equality dispatch above
+        // declined for both operands, which historically routed through the
+        // `emit_binary_op` shim with `BinOperandKind::Unknown` operands and
+        // emitted `EqDynamic` / `NeqDynamic`. That dynamic-fallback path is
+        // now a hard compile error.
+        let typed_op = if is_neq { BinaryOp::NotEqual } else { BinaryOp::Equal };
+        Err(strict_typing_binop_error(self, &typed_op, left, right))
     }
 
     /// Resolve the equality-relevant type of an expression from multiple
@@ -970,25 +976,18 @@ impl BytecodeCompiler {
                             // L1427-L1458).
                             //
                             // When the helper declines (no schema / no matching
-                            // impl), fall through to the runtime-dispatched
-                            // `AddDynamic` below. That path remains legitimate
+                            // impl), the historical path emitted `AddDynamic`
                             // for non-numeric operand combinations (DateTime,
-                            // mixed string, polyglot value) where dispatch
-                            // happens at runtime in `exec_arithmetic`.
+                            // mixed string, polyglot value). Strict-typing
+                            // sweep (Phase 1): that dynamic-fallback emission
+                            // is now a hard compile error.
                             if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left) {
-                                // V3.2 (Tranche A): route through the
-                                // `emit_binary_op` shim. Operand kinds are
-                                // `Unknown` because the typed Add-numeric path
-                                // above has already declined for this operand
-                                // pair; the shim then emits `AddDynamic`.
-                                use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-                                let _ = emit_binary_op(
+                                return Err(strict_typing_binop_error(
                                     self,
-                                    BinaryOp::Add,
-                                    BinOperandKind::Unknown,
-                                    BinOperandKind::Unknown,
-                                )
-                                .expect("emit_binary_op never returns Err for BinaryOp::Add");
+                                    &BinaryOp::Add,
+                                    left,
+                                    right,
+                                ));
                             }
                         }
                     }
@@ -1369,10 +1368,10 @@ impl BytecodeCompiler {
                     NumericEmitResult::EmittedTyped => {}
                     NumericEmitResult::CoercedNeedsGeneric => {
                         // Op has no typed variant for this type combination.
+                        // Strict-typing sweep (Phase 1): the historical
+                        // dynamic-opcode fallback is now a hard compile error.
                         if !try_emit_trait_dispatch(self, op, left_schema, left) {
-                            if !emit_generic_via_helper(self, op) {
-                                self.compile_binary_op(op)?;
-                            }
+                            return Err(strict_typing_binop_error(self, op, left, right));
                         }
                     }
                     NumericEmitResult::NoPlan => {
@@ -1388,10 +1387,12 @@ impl BytecodeCompiler {
                         ) {
                             NumericEmitResult::EmittedTyped => {}
                             _ => {
+                                // Strict-typing sweep (Phase 1): the historical
+                                // dynamic-opcode fallback is now a hard compile error.
                                 if !try_emit_trait_dispatch(self, op, left_schema, left) {
-                                    if !emit_generic_via_helper(self, op) {
-                                        self.compile_binary_op(op)?;
-                                    }
+                                    return Err(strict_typing_binop_error(
+                                        self, op, left, right,
+                                    ));
                                 }
                             }
                         }
