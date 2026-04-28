@@ -554,6 +554,133 @@ pub fn register_typed_async_function<F, Fut>(
         );
 }
 
+/// Test-only helper that registers a legacy-style sync function body
+/// (`Fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>`)
+/// through the typed registry as a `TypedReturn::ValueWord` passthrough.
+///
+/// Replaces the deleted `ModuleExports::add_function` for test fixtures
+/// that don't care about typed dispatch — the surrounding code being
+/// tested is what's interesting, not the typed-return marshalling.
+///
+/// Use [`register_typed_function`] for production code that has a
+/// concrete return type.
+pub fn register_test_function<F>(
+    module: &mut ModuleExports,
+    name: impl Into<String>,
+    body: F,
+) where
+    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let name = name.into();
+    let body_arc: Arc<
+        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+            + Send
+            + Sync,
+    > = Arc::new(move |args, ctx| body(args, ctx).map(TypedReturn::ValueWord));
+
+    // Register schema-only so LSP/visibility tracking works.
+    module.add_schema_only(
+        name.clone(),
+        ModuleFunction {
+            description: String::new(),
+            params: vec![],
+            return_type: None,
+        },
+    );
+
+    module.typed_exports_mut().functions.insert(
+        name,
+        TypedModuleFunction {
+            invoke: body_arc,
+            return_type: ConcreteType::Object,
+            arg_types: vec![],
+        },
+    );
+}
+
+/// Test-only helper that registers a legacy-style sync function body
+/// with an explicit `ModuleFunction` schema. See [`register_test_function`].
+pub fn register_test_function_with_schema<F>(
+    module: &mut ModuleExports,
+    name: impl Into<String>,
+    body: F,
+    schema: ModuleFunction,
+) where
+    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let name = name.into();
+    let body_arc: Arc<
+        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+            + Send
+            + Sync,
+    > = Arc::new(move |args, ctx| body(args, ctx).map(TypedReturn::ValueWord));
+
+    let arg_types: Vec<String> =
+        schema.params.iter().map(|p| p.type_name.clone()).collect();
+    module.add_schema_only(name.clone(), schema);
+
+    module.typed_exports_mut().functions.insert(
+        name,
+        TypedModuleFunction {
+            invoke: body_arc,
+            return_type: ConcreteType::Object,
+            arg_types,
+        },
+    );
+}
+
+/// Test-only helper that registers a legacy-style async function body
+/// (`Fn(Vec<ValueWord>) -> impl Future<Output = Result<ValueWord, String>>`)
+/// through the typed async registry as a `TypedReturn::ValueWord` passthrough.
+///
+/// Mirrors [`register_test_function`] for async fixtures.
+pub fn register_test_async_function<F, Fut>(
+    module: &mut ModuleExports,
+    name: impl Into<String>,
+    body: F,
+) where
+    F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Result<ValueWord, String>> + Send + 'static,
+{
+    let name = name.into();
+    module.add_schema_only(
+        name.clone(),
+        ModuleFunction {
+            description: String::new(),
+            params: vec![],
+            return_type: None,
+        },
+    );
+
+    let body_for_typed = body;
+    let typed_invoke: Arc<
+        dyn Fn(
+                Vec<ValueWord>,
+            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+            + Send
+            + Sync,
+    > = Arc::new(move |args: Vec<ValueWord>| {
+        let fut = body_for_typed(args);
+        Box::pin(async move { fut.await.map(TypedReturn::ValueWord) })
+            as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+    });
+
+    module.typed_exports_mut().async_functions.insert(
+        name,
+        TypedModuleAsyncFunction {
+            invoke: typed_invoke,
+            return_type: ConcreteType::Object,
+            arg_types: vec![],
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
