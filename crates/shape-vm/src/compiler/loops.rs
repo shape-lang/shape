@@ -59,6 +59,13 @@ impl BytecodeCompiler {
         let counter_local = self.declare_local(var_name)?;
         let end_local = self.declare_local("__range_end")?;
 
+        // Strict-typing-sweep (Cluster 4): the counter is always `int` (range
+        // endpoints are coerced to int in the prologue). Without installing
+        // this in the type tracker, binary ops on the IV (`i + 1`, `s + i`)
+        // inside the loop body see the IV as `unknown` and fail strict-typing.
+        self.set_local_type_info(counter_local, "int");
+        self.set_local_type_info(end_local, "int");
+
         // compile(start) → [NumberToInt if float] → StoreLocal(counter)
         self.compile_expr(start_expr)?;
         let start_nt = self.last_expr_numeric_type;
