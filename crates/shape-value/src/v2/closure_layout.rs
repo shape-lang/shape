@@ -497,6 +497,24 @@ impl ClosureLayout {
         self.captures[i].kind
     }
 
+    /// Interior `FieldKind` of capture `i` — the type stored *inside* the
+    /// box/cell, not the slot kind.
+    ///
+    /// For `Immutable` captures this returns the same value as
+    /// [`capture_kind`](Self::capture_kind): the slot directly holds a value
+    /// of the declared type.
+    ///
+    /// For `OwnedMutable` and `Shared` captures the slot kind is always
+    /// `FieldKind::Ptr` (the slot stores `*mut T` / `*const SharedCell`),
+    /// so `capture_kind` would lose the underlying type. This method
+    /// returns the interior type by consulting `capture_types[i]` directly.
+    /// Drop glue uses this to reconstruct the typed `Box<T>` for an
+    /// `OwnedMutable` cell.
+    #[inline]
+    pub fn capture_inner_kind(&self, i: usize) -> FieldKind {
+        self.capture_types[i].to_field_kind()
+    }
+
     /// Absolute offset of capture `i` from the start of a heap-allocated
     /// `TypedClosureHeader` (i.e. add 16 for the header).
     #[inline]
@@ -919,5 +937,64 @@ mod tests {
     fn test_header_constants() {
         assert_eq!(HEAP_CLOSURE_HEADER_SIZE, 16);
         assert_eq!(STACK_CLOSURE_HEADER_SIZE, 8);
+    }
+
+    // ---- capture_inner_kind tests ----
+
+    #[test]
+    fn capture_inner_kind_immutable_matches_capture_kind() {
+        // Immutable captures: slot kind == interior kind for all types.
+        let kinds = vec![
+            CaptureKind::Immutable,
+            CaptureKind::Immutable,
+            CaptureKind::Immutable,
+        ];
+        let layout = ClosureLayout::from_capture_types(
+            &[ConcreteType::I64, ConcreteType::F64, ConcreteType::String],
+            &kinds,
+        );
+        assert_eq!(layout.capture_kind(0), FieldKind::I64);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
+        assert_eq!(layout.capture_kind(1), FieldKind::F64);
+        assert_eq!(layout.capture_inner_kind(1), FieldKind::F64);
+        // String is a heap-typed Ptr in both views.
+        assert_eq!(layout.capture_kind(2), FieldKind::Ptr);
+        assert_eq!(layout.capture_inner_kind(2), FieldKind::Ptr);
+    }
+
+    #[test]
+    fn capture_inner_kind_owned_mutable_returns_interior() {
+        // OwnedMutable<i64>: slot kind is Ptr (Box<i64> *mut), interior is I64.
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
+    }
+
+    #[test]
+    fn capture_inner_kind_owned_mutable_f64() {
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::F64], &kinds);
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::F64);
+    }
+
+    #[test]
+    fn capture_inner_kind_shared_returns_interior() {
+        // Shared<bool>: slot kind is Ptr (*const SharedCell), interior is Bool.
+        let kinds = vec![CaptureKind::Shared];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::Bool], &kinds);
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::Bool);
+    }
+
+    #[test]
+    fn capture_inner_kind_owned_mutable_ptr() {
+        // OwnedMutable<String>: slot kind is Ptr, interior is also Ptr
+        // (the box contains a heap pointer that itself owns a refcount).
+        let kinds = vec![CaptureKind::OwnedMutable];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
     }
 }
