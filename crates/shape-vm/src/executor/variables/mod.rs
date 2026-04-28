@@ -612,6 +612,493 @@ impl VirtualMachine {
         Ok(())
     }
 
+    // ── Phase 3c Wave D.1: per-FieldKind typed OwnedMutable capture handlers ──
+    //
+    // Each handler resolves the upvalue's raw `*mut <T>` cell pointer and
+    // delegates to the per-FieldKind `read_owned_mutable_<kind>` /
+    // `write_owned_mutable_<kind>` helper in `shape_value::v2::closure_raw`.
+    // The cell holds a native scalar (i64/u64/f64/i32/u32/i16/u16/i8/u8/
+    // bool/ptr-shaped u64) without any tag overhead — the typed counterpart
+    // of the legacy single-form `op_load_owned_mutable_capture` /
+    // `op_store_owned_mutable_capture` (which assume `*mut ValueWord`).
+    //
+    // Stack convention: 8-byte register-shaped values. Sub-i64 ints are
+    // sign- or zero-extended into the 8-byte slot via `push_raw_u64`,
+    // matching the existing typed-opcode convention (see
+    // `op_store_local_typed`, the typed Shared handlers in D.2, and the
+    // C.2 JIT FFI lowering in `crates/shape-jit/src/ffi/object/closure.rs`).
+    // Stores pop the 8-byte slot via `pop_raw_u64` and truncate to the
+    // declared width before writing the cell.
+    //
+    // SAFETY (common to every handler below):
+    //   * `cell_ptr` is the raw u64 bits placed in `frame.upvalues[idx]`
+    //     by `op_make_closure`. It was minted via
+    //     `Box::into_raw(Box::new(initial))` for the matching native type
+    //     by `closure_raw::alloc_owned_mutable_<kind>`. Exactly one
+    //     closure owns the box; no aliasing or sharing semantics apply.
+    //   * The compiler emits the typed opcode only when the capture's
+    //     `CaptureKind` is `OwnedMutable` and the cell's interior
+    //     `FieldKind` matches `<Kind>`. Mismatches are a compiler bug.
+    //   * Null-check the pointer up-front so a layout/encoding bug
+    //     surfaces as a clean runtime error rather than a UB read.
+
+    fn op_load_owned_mutable_capture_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: see common invariants on the section header.
+        // `read_owned_mutable_i64` performs an aligned 8-byte load.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i64(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_owned_mutable_capture_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u64(cell_ptr) };
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_owned_mutable_capture_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut f64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_f64(cell_ptr) };
+        self.push_raw_u64(value.to_bits())
+    }
+
+    fn op_load_owned_mutable_capture_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i32;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Sign-extend i32 to i64
+        // for the 8-byte stack slot.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i32(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_owned_mutable_capture_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u32;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend u32 to u64.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u32(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_owned_mutable_capture_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i16;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Sign-extend i16 to i64.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i16(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_owned_mutable_capture_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u16;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend u16 to u64.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u16(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_owned_mutable_capture_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i8;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Sign-extend i8 to i64.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i8(cell_ptr) };
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_owned_mutable_capture_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u8;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Zero-extend u8 to u64.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u8(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_owned_mutable_capture_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut bool;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. Push the bool as a 0/1
+        // u64 — matches D.2's typed-bool convention; Wave E will rewire to
+        // `push_raw_bool` once typed-bool stack helpers are unified.
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_bool(cell_ptr) };
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_owned_mutable_capture_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        // SAFETY: section header invariants apply. The 8-byte payload is
+        // a ValueWord bit pattern carrying a NaN-boxed Arc/Box pointer.
+        // The helper does NOT clone/retain — refcount semantics are the
+        // caller's responsibility. Wave E will pair the Load with
+        // `vw_clone` / `vw_drop` at the IR level (matches the
+        // c-stdlib-msgpack pattern from commit afb1651, mirroring
+        // `op_load_shared_capture_ptr` in D.2).
+        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
+        self.push_raw_u64(value)
+    }
+
+    fn op_store_owned_mutable_capture_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i64;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_i64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_u64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut f64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_f64(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop the 8-byte slot and truncate to i32 (low 32 bits) — matches
+        // the typed-opcode truncation convention in `op_store_local_typed`.
+        let new_value = self.pop_raw_u64()? as i32;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i32;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_i32(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u32;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u32;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_u32(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i16;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i16;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_i16(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u16;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u16;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_u16(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i8;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut i8;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_i8(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u8;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u8;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_u8(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Treat any nonzero bit pattern as true — mirrors D.2's
+        // `op_store_shared_capture_bool` convention.
+        let new_value = self.pop_raw_u64()? != 0;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut bool;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply.
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_bool(cell_ptr, new_value) };
+        Ok(())
+    }
+
+    fn op_store_owned_mutable_capture_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bits = self.read_capture_raw_pointer_bits(idx)?;
+        let cell_ptr = bits as *mut u64;
+        if cell_ptr.is_null() {
+            return Err(VMError::RuntimeError(
+                "OwnedMutable capture pointer is null".to_string(),
+            ));
+        }
+        record_heap_write();
+        // SAFETY: section header invariants apply. `write_owned_mutable_ptr`
+        // does NOT release the previous payload nor retain the new one
+        // (matches `read_owned_mutable_ptr` symmetry). Refcount management
+        // is the responsibility of the compiler / IR (Wave E).
+        unsafe { shape_value::v2::closure_raw::write_owned_mutable_ptr(cell_ptr, new_bits) };
+        Ok(())
+    }
+
     /// `LoadSharedCapture { idx }`: acquire the parking_lot mutex behind
     /// capture `idx`, clone the inner ValueWord bits, drop the guard, and
     /// push the value onto the stack.
