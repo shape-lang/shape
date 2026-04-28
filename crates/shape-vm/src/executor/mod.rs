@@ -294,9 +294,14 @@ pub struct VirtualMachine {
     /// Used by extension dispatch, auto-available module_bindings, and LSP completions.
     module_registry: shape_runtime::module_exports::ModuleExportRegistry,
 
-    /// Table of ModuleFn closures indexed by usize ID.
-    /// ValueWord::ModuleFunction(id) references this table for dispatch.
-    module_fn_table: Vec<shape_runtime::module_exports::ModuleFn>,
+    /// Table of module-function entries indexed by usize ID.
+    /// `ValueWord::ModuleFunction(id)` references this table for dispatch.
+    ///
+    /// Phase 4c.3: entries are now sum-typed
+    /// (`Typed` / `TypedAsync` / `Legacy`) so the dispatch path can
+    /// route typed-return functions through a path that skips the
+    /// body-side `TypedReturn → ValueWord` round-trip.
+    module_fn_table: Vec<shape_runtime::module_exports::ModuleFnEntry>,
 
     /// Runtime function name → index lookup for UFCS dispatch.
     /// Populated after program load. Used by handle_object_method to find

@@ -264,6 +264,32 @@ pub type AsyncModuleFn = Arc<
         + Sync,
 >;
 
+/// One entry in the VM's per-process module-function table
+/// (`module_fn_table`), indexed by `ValueWord::ModuleFunction(u32)`.
+///
+/// Phase 4c.3 typed-dispatch refactor. The VM previously stored only
+/// [`ModuleFn`] (legacy ABI) here; entries are now sum-typed so the
+/// dispatch path can recognise typed-return and typed-async functions
+/// and skip the body-side `TypedReturn → ValueWord` round-trip when the
+/// caller doesn't need it.
+///
+/// - [`Self::Typed`]: synchronous typed-return native function. The
+///   body returns [`crate::typed_module_exports::TypedReturn`] directly;
+///   marshalling to `ValueWord` happens at the dispatch boundary.
+/// - [`Self::TypedAsync`]: async typed-return native function. The body
+///   returns a future of `TypedReturn`; the synchronous dispatch path
+///   blocks on the future and marshals at the boundary.
+/// - [`Self::Legacy`]: legacy `ModuleFn` ABI — kept as an escape hatch
+///   for callers that haven't migrated. Phase 4c.2 migrated all 96
+///   shipped exports off this path; remaining users are intrinsic
+///   helpers and inline test fixtures.
+#[derive(Clone)]
+pub enum ModuleFnEntry {
+    Typed(crate::typed_module_exports::TypedModuleFunction),
+    TypedAsync(crate::typed_module_exports::TypedModuleAsyncFunction),
+    Legacy(ModuleFn),
+}
+
 /// Visibility policy for one extension export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleExportVisibility {

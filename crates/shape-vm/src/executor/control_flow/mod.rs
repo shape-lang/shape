@@ -471,13 +471,7 @@ impl VirtualMachine {
                 vw_drop(self.stack[callee_idx]);
                 self.stack[callee_idx] = Self::NONE_BITS;
                 self.sp = callee_idx;
-                let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Module function ID {} not found in registry",
-                        func_id
-                    ))
-                })?;
-                let result_nb = self.invoke_module_fn(&module_fn, &args_nb)?;
+                let result_nb = self.invoke_module_fn_id(func_id, &args_nb)?;
                 self.push_raw_u64(result_nb)?;
                 Ok(())
             }
@@ -596,13 +590,7 @@ impl VirtualMachine {
                 vw_drop(self.stack[callee_idx]);
                 self.stack[callee_idx] = Self::NONE_BITS;
                 self.sp = callee_idx;
-                let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Module function ID {} not found in registry",
-                        func_id
-                    ))
-                })?;
-                let result_nb = self.invoke_module_fn(&module_fn, &args_nb)?;
+                let result_nb = self.invoke_module_fn_id(func_id, &args_nb)?;
                 self.push_raw_u64(result_nb)?;
                 Ok(())
             }

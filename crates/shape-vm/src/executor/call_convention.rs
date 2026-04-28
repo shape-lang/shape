@@ -481,14 +481,8 @@ impl VirtualMachine {
             }
             TAG_MODULE_FN => {
                 let func_id = callee.as_module_function().ok_or(VMError::InvalidCall)?;
-                let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Module function ID {} not found in registry",
-                        func_id
-                    ))
-                })?;
                 let args_vec: Vec<ValueWord> = args.to_vec();
-                let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
+                let result_nb = self.invoke_module_fn_id(func_id, &args_vec)?;
                 return Ok(result_nb);
             }
             // Track A.5: closure dispatch routes through
@@ -598,13 +592,6 @@ impl VirtualMachine {
             TAG_MODULE_FN => {
                 let callee_vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(callee_bits));
                 let func_id = callee_vw.as_module_function().ok_or(VMError::InvalidCall)?;
-                let module_fn =
-                    self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "Module function ID {} not found in registry",
-                            func_id
-                        ))
-                    })?;
                 let args_vec: Vec<ValueWord> = args
                     .iter()
                     .map(|&bits| {
@@ -612,7 +599,7 @@ impl VirtualMachine {
                         (*tmp).clone()
                     })
                     .collect();
-                let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
+                let result_nb = self.invoke_module_fn_id(func_id, &args_vec)?;
                 return Ok(result_nb.into_raw_bits());
             }
             TAG_HEAP => {
