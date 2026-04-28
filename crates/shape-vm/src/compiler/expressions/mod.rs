@@ -1335,6 +1335,25 @@ impl BytecodeCompiler {
                 ) {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
+                // Strict-typing-sweep: trust the type tracker for any
+                // primitive scalar name. The runtime inference engine
+                // ran on the original program AST and doesn't see
+                // function-body `let a: u32 = 42` declarations, so
+                // identifier inference returns Variable for those. The
+                // tracker, in contrast, sees the annotation when
+                // `compile_function_body` propagates declared types
+                // into local slots. Falling back to it for primitive
+                // names plugs the strict-typing hole that previously
+                // routed through the deleted *Dynamic* shim.
+                if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(&type_name)
+                    || shape_runtime::type_system::BuiltinTypes::is_number_type_name(&type_name)
+                    || matches!(
+                        type_name.as_str(),
+                        "bool" | "string" | "decimal" | "bigint"
+                    )
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
+                }
             }
         }
 
