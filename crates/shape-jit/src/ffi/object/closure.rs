@@ -423,6 +423,450 @@ pub unsafe extern "C" fn jit_arc_shared_release(ptr: u64) {
     }
 }
 
+// ============================================================================
+// Wave C.1: Per-FieldKind closure-cell FFI wrappers (D1 native ABI)
+// ============================================================================
+//
+// These wrappers thread the Wave-B per-FieldKind helpers
+// (`shape_value::v2::closure_raw::{alloc,read,write}_owned_mutable_<kind>`
+// and `read_shared_<kind>` / `write_shared_<kind>`) through the JIT FFI
+// surface as 33 + 22 = 55 distinct symbols.
+//
+// ABI contract (locked in Wave A):
+//   * Cell pointers travel as `i64` (raw `*mut T` bits) across the FFI
+//     boundary.
+//   * 8-byte payloads (i64/u64/f64/Ptr) use their native Cranelift type
+//     (I64 / F64).
+//   * 4-byte payloads (i32/u32) use Cranelift `I32`.
+//   * Sub-32 payloads (i16/u16/i8/u8/bool) are widened to `i32` at the FFI
+//     boundary because Cranelift on SystemV does not have a `bool` or `i8`
+//     parameter class — these are passed in i32 registers with the high
+//     bits zero/sign-extended. The wrappers below truncate on entry and
+//     widen on return.
+//
+// The legacy `jit_alloc_owned_mut_cell` / `jit_arc_shared_*` helpers above
+// remain in place for now; Wave G handles the cleanup after C.2 ports the
+// Cranelift codegen sites.
+
+// --- OwnedMutable: i64 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_i64(initial: i64) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_i64(initial) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_i64(ptr: i64) -> i64 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_i64(ptr as *mut i64) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_i64(ptr: i64, value: i64) {
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_i64(ptr as *mut i64, value) };
+}
+
+// --- OwnedMutable: u64 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_u64(initial: i64) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_u64(initial as u64) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_u64(ptr: i64) -> i64 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_u64(ptr as *mut u64) as i64 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_u64(ptr: i64, value: i64) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_u64(ptr as *mut u64, value as u64)
+    };
+}
+
+// --- OwnedMutable: f64 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_f64(initial: f64) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_f64(initial) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_f64(ptr: i64) -> f64 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_f64(ptr as *mut f64) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_f64(ptr: i64, value: f64) {
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_f64(ptr as *mut f64, value) };
+}
+
+// --- OwnedMutable: i32 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_i32(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_i32(initial) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_i32(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_i32(ptr as *mut i32) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_i32(ptr: i64, value: i32) {
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_i32(ptr as *mut i32, value) };
+}
+
+// --- OwnedMutable: u32 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_u32(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_u32(initial as u32) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_u32(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_u32(ptr as *mut u32) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_u32(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_u32(ptr as *mut u32, value as u32)
+    };
+}
+
+// --- OwnedMutable: i16 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_i16(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_i16(initial as i16) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_i16(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_i16(ptr as *mut i16) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_i16(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_i16(ptr as *mut i16, value as i16)
+    };
+}
+
+// --- OwnedMutable: u16 -------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_u16(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_u16(initial as u16) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_u16(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_u16(ptr as *mut u16) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_u16(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_u16(ptr as *mut u16, value as u16)
+    };
+}
+
+// --- OwnedMutable: i8 --------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_i8(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_i8(initial as i8) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_i8(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_i8(ptr as *mut i8) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_i8(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_i8(ptr as *mut i8, value as i8)
+    };
+}
+
+// --- OwnedMutable: u8 --------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_u8(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_u8(initial as u8) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_u8(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_u8(ptr as *mut u8) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_u8(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_u8(ptr as *mut u8, value as u8)
+    };
+}
+
+// --- OwnedMutable: bool ------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_bool(initial: i32) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_bool(initial != 0) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_bool(ptr: i64) -> i32 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_bool(ptr as *mut bool) as i32 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_bool(ptr: i64, value: i32) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_bool(ptr as *mut bool, value != 0)
+    };
+}
+
+// --- OwnedMutable: ptr (8-byte ValueWord-bits payload) -----------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_alloc_owned_mut_cell_ptr(initial: i64) -> i64 {
+    shape_value::v2::closure_raw::alloc_owned_mutable_ptr(initial as u64) as i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_owned_mut_cell_ptr(ptr: i64) -> i64 {
+    unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(ptr as *mut u64) as i64 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_owned_mut_cell_ptr(ptr: i64, value: i64) {
+    unsafe {
+        shape_value::v2::closure_raw::write_owned_mutable_ptr(ptr as *mut u64, value as u64)
+    };
+}
+
+// --- Shared: i64 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_i64(cell_ptr: i64) -> i64 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe { shape_value::v2::closure_raw::read_shared_i64(cell_ptr as *const SharedCell) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_i64(cell_ptr: i64, value: i64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_i64(cell_ptr as *const SharedCell, value)
+    };
+}
+
+// --- Shared: u64 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_u64(cell_ptr: i64) -> i64 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_u64(cell_ptr as *const SharedCell) as i64
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_u64(cell_ptr: i64, value: i64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_u64(
+            cell_ptr as *const SharedCell,
+            value as u64,
+        )
+    };
+}
+
+// --- Shared: f64 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_f64(cell_ptr: i64) -> f64 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe { shape_value::v2::closure_raw::read_shared_f64(cell_ptr as *const SharedCell) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_f64(cell_ptr: i64, value: f64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_f64(cell_ptr as *const SharedCell, value)
+    };
+}
+
+// --- Shared: i32 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_i32(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe { shape_value::v2::closure_raw::read_shared_i32(cell_ptr as *const SharedCell) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_i32(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_i32(cell_ptr as *const SharedCell, value)
+    };
+}
+
+// --- Shared: u32 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_u32(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_u32(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_u32(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_u32(
+            cell_ptr as *const SharedCell,
+            value as u32,
+        )
+    };
+}
+
+// --- Shared: i16 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_i16(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_i16(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_i16(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_i16(
+            cell_ptr as *const SharedCell,
+            value as i16,
+        )
+    };
+}
+
+// --- Shared: u16 -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_u16(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_u16(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_u16(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_u16(
+            cell_ptr as *const SharedCell,
+            value as u16,
+        )
+    };
+}
+
+// --- Shared: i8 --------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_i8(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_i8(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_i8(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_i8(
+            cell_ptr as *const SharedCell,
+            value as i8,
+        )
+    };
+}
+
+// --- Shared: u8 --------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_u8(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_u8(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_u8(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_u8(
+            cell_ptr as *const SharedCell,
+            value as u8,
+        )
+    };
+}
+
+// --- Shared: bool ------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_bool(cell_ptr: i64) -> i32 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_bool(cell_ptr as *const SharedCell) as i32
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_bool(cell_ptr: i64, value: i32) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_bool(
+            cell_ptr as *const SharedCell,
+            value != 0,
+        )
+    };
+}
+
+// --- Shared: ptr (8-byte ValueWord-bits payload) -----------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_shared_cell_ptr(cell_ptr: i64) -> i64 {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::read_shared_ptr(cell_ptr as *const SharedCell) as i64
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_write_shared_cell_ptr(cell_ptr: i64, value: i64) {
+    use shape_value::v2::closure_layout::SharedCell;
+    unsafe {
+        shape_value::v2::closure_raw::write_shared_ptr(
+            cell_ptr as *const SharedCell,
+            value as u64,
+        )
+    };
+}
+
 #[cfg(test)]
 mod a1e_shared_ffi_tests {
     //! Track A.1E unit tests for the Shared capture FFI helpers.
