@@ -12,6 +12,80 @@ use std::collections::BTreeSet;
 
 use super::super::BytecodeCompiler;
 
+/// Strict-typing-sweep (Cluster 2): scan a closure body for binary ops
+/// of the form `<param_name> <op> <literal>` (or the symmetric form), and
+/// derive a `TypeAnnotation` for `param_name` from the literal's type when
+/// the literal has one. This handles the canonical
+/// `|x| x + 1` / `|y| y + N` patterns that previously rode on the
+/// (now-deleted) Dynamic-emission shim.
+///
+/// Conservative: returns `None` if the param appears only in untyped
+/// contexts, or if the binary op pairs the param with another unknown
+/// (e.g. `|x, y| x + y`). The closure body still compiles in those cases
+/// — strict-typing simply errors at the offending binary op as before.
+fn infer_param_type_from_body(
+    param_name: &str,
+    body: &[shape_ast::ast::Statement],
+) -> Option<TypeAnnotation> {
+    use shape_ast::ast::{Literal, Statement};
+    fn literal_to_type_ann(lit: &Literal) -> Option<TypeAnnotation> {
+        Some(match lit {
+            Literal::Int(_) => TypeAnnotation::Basic("int".to_string()),
+            Literal::Number(_) => TypeAnnotation::Basic("number".to_string()),
+            Literal::Bool(_) => TypeAnnotation::Basic("bool".to_string()),
+            Literal::String(_) => TypeAnnotation::Basic("string".to_string()),
+            _ => return None,
+        })
+    }
+    fn scan_expr(name: &str, expr: &Expr) -> Option<TypeAnnotation> {
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                if let (Expr::Identifier(n, _), Expr::Literal(lit, _)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if n == name {
+                        if let Some(t) = literal_to_type_ann(lit) {
+                            return Some(t);
+                        }
+                    }
+                }
+                if let (Expr::Literal(lit, _), Expr::Identifier(n, _)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if n == name {
+                        if let Some(t) = literal_to_type_ann(lit) {
+                            return Some(t);
+                        }
+                    }
+                }
+                scan_expr(name, left).or_else(|| scan_expr(name, right))
+            }
+            Expr::UnaryOp { operand, .. } => scan_expr(name, operand),
+            Expr::FunctionCall { args, .. } => {
+                args.iter().find_map(|a| scan_expr(name, a))
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                scan_expr(name, receiver).or_else(|| args.iter().find_map(|a| scan_expr(name, a)))
+            }
+            Expr::Array(elements, _) => elements.iter().find_map(|e| scan_expr(name, e)),
+            Expr::Return(Some(e), _) => scan_expr(name, e),
+            _ => None,
+        }
+    }
+    fn scan_stmt(name: &str, stmt: &Statement) -> Option<TypeAnnotation> {
+        match stmt {
+            Statement::Expression(expr, _) => scan_expr(name, expr),
+            Statement::Return(Some(e), _) => scan_expr(name, e),
+            Statement::VariableDecl(decl, _) => {
+                decl.value.as_ref().and_then(|e| scan_expr(name, e))
+            }
+            Statement::Assignment(asgn, _) => scan_expr(name, &asgn.value),
+            _ => None,
+        }
+    }
+    body.iter().find_map(|s| scan_stmt(param_name, s))
+}
+
 /// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
 /// value-representation type) back into an AST `TypeAnnotation` so it can be
 /// attached to a synthetic capture parameter. Returning `None` falls back to
@@ -216,12 +290,32 @@ impl BytecodeCompiler {
         // (`arr.map(|x| …)` with `arr: Array<int>` → `x: int`). User params
         // with their own explicit annotation always win.
         let user_param_hints = self.pending_closure_param_types.take();
+
+        // Strict-typing-sweep (Cluster 2): closure-body param inference.
+        // For closures bound to a `let` and called via the local (or
+        // synthesized inside a generic body where const-args have been
+        // substituted to literals), we don't have an HOF-style call-site
+        // hint. Infer each unannotated user param's type by scanning the
+        // body for binary ops `<param> op <literal>` and pulling the
+        // literal's type. This is the same conservative heuristic that
+        // closure compilation has always relied on for `|x| x + 1`-shaped
+        // bodies, just made first-class instead of riding on the deleted
+        // *Dynamic-emission shim.
         for (idx, user_param) in params.iter().enumerate() {
             let mut p = user_param.clone();
             if p.type_annotation.is_none() {
+                // 1. HOF call-site hint wins first.
                 if let Some(hints) = user_param_hints.as_ref() {
                     if let Some(Some(ann)) = hints.get(idx) {
                         p.type_annotation = Some(ann.clone());
+                    }
+                }
+                // 2. Body-level literal-pairing heuristic.
+                if p.type_annotation.is_none() {
+                    if let Some(name) = p.pattern.as_identifier() {
+                        if let Some(ann) = infer_param_type_from_body(name, body) {
+                            p.type_annotation = Some(ann);
+                        }
                     }
                 }
             }
