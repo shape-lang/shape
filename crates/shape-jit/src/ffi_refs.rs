@@ -73,6 +73,76 @@ pub struct FFIFuncRefs {
     pub(crate) alloc_shared_cell: FuncRef,
     pub(crate) arc_shared_release: FuncRef,
 
+    // Wave C.1: per-FieldKind closure-cell FFI helpers (D1 native ABI).
+    // 33 OwnedMutable handles (alloc/read/write × 11 FieldKinds) + 22
+    // Shared handles (read/write × 11 FieldKinds) = 55 FuncRefs. Cell
+    // pointers cross the FFI boundary as `i64`; payloads use native
+    // Cranelift types where direct (F64/I64), I32 for 4-byte ints, and
+    // I32 widened from sub-32 (i16/u16/i8/u8/bool). See
+    // `crates/shape-jit/src/ffi/object/closure.rs` for ABI details.
+    //
+    // OwnedMutable allocators
+    pub(crate) alloc_owned_mut_cell_i64: FuncRef,
+    pub(crate) alloc_owned_mut_cell_u64: FuncRef,
+    pub(crate) alloc_owned_mut_cell_f64: FuncRef,
+    pub(crate) alloc_owned_mut_cell_i32: FuncRef,
+    pub(crate) alloc_owned_mut_cell_u32: FuncRef,
+    pub(crate) alloc_owned_mut_cell_i16: FuncRef,
+    pub(crate) alloc_owned_mut_cell_u16: FuncRef,
+    pub(crate) alloc_owned_mut_cell_i8: FuncRef,
+    pub(crate) alloc_owned_mut_cell_u8: FuncRef,
+    pub(crate) alloc_owned_mut_cell_bool: FuncRef,
+    pub(crate) alloc_owned_mut_cell_ptr: FuncRef,
+    // OwnedMutable readers
+    pub(crate) read_owned_mut_cell_i64: FuncRef,
+    pub(crate) read_owned_mut_cell_u64: FuncRef,
+    pub(crate) read_owned_mut_cell_f64: FuncRef,
+    pub(crate) read_owned_mut_cell_i32: FuncRef,
+    pub(crate) read_owned_mut_cell_u32: FuncRef,
+    pub(crate) read_owned_mut_cell_i16: FuncRef,
+    pub(crate) read_owned_mut_cell_u16: FuncRef,
+    pub(crate) read_owned_mut_cell_i8: FuncRef,
+    pub(crate) read_owned_mut_cell_u8: FuncRef,
+    pub(crate) read_owned_mut_cell_bool: FuncRef,
+    pub(crate) read_owned_mut_cell_ptr: FuncRef,
+    // OwnedMutable writers
+    pub(crate) write_owned_mut_cell_i64: FuncRef,
+    pub(crate) write_owned_mut_cell_u64: FuncRef,
+    pub(crate) write_owned_mut_cell_f64: FuncRef,
+    pub(crate) write_owned_mut_cell_i32: FuncRef,
+    pub(crate) write_owned_mut_cell_u32: FuncRef,
+    pub(crate) write_owned_mut_cell_i16: FuncRef,
+    pub(crate) write_owned_mut_cell_u16: FuncRef,
+    pub(crate) write_owned_mut_cell_i8: FuncRef,
+    pub(crate) write_owned_mut_cell_u8: FuncRef,
+    pub(crate) write_owned_mut_cell_bool: FuncRef,
+    pub(crate) write_owned_mut_cell_ptr: FuncRef,
+    // Shared readers (alloc/release reuse `alloc_shared_cell` /
+    // `arc_shared_release` above).
+    pub(crate) read_shared_cell_i64: FuncRef,
+    pub(crate) read_shared_cell_u64: FuncRef,
+    pub(crate) read_shared_cell_f64: FuncRef,
+    pub(crate) read_shared_cell_i32: FuncRef,
+    pub(crate) read_shared_cell_u32: FuncRef,
+    pub(crate) read_shared_cell_i16: FuncRef,
+    pub(crate) read_shared_cell_u16: FuncRef,
+    pub(crate) read_shared_cell_i8: FuncRef,
+    pub(crate) read_shared_cell_u8: FuncRef,
+    pub(crate) read_shared_cell_bool: FuncRef,
+    pub(crate) read_shared_cell_ptr: FuncRef,
+    // Shared writers
+    pub(crate) write_shared_cell_i64: FuncRef,
+    pub(crate) write_shared_cell_u64: FuncRef,
+    pub(crate) write_shared_cell_f64: FuncRef,
+    pub(crate) write_shared_cell_i32: FuncRef,
+    pub(crate) write_shared_cell_u32: FuncRef,
+    pub(crate) write_shared_cell_i16: FuncRef,
+    pub(crate) write_shared_cell_u16: FuncRef,
+    pub(crate) write_shared_cell_i8: FuncRef,
+    pub(crate) write_shared_cell_u8: FuncRef,
+    pub(crate) write_shared_cell_bool: FuncRef,
+    pub(crate) write_shared_cell_ptr: FuncRef,
+
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
