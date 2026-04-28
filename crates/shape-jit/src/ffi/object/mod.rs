@@ -59,4 +59,33 @@ pub use closure::{
 //                                       (outer-scope reclaim); null-safe.
 pub use closure::{jit_alloc_shared_cell, jit_arc_shared_release};
 
+// Wave C.1: Per-FieldKind closure-cell FFI helpers (D1 native ABI). 33
+// OwnedMutable wrappers (alloc/read/write × 11 FieldKinds) + 22 Shared
+// wrappers (read/write × 11 FieldKinds) = 55 distinct symbols. Cell
+// pointers cross the FFI boundary as `i64`; payloads use native types
+// (F64/I64) where 8-byte, `I32` for 4-byte ints, and `I32` widened from
+// sub-32 (i16/u16/i8/u8/bool). See
+// `crates/shape-jit/src/ffi/object/closure.rs` for ABI details.
+pub use closure::{
+    jit_alloc_owned_mut_cell_bool, jit_alloc_owned_mut_cell_f64, jit_alloc_owned_mut_cell_i8,
+    jit_alloc_owned_mut_cell_i16, jit_alloc_owned_mut_cell_i32, jit_alloc_owned_mut_cell_i64,
+    jit_alloc_owned_mut_cell_ptr, jit_alloc_owned_mut_cell_u8, jit_alloc_owned_mut_cell_u16,
+    jit_alloc_owned_mut_cell_u32, jit_alloc_owned_mut_cell_u64, jit_read_owned_mut_cell_bool,
+    jit_read_owned_mut_cell_f64, jit_read_owned_mut_cell_i8, jit_read_owned_mut_cell_i16,
+    jit_read_owned_mut_cell_i32, jit_read_owned_mut_cell_i64, jit_read_owned_mut_cell_ptr,
+    jit_read_owned_mut_cell_u8, jit_read_owned_mut_cell_u16, jit_read_owned_mut_cell_u32,
+    jit_read_owned_mut_cell_u64, jit_read_shared_cell_bool, jit_read_shared_cell_f64,
+    jit_read_shared_cell_i8, jit_read_shared_cell_i16, jit_read_shared_cell_i32,
+    jit_read_shared_cell_i64, jit_read_shared_cell_ptr, jit_read_shared_cell_u8,
+    jit_read_shared_cell_u16, jit_read_shared_cell_u32, jit_read_shared_cell_u64,
+    jit_write_owned_mut_cell_bool, jit_write_owned_mut_cell_f64, jit_write_owned_mut_cell_i8,
+    jit_write_owned_mut_cell_i16, jit_write_owned_mut_cell_i32, jit_write_owned_mut_cell_i64,
+    jit_write_owned_mut_cell_ptr, jit_write_owned_mut_cell_u8, jit_write_owned_mut_cell_u16,
+    jit_write_owned_mut_cell_u32, jit_write_owned_mut_cell_u64, jit_write_shared_cell_bool,
+    jit_write_shared_cell_f64, jit_write_shared_cell_i8, jit_write_shared_cell_i16,
+    jit_write_shared_cell_i32, jit_write_shared_cell_i64, jit_write_shared_cell_ptr,
+    jit_write_shared_cell_u8, jit_write_shared_cell_u16, jit_write_shared_cell_u32,
+    jit_write_shared_cell_u64,
+};
+
 pub use pattern::{jit_pattern_check_constructor, jit_pattern_extract_constructor};

@@ -14,10 +14,29 @@ use super::super::ffi::conversion::{
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
-    jit_alloc_owned_mut_cell, jit_alloc_shared_cell, jit_arc_shared_release,
-    jit_arc_shared_retain, jit_finalize_heap_closure, jit_format, jit_get_prop,
-    jit_hashmap_shape_id, jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object,
-    jit_object_rest, jit_set_prop, jit_shared_lock_contended, jit_shared_unlock_contended,
+    jit_alloc_owned_mut_cell, jit_alloc_owned_mut_cell_bool, jit_alloc_owned_mut_cell_f64,
+    jit_alloc_owned_mut_cell_i8, jit_alloc_owned_mut_cell_i16, jit_alloc_owned_mut_cell_i32,
+    jit_alloc_owned_mut_cell_i64, jit_alloc_owned_mut_cell_ptr, jit_alloc_owned_mut_cell_u8,
+    jit_alloc_owned_mut_cell_u16, jit_alloc_owned_mut_cell_u32, jit_alloc_owned_mut_cell_u64,
+    jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain,
+    jit_finalize_heap_closure, jit_format, jit_get_prop, jit_hashmap_shape_id,
+    jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object, jit_object_rest,
+    jit_read_owned_mut_cell_bool, jit_read_owned_mut_cell_f64, jit_read_owned_mut_cell_i8,
+    jit_read_owned_mut_cell_i16, jit_read_owned_mut_cell_i32, jit_read_owned_mut_cell_i64,
+    jit_read_owned_mut_cell_ptr, jit_read_owned_mut_cell_u8, jit_read_owned_mut_cell_u16,
+    jit_read_owned_mut_cell_u32, jit_read_owned_mut_cell_u64, jit_read_shared_cell_bool,
+    jit_read_shared_cell_f64, jit_read_shared_cell_i8, jit_read_shared_cell_i16,
+    jit_read_shared_cell_i32, jit_read_shared_cell_i64, jit_read_shared_cell_ptr,
+    jit_read_shared_cell_u8, jit_read_shared_cell_u16, jit_read_shared_cell_u32,
+    jit_read_shared_cell_u64, jit_set_prop, jit_shared_lock_contended,
+    jit_shared_unlock_contended, jit_write_owned_mut_cell_bool, jit_write_owned_mut_cell_f64,
+    jit_write_owned_mut_cell_i8, jit_write_owned_mut_cell_i16, jit_write_owned_mut_cell_i32,
+    jit_write_owned_mut_cell_i64, jit_write_owned_mut_cell_ptr, jit_write_owned_mut_cell_u8,
+    jit_write_owned_mut_cell_u16, jit_write_owned_mut_cell_u32, jit_write_owned_mut_cell_u64,
+    jit_write_shared_cell_bool, jit_write_shared_cell_f64, jit_write_shared_cell_i8,
+    jit_write_shared_cell_i16, jit_write_shared_cell_i32, jit_write_shared_cell_i64,
+    jit_write_shared_cell_ptr, jit_write_shared_cell_u8, jit_write_shared_cell_u16,
+    jit_write_shared_cell_u32, jit_write_shared_cell_u64,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
 use super::super::ffi::typed_object::jit_typed_object_get_field;
@@ -91,6 +110,239 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_arc_shared_release",
         jit_arc_shared_release as *const u8,
     );
+
+    // Wave C.1: per-FieldKind closure-cell FFI helpers. 33 OwnedMutable
+    // (alloc/read/write × 11 FieldKinds) + 22 Shared (read/write × 11
+    // FieldKinds) = 55 distinct symbols.  See
+    // `crates/shape-jit/src/ffi/object/closure.rs` for the wrapper
+    // implementations and the `D1 native ABI` block doc.
+    //
+    // OwnedMutable allocators
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_i64",
+        jit_alloc_owned_mut_cell_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_u64",
+        jit_alloc_owned_mut_cell_u64 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_f64",
+        jit_alloc_owned_mut_cell_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_i32",
+        jit_alloc_owned_mut_cell_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_u32",
+        jit_alloc_owned_mut_cell_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_i16",
+        jit_alloc_owned_mut_cell_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_u16",
+        jit_alloc_owned_mut_cell_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_i8",
+        jit_alloc_owned_mut_cell_i8 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_u8",
+        jit_alloc_owned_mut_cell_u8 as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_bool",
+        jit_alloc_owned_mut_cell_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_alloc_owned_mut_cell_ptr",
+        jit_alloc_owned_mut_cell_ptr as *const u8,
+    );
+    // OwnedMutable readers
+    builder.symbol(
+        "jit_read_owned_mut_cell_i64",
+        jit_read_owned_mut_cell_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_u64",
+        jit_read_owned_mut_cell_u64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_f64",
+        jit_read_owned_mut_cell_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_i32",
+        jit_read_owned_mut_cell_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_u32",
+        jit_read_owned_mut_cell_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_i16",
+        jit_read_owned_mut_cell_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_u16",
+        jit_read_owned_mut_cell_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_i8",
+        jit_read_owned_mut_cell_i8 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_u8",
+        jit_read_owned_mut_cell_u8 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_bool",
+        jit_read_owned_mut_cell_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_read_owned_mut_cell_ptr",
+        jit_read_owned_mut_cell_ptr as *const u8,
+    );
+    // OwnedMutable writers
+    builder.symbol(
+        "jit_write_owned_mut_cell_i64",
+        jit_write_owned_mut_cell_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_u64",
+        jit_write_owned_mut_cell_u64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_f64",
+        jit_write_owned_mut_cell_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_i32",
+        jit_write_owned_mut_cell_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_u32",
+        jit_write_owned_mut_cell_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_i16",
+        jit_write_owned_mut_cell_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_u16",
+        jit_write_owned_mut_cell_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_i8",
+        jit_write_owned_mut_cell_i8 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_u8",
+        jit_write_owned_mut_cell_u8 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_bool",
+        jit_write_owned_mut_cell_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_write_owned_mut_cell_ptr",
+        jit_write_owned_mut_cell_ptr as *const u8,
+    );
+    // Shared readers
+    builder.symbol(
+        "jit_read_shared_cell_i64",
+        jit_read_shared_cell_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_u64",
+        jit_read_shared_cell_u64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_f64",
+        jit_read_shared_cell_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_i32",
+        jit_read_shared_cell_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_u32",
+        jit_read_shared_cell_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_i16",
+        jit_read_shared_cell_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_u16",
+        jit_read_shared_cell_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_i8",
+        jit_read_shared_cell_i8 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_u8",
+        jit_read_shared_cell_u8 as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_bool",
+        jit_read_shared_cell_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_read_shared_cell_ptr",
+        jit_read_shared_cell_ptr as *const u8,
+    );
+    // Shared writers
+    builder.symbol(
+        "jit_write_shared_cell_i64",
+        jit_write_shared_cell_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_u64",
+        jit_write_shared_cell_u64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_f64",
+        jit_write_shared_cell_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_i32",
+        jit_write_shared_cell_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_u32",
+        jit_write_shared_cell_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_i16",
+        jit_write_shared_cell_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_u16",
+        jit_write_shared_cell_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_i8",
+        jit_write_shared_cell_i8 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_u8",
+        jit_write_shared_cell_u8 as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_bool",
+        jit_write_shared_cell_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_write_shared_cell_ptr",
+        jit_write_shared_cell_ptr as *const u8,
+    );
+
     builder.symbol("jit_object_rest", jit_object_rest as *const u8);
     builder.symbol("jit_format", jit_format as *const u8);
     builder.symbol("jit_format_error", jit_format_error as *const u8);
@@ -350,6 +602,123 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .expect("Failed to declare jit_arc_shared_release");
         ffi_funcs.insert("jit_arc_shared_release".to_string(), func_id);
     }
+
+    // Wave C.1: per-FieldKind closure-cell FFI helpers — Cranelift
+    // signatures matching the wrappers in
+    // `crates/shape-jit/src/ffi/object/closure.rs`.
+    //
+    // Type lookup per FieldKind (ABI):
+    //   F64               -> types::F64
+    //   I64 / U64 / Ptr   -> types::I64
+    //   I32 / U32         -> types::I32
+    //   I16 / U16 / I8 / U8 / Bool -> types::I32 (sub-32 widened at boundary)
+    //
+    // Cell pointers (the `ptr: i64` arg in readers/writers, and return of
+    // allocators) are always types::I64.
+    fn declare_owned_alloc(
+        module: &mut JITModule,
+        ffi_funcs: &mut HashMap<String, FuncId>,
+        name: &'static str,
+        param: types::Type,
+    ) {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(param)); // initial native value
+        sig.returns.push(AbiParam::new(types::I64)); // *mut T cell ptr
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("Failed to declare {}", name));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    fn declare_cell_read(
+        module: &mut JITModule,
+        ffi_funcs: &mut HashMap<String, FuncId>,
+        name: &'static str,
+        ret: types::Type,
+    ) {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // cell ptr
+        sig.returns.push(AbiParam::new(ret)); // native value
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("Failed to declare {}", name));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    fn declare_cell_write(
+        module: &mut JITModule,
+        ffi_funcs: &mut HashMap<String, FuncId>,
+        name: &'static str,
+        param: types::Type,
+    ) {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // cell ptr
+        sig.params.push(AbiParam::new(param)); // native value
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("Failed to declare {}", name));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+
+    // OwnedMutable allocators
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i64", types::I64);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u64", types::I64);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_f64", types::F64);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i32", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u32", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i16", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u16", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i8", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u8", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_bool", types::I32);
+    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_ptr", types::I64);
+    // OwnedMutable readers
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i64", types::I64);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u64", types::I64);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_f64", types::F64);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i32", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u32", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i16", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u16", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i8", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u8", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_bool", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_ptr", types::I64);
+    // OwnedMutable writers
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i64", types::I64);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u64", types::I64);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_f64", types::F64);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i32", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u32", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i16", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u16", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i8", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u8", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_bool", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_ptr", types::I64);
+    // Shared readers (alloc/release reuse the existing generic helpers
+    // `jit_alloc_shared_cell` / `jit_arc_shared_release`).
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_i64", types::I64);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_u64", types::I64);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_f64", types::F64);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_i32", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_u32", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_i16", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_u16", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_i8", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_u8", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_bool", types::I32);
+    declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_ptr", types::I64);
+    // Shared writers
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_i64", types::I64);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_u64", types::I64);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_f64", types::F64);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_i32", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_u32", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_i16", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_u16", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_i8", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_u8", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_bool", types::I32);
+    declare_cell_write(module, ffi_funcs, "jit_write_shared_cell_ptr", types::I64);
 
     // jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64
     {
