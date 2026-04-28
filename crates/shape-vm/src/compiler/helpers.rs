@@ -3085,6 +3085,71 @@ impl BytecodeCompiler {
     }
 }
 
+// Wave E: per-`FieldKind` dispatch helpers for OwnedMutable closure-capture
+// load and store opcodes (D.1 codes 0x140-0x155).
+//
+// Each helper maps a closure-cell interior `FieldKind` to the matching typed
+// opcode. The compiler computes the cell's interior `FieldKind` from the
+// captured binding's resolved `ConcreteType` at closure-construction time
+// (see `compile_expr_closure`'s population of
+// `owned_mutable_capture_inner_kinds`) and dispatches reads / writes inside
+// the closure body via these tables.
+//
+// Stack contract: typed loads push raw native bytes (`push_raw_u64` with
+// sub-i64 ints sign- or zero-extended into the i64 path); typed stores pop
+// raw native bytes via the matching `pop_raw_<kind>` / `pop_raw_u64`
+// helpers. `Ptr` transfers the raw 8-byte ValueWord bit pattern unchanged
+// — neither typed nor legacy variant clones / drops the heap share, so the
+// emit-site swap from legacy `LoadOwnedMutableCapture` (0x132) /
+// `StoreOwnedMutableCapture` (0x133) preserves refcount semantics.
+//
+// Wave G removes the legacy 0x132/0x133 opcodes once every emit path has
+// been migrated.
+
+/// Map an OwnedMutable closure-cell interior `FieldKind` to its typed
+/// `LoadOwnedMutableCapture<Kind>` opcode (D.1 codes 0x140-0x14A).
+#[inline]
+pub(crate) fn owned_mutable_typed_load_opcode(
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> OpCode {
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::I64 => OpCode::LoadOwnedMutableCaptureI64,
+        FieldKind::U64 => OpCode::LoadOwnedMutableCaptureU64,
+        FieldKind::F64 => OpCode::LoadOwnedMutableCaptureF64,
+        FieldKind::I32 => OpCode::LoadOwnedMutableCaptureI32,
+        FieldKind::U32 => OpCode::LoadOwnedMutableCaptureU32,
+        FieldKind::I16 => OpCode::LoadOwnedMutableCaptureI16,
+        FieldKind::U16 => OpCode::LoadOwnedMutableCaptureU16,
+        FieldKind::I8 => OpCode::LoadOwnedMutableCaptureI8,
+        FieldKind::U8 => OpCode::LoadOwnedMutableCaptureU8,
+        FieldKind::Bool => OpCode::LoadOwnedMutableCaptureBool,
+        FieldKind::Ptr => OpCode::LoadOwnedMutableCapturePtr,
+    }
+}
+
+/// Map an OwnedMutable closure-cell interior `FieldKind` to its typed
+/// `StoreOwnedMutableCapture<Kind>` opcode (D.1 codes 0x14B-0x155).
+#[inline]
+pub(crate) fn owned_mutable_typed_store_opcode(
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> OpCode {
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::I64 => OpCode::StoreOwnedMutableCaptureI64,
+        FieldKind::U64 => OpCode::StoreOwnedMutableCaptureU64,
+        FieldKind::F64 => OpCode::StoreOwnedMutableCaptureF64,
+        FieldKind::I32 => OpCode::StoreOwnedMutableCaptureI32,
+        FieldKind::U32 => OpCode::StoreOwnedMutableCaptureU32,
+        FieldKind::I16 => OpCode::StoreOwnedMutableCaptureI16,
+        FieldKind::U16 => OpCode::StoreOwnedMutableCaptureU16,
+        FieldKind::I8 => OpCode::StoreOwnedMutableCaptureI8,
+        FieldKind::U8 => OpCode::StoreOwnedMutableCaptureU8,
+        FieldKind::Bool => OpCode::StoreOwnedMutableCaptureBool,
+        FieldKind::Ptr => OpCode::StoreOwnedMutableCapturePtr,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;

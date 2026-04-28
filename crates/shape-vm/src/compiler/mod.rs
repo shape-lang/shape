@@ -987,6 +987,19 @@ pub struct BytecodeCompiler {
     /// while compiling a closure body.
     pub(crate) owned_mutable_closure_captures: HashMap<String, u16>,
 
+    /// Wave E: parallel to `owned_mutable_closure_captures`, records
+    /// the interior `FieldKind` of each OwnedMutable capture cell. The
+    /// inner kind is derived from the captured binding's resolved
+    /// `ConcreteType` (`concrete_type_for_expr → ConcreteType::to_field_kind`)
+    /// at the point of closure construction. The closure body uses
+    /// this map to dispatch to the typed Wave D.1 opcodes
+    /// (`LoadOwnedMutableCapture<Kind>` / `StoreOwnedMutableCapture<Kind>`,
+    /// codes 0x140-0x155) instead of the legacy `0x132`/`0x133` ValueWord
+    /// opcodes. Populated alongside `owned_mutable_closure_captures`,
+    /// saved/restored across nested closure-body compilations.
+    pub(crate) owned_mutable_capture_inner_kinds:
+        HashMap<String, shape_value::v2::struct_layout::FieldKind>,
+
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one
     /// of these variables (even immutably), it must use the SharedCell path
