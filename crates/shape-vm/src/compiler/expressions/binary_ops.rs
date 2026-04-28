@@ -783,7 +783,14 @@ impl BytecodeCompiler {
                         // operands are proven strings/chars.
                         self.emit(Instruction::simple(OpCode::StringConcatTyped));
                         self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
+                        // Phase 3e: result of string concat is a string —
+                        // propagate so chained concats and assignment-target
+                        // type tracking see the type.
+                        self.last_expr_type_info = Some(
+                            crate::type_tracking::VariableTypeInfo::named(
+                                "string".to_string(),
+                            ),
+                        );
                         self.last_expr_numeric_type = None;
                         return Ok(());
                     }
@@ -845,7 +852,14 @@ impl BytecodeCompiler {
                         if let Some(op) = typed_opcode {
                             self.emit(Instruction::simple(op));
                             self.last_expr_schema = None;
-                            self.last_expr_type_info = None;
+                            // Phase 3e: result of string + scalar concat is
+                            // a string — propagate the type so chained
+                            // concats track it.
+                            self.last_expr_type_info = Some(
+                                crate::type_tracking::VariableTypeInfo::named(
+                                    "string".to_string(),
+                                ),
+                            );
                             // Result is a freshly-allocated string; clear
                             // the numeric hint so downstream Add chains
                             // don't think the result is a scalar.

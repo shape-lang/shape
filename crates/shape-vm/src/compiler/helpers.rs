@@ -1563,6 +1563,15 @@ impl BytecodeCompiler {
                 // `infer_expr_type` cannot resolve the retarget at the
                 // `dt + dur` site.
                 || Self::is_temporal_type_name(info.type_name.as_deref())
+                // Phase 3e: propagate primitive non-numeric type names
+                // (string / bool / char) set by `compile_expr_literal`.
+                // Without this, `let mut s = ""` records `s` as
+                // Unknown, breaking string-concat in body loops
+                // (comptime-for, generic for-in, while, etc.).
+                || matches!(
+                    info.type_name.as_deref(),
+                    Some("string" | "bool" | "char")
+                )
             {
                 if is_local {
                     self.type_tracker.set_local_type(slot, info.clone());

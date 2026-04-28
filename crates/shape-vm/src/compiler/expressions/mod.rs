@@ -1357,6 +1357,27 @@ impl BytecodeCompiler {
             }
         }
 
+        // Phase 3e: BinaryOp Add of string-typed operands yields a string.
+        // The runtime type-inference engine doesn't know about let-mut
+        // accumulator types from the tracker, so chained concats like
+        // `result + name + " "` would otherwise resolve to Unknown for
+        // any inner sub-expression that isn't a bare identifier.
+        if let Expr::BinaryOp { op: shape_ast::ast::BinaryOp::Add, left, right, .. } = expr {
+            let lt = self.infer_expr_type(left).ok();
+            let rt = self.infer_expr_type(right).ok();
+            let is_string = |t: &Option<shape_runtime::type_system::Type>| {
+                matches!(
+                    t,
+                    Some(shape_runtime::type_system::Type::Concrete(
+                        TypeAnnotation::Basic(n)
+                    )) if n == "string" || n == "char"
+                )
+            };
+            if is_string(&lt) && is_string(&rt) {
+                return Ok(Type::Concrete(TypeAnnotation::Basic("string".to_string())));
+            }
+        }
+
         // Phase 3d: TypedObject self-field type propagation.
         // For `expr.field`, when the receiver is an identifier with a known
         // schema in the tracker (e.g. `self` in a trait method body, or any

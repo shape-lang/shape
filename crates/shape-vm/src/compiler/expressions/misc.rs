@@ -845,6 +845,22 @@ impl BytecodeCompiler {
             ));
             self.type_tracker
                 .set_local_binding_semantics(local_idx, Self::owned_mutable_binding_semantics());
+            // Phase 3e: propagate the element's literal kind into the
+            // type tracker so the body's binary ops can emit typed
+            // opcodes. Without this, `result + name` (where name is
+            // bound to a string literal) sees `name` as unknown and
+            // strict-typing rejects the Add.
+            let elem_type_name = match &lit {
+                shape_ast::ast::Literal::Int(_) => Some("int"),
+                shape_ast::ast::Literal::Number(_) => Some("number"),
+                shape_ast::ast::Literal::Bool(_) => Some("bool"),
+                shape_ast::ast::Literal::String(_) => Some("string"),
+                shape_ast::ast::Literal::Decimal(_) => Some("decimal"),
+                _ => None,
+            };
+            if let Some(tn) = elem_type_name {
+                self.set_local_type_info(local_idx, tn);
+            }
 
             // Compile body statements.
             // The last statement's value stays on the stack as the iteration result.
