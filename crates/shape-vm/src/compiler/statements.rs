@@ -1461,6 +1461,30 @@ impl BytecodeCompiler {
             })
             .collect();
 
+        // Sweep phase 3c.x: cache the struct-variant fields so match
+        // patterns like `m::E::V { x, y }` can recover x and y's types
+        // for strict-typing binop dispatch (`x + y`). The runtime schema
+        // collapses per-variant struct fields into `__payload_N: Any`, so
+        // we keep the named-field annotations on the side. Register
+        // under both the qualified name (e.g. `m::E`) and the bare name
+        // to mirror the schema-registration aliasing below.
+        for member in &enum_def.members {
+            if let EnumMemberKind::Struct(fields) = &member.kind {
+                let kv: Vec<(String, shape_ast::ast::TypeAnnotation)> = fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                    .collect();
+                self.enum_struct_variant_fields
+                    .insert((enum_def.name.clone(), member.name.clone()), kv.clone());
+                if let Some(basename) = enum_def.name.rsplit("::").next() {
+                    if basename != enum_def.name {
+                        self.enum_struct_variant_fields
+                            .insert((basename.to_string(), member.name.clone()), kv);
+                    }
+                }
+            }
+        }
+
         let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
         self.type_tracker.schema_registry_mut().register(schema);
 

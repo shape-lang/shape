@@ -452,7 +452,14 @@ impl BytecodeCompiler {
                     let resolved_name = self.resolve_type_name(enum_name);
                     if let Some(schema) = self.type_tracker.schema_registry().get(resolved_name.as_str()) {
                         if schema.get_enum_info().is_some() {
-                            return self.compile_typed_enum_binding(value_local, schema.id, fields);
+                            let schema_id = schema.id;
+                            return self.compile_typed_enum_binding(
+                                value_local,
+                                schema_id,
+                                fields,
+                                Some(&resolved_name),
+                                Some(variant.as_str()),
+                            );
                         }
                     }
                     Err(ShapeError::SemanticError {
@@ -479,6 +486,8 @@ impl BytecodeCompiler {
         value_local: u16,
         schema_id: u32,
         fields: &PatternConstructorFields,
+        enum_name: Option<&str>,
+        variant_name: Option<&str>,
     ) -> Result<()> {
         match fields {
             PatternConstructorFields::Unit => Ok(()),
@@ -508,6 +517,35 @@ impl BytecodeCompiler {
                 Ok(())
             }
             PatternConstructorFields::Struct(patterns) => {
+                // Sweep phase 3c.x: look up the (enum, variant) struct
+                // field annotations so x and y in `m::E::V { x, y } => x + y`
+                // get their declared int/number type instead of falling
+                // through to Unknown. The schema only stores
+                // `__payload_N: Any` for variant payloads; the named
+                // field types live on the side in
+                // `enum_struct_variant_fields`, populated by
+                // `register_enum`.
+                let variant_fields: Option<
+                    Vec<(String, shape_ast::ast::TypeAnnotation)>,
+                > = match (enum_name, variant_name) {
+                    (Some(en), Some(vn)) => self
+                        .enum_struct_variant_fields
+                        .get(&(en.to_string(), vn.to_string()))
+                        .cloned()
+                        .or_else(|| {
+                            // Fall back to bare-name lookup (e.g. inside
+                            // a `mod m` block, an `E::V` pattern may
+                            // resolve `enum_name` differently than the
+                            // qualified key).
+                            en.rsplit("::").next().and_then(|bare| {
+                                self.enum_struct_variant_fields
+                                    .get(&(bare.to_string(), vn.to_string()))
+                                    .cloned()
+                            })
+                        }),
+                    _ => None,
+                };
+
                 // For struct payloads, we access fields by index
                 for (idx, (_key, pat)) in patterns.iter().enumerate() {
                     self.emit(Instruction::new(
@@ -524,6 +562,19 @@ impl BytecodeCompiler {
                         }),
                     ));
                     let field_local = self.declare_temp_local("__typed_enum_field_")?;
+                    // Sweep phase 3c.x: propagate the variant struct
+                    // field's declared type onto the temp local so the
+                    // downstream Identifier/Typed binding inherits it
+                    // via the existing source_info copy in those arms.
+                    if let Some(ref vf) = variant_fields {
+                        if let Some((_, ann)) = vf.get(idx) {
+                            if let Some(tn) =
+                                BytecodeCompiler::tracked_type_name_from_annotation(ann)
+                            {
+                                self.set_local_type_info(field_local, &tn);
+                            }
+                        }
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(field_local)),

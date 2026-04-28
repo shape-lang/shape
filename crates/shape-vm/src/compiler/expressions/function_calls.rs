@@ -738,6 +738,49 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.last_expr_numeric_type = None;
+            // Sweep phase 3c.x: when the callee is a `let f = |…|`
+            // binding with a tracked closure return type, propagate that
+            // type onto `last_expr_numeric_type` (or `last_expr_type_info`
+            // for non-numeric primitives) so a downstream `let ra = f(4)`
+            // assignment records `ra: int` via
+            // `propagate_initializer_type_to_slot`. Without this hop,
+            // `ra + rb` fails strict-typing as `unknown + unknown`.
+            let tracked_callable_rt: Option<String> =
+                if let Some(local_idx) = self.resolve_local(name) {
+                    self.local_callable_return_types.get(&local_idx).cloned()
+                } else if let Some(scoped) =
+                    self.resolve_scoped_module_binding_name(name)
+                {
+                    self.module_bindings.get(&scoped).and_then(|idx| {
+                        self.module_binding_callable_return_types.get(idx).cloned()
+                    })
+                } else {
+                    self.module_bindings.get(name).and_then(|idx| {
+                        self.module_binding_callable_return_types.get(idx).cloned()
+                    })
+                };
+            if let Some(rt_name) = tracked_callable_rt.as_ref() {
+                use crate::type_tracking::NumericType;
+                match rt_name.as_str() {
+                    "int" => self.last_expr_numeric_type = Some(NumericType::Int),
+                    "number" => self.last_expr_numeric_type = Some(NumericType::Number),
+                    "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+                    other if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(other) => {
+                        // Width-aware ints — fall through; the i32/i16/etc.
+                        // names round-trip via type_info.
+                        self.last_expr_type_info =
+                            Some(crate::type_tracking::VariableTypeInfo::named(
+                                other.to_string(),
+                            ));
+                    }
+                    "string" | "bool" | "char" => {
+                        self.last_expr_type_info = Some(
+                            crate::type_tracking::VariableTypeInfo::named(rt_name.clone()),
+                        );
+                    }
+                    _ => {}
+                }
+            }
             if let Some(return_reference_summary) = return_reference_summary {
                 self.set_last_expr_reference_result(return_reference_summary.mode, true);
             } else {
@@ -858,7 +901,24 @@ impl BytecodeCompiler {
             let pass_modes = Self::pass_modes_from_ref_flags(&ref_params, &ref_mutates);
             let return_reference_summary =
                 self.function_return_reference_summary_for_name(&call_name);
+
+            // Sweep phase 3c.x: bidirectional inference for `any`-typed
+            // callable params on free user functions. When the callee has
+            // an `any`-annotated param at position k AND args[k] is a
+            // closure literal AND the other concrete-typed args' types
+            // determine the closure's param types, install
+            // `pending_closure_param_types` so the closure compile path
+            // attaches concrete annotations to its user params (`|x, y|`
+            // → `|x: int, y: int|`). See
+            // `apply2(|x, y| x + y, 2, 3)` — without this, `x + y` fails
+            // strict typing as `unknown + unknown`.
+            self.install_pending_closure_param_types_for_any_param_hof(&call_name, args);
+
             let writebacks = self.compile_call_args(args, Some(&pass_modes))?;
+            // The closure compile path takes() the hint, but if the closure
+            // arg failed early (or there's no closure arg), clear any
+            // residual hint to avoid leaking it into a later unrelated call.
+            self.pending_closure_param_types = None;
 
             // Compile default expressions for missing arguments
             if actual_arity < effective_total_arity {
@@ -1344,6 +1404,111 @@ impl BytecodeCompiler {
         } else {
             vec![Some(elem_ann)]
         };
+        self.pending_closure_param_types = Some(hints);
+    }
+
+    /// Sweep phase 3c.x: bidirectional inference for free user functions
+    /// whose callable param is typed `any`. When the call site supplies a
+    /// closure literal at the same position, infer the closure's param
+    /// types from the OTHER concrete-typed args at the call site.
+    ///
+    /// Concretely: `apply2(f: any, a: int, b: int) -> int` called as
+    /// `apply2(|x, y| x + y, 2, 3)` should map to `|x: int, y: int|`.
+    /// We scan args once, find the (single) closure arg position, and use
+    /// the remaining args' inferred types to fill closure-param hints.
+    /// We require the remaining args' types to be homogeneous and to
+    /// match the closure's user-param count exactly.
+    pub(crate) fn install_pending_closure_param_types_for_any_param_hof(
+        &mut self,
+        callee_name: &str,
+        args: &[Expr],
+    ) {
+        // Locate the (single) closure-literal arg.
+        let closure_idx = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a {
+                Expr::FunctionExpr { .. } => Some(i),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if closure_idx.len() != 1 {
+            return;
+        }
+        let closure_pos = closure_idx[0];
+
+        // Look up the closure's user-param count.
+        let closure_user_param_count = if let Expr::FunctionExpr { params, .. } = &args[closure_pos]
+        {
+            params.len()
+        } else {
+            return;
+        };
+        if closure_user_param_count == 0 {
+            return;
+        }
+
+        // The callee must be a known user function whose param at
+        // `closure_pos` is annotated `any` (callable-by-erased-type).
+        let func_def = match self.function_defs.get(callee_name).cloned() {
+            Some(def) => def,
+            None => return,
+        };
+        let callee_param_at_closure_pos = match func_def.params.get(closure_pos) {
+            Some(p) => p,
+            None => return,
+        };
+        let is_any_annotated = matches!(
+            &callee_param_at_closure_pos.type_annotation,
+            Some(shape_ast::ast::TypeAnnotation::Basic(name)) if name == "any"
+        );
+        if !is_any_annotated {
+            return;
+        }
+
+        // Collect inferred types for the remaining (non-closure) args.
+        let mut remaining_types: Vec<shape_ast::ast::TypeAnnotation> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i == closure_pos {
+                continue;
+            }
+            let ty = match self.infer_expr_type(arg) {
+                Ok(t) => t,
+                Err(_) => return, // Unknown type — bail.
+            };
+            // Require a Concrete(Basic(...)) primitive name.
+            let ann = match ty {
+                shape_runtime::type_system::Type::Concrete(ann) => ann,
+                _ => return,
+            };
+            remaining_types.push(ann);
+        }
+
+        // Require exactly `closure_user_param_count` remaining args (so
+        // they zip 1:1 with the closure's user params).
+        if remaining_types.len() != closure_user_param_count {
+            return;
+        }
+        // Require all remaining types to be the same primitive scalar name
+        // — homogeneous arithmetic is the only safe pattern for a closure
+        // body like `x + y`. Heterogeneous args would need stronger
+        // analysis to map to specific param positions.
+        let first = match remaining_types.first() {
+            Some(shape_ast::ast::TypeAnnotation::Basic(n)) => n.clone(),
+            _ => return,
+        };
+        for ann in &remaining_types[1..] {
+            match ann {
+                shape_ast::ast::TypeAnnotation::Basic(n) if *n == first => {}
+                _ => return,
+            }
+        }
+        if !BytecodeCompiler::tracker_type_name_is_primitive(&first) {
+            return;
+        }
+
+        let elem_ann = shape_ast::ast::TypeAnnotation::Basic(first);
+        let hints = vec![Some(elem_ann); closure_user_param_count];
         self.pending_closure_param_types = Some(hints);
     }
 

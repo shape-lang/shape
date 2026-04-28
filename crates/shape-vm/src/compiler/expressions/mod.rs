@@ -1409,6 +1409,58 @@ impl BytecodeCompiler {
             }
         }
 
+        // Sweep phase 3c.x: callable-array-element invocation. The parser
+        // models `arr[i](args...)` as
+        // `MethodCall { method: "__call__", receiver: IndexAccess { object: Identifier(arr), .. }, .. }`.
+        // When `arr` is a `let arr = [|...| ..., ...]` binding whose elements
+        // are closures with a homogeneous return type, recover that type
+        // from `local_array_callable_return_types` /
+        // `module_binding_array_callable_return_types` so binops like
+        // `arr[0](1) + arr[1](1)` can dispatch under strict typing.
+        if let Expr::MethodCall { receiver, method, .. } = expr {
+            if method == "__call__" {
+                if let Expr::IndexAccess { object, .. } = receiver.as_ref() {
+                    if let Expr::Identifier(arr_name, _) = object.as_ref() {
+                        if let Some(local_idx) = self.resolve_local(arr_name) {
+                            if let Some(rt_name) = self
+                                .local_array_callable_return_types
+                                .get(&local_idx)
+                                .cloned()
+                            {
+                                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+                            }
+                        }
+                        if let Some(scoped) =
+                            self.resolve_scoped_module_binding_name(arr_name)
+                        {
+                            if let Some(&binding_idx) =
+                                self.module_bindings.get(&scoped)
+                            {
+                                if let Some(rt_name) = self
+                                    .module_binding_array_callable_return_types
+                                    .get(&binding_idx)
+                                    .cloned()
+                                {
+                                    return Ok(Type::Concrete(TypeAnnotation::Basic(
+                                        rt_name,
+                                    )));
+                                }
+                            }
+                        }
+                        if let Some(&binding_idx) = self.module_bindings.get(arr_name) {
+                            if let Some(rt_name) = self
+                                .module_binding_array_callable_return_types
+                                .get(&binding_idx)
+                                .cloned()
+                            {
+                                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase 3e: BinaryOp Add of string-typed operands yields a string.
         // The runtime type-inference engine doesn't know about let-mut
         // accumulator types from the tracker, so chained concats like

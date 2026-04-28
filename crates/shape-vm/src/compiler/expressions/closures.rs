@@ -125,6 +125,61 @@ pub(crate) fn infer_param_type_from_body(
     body.iter().find_map(|s| scan_stmt(param_name, s))
 }
 
+/// Sweep phase 3c.x: scan a closure body for `param_name op outer_ident`
+/// where `outer_ident` has a known type in `known_outer_types`, and
+/// propagate that type back to `param_name`. Returns the propagated type
+/// name as a `String` (e.g. "int") or `None` if no such pairing is found.
+fn infer_param_type_from_outer_pairing(
+    param_name: &str,
+    body: &[shape_ast::ast::Statement],
+    known_outer_types: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    use shape_ast::ast::Statement;
+    fn scan(name: &str, expr: &Expr, known: &std::collections::HashMap<String, String>) -> Option<String> {
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                if let (Expr::Identifier(ln, _), Expr::Identifier(rn, _)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if ln == name {
+                        if let Some(t) = known.get(rn) {
+                            return Some(t.clone());
+                        }
+                    }
+                    if rn == name {
+                        if let Some(t) = known.get(ln) {
+                            return Some(t.clone());
+                        }
+                    }
+                }
+                scan(name, left, known).or_else(|| scan(name, right, known))
+            }
+            Expr::UnaryOp { operand, .. } => scan(name, operand, known),
+            Expr::Return(Some(e), _) => scan(name, e, known),
+            Expr::FunctionCall { args, .. } => {
+                args.iter().find_map(|a| scan(name, a, known))
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                scan(name, receiver, known)
+                    .or_else(|| args.iter().find_map(|a| scan(name, a, known)))
+            }
+            _ => None,
+        }
+    }
+    fn scan_stmt(
+        name: &str,
+        stmt: &Statement,
+        known: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        match stmt {
+            Statement::Expression(e, _) => scan(name, e, known),
+            Statement::Return(Some(e), _) => scan(name, e, known),
+            _ => None,
+        }
+    }
+    body.iter().find_map(|s| scan_stmt(param_name, s, known_outer_types))
+}
+
 /// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
 /// value-representation type) back into an AST `TypeAnnotation` so it can be
 /// attached to a synthetic capture parameter. Returning `None` falls back to
@@ -213,6 +268,22 @@ pub(crate) fn infer_closure_body_return_type_name(
     body: &[shape_ast::ast::Statement],
     explicit_return: Option<&TypeAnnotation>,
 ) -> Option<String> {
+    infer_closure_body_return_type_name_with_outer(compiler, params, body, explicit_return, &[])
+}
+
+/// Sweep phase 3c.x: variant that also accepts a list of enclosing-scope
+/// parameters whose names should resolve to their declared types when
+/// scanning the closure body. Used by `update_callable_binding_from_expr`
+/// for the `let f = make(...)` → `f(arg) + f(arg)` pattern, where `make`'s
+/// returned closure captures `make`'s parameters by name and we want to
+/// recover their declared types without actually compiling `make`'s body.
+pub(crate) fn infer_closure_body_return_type_name_with_outer(
+    compiler: &mut BytecodeCompiler,
+    params: &[shape_ast::ast::FunctionParameter],
+    body: &[shape_ast::ast::Statement],
+    explicit_return: Option<&TypeAnnotation>,
+    enclosing_params: &[shape_ast::ast::FunctionParameter],
+) -> Option<String> {
     use shape_ast::ast::{BinaryOp as Op, Literal, Statement};
     use std::collections::HashMap;
 
@@ -222,8 +293,21 @@ pub(crate) fn infer_closure_body_return_type_name(
         }
     }
 
-    // Build param-type map.
+    // Build param-type map. Start with the enclosing-scope params (e.g.
+    // the captured `n: int` from `fn make(n: int) -> any { return |x| x + n }`)
+    // so the closure body can resolve free identifiers that came from the
+    // outer function. Closure-local params override on name collision.
     let mut param_types: HashMap<String, String> = HashMap::new();
+    for p in enclosing_params {
+        let Some(ident) = p.pattern.as_identifier() else {
+            continue;
+        };
+        if let Some(ann) = &p.type_annotation {
+            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
+                param_types.insert(ident.to_string(), tn);
+            }
+        }
+    }
     for p in params {
         let Some(ident) = p.pattern.as_identifier() else {
             continue;
@@ -238,6 +322,16 @@ pub(crate) fn infer_closure_body_return_type_name(
         // compiler uses for unannotated params (`|x| x + 1`).
         if let Some(ann) = infer_param_type_from_body(ident, body) {
             if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(&ann) {
+                param_types.insert(ident.to_string(), tn);
+            }
+        }
+        // Sweep phase 3c.x: when the param has no annotation and no
+        // body-literal pairing, but the body uses it in a binary op
+        // against an enclosing-param that IS typed, infer the closure
+        // param's type from the enclosing param's type. Covers
+        // `|x| x + n` over `fn make(n: int) ...`.
+        if !param_types.contains_key(ident) {
+            if let Some(tn) = infer_param_type_from_outer_pairing(ident, body, &param_types) {
                 param_types.insert(ident.to_string(), tn);
             }
         }
@@ -1486,6 +1580,10 @@ mod tests {
         // that now (correctly) rejects with B0005. Bumping the source
         // to `VarKind::Var` matches the test's documented intent
         // ("mutable closure capture marks binding as shared storage").
+        // Sweep phase 3c.x: declare `counter: int` so the closure body
+        // (`counter + 1`) survives strict-typing's binop dispatch. The
+        // test's purpose is to assert the storage-class side effect of
+        // capture, not to exercise inference of an uninitialized var.
         let counter_decl = VariableDecl {
             kind: VarKind::Var,
             is_mut: false,
@@ -1493,7 +1591,7 @@ mod tests {
                 "counter".to_string(),
                 Span::DUMMY,
             ),
-            type_annotation: None,
+            type_annotation: Some(shape_ast::ast::TypeAnnotation::Basic("int".to_string())),
             value: None,
             ownership: Default::default(),
         };
@@ -1502,6 +1600,9 @@ mod tests {
             false,
             BytecodeCompiler::binding_semantics_for_var_decl(&counter_decl),
         );
+        // Wire counter's type into the type tracker so binop dispatch
+        // can see it as int instead of Unknown.
+        compiler.set_module_binding_type_info(counter_idx, "int");
 
         compiler
             .compile_expr_closure(params, body, Span::DUMMY)

@@ -1015,6 +1015,19 @@ impl BytecodeCompiler {
         let saved_local_callable_pass_modes = std::mem::take(&mut self.local_callable_pass_modes);
         let saved_local_callable_return_reference_summaries =
             std::mem::take(&mut self.local_callable_return_reference_summaries);
+        // Sweep phase 3c.x: snapshot/restore the closure return-type map
+        // and array-callable map alongside the existing pass-mode/summary
+        // maps. `compile_function` clears them via `clear_locals`-adjacent
+        // logic at line ~1089; without snapshot/restore, any closure
+        // recorded in the outer function before the inner-function
+        // compile is invisible after it returns. Reproduces as
+        // `let f = |…| …; let ra = f(4); ra + …` failing with
+        // `unknown + int` because f's tracked return type was wiped when
+        // a sibling closure compiled.
+        let saved_local_callable_return_types =
+            std::mem::take(&mut self.local_callable_return_types);
+        let saved_local_array_callable_return_types =
+            std::mem::take(&mut self.local_array_callable_return_types);
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
@@ -1357,6 +1370,12 @@ impl BytecodeCompiler {
                         self.local_callable_pass_modes = saved_local_callable_pass_modes.clone();
                         self.local_callable_return_reference_summaries =
                             saved_local_callable_return_reference_summaries.clone();
+                        // Sweep phase 3c.x: restore closure return-type +
+                        // array-callable maps alongside.
+                        self.local_callable_return_types =
+                            saved_local_callable_return_types.clone();
+                        self.local_array_callable_return_types =
+                            saved_local_array_callable_return_types.clone();
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
@@ -1462,6 +1481,10 @@ impl BytecodeCompiler {
         self.local_callable_pass_modes = saved_local_callable_pass_modes;
         self.local_callable_return_reference_summaries =
             saved_local_callable_return_reference_summaries;
+        // Sweep phase 3c.x: restore closure return-type + array-callable
+        // maps alongside.
+        self.local_callable_return_types = saved_local_callable_return_types;
+        self.local_array_callable_return_types = saved_local_array_callable_return_types;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;

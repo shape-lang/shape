@@ -638,6 +638,19 @@ pub struct BytecodeCompiler {
     /// module-binding slots (top-level / REPL `let f = |…|` style).
     pub(crate) module_binding_callable_return_types: HashMap<u16, String>,
 
+    /// Sweep phase 3c.x: inferred return-type names for arrays whose elements
+    /// are closure literals with a homogeneous return type. Keyed by the
+    /// local slot holding the array. Consumed by `infer_expr_type` for the
+    /// `arr[i](args...)` callsite (which the parser models as
+    /// `MethodCall { method: "__call__", receiver: IndexAccess { .. } }`).
+    /// Without this lookup, `arr[0](1) + arr[1](1)` fails strict-typing as
+    /// `unknown + unknown`.
+    pub(crate) local_array_callable_return_types: HashMap<u16, String>,
+
+    /// Sweep phase 3c.x: inferred return-type names for arrays of closures
+    /// stored in module-binding slots (top-level `let arr = [|x| ..., ...]`).
+    pub(crate) module_binding_array_callable_return_types: HashMap<u16, String>,
+
     /// Named functions that safely return one reference parameter unchanged.
     pub(crate) function_return_reference_summaries: HashMap<String, FunctionReturnReferenceSummary>,
 
@@ -695,6 +708,16 @@ pub struct BytecodeCompiler {
     /// Foreign function definitions keyed by function name.
     /// Used to resolve the effective (Result-wrapped) return type at call sites.
     pub(crate) foreign_function_defs: HashMap<String, shape_ast::ast::ForeignFunctionDef>,
+    /// Sweep phase 3c.x: per-(enum, variant) struct-variant field
+    /// annotations. The schema-level `EnumVariantInfo` only carries field
+    /// counts (`payload_fields`) and uses `__payload_N` field names with
+    /// `FieldType::Any`, so the named-field types of `enum E { V { x: int,
+    /// y: int } }` are otherwise lost at pattern compile time. Populated
+    /// by `register_enum`; consumed by `compile_typed_enum_binding` (struct
+    /// arm) so `match m::E::V { x, y } => x + y` propagates int onto x and
+    /// y.
+    pub(crate) enum_struct_variant_fields:
+        HashMap<(String, String), Vec<(String, shape_ast::ast::TypeAnnotation)>>,
     /// Cached const specializations keyed by `(base_name + const-arg fingerprint)`.
     pub(crate) const_specializations: HashMap<String, usize>,
     /// Monotonic counter for unique specialization symbol names.
