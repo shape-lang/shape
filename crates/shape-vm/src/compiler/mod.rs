@@ -717,6 +717,19 @@ pub struct BytecodeCompiler {
     /// Used to include future property assignments in inline object schemas at compile time.
     pub(crate) hoisted_fields: HashMap<String, Vec<String>>,
 
+    /// Phase 3e: inferred FieldType for hoisted fields, when the assigned
+    /// RHS is a simple literal whose primitive type is statically known.
+    /// Maps variable name → property name → inferred FieldType.
+    ///
+    /// Used by `compile_typed_object_literal` to register the schema with
+    /// concrete primitive types (I64, F64, Bool, String) instead of falling
+    /// back to FieldType::Any. Without this, `let mut a = { x: 10 }; a.y =
+    /// 20; a.x + a.y` types `a.y` as Any in the schema, so the binary-op
+    /// numeric path declines and trait dispatch fires (which has no runtime
+    /// handler for `int.add`).
+    pub(crate) hoisted_field_types:
+        HashMap<String, HashMap<String, shape_runtime::type_schema::FieldType>>,
+
     /// When compiling a variable initializer, the name of the variable being assigned to.
     /// Used by compile_typed_object_literal to include hoisted fields in the schema.
     pub(crate) pending_variable_name: Option<String>,

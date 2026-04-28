@@ -363,7 +363,17 @@ impl BytecodeCompiler {
         // schema compaction pass that shrinks schemas after all field accesses
         // are known.
 
-        // Build typed field list by inferring types from expressions
+        // Build typed field list by inferring types from expressions.
+        // Phase 3e: hoisted fields use the inferred FieldType from the
+        // pre-pass when the assigned RHS is a literal — otherwise default
+        // to Any. Looking up by var name through pending_variable_name
+        // keeps the legacy un-named code path behavior identical.
+        let hoisted_type_lookup = self
+            .pending_variable_name
+            .as_ref()
+            .and_then(|var| self.hoisted_field_types.get(var))
+            .cloned()
+            .unwrap_or_default();
         let typed_fields: Vec<(&str, FieldType)> = entries
             .iter()
             .filter_map(|e| match e {
@@ -373,7 +383,13 @@ impl BytecodeCompiler {
                 }
                 ObjectEntry::Spread(_) => None,
             })
-            .chain(hoisted.iter().map(|h| (h.as_str(), FieldType::Any)))
+            .chain(hoisted.iter().map(|h| {
+                let ft = hoisted_type_lookup
+                    .get(h.as_str())
+                    .cloned()
+                    .unwrap_or(FieldType::Any);
+                (h.as_str(), ft)
+            }))
             .collect();
 
         // Register inline schema with ALL fields (explicit + hoisted), with inferred types

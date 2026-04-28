@@ -1157,11 +1157,37 @@ impl BytecodeCompiler {
         // note in `compile_typed_object_literal`.
         {
             use shape_runtime::type_system::inference::PropertyAssignmentCollector;
+            use shape_ast::ast::{Expr, Literal};
+            use shape_runtime::type_schema::FieldType;
             let assignments = PropertyAssignmentCollector::collect(&program);
             let grouped = PropertyAssignmentCollector::group_by_variable(&assignments);
+            // Phase 3e: infer a primitive FieldType for each hoisted field
+            // when the RHS is a literal whose type is statically known.
+            // Falls back to FieldType::Any (the prior behavior) for
+            // non-literal RHS or types we can't map.
+            let infer_lit = |expr: &Expr| -> Option<FieldType> {
+                match expr {
+                    Expr::Literal(Literal::Int(_), _) => Some(FieldType::I64),
+                    Expr::Literal(Literal::Number(_), _) => Some(FieldType::F64),
+                    Expr::Literal(Literal::Decimal(_), _) => Some(FieldType::Decimal),
+                    Expr::Literal(Literal::Bool(_), _) => Some(FieldType::Bool),
+                    Expr::Literal(Literal::String(_), _) => Some(FieldType::String),
+                    _ => None,
+                }
+            };
             for (var_name, var_assignments) in grouped {
                 let field_names: Vec<String> =
                     var_assignments.iter().map(|a| a.property.clone()).collect();
+                let mut type_map: std::collections::HashMap<String, FieldType> =
+                    std::collections::HashMap::new();
+                for a in &var_assignments {
+                    if let Some(ft) = infer_lit(&a.value_expr) {
+                        type_map.insert(a.property.clone(), ft);
+                    }
+                }
+                if !type_map.is_empty() {
+                    self.hoisted_field_types.insert(var_name.clone(), type_map);
+                }
                 self.hoisted_fields.insert(var_name, field_names);
             }
         }

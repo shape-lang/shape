@@ -75,6 +75,7 @@ impl BytecodeCompiler {
             source_dir: None,
             errors: Vec::new(),
             hoisted_fields: HashMap::new(),
+            hoisted_field_types: HashMap::new(),
             pending_variable_name: None,
             pending_variable_typed_array_kind: None,
             nested_array_literal_depth: 0,

@@ -396,6 +396,24 @@ impl BytecodeCompiler {
                     Self::owned_mutable_binding_semantics(),
                 );
 
+                // Phase 3e: propagate iterator element type to the loop
+                // variable. Without this, `for x in arr` (over an
+                // Array<int>) declares `x` with no type info, so
+                // `sum + x` can't emit AddInt and falls into trait
+                // dispatch (which has no runtime handler for int.add).
+                //
+                // Only handles the common single-identifier pattern.
+                // Complex destructuring patterns continue to leave the
+                // loop var(s) untyped — bidirectional inference can
+                // recover them when needed.
+                if let Some(var_name) = pattern.as_identifier() {
+                    if let Some(local_idx) = self.resolve_local(var_name) {
+                        if let Some(elem_type) = self.iter_element_type_name(iter) {
+                            self.set_local_type_info(local_idx, &elem_type);
+                        }
+                    }
+                }
+
                 let loop_start = self.program.current_offset();
                 self.emit(Instruction::simple(OpCode::LoopStart));
                 let loop_ctx = LoopContext {
@@ -743,6 +761,17 @@ impl BytecodeCompiler {
             &for_expr.pattern,
             Self::owned_mutable_binding_semantics(),
         );
+
+        // Phase 3e: propagate iterator element type to the loop variable
+        // for the simple identifier-pattern form. Same fix as
+        // `compile_for_loop`; `for x in arr` over `Array<int>` now
+        // declares `x` with tracker type `int` so `sum + x` emits
+        // `AddInt` rather than falling into trait dispatch.
+        if let shape_ast::ast::Pattern::Identifier(_) = &for_expr.pattern {
+            if let Some(elem_type) = self.iter_element_type_name(&for_expr.iterable) {
+                self.set_local_type_info(elem_local, &elem_type);
+            }
+        }
 
         let loop_start = self.program.current_offset();
         self.emit(Instruction::simple(OpCode::LoopStart));
@@ -1300,6 +1329,69 @@ impl BytecodeCompiler {
 
         self.pop_scope();
         Ok(())
+    }
+
+    /// Phase 3e helper: infer the element type name of a `for x in ITER`
+    /// iterator expression.
+    ///
+    /// Currently handles:
+    ///   - Identifier referring to a tracked typed array (`Vec<T>` /
+    ///     `Array<T>` tracker name) — returns the inner type name.
+    ///   - Array literal — peeks the first element and uses its
+    ///     literal kind.
+    ///
+    /// Returns `None` for iterators whose element type can't be proven at
+    /// compile time (HashMap iteration, custom iterables, untyped arrays).
+    pub(super) fn iter_element_type_name(&self, iter: &Expr) -> Option<String> {
+        match iter {
+            Expr::Identifier(name, _) => {
+                let type_name = if let Some(local_idx) = self.resolve_local(name) {
+                    self.type_tracker
+                        .get_local_type(local_idx)?
+                        .type_name
+                        .clone()?
+                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+                    let binding_idx = *self.module_bindings.get(&scoped)?;
+                    self.type_tracker
+                        .get_binding_type(binding_idx)?
+                        .type_name
+                        .clone()?
+                } else {
+                    return None;
+                };
+                Self::array_type_name_inner(&type_name)
+            }
+            Expr::Array(elems, _) => {
+                let first = elems.first()?;
+                match first {
+                    Expr::Literal(shape_ast::ast::Literal::Int(_), _) => {
+                        Some("int".to_string())
+                    }
+                    Expr::Literal(shape_ast::ast::Literal::Number(_), _) => {
+                        Some("number".to_string())
+                    }
+                    Expr::Literal(shape_ast::ast::Literal::Bool(_), _) => {
+                        Some("bool".to_string())
+                    }
+                    Expr::Literal(shape_ast::ast::Literal::String(_), _) => {
+                        Some("string".to_string())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Strip an `Array<T>` / `Vec<T>` wrapper to recover the element type
+    /// name. Returns `None` for non-array tracker names.
+    fn array_type_name_inner(name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        let inner = trimmed
+            .strip_prefix("Vec<")
+            .or_else(|| trimmed.strip_prefix("Array<"))?
+            .strip_suffix('>')?;
+        Some(inner.trim().to_string())
     }
 }
 
