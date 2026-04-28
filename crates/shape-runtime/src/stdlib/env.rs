@@ -4,13 +4,14 @@
 //!
 //! Policy gated: requires Env permission at runtime.
 //!
-//! Phase 4b: 6 of 7 exports migrated to `TypedModuleExports` (the typed-return
-//! ABI). `env.get` returns `Option<string>` and is left on the legacy path
-//! pending Phase 4c's sum-typed `TypedReturn::Option` variant.
+//! Phase 4c: all 7 exports migrated to `TypedModuleExports`. `env.get`
+//! uses the new `TypedReturn::Some` / `TypedReturn::None` variants for
+//! its `Option<string>` return.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
+#[cfg(test)]
 use std::sync::Arc;
 
 /// Create the `env` module with environment variable and system info functions.
@@ -19,10 +20,19 @@ pub fn create_env_module() -> ModuleExports {
     module.description = "Environment variables and system information".to_string();
 
     // env.get(name: string) -> Option<string>
-    // PHASE 4C: Option<T> sum-typed return — left on legacy ABI for now.
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "get",
-        |args: &[ValueWord], ctx: &ModuleContext| {
+        "Get the value of an environment variable, or none if not set",
+        vec![ModuleParam {
+            name: "name".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Environment variable name".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Option(Box::new(ConcreteType::String)),
+        |args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let name = args
                 .first()
@@ -30,20 +40,9 @@ pub fn create_env_module() -> ModuleExports {
                 .ok_or_else(|| "env.get() requires a variable name string".to_string())?;
 
             match std::env::var(name) {
-                Ok(val) => Ok(ValueWord::from_some(ValueWord::from_string(Arc::new(val)))),
-                Err(_) => Ok(ValueWord::none()),
+                Ok(val) => Ok(TypedReturn::Some(Box::new(TypedReturn::String(val)))),
+                Err(_) => Ok(TypedReturn::None),
             }
-        },
-        ModuleFunction {
-            description: "Get the value of an environment variable, or none if not set".to_string(),
-            params: vec![ModuleParam {
-                name: "name".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Environment variable name".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Option<string>".to_string()),
         },
     );
 
@@ -299,18 +298,23 @@ mod tests {
     #[test]
     fn test_env_typed_registry_populated() {
         let module = create_env_module();
-        // 6 of 7 exports are migrated to the typed registry.
+        // All 7 exports are migrated to the typed registry as of Phase 4c.
         let typed = module.typed_exports();
+        assert!(typed.get("get").is_some());
         assert!(typed.get("has").is_some());
         assert!(typed.get("all").is_some());
         assert!(typed.get("args").is_some());
         assert!(typed.get("cwd").is_some());
         assert!(typed.get("os").is_some());
         assert!(typed.get("arch").is_some());
-        // env.get() stays on legacy path until Phase 4c.
-        assert!(typed.get("get").is_none());
 
         let has_entry = typed.get("has").unwrap();
         assert_eq!(has_entry.return_type, ConcreteType::Bool);
+
+        let get_entry = typed.get("get").unwrap();
+        assert_eq!(
+            get_entry.return_type,
+            ConcreteType::Option(Box::new(ConcreteType::String))
+        );
     }
 }

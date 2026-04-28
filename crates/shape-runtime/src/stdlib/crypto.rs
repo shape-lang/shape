@@ -5,7 +5,7 @@
 //!          crypto.hex_encode, crypto.hex_decode, crypto.random_bytes,
 //!          crypto.ed25519_generate_keypair, crypto.ed25519_sign, crypto.ed25519_verify
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
@@ -114,9 +114,19 @@ pub fn create_crypto_module() -> ModuleExports {
     );
 
     // crypto.base64_decode(encoded: string) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "base64_decode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decode a Base64 string",
+        vec![ModuleParam {
+            name: "encoded".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Base64-encoded string to decode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             use base64::Engine;
 
             let encoded = args
@@ -131,20 +141,7 @@ pub fn create_crypto_module() -> ModuleExports {
             let decoded = String::from_utf8(bytes)
                 .map_err(|e| format!("crypto.base64_decode() invalid UTF-8: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(
-                decoded,
-            ))))
-        },
-        ModuleFunction {
-            description: "Decode a Base64 string".to_string(),
-            params: vec![ModuleParam {
-                name: "encoded".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Base64-encoded string to decode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(decoded))))
         },
     );
 
@@ -171,9 +168,19 @@ pub fn create_crypto_module() -> ModuleExports {
     );
 
     // crypto.hex_decode(hex: string) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "hex_decode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Decode a hexadecimal string",
+        vec![ModuleParam {
+            name: "hex".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Hex-encoded string to decode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let hex_str = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -185,20 +192,7 @@ pub fn create_crypto_module() -> ModuleExports {
             let decoded = String::from_utf8(bytes)
                 .map_err(|e| format!("crypto.hex_decode() invalid UTF-8: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(
-                decoded,
-            ))))
-        },
-        ModuleFunction {
-            description: "Decode a hexadecimal string".to_string(),
-            params: vec![ModuleParam {
-                name: "hex".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Hex-encoded string to decode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(decoded))))
         },
     );
 
