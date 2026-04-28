@@ -2,10 +2,11 @@
 //!
 //! Exports: archive.zip_create, archive.zip_extract, archive.tar_create, archive.tar_extract
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
-use super::byte_utils::{bytes_from_array, bytes_to_array};
+use super::byte_utils::bytes_from_array;
 
 /// Extract entries from an Array of {name: string, data: string} objects.
 /// Supports both TypedObject and HashMap representations.
@@ -86,9 +87,19 @@ pub fn create_archive_module() -> ModuleExports {
     module.description = "Archive creation and extraction (zip, tar)".to_string();
 
     // archive.zip_create(entries: Array<{name: string, data: string}>) -> Array<int>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "zip_create",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Create a zip archive in memory from an array of entries",
+        vec![ModuleParam {
+            name: "entries".to_string(),
+            type_name: "Array<{name: string, data: string}>".to_string(),
+            required: true,
+            description: "Array of objects with 'name' and 'data' fields".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bytes,
+        |args, _ctx| {
             use std::io::{Cursor, Write};
 
             let entries_val = args
@@ -119,25 +130,24 @@ pub fn create_archive_module() -> ModuleExports {
                 .finish()
                 .map_err(|e| format!("archive.zip_create() failed to finish: {}", e))?;
 
-            Ok(bytes_to_array(&cursor.into_inner()))
-        },
-        ModuleFunction {
-            description: "Create a zip archive in memory from an array of entries".to_string(),
-            params: vec![ModuleParam {
-                name: "entries".to_string(),
-                type_name: "Array<{name: string, data: string}>".to_string(),
-                required: true,
-                description: "Array of objects with 'name' and 'data' fields".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".to_string()),
+            Ok(TypedReturn::Bytes(cursor.into_inner()))
         },
     );
 
     // archive.zip_extract(data: Array<int>) -> Array<{name: string, data: string}>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "zip_extract",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Extract a zip archive from a byte array into an array of entries",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Zip archive as byte array".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::ArrayObject("Array<{name: string, data: string}>".to_string()),
+        |args, _ctx| {
             use std::io::{Cursor, Read};
 
             let input = args.first().ok_or_else(|| {
@@ -169,26 +179,24 @@ pub fn create_archive_module() -> ModuleExports {
                 entries.push(make_entry(&name, &contents));
             }
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
-        },
-        ModuleFunction {
-            description: "Extract a zip archive from a byte array into an array of entries"
-                .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Zip archive as byte array".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<{name: string, data: string}>".to_string()),
+            Ok(TypedReturn::ArrayValueWord(entries))
         },
     );
 
     // archive.tar_create(entries: Array<{name: string, data: string}>) -> Array<int>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tar_create",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Create a tar archive in memory from an array of entries",
+        vec![ModuleParam {
+            name: "entries".to_string(),
+            type_name: "Array<{name: string, data: string}>".to_string(),
+            required: true,
+            description: "Array of objects with 'name' and 'data' fields".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bytes,
+        |args, _ctx| {
             let entries_val = args
                 .first()
                 .ok_or_else(|| "archive.tar_create() requires an entries array".to_string())?;
@@ -213,25 +221,24 @@ pub fn create_archive_module() -> ModuleExports {
                 .into_inner()
                 .map_err(|e| format!("archive.tar_create() failed to finish: {}", e))?;
 
-            Ok(bytes_to_array(&tar_bytes))
-        },
-        ModuleFunction {
-            description: "Create a tar archive in memory from an array of entries".to_string(),
-            params: vec![ModuleParam {
-                name: "entries".to_string(),
-                type_name: "Array<{name: string, data: string}>".to_string(),
-                required: true,
-                description: "Array of objects with 'name' and 'data' fields".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<int>".to_string()),
+            Ok(TypedReturn::Bytes(tar_bytes))
         },
     );
 
     // archive.tar_extract(data: Array<int>) -> Array<{name: string, data: string}>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "tar_extract",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Extract a tar archive from a byte array into an array of entries",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "Array<int>".to_string(),
+            required: true,
+            description: "Tar archive as byte array".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::ArrayObject("Array<{name: string, data: string}>".to_string()),
+        |args, _ctx| {
             use std::io::{Cursor, Read};
 
             let input = args.first().ok_or_else(|| {
@@ -270,19 +277,7 @@ pub fn create_archive_module() -> ModuleExports {
                 entries.push(make_entry(&name, &contents));
             }
 
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
-        },
-        ModuleFunction {
-            description: "Extract a tar archive from a byte array into an array of entries"
-                .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "Array<int>".to_string(),
-                required: true,
-                description: "Tar archive as byte array".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Array<{name: string, data: string}>".to_string()),
+            Ok(TypedReturn::ArrayValueWord(entries))
         },
     );
 

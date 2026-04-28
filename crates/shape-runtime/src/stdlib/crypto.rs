@@ -6,6 +6,7 @@
 //!          crypto.ed25519_generate_keypair, crypto.ed25519_sign, crypto.ed25519_verify
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -15,9 +16,19 @@ pub fn create_crypto_module() -> ModuleExports {
     module.description = "Cryptographic hashing and encoding utilities".to_string();
 
     // crypto.sha256(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "sha256",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compute the SHA-256 hash of a string, returning a hex-encoded digest",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to hash".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use sha2::{Digest, Sha256};
 
             let data = args
@@ -28,26 +39,33 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = Sha256::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(ValueWord::from_string(Arc::new(hex::encode(result))))
-        },
-        ModuleFunction {
-            description: "Compute the SHA-256 hash of a string, returning a hex-encoded digest"
-                .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to hash".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(result)))
         },
     );
 
     // crypto.hmac_sha256(data: string, key: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "hmac_sha256",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compute HMAC-SHA256 of data with the given key, returning hex digest",
+        vec![
+            ModuleParam {
+                name: "data".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Data to authenticate".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "key".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "HMAC key".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        |args, _ctx| {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
 
@@ -65,37 +83,24 @@ pub fn create_crypto_module() -> ModuleExports {
                 .map_err(|e| format!("crypto.hmac_sha256() key error: {}", e))?;
             mac.update(data.as_bytes());
             let result = mac.finalize();
-            Ok(ValueWord::from_string(Arc::new(hex::encode(
-                result.into_bytes(),
-            ))))
-        },
-        ModuleFunction {
-            description: "Compute HMAC-SHA256 of data with the given key, returning hex digest"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Data to authenticate".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "key".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "HMAC key".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(result.into_bytes())))
         },
     );
 
     // crypto.base64_encode(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "base64_encode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Encode a string to Base64",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to encode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use base64::Engine;
 
             let data = args
@@ -104,18 +109,7 @@ pub fn create_crypto_module() -> ModuleExports {
                 .ok_or_else(|| "crypto.base64_encode() requires a string argument".to_string())?;
 
             let encoded = base64::engine::general_purpose::STANDARD.encode(data.as_bytes());
-            Ok(ValueWord::from_string(Arc::new(encoded)))
-        },
-        ModuleFunction {
-            description: "Encode a string to Base64".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to encode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(encoded))
         },
     );
 
@@ -155,28 +149,24 @@ pub fn create_crypto_module() -> ModuleExports {
     );
 
     // crypto.hex_encode(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "hex_encode",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Encode a string as hexadecimal",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to hex-encode".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             let data = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "crypto.hex_encode() requires a string argument".to_string())?;
-
-            Ok(ValueWord::from_string(Arc::new(hex::encode(
-                data.as_bytes(),
-            ))))
-        },
-        ModuleFunction {
-            description: "Encode a string as hexadecimal".to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to hex-encode".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(data.as_bytes())))
         },
     );
 
@@ -213,9 +203,19 @@ pub fn create_crypto_module() -> ModuleExports {
     );
 
     // crypto.sha512(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "sha512",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compute the SHA-512 hash of a string, returning a hex-encoded digest",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to hash".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use sha2::{Digest, Sha512};
 
             let data = args
@@ -226,26 +226,24 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = Sha512::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(ValueWord::from_string(Arc::new(hex::encode(result))))
-        },
-        ModuleFunction {
-            description: "Compute the SHA-512 hash of a string, returning a hex-encoded digest"
-                .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to hash".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(result)))
         },
     );
 
     // crypto.sha1(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "sha1",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compute the SHA-1 hash of a string, returning a hex-encoded digest (legacy)",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to hash".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use sha1::Digest;
 
             let data = args
@@ -256,27 +254,24 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = sha1::Sha1::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(ValueWord::from_string(Arc::new(hex::encode(result))))
-        },
-        ModuleFunction {
-            description:
-                "Compute the SHA-1 hash of a string, returning a hex-encoded digest (legacy)"
-                    .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to hash".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(result)))
         },
     );
 
     // crypto.md5(data: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "md5",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Compute the MD5 hash of a string, returning a hex-encoded digest (legacy)",
+        vec![ModuleParam {
+            name: "data".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Data to hash".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, _ctx| {
             use md5::Digest;
 
             let data = args
@@ -287,27 +282,24 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = md5::Md5::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(ValueWord::from_string(Arc::new(hex::encode(result))))
-        },
-        ModuleFunction {
-            description:
-                "Compute the MD5 hash of a string, returning a hex-encoded digest (legacy)"
-                    .to_string(),
-            params: vec![ModuleParam {
-                name: "data".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Data to hash".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(result)))
         },
     );
 
     // crypto.random_bytes(n: int) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "random_bytes",
-        |args: &[ValueWord], ctx: &ModuleContext| {
+        "Generate n random bytes, returned as a hex-encoded string",
+        vec![ModuleParam {
+            name: "n".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            description: "Number of random bytes to generate (0..65536)".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::String,
+        |args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
             use rand::RngCore;
 
@@ -322,25 +314,18 @@ pub fn create_crypto_module() -> ModuleExports {
 
             let mut buf = vec![0u8; n as usize];
             rand::thread_rng().fill_bytes(&mut buf);
-            Ok(ValueWord::from_string(Arc::new(hex::encode(buf))))
-        },
-        ModuleFunction {
-            description: "Generate n random bytes, returned as a hex-encoded string".to_string(),
-            params: vec![ModuleParam {
-                name: "n".to_string(),
-                type_name: "int".to_string(),
-                required: true,
-                description: "Number of random bytes to generate (0..65536)".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(buf)))
         },
     );
 
     // crypto.ed25519_generate_keypair() -> object
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "ed25519_generate_keypair",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Generate an Ed25519 keypair, returning an object with hex-encoded public_key and secret_key",
+        vec![],
+        ConcreteType::Object,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
             use rand::RngCore;
 
@@ -349,28 +334,42 @@ pub fn create_crypto_module() -> ModuleExports {
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
             let verifying_key = signing_key.verifying_key();
 
-            let keys = vec![
-                ValueWord::from_string(Arc::new("public_key".to_string())),
-                ValueWord::from_string(Arc::new("secret_key".to_string())),
-            ];
-            let values = vec![
-                ValueWord::from_string(Arc::new(hex::encode(verifying_key.to_bytes()))),
-                ValueWord::from_string(Arc::new(hex::encode(signing_key.to_bytes()))),
-            ];
-            Ok(ValueWord::from_hashmap_pairs(keys, values))
-        },
-        ModuleFunction {
-            description: "Generate an Ed25519 keypair, returning an object with hex-encoded public_key and secret_key"
-                .to_string(),
-            params: vec![],
-            return_type: Some("object".to_string()),
+            Ok(TypedReturn::HashMapStringString(vec![
+                (
+                    "public_key".to_string(),
+                    hex::encode(verifying_key.to_bytes()),
+                ),
+                (
+                    "secret_key".to_string(),
+                    hex::encode(signing_key.to_bytes()),
+                ),
+            ]))
         },
     );
 
     // crypto.ed25519_sign(message: string, secret_key: string) -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "ed25519_sign",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Sign a message with an Ed25519 secret key, returning a hex-encoded signature",
+        vec![
+            ModuleParam {
+                name: "message".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Message to sign".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "secret_key".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Hex-encoded 32-byte Ed25519 secret key".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::String,
+        |args, _ctx| {
             use ed25519_dalek::Signer;
 
             let message = args.first().and_then(|a| a.as_str()).ok_or_else(|| {
@@ -393,38 +392,40 @@ pub fn create_crypto_module() -> ModuleExports {
 
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
             let signature = signing_key.sign(message.as_bytes());
-            Ok(ValueWord::from_string(Arc::new(hex::encode(
-                signature.to_bytes(),
-            ))))
-        },
-        ModuleFunction {
-            description:
-                "Sign a message with an Ed25519 secret key, returning a hex-encoded signature"
-                    .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "message".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Message to sign".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "secret_key".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Hex-encoded 32-byte Ed25519 secret key".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(hex::encode(signature.to_bytes())))
         },
     );
 
     // crypto.ed25519_verify(message: string, signature: string, public_key: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "ed25519_verify",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Verify an Ed25519 signature against a message and public key",
+        vec![
+            ModuleParam {
+                name: "message".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Message that was signed".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "signature".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Hex-encoded 64-byte Ed25519 signature".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "public_key".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                description: "Hex-encoded 32-byte Ed25519 public key".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Bool,
+        |args, _ctx| {
             use ed25519_dalek::Verifier;
 
             let message = args.first().and_then(|a| a.as_str()).ok_or_else(|| {
@@ -464,34 +465,7 @@ pub fn create_crypto_module() -> ModuleExports {
 
             let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
             let valid = verifying_key.verify(message.as_bytes(), &signature).is_ok();
-            Ok(ValueWord::from_bool(valid))
-        },
-        ModuleFunction {
-            description: "Verify an Ed25519 signature against a message and public key".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "message".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Message that was signed".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "signature".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Hex-encoded 64-byte Ed25519 signature".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "public_key".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Hex-encoded 32-byte Ed25519 public key".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(valid))
         },
     );
 
