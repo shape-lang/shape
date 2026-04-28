@@ -33,6 +33,7 @@
 use crate::module_exports::{
     ModuleContext, ModuleExports, ModuleFunction, ModuleParam,
 };
+use shape_value::datatable::DataTable;
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,11 +44,12 @@ use std::sync::Arc;
 /// [`TypedReturn::into_value_word`]. The function body produces a
 /// `TypedReturn` directly; marshalling happens at the registry boundary.
 ///
-/// Phase 4b covers static-typed return shapes only. Sum-typed (`Result<T>`,
-/// `Option<T>`) and polymorphic (`any`) variants are deferred to Phase 4c —
-/// at which point this enum will grow `Result(Box<TypedReturn>, …)` /
-/// `Option(Option<Box<TypedReturn>>)` / `Enum { schema, variant, fields }`
-/// variants.
+/// Phase 4b covers static-typed return shapes only. Phase 4c grows the
+/// enum to cover sum-typed shapes (`Result<T,E>`, `Option<T>`) and the
+/// `Opaque` heap-handle variant used by arrow/wire (DataTable) — see
+/// [`TypedReturn::Ok`], [`TypedReturn::Err`], [`TypedReturn::Some`],
+/// [`TypedReturn::None`], [`TypedReturn::DataTable`],
+/// [`TypedReturn::ArrayObjectPairs`].
 #[derive(Debug, Clone)]
 pub enum TypedReturn {
     /// 64-bit signed integer.
@@ -100,10 +102,33 @@ pub enum TypedReturn {
         keys: Vec<ValueWord>,
         values: Vec<ValueWord>,
     },
+    /// `Ok(payload)` — `Result<T,E>` success constructor. The payload type
+    /// follows the function's declared `Result<T,…>` shape; mismatched
+    /// payload variants are a registration-time bug.
+    Ok(Box<TypedReturn>),
+    /// `Err(payload)` — `Result<T,E>` error constructor. For functions
+    /// declared `Result<T, string>`, `payload` is `TypedReturn::String(…)`.
+    Err(Box<TypedReturn>),
+    /// `Some(payload)` — `Option<T>` present constructor.
+    Some(Box<TypedReturn>),
+    /// `None` — `Option<T>` absent constructor.
+    None,
+    /// `DataTable` heap handle — opaque columnar table from
+    /// `arrow_module` / wire conversion. Surfaces to Shape as the
+    /// built-in `DataTable` type.
+    DataTable(Arc<DataTable>),
+    /// Array of typed object pairs. Each element is a
+    /// `Vec<(String, TypedReturn)>` (same shape as
+    /// `TypedReturn::ObjectPairs`), materialized as a `HashMap`
+    /// ValueWord. Used by xml/regex/csv where the function returns
+    /// `Array<{...}>`.
+    ArrayObjectPairs(Vec<Vec<(String, TypedReturn)>>),
     /// Pass-through: hand-rolled ValueWord. Escape hatch for borderline
     /// cases where the function body still needs the legacy
     /// `ValueWord::from_*` API (e.g., set operations that construct from
-    /// other set inputs). Phase 4c will narrow these.
+    /// other set inputs, msgpack's `Result<any>` where the inner shape is
+    /// `serde_json::Value`-derived). Narrowed module-by-module across
+    /// the migration.
     ValueWord(ValueWord),
 }
 
@@ -182,6 +207,18 @@ impl TypedReturn {
             TypedReturn::HashMapValueWord { keys, values } => {
                 ValueWord::from_hashmap_pairs(keys, values)
             }
+            TypedReturn::Ok(inner) => ValueWord::from_ok(inner.into_value_word()),
+            TypedReturn::Err(inner) => ValueWord::from_err(inner.into_value_word()),
+            TypedReturn::Some(inner) => ValueWord::from_some(inner.into_value_word()),
+            TypedReturn::None => ValueWord::none(),
+            TypedReturn::DataTable(dt) => ValueWord::from_datatable(dt),
+            TypedReturn::ArrayObjectPairs(rows) => {
+                let elements: Vec<ValueWord> = rows
+                    .into_iter()
+                    .map(|pairs| TypedReturn::ObjectPairs(pairs).into_value_word())
+                    .collect();
+                ValueWord::from_array(shape_value::vmarray_from_vec(elements))
+            }
             TypedReturn::ValueWord(v) => v,
         }
     }
@@ -221,6 +258,25 @@ pub enum ConcreteType {
     HashMap,
     /// Untyped Array (escape hatch for borderline cases).
     Array,
+    /// `Result<T>` (single-arg form). Common across stdlib (file/csv/yaml).
+    Result(Box<ConcreteType>),
+    /// `Result<T, E>` (two-arg form). Used by arrow/wire returns whose
+    /// LSP surface is `Result<DataTable, string>` etc.
+    Result2(Box<ConcreteType>, Box<ConcreteType>),
+    /// `Option<T>`. Used by regex/csv returns whose LSP surface is
+    /// `Option<{...}>`.
+    Option(Box<ConcreteType>),
+    /// `DataTable` opaque heap handle (arrow / wire).
+    DataTable,
+    /// `HashMap<string, string>` — alias for `HashMapStringString`. New
+    /// callers should prefer this name; kept distinct for clarity.
+    /// Free-form generic type name. Escape hatch for `Result<any>`,
+    /// `Result<DataTable, string>` (already supported via Result2 plus
+    /// payload), and ad-hoc shapes that don't decompose. Use sparingly.
+    Named(String),
+    /// `any` — polymorphic return. Used by msgpack.decode whose payload
+    /// is `serde_json::Value`-derived.
+    Any,
 }
 
 impl ConcreteType {
@@ -245,6 +301,14 @@ impl ConcreteType {
             ConcreteType::ArrayObject(s) => s.clone(),
             ConcreteType::HashMap => "HashMap".to_string(),
             ConcreteType::Array => "Array".to_string(),
+            ConcreteType::Result(inner) => format!("Result<{}>", inner.shape_type_name()),
+            ConcreteType::Result2(t, e) => {
+                format!("Result<{}, {}>", t.shape_type_name(), e.shape_type_name())
+            }
+            ConcreteType::Option(inner) => format!("Option<{}>", inner.shape_type_name()),
+            ConcreteType::DataTable => "DataTable".to_string(),
+            ConcreteType::Named(s) => s.clone(),
+            ConcreteType::Any => "any".to_string(),
         }
     }
 }
@@ -432,6 +496,64 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].as_str(), Some("k"));
         assert_eq!(values[0].as_str(), Some("v"));
+    }
+
+    #[test]
+    fn typed_return_ok_marshal() {
+        let v = TypedReturn::Ok(Box::new(TypedReturn::String("yay".to_string())))
+            .into_value_word();
+        let inner = v.as_ok_inner().expect("Ok wrapped");
+        assert_eq!(inner.as_str(), Some("yay"));
+    }
+
+    #[test]
+    fn typed_return_err_marshal() {
+        let v = TypedReturn::Err(Box::new(TypedReturn::String("oops".to_string())))
+            .into_value_word();
+        let inner = v.as_err_inner().expect("Err wrapped");
+        assert_eq!(inner.as_str(), Some("oops"));
+    }
+
+    #[test]
+    fn typed_return_some_none_marshal() {
+        let some = TypedReturn::Some(Box::new(TypedReturn::I64(42))).into_value_word();
+        assert_eq!(some.as_some_inner().and_then(|v| v.as_i64()), Some(42));
+
+        let none = TypedReturn::None.into_value_word();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn typed_return_array_object_pairs_marshal() {
+        let v = TypedReturn::ArrayObjectPairs(vec![
+            vec![("k".to_string(), TypedReturn::I64(1))],
+            vec![("k".to_string(), TypedReturn::I64(2))],
+        ])
+        .into_value_word();
+        let arr = v.as_any_array().unwrap().to_generic();
+        assert_eq!(arr.len(), 2);
+        let (_, values, _) = arr[1].as_hashmap().unwrap();
+        assert_eq!(values[0].as_i64(), Some(2));
+    }
+
+    #[test]
+    fn concrete_type_result_option_names() {
+        assert_eq!(
+            ConcreteType::Result(Box::new(ConcreteType::String)).shape_type_name(),
+            "Result<string>"
+        );
+        assert_eq!(
+            ConcreteType::Result2(
+                Box::new(ConcreteType::DataTable),
+                Box::new(ConcreteType::String),
+            )
+            .shape_type_name(),
+            "Result<DataTable, string>"
+        );
+        assert_eq!(
+            ConcreteType::Option(Box::new(ConcreteType::Int)).shape_type_name(),
+            "Option<int>"
+        );
     }
 
     #[test]
