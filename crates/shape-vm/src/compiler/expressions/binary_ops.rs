@@ -483,6 +483,44 @@ impl BytecodeCompiler {
             return Ok(true);
         }
 
+        // Strict-typing-sweep: cross-numeric-kind equality where one side
+        // is a literal int (e.g. `mean_val == 0` with `mean_val: number`).
+        // Symmetric to plan_coercion's CoerceLeft / CoerceRight rules in
+        // numeric_ops.rs, just for equality ops. This is the same
+        // literal-int-into-number coercion arithmetic already does and
+        // doesn't introduce a new fallback path: the resulting opcode is
+        // a typed `EqNumber`/`NeqNumber`, not a Dynamic.
+        let cross_emission = match (lhs_eq, rhs_eq) {
+            (Some(EqOperandType::Number), Some(EqOperandType::Int))
+                if matches!(right, Expr::Literal(Literal::Int(_), _)) =>
+            {
+                Some((OpCode::EqNumber, true /* coerce_right_int_to_number */))
+            }
+            (Some(EqOperandType::Int), Some(EqOperandType::Number))
+                if matches!(left, Expr::Literal(Literal::Int(_), _)) =>
+            {
+                Some((OpCode::EqNumber, false /* coerce_left_int_to_number */))
+            }
+            _ => None,
+        };
+        if let Some((opcode, coerce_right)) = cross_emission {
+            self.compile_expr(left)?;
+            if !coerce_right {
+                self.emit(Instruction::simple(OpCode::IntToNumber));
+            }
+            self.compile_expr(right)?;
+            if coerce_right {
+                self.emit(Instruction::simple(OpCode::IntToNumber));
+            }
+            // EqNumber → NeqNumber via Not when needed.
+            let final_op = if is_neq { OpCode::NeqNumber } else { opcode };
+            self.emit(Instruction::simple(final_op));
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            return Ok(true);
+        }
+
         // Strict-typing sweep (Phase 1): the typed-equality dispatch above
         // declined for both operands, which historically routed through the
         // `emit_binary_op` shim with `BinOperandKind::Unknown` operands and
