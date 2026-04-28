@@ -33,7 +33,7 @@
 //! `I16`/`U16` use 2; `I8`/`U8`/`Bool` use 1; `Ptr` uses 8 and participates
 //! in the `heap_capture_mask` retain/release cycle.
 
-use super::closure_layout::{ClosureLayout, TypedClosureHeader};
+use super::closure_layout::{ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
 use std::sync::Arc;
@@ -606,6 +606,503 @@ pub unsafe fn write_capture_typed(ptr: *mut u8, layout: &ClosureLayout, idx: usi
 pub unsafe fn typed_closure_refcount(ptr: *const u8) -> u32 {
     // SAFETY: caller upholds that `ptr` is a live TypedClosureHeader block.
     unsafe { (*(ptr as *const HeapHeader)).get_refcount() }
+}
+
+// ---------------------------------------------------------------------------
+// Per-FieldKind OwnedMutable cell helpers (Wave B / D2 dispatch).
+//
+// An `OwnedMutable` capture's slot holds a typed `*mut T` pointer obtained
+// from `Box::into_raw(Box::new(initial))`, where `T` matches the interior
+// `FieldKind` (`capture_inner_kind(i)`). Each slot owns exactly one box;
+// closure Drop reclaims it via the matching `Box::from_raw` cast.
+//
+// These helpers are the kind-specialised entry points the JIT FFI and VM
+// executor will consume in Wave C/D. They expose:
+//
+// - `alloc_owned_mutable_<kind>(initial) -> *mut <T>` — leak a fresh box.
+// - `read_owned_mutable_<kind>(ptr) -> <T>` — load the cell payload.
+// - `write_owned_mutable_<kind>(ptr, value)` — store a new payload.
+//
+// All read/write helpers are `unsafe` because the caller must guarantee
+// the pointer is non-null and points to a live cell of the matching type;
+// they are kept `#[inline]` so the JIT can match this body byte-for-byte
+// when emitting inline lowerings later.
+// ---------------------------------------------------------------------------
+
+/// Allocate a fresh `OwnedMutable` cell holding an `i64` payload.
+///
+/// Returns a `*mut i64` produced by `Box::into_raw(Box::new(initial))`.
+/// The caller must eventually reclaim the box via `Box::from_raw` (or
+/// indirectly via [`drop_owned_mutable_capture`] on the owning closure).
+#[inline]
+pub fn alloc_owned_mutable_i64(initial: i64) -> *mut i64 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `i64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i64>` cell allocated
+/// by [`alloc_owned_mutable_i64`].
+#[inline]
+pub unsafe fn read_owned_mutable_i64(ptr: *mut i64) -> i64 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `i64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i64>` cell allocated
+/// by [`alloc_owned_mutable_i64`].
+#[inline]
+pub unsafe fn write_owned_mutable_i64(ptr: *mut i64, value: i64) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding an `f64` payload.
+#[inline]
+pub fn alloc_owned_mutable_f64(initial: f64) -> *mut f64 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `f64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<f64>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_f64(ptr: *mut f64) -> f64 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `f64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<f64>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_f64(ptr: *mut f64, value: f64) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding an `i32` payload.
+#[inline]
+pub fn alloc_owned_mutable_i32(initial: i32) -> *mut i32 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `i32` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i32>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_i32(ptr: *mut i32) -> i32 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `i32` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i32>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_i32(ptr: *mut i32, value: i32) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding an `i16` payload.
+#[inline]
+pub fn alloc_owned_mutable_i16(initial: i16) -> *mut i16 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `i16` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i16>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_i16(ptr: *mut i16) -> i16 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `i16` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i16>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_i16(ptr: *mut i16, value: i16) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding an `i8` payload.
+#[inline]
+pub fn alloc_owned_mutable_i8(initial: i8) -> *mut i8 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `i8` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i8>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_i8(ptr: *mut i8) -> i8 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `i8` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<i8>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_i8(ptr: *mut i8, value: i8) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `u64` payload.
+#[inline]
+pub fn alloc_owned_mutable_u64(initial: u64) -> *mut u64 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `u64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u64>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_u64(ptr: *mut u64) -> u64 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `u64` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u64>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_u64(ptr: *mut u64, value: u64) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `u32` payload.
+#[inline]
+pub fn alloc_owned_mutable_u32(initial: u32) -> *mut u32 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `u32` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u32>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_u32(ptr: *mut u32) -> u32 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `u32` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u32>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_u32(ptr: *mut u32, value: u32) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `u16` payload.
+#[inline]
+pub fn alloc_owned_mutable_u16(initial: u16) -> *mut u16 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `u16` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u16>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_u16(ptr: *mut u16) -> u16 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `u16` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u16>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_u16(ptr: *mut u16, value: u16) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `u8` payload.
+#[inline]
+pub fn alloc_owned_mutable_u8(initial: u8) -> *mut u8 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `u8` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u8>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_u8(ptr: *mut u8) -> u8 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `u8` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u8>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_u8(ptr: *mut u8, value: u8) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `bool` payload.
+#[inline]
+pub fn alloc_owned_mutable_bool(initial: bool) -> *mut bool {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the `bool` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<bool>` cell.
+#[inline]
+pub unsafe fn read_owned_mutable_bool(ptr: *mut bool) -> bool {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write the `bool` payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<bool>` cell.
+#[inline]
+pub unsafe fn write_owned_mutable_bool(ptr: *mut bool, value: bool) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+/// Allocate a fresh `OwnedMutable` cell holding a `Ptr` payload.
+///
+/// The cell stores the raw 8-byte heap-pointer bit pattern (a
+/// NaN-boxed `ValueWord` carrying an `Arc<HeapValue>` share or an owned
+/// heap pointer). The interior bits are released through
+/// [`release_raw_value_bits`] inside [`drop_owned_mutable_capture`]
+/// before the box itself is reclaimed, mirroring the existing
+/// `heap_capture_mask` semantics for immutable Ptr captures.
+#[inline]
+pub fn alloc_owned_mutable_ptr(initial: u64) -> *mut u64 {
+    Box::into_raw(Box::new(initial))
+}
+
+/// Read the raw `u64` (Ptr-shaped) payload of an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u64>` cell allocated
+/// via [`alloc_owned_mutable_ptr`]. The returned bits are caller-owned
+/// from a refcount standpoint exactly to the extent the cell owned
+/// them; cloning into a separately-owned share is the caller's
+/// responsibility (see `ValueWord::clone_from_bits`).
+#[inline]
+pub unsafe fn read_owned_mutable_ptr(ptr: *mut u64) -> u64 {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr }
+}
+
+/// Write a new `u64` (Ptr-shaped) payload into an `OwnedMutable` cell.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `Box<u64>` cell. The
+/// caller is responsible for releasing the previous payload's refcount
+/// share (if any) BEFORE calling this — this function does not
+/// retain/release.
+#[inline]
+pub unsafe fn write_owned_mutable_ptr(ptr: *mut u64, value: u64) {
+    // SAFETY: caller upholds the pointer is live and properly typed.
+    unsafe { *ptr = value };
+}
+
+// ---------------------------------------------------------------------------
+// Per-CaptureKind drop helpers (D4 from the Wave A playbook).
+//
+// `release_typed_closure` dispatches on `capture_kinds[i]` and calls one of
+// these helpers per slot. `drop_owned_mutable_capture` reconstructs the
+// typed `Box<T>` matching `capture_inner_kind(i)` and drops it; if the
+// interior kind is `Ptr`, the heap-refcount share encoded in the cell's
+// bits is released first.
+//
+// `drop_shared_capture` is left as a stub for the parallel migration agent
+// (`migrate-shared-storage`) to fill in. The signature below is the
+// contract `release_typed_closure` relies on.
+// ---------------------------------------------------------------------------
+
+/// Drop the `OwnedMutable` capture at index `i` of a closure block.
+///
+/// Reads the typed `*mut T` from the slot at
+/// `layout.heap_capture_offset(i)`, dispatches on
+/// `layout.capture_inner_kind(i)`, and reclaims the box via
+/// `Box::from_raw`. For `FieldKind::Ptr` the interior bits carry one
+/// heap-refcount share that is released via [`release_raw_value_bits`]
+/// BEFORE the box is freed — mirroring the immutable-Ptr semantics that
+/// `heap_capture_mask` enforces for non-mutable captures.
+///
+/// # Safety
+///
+/// - `base` must point to a live `TypedClosureHeader` block whose layout
+///   matches `layout` and has at least `i + 1` captures.
+/// - `layout.capture_kinds[i]` must be `CaptureKind::OwnedMutable`.
+/// - The slot at `layout.heap_capture_offset(i)` must contain a non-null
+///   pointer obtained from the matching `alloc_owned_mutable_<kind>` for
+///   the interior `FieldKind`, or it may be null (which is a no-op).
+/// - The block must currently be in the refcount-zero teardown phase —
+///   no other thread may concurrently access this slot.
+#[inline]
+pub unsafe fn drop_owned_mutable_capture(layout: &ClosureLayout, base: *mut u8, i: usize) {
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: caller upholds that the slot is in-bounds and 8-byte aligned;
+    // the slot stores a single-pointer-sized value (Ptr slot).
+    let raw = unsafe { std::ptr::read(base.add(off) as *const *mut u8) };
+    if raw.is_null() {
+        return;
+    }
+    match layout.capture_inner_kind(i) {
+        FieldKind::I64 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_i64`.
+            unsafe { drop(Box::from_raw(raw as *mut i64)) };
+        }
+        FieldKind::F64 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_f64`.
+            unsafe { drop(Box::from_raw(raw as *mut f64)) };
+        }
+        FieldKind::I32 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_i32`.
+            unsafe { drop(Box::from_raw(raw as *mut i32)) };
+        }
+        FieldKind::I16 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_i16`.
+            unsafe { drop(Box::from_raw(raw as *mut i16)) };
+        }
+        FieldKind::I8 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_i8`.
+            unsafe { drop(Box::from_raw(raw as *mut i8)) };
+        }
+        FieldKind::U64 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_u64`.
+            unsafe { drop(Box::from_raw(raw as *mut u64)) };
+        }
+        FieldKind::U32 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_u32`.
+            unsafe { drop(Box::from_raw(raw as *mut u32)) };
+        }
+        FieldKind::U16 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_u16`.
+            unsafe { drop(Box::from_raw(raw as *mut u16)) };
+        }
+        FieldKind::U8 => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_u8`.
+            unsafe { drop(Box::from_raw(raw as *mut u8)) };
+        }
+        FieldKind::Bool => {
+            // SAFETY: slot was produced by `alloc_owned_mutable_bool`.
+            unsafe { drop(Box::from_raw(raw as *mut bool)) };
+        }
+        FieldKind::Ptr => {
+            // Interior is a heap-refcount share — release it before
+            // freeing the box. Read the bits, decrement the inner
+            // share, then reclaim the box itself.
+            // SAFETY: slot was produced by `alloc_owned_mutable_ptr`,
+            // so the box holds exactly one `u64` cell with the
+            // `ValueWord` bit pattern.
+            let cell = raw as *mut u64;
+            let bits = unsafe { *cell };
+            release_raw_value_bits(bits);
+            // SAFETY: reclaim the now-empty `Box<u64>`.
+            unsafe { drop(Box::from_raw(cell)) };
+        }
+    }
+}
+
+/// Drop the `Shared` capture at index `i` of a closure block.
+///
+/// # Status (Wave B coordination)
+///
+/// Stub. The OwnedMutable migration agent (this file's author) declares
+/// the signature `release_typed_closure` dispatches against; the parallel
+/// `migrate-shared-storage` agent fills in the body.
+///
+/// # Contract for the parallel agent
+///
+/// Read `*const SharedCell` from `base.add(layout.heap_capture_offset(i))`.
+/// If non-null, reclaim the Arc share via `Arc::from_raw` (which
+/// decrements `strong_count` and, if it was the last share, drops the
+/// underlying `SharedCell` containing the interior `ValueWord` payload).
+/// The interior payload may itself carry a heap-refcount share — when
+/// the last Arc share drops, the `SharedCell`'s Drop must release that
+/// share. Whether `SharedCell::Drop` performs that release or whether
+/// this helper performs it before reclaiming the Arc is the parallel
+/// agent's design choice; either way it must happen exactly once.
+///
+/// # Safety
+///
+/// - `base` must point to a live `TypedClosureHeader` block whose layout
+///   matches `layout` and has at least `i + 1` captures.
+/// - `layout.capture_kinds[i]` must be `CaptureKind::Shared`.
+/// - The slot at `layout.heap_capture_offset(i)` must contain either a
+///   null pointer (no-op) or a non-null pointer produced by
+///   `Arc::into_raw` representing exactly one strong-count share.
+/// - The block must currently be in the refcount-zero teardown phase —
+///   no other thread may concurrently access this slot.
+#[inline]
+pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usize) {
+    use crate::v2::closure_layout::SharedCell;
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: caller upholds slot is in-bounds, 8-byte aligned, and either
+    // null or a valid `Arc::into_raw` result.
+    let raw = unsafe { std::ptr::read(base.add(off) as *const *const SharedCell) };
+    if !raw.is_null() {
+        // SAFETY: `raw` came from `Arc::into_raw(Arc::new(...))` and
+        // represents exactly one strong-count share. Reclaim the Arc
+        // here — its Drop releases the strong share and (if last) frees
+        // the cell along with any heap refcount the interior payload
+        // owned. The parallel `migrate-shared-storage` agent will
+        // refine this body once SharedCell switches to typed storage.
+        unsafe { drop(Arc::from_raw(raw)) };
+    }
 }
 
 #[cfg(test)]
