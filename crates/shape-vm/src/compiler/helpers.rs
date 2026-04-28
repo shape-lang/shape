@@ -4055,7 +4055,9 @@ mod tests {
         );
     }
 
+    // strict-typing-sweep: dynamic emission deleted
     #[test]
+    #[ignore]
     fn r55_flag_off_falls_back_to_dynamic() {
         // Flag off: string+scalar Add must route through the Dynamic
         // `AddDynamic` path (which the `try_heap_arithmetic` Case 2

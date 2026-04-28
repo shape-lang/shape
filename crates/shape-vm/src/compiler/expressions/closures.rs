@@ -3,13 +3,61 @@
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
 use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
-use shape_ast::ast::{Expr, FunctionDef, Span};
+use shape_ast::ast::type_path::TypePath;
+use shape_ast::ast::{Expr, FunctionDef, Span, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
 use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::BTreeSet;
 
 use super::super::BytecodeCompiler;
+
+/// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
+/// value-representation type) back into an AST `TypeAnnotation` so it can be
+/// attached to a synthetic capture parameter. Returning `None` falls back to
+/// the no-annotation path (which is fine for opaque types — those captures
+/// never participate in typed binary-ops anyway).
+///
+/// We map the type-name primitives that `tracked_type_name_from_annotation`
+/// recognizes plus `Vec<T>` for arrays. Composite/opaque types
+/// (Struct/Enum/Closure/Function/Pointer/HashMap with non-trivial inner)
+/// return `None` — they don't need typed-op support inside the closure body.
+fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<TypeAnnotation> {
+    match ct {
+        ConcreteType::F64 => Some(TypeAnnotation::Basic("number".to_string())),
+        ConcreteType::I64 => Some(TypeAnnotation::Basic("int".to_string())),
+        ConcreteType::I32 => Some(TypeAnnotation::Basic("i32".to_string())),
+        ConcreteType::I16 => Some(TypeAnnotation::Basic("i16".to_string())),
+        ConcreteType::I8 => Some(TypeAnnotation::Basic("i8".to_string())),
+        ConcreteType::U64 => Some(TypeAnnotation::Basic("u64".to_string())),
+        ConcreteType::U32 => Some(TypeAnnotation::Basic("u32".to_string())),
+        ConcreteType::U16 => Some(TypeAnnotation::Basic("u16".to_string())),
+        ConcreteType::U8 => Some(TypeAnnotation::Basic("u8".to_string())),
+        ConcreteType::Bool => Some(TypeAnnotation::Basic("bool".to_string())),
+        ConcreteType::String => Some(TypeAnnotation::Basic("string".to_string())),
+        ConcreteType::Decimal => Some(TypeAnnotation::Basic("decimal".to_string())),
+        ConcreteType::BigInt => Some(TypeAnnotation::Basic("bigint".to_string())),
+        ConcreteType::DateTime => Some(TypeAnnotation::Basic("DateTime".to_string())),
+        ConcreteType::Array(inner) => {
+            // Render as Vec<T> via the Generic form so
+            // `tracked_type_name_from_annotation` produces "Vec<int>" /
+            // "Vec<number>" — the names the type-tracker keys typed array
+            // ops on.
+            concrete_type_to_type_annotation(inner).map(|inner_ann| TypeAnnotation::Generic {
+                name: TypePath::simple("Vec"),
+                args: vec![inner_ann],
+            })
+        }
+        // Nullable: drop the wrapper — the captured variable is the inner
+        // value at the binary-op site if the closure narrows it. No-annotation
+        // is safer than a wrong annotation.
+        ConcreteType::Option(_) => None,
+        // Other composite / opaque types: no useful annotation for the
+        // type-tracker. The capture lives as a Pointer-typed slot via the
+        // closure layout and does not participate in typed binops.
+        _ => None,
+    }
+}
 
 impl BytecodeCompiler {
     /// Compile a function expression (closure)
@@ -136,15 +184,27 @@ impl BytecodeCompiler {
 
         // Build closure parameters: only immutable captures become leading params.
         // Mutable captures are accessed via LoadClosure/StoreClosure opcodes.
+        //
+        // Strict-typing-sweep (Cluster 1): synthesize a `type_annotation` for each
+        // capture from its resolved upstream `ConcreteType`. Without this the
+        // capture-param falls into the "no annotation" branch in
+        // `compile_function_body` (line ~1182) and ends up in `param_locals` with
+        // no type info — which then makes binary-ops on the capture inside the
+        // closure body fail with "Cannot infer types for binary operation".
         let mut closure_params = Vec::with_capacity(captured_vars.len() + params.len());
         for name in &captured_vars {
+            let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
+            let capture_ct = concrete_type_for_expr(self, &ident_expr);
+            let type_annotation = capture_ct
+                .as_ref()
+                .and_then(concrete_type_to_type_annotation);
             closure_params.push(shape_ast::ast::FunctionParameter {
                 pattern: shape_ast::ast::DestructurePattern::Identifier(name.clone(), Span::DUMMY),
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
                 is_out: false,
-                type_annotation: None,
+                type_annotation,
                 default_value: None,
             });
         }
