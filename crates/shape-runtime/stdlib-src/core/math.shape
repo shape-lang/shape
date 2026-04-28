@@ -177,19 +177,19 @@ pub fn tanh(x) {
 // ===== Helpers =====
 
 /// Clamp a value to [min, max].
-pub fn clamp(x, lo, hi) {
+pub fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
     if x < lo { lo }
     else if x > hi { hi }
     else { x }
 }
 
 /// Linear interpolation between two values.
-pub fn lerp(a, b, t) {
+pub fn lerp<T: Add + Sub + Mul>(a: T, b: T, t: T) -> T {
     a + (b - a) * t
 }
 
 /// Return the sign of a number: -1, 0, or 1.
-pub fn sign(x) {
+pub fn sign(x: int) -> int {
     if x > 0 { 1 }
     else if x < 0 { -1 }
     else { 0 }

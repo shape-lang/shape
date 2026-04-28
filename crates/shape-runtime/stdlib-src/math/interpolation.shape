@@ -5,14 +5,14 @@
 /// Query points are provided as Mat<number> (Nx3 or Nx2).
 
 /// Clamp a value to [lo, hi].
-fn clamp(x, lo, hi) {
+fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
     if x < lo { lo }
     else if x > hi { hi }
     else { x }
 }
 
 /// Linearly interpolate between two values.
-fn lerp(a, b, t) {
+fn lerp<T: Add + Sub + Mul>(a: T, b: T, t: T) -> T {
     a + (b - a) * t
 }
 

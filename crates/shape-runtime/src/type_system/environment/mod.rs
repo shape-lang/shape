@@ -591,6 +591,43 @@ impl TypeEnvironment {
                 vec!["cmp".to_string()],
             );
         }
+
+        // Phase 3b: register arithmetic trait impls (Add/Sub/Mul/Div/Neg) for
+        // primitive numeric types. Same bookkeeping pattern as Eq/Ord above —
+        // the bytecode compiler emits typed opcodes (`AddInt`, `SubNumber`,
+        // …) directly when both operands have the proven primitive type.
+        // These impls exist so call-site bound checking on `<T: Add>` etc.
+        // succeeds when `T` resolves to a primitive numeric type.
+        let arithmetic_types = ["int", "i8", "i16", "i32", "i64",
+                                "u8", "u16", "u32", "u64",
+                                "number", "f32", "f64"];
+        for type_name in &arithmetic_types {
+            let _ = self.type_registry.register_trait_impl(
+                "Add",
+                type_name,
+                vec!["add".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Sub",
+                type_name,
+                vec!["sub".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Mul",
+                type_name,
+                vec!["mul".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Div",
+                type_name,
+                vec!["div".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Neg",
+                type_name,
+                vec!["neg".to_string()],
+            );
+        }
     }
 
     /// Register the Numeric marker trait and built-in implementations.
