@@ -2131,4 +2131,266 @@ mod tests {
         // miri / ASan would fire if the interior share leaked or was
         // double-released.
     }
+
+    // ------------------------------------------------------------------
+    // Wave B (phase-3c-closure-y1) — per-FieldKind SharedCell payload
+    // round-trips, drop_shared_capture refcount semantics, and a light
+    // concurrent stress to validate that the spinlock keeps writes
+    // atomic. Mirrors the OwnedMutable test block above for the
+    // CaptureKind::Shared storage discipline.
+    // ------------------------------------------------------------------
+
+    /// Static-assert that the publicly-exposed payload offset matches
+    /// the value the helpers and the JIT both bake in. The CLAUDE.md /
+    /// JIT-coupled-ABI doc on `SharedCell` calls this offset
+    /// load-bearing.
+    #[test]
+    fn shared_cell_value_offset_is_eight() {
+        const _: [(); SHARED_CELL_VALUE_OFFSET as usize] = [(); 8];
+        assert_eq!(SHARED_CELL_VALUE_OFFSET, 8);
+    }
+
+    #[test]
+    fn shared_cell_i64_roundtrip() {
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
+        let raw = Arc::into_raw(cell);
+        unsafe {
+            write_shared_i64(raw, -123_456_789);
+            assert_eq!(read_shared_i64(raw), -123_456_789);
+            drop(Arc::from_raw(raw));
+        }
+    }
+
+    #[test]
+    fn shared_cell_f64_roundtrip() {
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
+        let raw = Arc::into_raw(cell);
+        unsafe {
+            write_shared_f64(raw, std::f64::consts::PI);
+            assert_eq!(read_shared_f64(raw), std::f64::consts::PI);
+            drop(Arc::from_raw(raw));
+        }
+    }
+
+    #[test]
+    fn shared_cell_bool_roundtrip() {
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
+        let raw = Arc::into_raw(cell);
+        unsafe {
+            write_shared_bool(raw, true);
+            assert!(read_shared_bool(raw));
+            write_shared_bool(raw, false);
+            assert!(!read_shared_bool(raw));
+            drop(Arc::from_raw(raw));
+        }
+    }
+
+    #[test]
+    fn shared_cell_ptr_roundtrip_does_not_release() {
+        // Ptr-payload writer/reader must NOT touch the heap refcount.
+        // Allocate a String, store its bits, re-read, then balance the
+        // bits' share with a single `release_raw_value_bits` — miri /
+        // ASan would flag a leaked or double-released share.
+        let bits = ValueWord::from_string(Arc::new("payload".to_string())).into_raw_bits();
+
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
+        let raw = Arc::into_raw(cell);
+        unsafe {
+            write_shared_ptr(raw, bits);
+            assert_eq!(read_shared_ptr(raw), bits, "Ptr payload bits round-trip");
+            drop(Arc::from_raw(raw));
+        }
+        // Release the single share `bits` carries.
+        release_raw_value_bits(bits);
+    }
+
+    #[test]
+    fn shared_cell_sub_8byte_writers_extend_correctly() {
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
+        let raw = Arc::into_raw(cell);
+        unsafe {
+            // i32: writing -1 must sign-extend so an i64 reader observes -1.
+            write_shared_i32(raw, -1);
+            assert_eq!(read_shared_i32(raw), -1);
+            assert_eq!(read_shared_i64(raw), -1, "sign extension to 8 bytes");
+
+            // u32: writing 0xDEADBEEF must zero-extend (high half = 0).
+            write_shared_u32(raw, 0xDEAD_BEEF);
+            assert_eq!(read_shared_u32(raw), 0xDEAD_BEEF);
+            assert_eq!(read_shared_u64(raw), 0xDEAD_BEEF as u64);
+
+            write_shared_i16(raw, -1);
+            assert_eq!(read_shared_i16(raw), -1);
+            assert_eq!(read_shared_i64(raw), -1);
+
+            write_shared_u16(raw, 0xCAFE);
+            assert_eq!(read_shared_u16(raw), 0xCAFE);
+            assert_eq!(read_shared_u64(raw), 0xCAFE_u64);
+
+            write_shared_i8(raw, -2);
+            assert_eq!(read_shared_i8(raw), -2);
+            assert_eq!(read_shared_i64(raw), -2);
+
+            write_shared_u8(raw, 0xAB);
+            assert_eq!(read_shared_u8(raw), 0xAB);
+            assert_eq!(read_shared_u64(raw), 0xAB_u64);
+
+            drop(Arc::from_raw(raw));
+        }
+    }
+
+    #[test]
+    fn drop_shared_capture_decrements_arc_strong_count_scalar() {
+        // For a scalar (non-Ptr) interior kind, drop_shared_capture must
+        // simply Arc::from_raw + drop — no payload release.
+        let kinds = vec![CaptureKind::Shared];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
+
+        let external: Arc<SharedCell> =
+            Arc::new(SharedCell::new(ValueWord::from_i64(99)));
+        let closure_share = Arc::clone(&external);
+        assert_eq!(Arc::strong_count(&external), 2);
+        let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
+
+        unsafe {
+            let block = alloc_typed_closure(0, 0, &layout);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(block.add(off) as *mut *const SharedCell, cell_ptr);
+
+            drop_shared_capture(&layout, block, 0);
+
+            // External strong count back to 1 (closure share released).
+            assert_eq!(Arc::strong_count(&external), 1);
+
+            // Null out the slot before calling release_typed_closure so
+            // its mask-walk on teardown sees a null cell_ptr (early-return
+            // in drop_shared_capture). Otherwise we'd double-release.
+            std::ptr::write(
+                block.add(off) as *mut *const SharedCell,
+                std::ptr::null::<SharedCell>(),
+            );
+            release_typed_closure(block, &layout);
+        }
+    }
+
+    #[test]
+    fn drop_shared_capture_releases_ptr_payload_then_arc() {
+        // For a Ptr interior kind drop_shared_capture must:
+        //   1. lock cell, read 8-byte payload, release_raw_value_bits, unlock
+        //   2. Arc::from_raw + drop
+        // Verify by observing the SharedCell's Arc strong-count drop
+        // (concrete count is portable) and rely on miri/ASan for the
+        // payload-release balance — `bits` is the ONLY share we allocate
+        // for the payload, and drop_shared_capture must release it
+        // exactly once. A leak or double-free would surface under miri.
+        let kinds = vec![CaptureKind::Shared];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
+        assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
+
+        // Allocate a string ValueWord — this carries exactly one heap
+        // refcount share. We hand that share to the cell and never
+        // touch the bits again; drop_shared_capture must release it.
+        let bits = ValueWord::from_string(Arc::new("ptr-payload".to_string())).into_raw_bits();
+
+        // The cell stores `bits` as its initial payload — the cell now
+        // owns that single share.
+        let external: Arc<SharedCell> =
+            Arc::new(SharedCell::new(ValueWord::from_raw_bits(bits)));
+        let closure_share = Arc::clone(&external);
+        assert_eq!(Arc::strong_count(&external), 2);
+        let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
+
+        unsafe {
+            let block = alloc_typed_closure(0, 0, &layout);
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(block.add(off) as *mut *const SharedCell, cell_ptr);
+
+            // Sanity: the cell holds the ptr bits.
+            assert_eq!(read_shared_ptr(cell_ptr), bits);
+
+            drop_shared_capture(&layout, block, 0);
+
+            // The closure share dropped — strong_count back to 1.
+            assert_eq!(
+                Arc::strong_count(&external),
+                1,
+                "Arc<SharedCell> share must be released by drop_shared_capture",
+            );
+
+            // Null out the slot so release_typed_closure's mask-walk
+            // sees null (early-return in drop_shared_capture).
+            std::ptr::write(
+                block.add(off) as *mut *const SharedCell,
+                std::ptr::null::<SharedCell>(),
+            );
+            release_typed_closure(block, &layout);
+
+            // Drop the external Arc — last share, frees the cell. The
+            // cell's Drop must NOT re-release the payload bits because
+            // drop_shared_capture already did. A miri/ASan run would
+            // catch a double-free here. (The cell's payload is now a
+            // dangling u64 that nothing reads.)
+        }
+        drop(external);
+    }
+
+    #[test]
+    fn drop_shared_capture_handles_null_slot() {
+        // A null cell_ptr is a no-op (per the safety contract).
+        let kinds = vec![CaptureKind::Shared];
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
+        unsafe {
+            let block = alloc_typed_closure(0, 0, &layout);
+            // alloc_zeroed → null SharedCell ptr at the slot.
+            drop_shared_capture(&layout, block, 0);
+            // Block still has refcount 1; release normally — the slot is
+            // already null so the mask-walk's drop_shared_capture is a
+            // second no-op.
+            release_typed_closure(block, &layout);
+        }
+    }
+
+    #[test]
+    fn shared_cell_concurrent_stress_no_torn_writes() {
+        // Two threads race on a single shared cell, alternating writes
+        // of two distinct 8-byte sentinel values. The lock must keep
+        // every observed read equal to one of the two sentinels (no
+        // partial-byte tear).
+        use std::sync::Barrier;
+        use std::thread;
+
+        const A: i64 = 0x0101_0101_0101_0101;
+        const B: i64 = -0x0202_0202_0202_0202;
+
+        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(A)));
+        let raw_addr = Arc::into_raw(cell) as usize;
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for tid in 0..2u8 {
+            let bar = Arc::clone(&barrier);
+            let h = thread::spawn(move || {
+                let raw = raw_addr as *const SharedCell;
+                bar.wait();
+                for _ in 0..500 {
+                    if tid == 0 {
+                        unsafe { write_shared_i64(raw, A) };
+                    } else {
+                        unsafe { write_shared_i64(raw, B) };
+                    }
+                    let v = unsafe { read_shared_i64(raw) };
+                    assert!(v == A || v == B, "torn write observed: {v:#x}");
+                }
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        unsafe {
+            drop(Arc::from_raw(raw_addr as *const SharedCell));
+        }
+    }
 }
