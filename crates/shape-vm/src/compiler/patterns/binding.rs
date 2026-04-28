@@ -366,6 +366,32 @@ impl BytecodeCompiler {
                         Some(operand),
                     ));
                     let field_local = self.declare_temp_local("__match_field_")?;
+                    // Phase 3e: propagate the schema field's type onto the
+                    // temp local so the downstream binding (Pattern::Identifier
+                    // or Pattern::Typed) inherits the type info via the
+                    // existing source_info copy in those arms. Without this,
+                    // `match obj { { x, y } => x + y }` over a TypedObject
+                    // with int fields gets x and y as Unknown, breaking
+                    // strict-typing.
+                    if let Some(field_def) = self
+                        .type_tracker
+                        .schema_registry()
+                        .get_by_id(schema_id)
+                        .and_then(|s| s.get_field(key))
+                    {
+                        let field_ty = field_def.field_type.clone();
+                        let type_name_opt = match &field_ty {
+                            shape_runtime::type_schema::FieldType::I64 => Some("int"),
+                            shape_runtime::type_schema::FieldType::F64 => Some("number"),
+                            shape_runtime::type_schema::FieldType::Bool => Some("bool"),
+                            shape_runtime::type_schema::FieldType::String => Some("string"),
+                            shape_runtime::type_schema::FieldType::Decimal => Some("decimal"),
+                            _ => None,
+                        };
+                        if let Some(tn) = type_name_opt {
+                            self.set_local_type_info(field_local, tn);
+                        }
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(field_local)),
