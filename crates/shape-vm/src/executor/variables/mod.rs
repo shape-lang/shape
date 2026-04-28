@@ -4366,4 +4366,270 @@ mod tests {
         .unwrap();
         vm.call_stack.pop();
     }
+
+    // ── Track D.2: tests for the typed Shared capture handlers ─────────
+    //
+    // Each test uses an `Arc<SharedCell>` allocated as an "external"
+    // observer plus one `Arc::into_raw`-produced share parked in a
+    // synthetic frame's upvalue slot. The interior `FieldKind` is
+    // implicit in which `read/write_shared_<kind>` helper we call —
+    // the cell itself is just an 8-byte payload + lock byte.
+    //
+    // Each test follows the same pattern: Load → assert initial value;
+    // Store new value; Load → assert new value; observe via the
+    // external Arc; reclaim the Arc strong-count share; pop frame.
+    //
+    // The mandated four kinds (I64, F64, Bool, Ptr) cover every
+    // corner of the helper set:
+    //   * I64 — full 8-byte signed payload (no sign-extension dance).
+    //   * F64 — bitwise-identical f64 round-trip.
+    //   * Bool — narrow payload + the "any non-zero byte ⇒ true"
+    //          read convention.
+    //   * Ptr — raw 8-byte payload round-trip with NO retain/release
+    //          in the handler (matches the helper's contract).
+    //
+    // Locking sanity: every test executes Load → Store → Load on the
+    // same cell. `read_shared_<kind>` / `write_shared_<kind>` acquire
+    // and release the cell's mutex inside each call. If the handler
+    // accidentally took the lock externally we would deadlock on the
+    // second call (single-threaded). The tests passing means no
+    // double-locking occurs.
+
+    #[test]
+    fn d2_load_store_load_shared_capture_i64() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let initial: i64 = -987_654_321;
+        let external: StdArc<SharedCell> =
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
+        // SAFETY: cell is fresh, no other reader/writer; we mint a
+        // typed initial value through the lock-gated helper.
+        unsafe {
+            shape_value::v2::closure_raw::write_shared_i64(
+                StdArc::as_ptr(&external) as *const SharedCell,
+                initial,
+            );
+        }
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        // Round 1: Load — expect initial.
+        let load = Instruction::new(
+            OpCode::LoadSharedCaptureI64,
+            Some(Operand::Local(0)),
+        );
+        vm.op_load_shared_capture_i64(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, initial);
+
+        // Round 2: Store new value.
+        let new_val: i64 = i64::MAX - 7;
+        vm.push_raw_u64(new_val as u64).unwrap();
+        let store = Instruction::new(
+            OpCode::StoreSharedCaptureI64,
+            Some(Operand::Local(0)),
+        );
+        vm.op_store_shared_capture_i64(&store).unwrap();
+
+        // Round 3: Load — expect new_val.
+        vm.op_load_shared_capture_i64(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, new_val);
+
+        // External observer sees new_val.
+        // SAFETY: external is a live Arc; helper acquires its own
+        // lock; cell points at the same allocation as cell_ptr.
+        let observed = unsafe {
+            shape_value::v2::closure_raw::read_shared_i64(
+                StdArc::as_ptr(&external) as *const SharedCell,
+            )
+        };
+        assert_eq!(observed, new_val);
+
+        // SAFETY: cell_ptr came from Arc::into_raw, one share.
+        unsafe { drop(StdArc::from_raw(cell_ptr)) };
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn d2_load_store_load_shared_capture_f64() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let initial: f64 = std::f64::consts::PI;
+        let external: StdArc<SharedCell> =
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
+        // SAFETY: see I64 test rationale.
+        unsafe {
+            shape_value::v2::closure_raw::write_shared_f64(
+                StdArc::as_ptr(&external) as *const SharedCell,
+                initial,
+            );
+        }
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        let load = Instruction::new(
+            OpCode::LoadSharedCaptureF64,
+            Some(Operand::Local(0)),
+        );
+        vm.op_load_shared_capture_f64(&load).unwrap();
+        assert_eq!(f64::from_bits(vm.pop_raw_u64().unwrap()), initial);
+
+        let new_val: f64 = -1.5e+200;
+        vm.push_raw_u64(new_val.to_bits()).unwrap();
+        let store = Instruction::new(
+            OpCode::StoreSharedCaptureF64,
+            Some(Operand::Local(0)),
+        );
+        vm.op_store_shared_capture_f64(&store).unwrap();
+
+        vm.op_load_shared_capture_f64(&load).unwrap();
+        assert_eq!(f64::from_bits(vm.pop_raw_u64().unwrap()), new_val);
+
+        let observed = unsafe {
+            shape_value::v2::closure_raw::read_shared_f64(
+                StdArc::as_ptr(&external) as *const SharedCell,
+            )
+        };
+        assert_eq!(observed, new_val);
+
+        // SAFETY: cell_ptr came from Arc::into_raw, one share.
+        unsafe { drop(StdArc::from_raw(cell_ptr)) };
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn d2_load_store_load_shared_capture_bool() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        let external: StdArc<SharedCell> =
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
+        // SAFETY: typed init of bool = true.
+        unsafe {
+            shape_value::v2::closure_raw::write_shared_bool(
+                StdArc::as_ptr(&external) as *const SharedCell,
+                true,
+            );
+        }
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        let load = Instruction::new(
+            OpCode::LoadSharedCaptureBool,
+            Some(Operand::Local(0)),
+        );
+        vm.op_load_shared_capture_bool(&load).unwrap();
+        // Helper returned true → handler pushed 1 in low byte.
+        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
+
+        // Store false.
+        vm.push_raw_u64(0).unwrap();
+        let store = Instruction::new(
+            OpCode::StoreSharedCaptureBool,
+            Some(Operand::Local(0)),
+        );
+        vm.op_store_shared_capture_bool(&store).unwrap();
+        vm.op_load_shared_capture_bool(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), 0);
+
+        let observed_false = unsafe {
+            shape_value::v2::closure_raw::read_shared_bool(
+                StdArc::as_ptr(&external) as *const SharedCell,
+            )
+        };
+        assert!(!observed_false);
+
+        // Edge case: handler treats any non-zero popped slot as true,
+        // matching `read_shared_bool`'s "non-zero byte ⇒ true"
+        // convention. Verify by pushing a high-byte-only bit pattern.
+        vm.push_raw_u64(0x0100_0000_0000_0000).unwrap();
+        vm.op_store_shared_capture_bool(&store).unwrap();
+        let observed_after = unsafe {
+            shape_value::v2::closure_raw::read_shared_bool(
+                StdArc::as_ptr(&external) as *const SharedCell,
+            )
+        };
+        // `write_shared_bool` canonicalises to byte 1, so the
+        // external read sees true.
+        assert!(observed_after);
+
+        // SAFETY: cell_ptr came from Arc::into_raw, one share.
+        unsafe { drop(StdArc::from_raw(cell_ptr)) };
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn d2_load_store_load_shared_capture_ptr() {
+        let mut vm = fresh_vm_for_capture_opcode_test();
+
+        // The handler treats the 8-byte payload as opaque bits — no
+        // retain/release. Use leaked Box<u8> addresses as carrier
+        // bits to test the byte-equal round-trip without entangling
+        // refcount glue (that's Wave E's IR concern).
+        let leak_a: *mut u8 = Box::into_raw(Box::new(0xAAu8));
+        let leak_b: *mut u8 = Box::into_raw(Box::new(0xBBu8));
+        let bits_initial: u64 = leak_a as u64;
+        let bits_new: u64 = leak_b as u64;
+
+        let external: StdArc<SharedCell> =
+            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
+        // SAFETY: typed init.
+        unsafe {
+            shape_value::v2::closure_raw::write_shared_ptr(
+                StdArc::as_ptr(&external) as *const SharedCell,
+                bits_initial,
+            );
+        }
+        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
+        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
+        push_synthetic_frame_with_upvalues(
+            &mut vm,
+            vec![Upvalue::new(cell_ptr as u64)],
+        );
+
+        let load = Instruction::new(
+            OpCode::LoadSharedCapturePtr,
+            Some(Operand::Local(0)),
+        );
+        vm.op_load_shared_capture_ptr(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), bits_initial);
+
+        vm.push_raw_u64(bits_new).unwrap();
+        let store = Instruction::new(
+            OpCode::StoreSharedCapturePtr,
+            Some(Operand::Local(0)),
+        );
+        vm.op_store_shared_capture_ptr(&store).unwrap();
+
+        vm.op_load_shared_capture_ptr(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), bits_new);
+
+        let observed = unsafe {
+            shape_value::v2::closure_raw::read_shared_ptr(
+                StdArc::as_ptr(&external) as *const SharedCell,
+            )
+        };
+        assert_eq!(observed, bits_new);
+
+        // SAFETY: cell_ptr came from Arc::into_raw, one share. The
+        // Box<u8> leaks were minted by Box::into_raw above; we reclaim
+        // them exactly once each here.
+        unsafe {
+            drop(StdArc::from_raw(cell_ptr));
+            drop(Box::from_raw(leak_a));
+            drop(Box::from_raw(leak_b));
+        }
+        assert_eq!(StdArc::strong_count(&external), 1);
+        vm.call_stack.pop();
+    }
 }
