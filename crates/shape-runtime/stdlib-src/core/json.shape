@@ -1,8 +1,10 @@
 /// @module std::core::json
 /// JSON Parsing and Serialization
 ///
-/// Parse JSON strings into Shape values and serialize Shape values
-/// back to JSON strings.
+/// Parse JSON strings into typed `Json` enum values and serialize Shape
+/// values back to JSON strings. Pull in the `Json` ADT (re-exported from
+/// `std::core::json_value`) so the enum is in scope wherever this module
+/// is imported.
 ///
 /// # Example
 ///
@@ -11,10 +13,15 @@
 ///
 /// let data = json.parse("{\"name\": \"Alice\", \"age\": 30}")
 /// match data {
-///     Ok(obj) => print(obj["name"])
+///     Ok(value) => match value {
+///         Json::Object(_) => print("got an object")
+///         _ => print("got some other JSON value")
+///     }
 ///     Err(e) => print(f"Parse error: {e}")
 /// }
 /// ```
+
+use std::core::json_value
 
 /// Parse a JSON string into Shape values.
 ///

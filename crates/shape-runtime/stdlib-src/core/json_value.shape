@@ -8,9 +8,15 @@
 ///   let name = (data.get("name") as? string)?
 
 /// Algebraic data type representing JSON values in Shape.
+///
+/// `Int` is used for JSON numbers that fit in `i64` and have no fractional
+/// part; `Number` is used for everything else. This preserves the
+/// `int` / `number` distinction at the boundary so downstream code can
+/// recover the precise type without a follow-up coercion.
 pub enum Json {
     Null,
     Bool(bool),
+    Int(int),
     Number(number),
     Str(string),
     Array(any),
@@ -81,7 +87,17 @@ impl TryFrom<Json> for number {
     method tryFrom(value: Json) -> Result<number, AnyError> {
         match value {
             Json::Number(n) => Ok(n),
+            Json::Int(i) => Ok(i as number),
             _ => Err("Json value is not a number"),
+        }
+    }
+}
+
+impl TryFrom<Json> for int {
+    method tryFrom(value: Json) -> Result<int, AnyError> {
+        match value {
+            Json::Int(i) => Ok(i),
+            _ => Err("Json value is not an int"),
         }
     }
 }

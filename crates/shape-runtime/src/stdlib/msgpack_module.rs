@@ -9,7 +9,12 @@ use std::sync::Arc;
 
 /// Convert a `serde_json::Value` into an untyped `ValueWord`.
 ///
-/// This mirrors `json_value_to_nanboxed` from the json module.
+/// Local helper for the msgpack module — produces HashMap/Array/scalar
+/// values (NOT a typed `Json` enum). The json module's typed `Json` enum
+/// path replaced the equivalent untyped helper there in sweep phase 4a;
+/// this msgpack helper is scheduled for the same migration in a later
+/// phase. TODO: phase-4b/4c — return a typed value so callers can pattern
+/// match instead of reaching for `as_hashmap` / `as_any_array`.
 fn json_value_to_valueword(value: serde_json::Value) -> ValueWord {
     match value {
         serde_json::Value::Null => ValueWord::none(),

@@ -1,6 +1,12 @@
 //! Native `json` module for JSON parsing and serialization.
 //!
 //! Exports: json.parse(text), json.stringify(value, pretty?), json.is_valid(text)
+//!
+//! `parse(text)` always returns a typed `Json` enum value. The legacy
+//! `json_value_to_nanboxed` untyped fallback was removed in sweep phase 4a.
+//! Schema-driven parsing (`__parse_typed`) coerces JSON directly into a
+//! TypedObject for the supplied schema; nested unknown objects fall back to
+//! the typed `Json` enum rather than an untyped HashMap.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
@@ -8,37 +14,17 @@ use shape_value::heap_value::HeapValue;
 use shape_value::{ArgVec, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
-/// Convert a `serde_json::Value` into an untyped `ValueWord` (legacy fallback).
-fn json_value_to_nanboxed(value: serde_json::Value) -> ValueWord {
-    match value {
-        serde_json::Value::Null => ValueWord::none(),
-        serde_json::Value::Bool(b) => ValueWord::from_bool(b),
-        serde_json::Value::Number(n) => ValueWord::from_f64(n.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s)),
-        serde_json::Value::Array(arr) => {
-            let items: ArgVec =
-                ArgVec::from_vec(arr.into_iter().map(json_value_to_nanboxed).collect());
-            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
-        }
-        serde_json::Value::Object(map) => {
-            let mut keys = Vec::with_capacity(map.len());
-            let mut values = Vec::with_capacity(map.len());
-            for (k, v) in map.into_iter() {
-                keys.push(ValueWord::from_string(Arc::new(k)));
-                values.push(json_value_to_nanboxed(v));
-            }
-            ValueWord::from_hashmap_pairs(keys, values)
-        }
-    }
-}
-
-// Json enum variant IDs (must match order in json_value.shape)
+// Json enum variant IDs (must match order in json_value.shape).
+//
+// Layout: Null | Bool(bool) | Int(int) | Number(number) | Str(string)
+//       | Array(any) | Object(any)
 const JSON_VARIANT_NULL: i64 = 0;
 const JSON_VARIANT_BOOL: i64 = 1;
-const JSON_VARIANT_NUMBER: i64 = 2;
-const JSON_VARIANT_STR: i64 = 3;
-const JSON_VARIANT_ARRAY: i64 = 4;
-const JSON_VARIANT_OBJECT: i64 = 5;
+const JSON_VARIANT_INT: i64 = 2;
+const JSON_VARIANT_NUMBER: i64 = 3;
+const JSON_VARIANT_STR: i64 = 4;
+const JSON_VARIANT_ARRAY: i64 = 5;
+const JSON_VARIANT_OBJECT: i64 = 6;
 
 /// Build a Json enum TypedObject with the given variant and payload.
 fn make_json_enum(schema_id: u64, variant_id: i64, payload: Option<ValueWord>) -> ValueWord {
@@ -59,17 +45,33 @@ fn make_json_enum(schema_id: u64, variant_id: i64, payload: Option<ValueWord>) -
 }
 
 /// Convert a `serde_json::Value` into a typed `Json` enum TypedObject.
+///
+/// Integral JSON numbers that fit in `i64` are mapped to `Json::Int`;
+/// all other numbers map to `Json::Number(f64)`. This preserves the
+/// `int` / `number` distinction on the boundary.
 fn json_value_to_enum(value: serde_json::Value, schema_id: u64) -> ValueWord {
     match value {
         serde_json::Value::Null => make_json_enum(schema_id, JSON_VARIANT_NULL, None),
         serde_json::Value::Bool(b) => {
             make_json_enum(schema_id, JSON_VARIANT_BOOL, Some(ValueWord::from_bool(b)))
         }
-        serde_json::Value::Number(n) => make_json_enum(
-            schema_id,
-            JSON_VARIANT_NUMBER,
-            Some(ValueWord::from_f64(n.as_f64().unwrap_or(0.0))),
-        ),
+        serde_json::Value::Number(n) => {
+            // Prefer Json::Int for integral numbers; fall back to Json::Number.
+            if let Some(i) = n.as_i64() {
+                if !n.to_string().contains('.') {
+                    return make_json_enum(
+                        schema_id,
+                        JSON_VARIANT_INT,
+                        Some(ValueWord::from_i64(i)),
+                    );
+                }
+            }
+            make_json_enum(
+                schema_id,
+                JSON_VARIANT_NUMBER,
+                Some(ValueWord::from_f64(n.as_f64().unwrap_or(0.0))),
+            )
+        }
         serde_json::Value::String(s) => make_json_enum(
             schema_id,
             JSON_VARIANT_STR,
@@ -183,16 +185,29 @@ fn json_value_to_typed_nb(
             if let Some(nested_schema) = registry.get(type_name) {
                 json_object_to_typed(nested_schema.id, nested_schema, obj, registry)
             } else {
-                // Schema not found — fall back to untyped hashmap
-                Ok(json_value_to_nanboxed(serde_json::Value::Object(
-                    obj.clone(),
-                )))
+                // Schema not found for the nested type — fall back to a typed
+                // `Json::Object`. Phase 4a removed the legacy untyped HashMap
+                // fallback; callers must use the typed Json enum surface.
+                json_value_to_typed_json_enum(serde_json::Value::Object(obj.clone()), registry)
             }
         }
-        (serde_json::Value::Object(obj), _) => Ok(json_value_to_nanboxed(
-            serde_json::Value::Object(obj.clone()),
-        )),
+        (serde_json::Value::Object(obj), _) => {
+            json_value_to_typed_json_enum(serde_json::Value::Object(obj.clone()), registry)
+        }
     }
+}
+
+/// Build a typed `Json` enum value from any `serde_json::Value`, looking up
+/// the `Json` schema in `registry`. Returns an error if the schema is not
+/// registered (which means the stdlib `core::json_value` module was not loaded).
+fn json_value_to_typed_json_enum(
+    value: serde_json::Value,
+    registry: &TypeSchemaRegistry,
+) -> Result<ValueWord, String> {
+    let schema = registry
+        .get("Json")
+        .ok_or_else(|| "json: typed `Json` enum schema is not registered".to_string())?;
+    Ok(json_value_to_enum(value, schema.id as u64))
 }
 
 /// Create the `json` module with JSON parsing and serialization functions.
@@ -201,7 +216,9 @@ pub fn create_json_module() -> ModuleExports {
     module.description = "JSON parsing and serialization".to_string();
 
     // json.parse(text: string) -> Result<Json>
-    // Returns typed Json enum when the schema is registered, otherwise untyped.
+    // Always returns a typed `Json` enum value — sweep phase 4a removed the
+    // legacy untyped fallback. The schema-driven form lives in
+    // `__parse_typed(text, schema_id)`.
     module.add_function_with_schema(
         "parse",
         |args: &[ValueWord], ctx: &ModuleContext| {
@@ -213,11 +230,14 @@ pub fn create_json_module() -> ModuleExports {
             let parsed: serde_json::Value =
                 serde_json::from_str(text).map_err(|e| format!("json.parse() failed: {}", e))?;
 
-            let result = if let Some(json_schema) = ctx.schemas.get("Json") {
-                json_value_to_enum(parsed, json_schema.id as u64)
-            } else {
-                json_value_to_nanboxed(parsed)
-            };
+            let json_schema = ctx
+                .schemas
+                .get("Json")
+                .ok_or_else(|| {
+                    "json.parse() requires the `Json` enum schema (load std::core::json_value)"
+                        .to_string()
+                })?;
+            let result = json_value_to_enum(parsed, json_schema.id as u64);
 
             Ok(ValueWord::from_ok(result))
         },
@@ -367,9 +387,31 @@ pub fn create_json_module() -> ModuleExports {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_schema::{EnumVariantInfo, TypeSchema, TypeSchemaRegistry};
+
+    /// Build a registry with the canonical `Json` enum schema registered.
+    /// Variant order must match `JSON_VARIANT_*` constants and
+    /// `stdlib-src/core/json_value.shape`.
+    fn registry_with_json() -> TypeSchemaRegistry {
+        let mut registry = TypeSchemaRegistry::new();
+        let schema = TypeSchema::new_enum(
+            "Json",
+            vec![
+                EnumVariantInfo::new("Null", JSON_VARIANT_NULL as u16, 0),
+                EnumVariantInfo::new("Bool", JSON_VARIANT_BOOL as u16, 1),
+                EnumVariantInfo::new("Int", JSON_VARIANT_INT as u16, 1),
+                EnumVariantInfo::new("Number", JSON_VARIANT_NUMBER as u16, 1),
+                EnumVariantInfo::new("Str", JSON_VARIANT_STR as u16, 1),
+                EnumVariantInfo::new("Array", JSON_VARIANT_ARRAY as u16, 1),
+                EnumVariantInfo::new("Object", JSON_VARIANT_OBJECT as u16, 1),
+            ],
+        );
+        registry.register(schema);
+        registry
+    }
 
     fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
+        let registry = Box::leak(Box::new(registry_with_json()));
         crate::module_exports::ModuleContext {
             schemas: registry,
             invoke_callable: None,
@@ -381,6 +423,11 @@ mod tests {
             set_pending_resume: None,
             set_pending_frame_resume: None,
         }
+    }
+
+    /// Extract `(variant_id, payload)` from a `Json` enum TypedObject.
+    fn extract_json(nb: &ValueWord) -> (i64, Option<ValueWord>) {
+        extract_enum_variant(nb)
     }
 
     #[test]
@@ -399,9 +446,11 @@ mod tests {
         let ctx = test_ctx();
         let input = ValueWord::from_string(Arc::new(r#""hello""#.to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
-        // Result is Ok(value)
+        // Result is Ok(Json::Str("hello"))
         let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("hello"));
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_STR);
+        assert_eq!(payload.as_ref().and_then(|p| p.as_str()), Some("hello"));
     }
 
     #[test]
@@ -412,7 +461,22 @@ mod tests {
         let input = ValueWord::from_string(Arc::new("42.5".to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_f64(), Some(42.5));
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_NUMBER);
+        assert_eq!(payload.as_ref().and_then(|p| p.as_f64()), Some(42.5));
+    }
+
+    #[test]
+    fn test_json_parse_int() {
+        let module = create_json_module();
+        let parse_fn = module.get_export("parse").unwrap();
+        let ctx = test_ctx();
+        let input = ValueWord::from_string(Arc::new("42".to_string()));
+        let result = parse_fn(&[input], &ctx).unwrap();
+        let inner = result.as_ok_inner().expect("should be Ok");
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_INT, "integral JSON should be Json::Int");
+        assert_eq!(payload.as_ref().and_then(|p| p.as_i64()), Some(42));
     }
 
     #[test]
@@ -423,7 +487,9 @@ mod tests {
         let input = ValueWord::from_string(Arc::new("true".to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_bool(), Some(true));
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_BOOL);
+        assert_eq!(payload.as_ref().and_then(|p| p.as_bool()), Some(true));
     }
 
     #[test]
@@ -434,7 +500,8 @@ mod tests {
         let input = ValueWord::from_string(Arc::new("null".to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
-        assert!(inner.is_none());
+        let (variant, _payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_NULL);
     }
 
     #[test]
@@ -445,11 +512,17 @@ mod tests {
         let input = ValueWord::from_string(Arc::new("[1, 2, 3]".to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
-        let arr = inner.as_any_array().expect("should be array").to_generic();
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_ARRAY);
+        let payload = payload.expect("Array variant should have a payload");
+        let arr = payload.as_any_array().expect("payload should be array").to_generic();
         assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0].as_f64(), Some(1.0));
-        assert_eq!(arr[1].as_f64(), Some(2.0));
-        assert_eq!(arr[2].as_f64(), Some(3.0));
+        // Each element is itself a Json::Int.
+        for (idx, expected) in [1i64, 2, 3].iter().enumerate() {
+            let (v, p) = extract_json(&arr[idx]);
+            assert_eq!(v, JSON_VARIANT_INT);
+            assert_eq!(p.and_then(|x| x.as_i64()), Some(*expected));
+        }
     }
 
     #[test]
@@ -460,7 +533,10 @@ mod tests {
         let input = ValueWord::from_string(Arc::new(r#"{"a": 1, "b": "two"}"#.to_string()));
         let result = parse_fn(&[input], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
+        let (variant, payload) = extract_json(inner);
+        assert_eq!(variant, JSON_VARIANT_OBJECT);
+        let payload = payload.expect("Object variant should have a payload");
+        let (keys, _values, _index) = payload.as_hashmap().expect("payload should be hashmap");
         assert_eq!(keys.len(), 2);
     }
 
@@ -641,50 +717,43 @@ mod tests {
     /// Test json_value_to_enum produces TypedObjects with correct variant IDs.
     #[test]
     fn test_json_value_to_enum_variants() {
-        use crate::type_schema::{EnumVariantInfo, TypeSchema};
-        // Register Json enum schema
-        let schema = TypeSchema::new_enum(
-            "Json",
-            vec![
-                EnumVariantInfo::new("Null", 0, 0),
-                EnumVariantInfo::new("Bool", 1, 1),
-                EnumVariantInfo::new("Number", 2, 1),
-                EnumVariantInfo::new("Str", 3, 1),
-                EnumVariantInfo::new("Array", 4, 1),
-                EnumVariantInfo::new("Object", 5, 1),
-            ],
-        );
-        let sid = schema.id as u64;
+        let registry = registry_with_json();
+        let sid = registry.get("Json").unwrap().id as u64;
 
         // Null
         let null_nb = json_value_to_enum(serde_json::Value::Null, sid);
         let (variant, _payload) = extract_enum_variant(&null_nb);
-        assert_eq!(variant, 0, "Null should be variant 0");
+        assert_eq!(variant, JSON_VARIANT_NULL, "Null variant id");
 
         // Bool
         let bool_nb = json_value_to_enum(serde_json::Value::Bool(true), sid);
         let (variant, _payload) = extract_enum_variant(&bool_nb);
-        assert_eq!(variant, 1, "Bool should be variant 1");
+        assert_eq!(variant, JSON_VARIANT_BOOL, "Bool variant id");
 
-        // Number
+        // Int (integral number)
+        let int_nb = json_value_to_enum(serde_json::json!(42), sid);
+        let (variant, _payload) = extract_enum_variant(&int_nb);
+        assert_eq!(variant, JSON_VARIANT_INT, "integral number → Json::Int");
+
+        // Number (fractional)
         let num_nb = json_value_to_enum(serde_json::json!(42.5), sid);
         let (variant, _payload) = extract_enum_variant(&num_nb);
-        assert_eq!(variant, 2, "Number should be variant 2");
+        assert_eq!(variant, JSON_VARIANT_NUMBER, "fractional → Json::Number");
 
         // String
         let str_nb = json_value_to_enum(serde_json::json!("hello"), sid);
         let (variant, _payload) = extract_enum_variant(&str_nb);
-        assert_eq!(variant, 3, "Str should be variant 3");
+        assert_eq!(variant, JSON_VARIANT_STR, "Str variant id");
 
         // Array
         let arr_nb = json_value_to_enum(serde_json::json!([1, 2, 3]), sid);
         let (variant, _payload) = extract_enum_variant(&arr_nb);
-        assert_eq!(variant, 4, "Array should be variant 4");
+        assert_eq!(variant, JSON_VARIANT_ARRAY, "Array variant id");
 
         // Object
         let obj_nb = json_value_to_enum(serde_json::json!({"a": 1}), sid);
         let (variant, _payload) = extract_enum_variant(&obj_nb);
-        assert_eq!(variant, 5, "Object should be variant 5");
+        assert_eq!(variant, JSON_VARIANT_OBJECT, "Object variant id");
     }
 
     /// Test that __parse_typed uses @alias annotations to map JSON keys to fields.

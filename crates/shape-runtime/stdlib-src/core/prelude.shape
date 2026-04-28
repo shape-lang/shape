@@ -27,3 +27,9 @@ use std::core::option_methods
 use std::core::result_methods
 use std::core::column_methods
 use std::core::table_methods
+
+// Sweep phase 4a: the `Json` enum is the canonical surface returned by
+// `std::core::json::parse(text)`. Auto-import the ADT so the typed enum
+// schema is registered on every program — `parse` errors out if the
+// schema is missing.
+use std::core::json_value
