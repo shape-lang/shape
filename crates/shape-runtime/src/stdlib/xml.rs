@@ -5,7 +5,8 @@
 //! XML nodes are represented as Shape HashMaps with structure:
 //! `{ name: string, attributes: HashMap, children: Array, text?: string }`
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use shape_value::{ValueWord, ValueWordExt};
@@ -222,9 +223,19 @@ pub fn create_xml_module() -> ModuleExports {
     module.description = "XML parsing and serialization".to_string();
 
     // xml.parse(text: string) -> Result<HashMap>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "parse",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Parse an XML string into a Shape HashMap node",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "XML string to parse".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::HashMap)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -234,16 +245,18 @@ pub fn create_xml_module() -> ModuleExports {
             reader.config_mut().trim_text(true);
             let mut buf = Vec::new();
 
-            // Find the root element
+            // Find the root element. The recursive parser produces a
+            // ValueWord (HashMap with name/attributes/children/text); the
+            // outer Result wrapping happens at the registry boundary.
             loop {
                 match reader.read_event_into(&mut buf) {
                     Ok(Event::Start(ref e)) => {
-                        let result = parse_element(&mut reader, e)?;
-                        return Ok(ValueWord::from_ok(result));
+                        let inner = parse_element(&mut reader, e)?;
+                        return Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(inner))));
                     }
                     Ok(Event::Empty(ref e)) => {
-                        let result = parse_empty_element(e)?;
-                        return Ok(ValueWord::from_ok(result));
+                        let inner = parse_empty_element(e)?;
+                        return Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(inner))));
                     }
                     Ok(Event::Eof) => {
                         return Err("xml.parse(): no root element found".to_string());
@@ -256,23 +269,24 @@ pub fn create_xml_module() -> ModuleExports {
                 buf.clear();
             }
         },
-        ModuleFunction {
-            description: "Parse an XML string into a Shape HashMap node".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "XML string to parse".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<HashMap>".to_string()),
-        },
     );
 
     // xml.stringify(value: HashMap) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stringify",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Serialize a Shape HashMap node to an XML string",
+        vec![ModuleParam {
+            name: "value".to_string(),
+            type_name: "HashMap".to_string(),
+            required: true,
+            description:
+                "Node value to serialize (with name, attributes, children, text? fields)"
+                    .to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "xml.stringify() requires a value argument".to_string())?;
@@ -283,20 +297,7 @@ pub fn create_xml_module() -> ModuleExports {
             let output = String::from_utf8(writer.into_inner().into_inner())
                 .map_err(|e| format!("xml.stringify(): invalid UTF-8 output: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(output))))
-        },
-        ModuleFunction {
-            description: "Serialize a Shape HashMap node to an XML string".to_string(),
-            params: vec![ModuleParam {
-                name: "value".to_string(),
-                type_name: "HashMap".to_string(),
-                required: true,
-                description:
-                    "Node value to serialize (with name, attributes, children, text? fields)"
-                        .to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
         },
     );
 
