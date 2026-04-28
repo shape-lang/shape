@@ -22,7 +22,7 @@ use super::super::BytecodeCompiler;
 /// recognizes plus `Vec<T>` for arrays. Composite/opaque types
 /// (Struct/Enum/Closure/Function/Pointer/HashMap with non-trivial inner)
 /// return `None` — they don't need typed-op support inside the closure body.
-fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<TypeAnnotation> {
+pub(crate) fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<TypeAnnotation> {
     match ct {
         ConcreteType::F64 => Some(TypeAnnotation::Basic("number".to_string())),
         ConcreteType::I64 => Some(TypeAnnotation::Basic("int".to_string())),
@@ -208,7 +208,25 @@ impl BytecodeCompiler {
                 default_value: None,
             });
         }
-        closure_params.extend(params.to_vec());
+
+        // Strict-typing-sweep (Cluster 3): consume bidirectional inference
+        // hints for the user-portion params. The outer HOF dispatch site
+        // populates `pending_closure_param_types` with one Option<TypeAnnotation>
+        // per user param when the receiver type implies an arg type
+        // (`arr.map(|x| …)` with `arr: Array<int>` → `x: int`). User params
+        // with their own explicit annotation always win.
+        let user_param_hints = self.pending_closure_param_types.take();
+        for (idx, user_param) in params.iter().enumerate() {
+            let mut p = user_param.clone();
+            if p.type_annotation.is_none() {
+                if let Some(hints) = user_param_hints.as_ref() {
+                    if let Some(Some(ann)) = hints.get(idx) {
+                        p.type_annotation = Some(ann.clone());
+                    }
+                }
+            }
+            closure_params.push(p);
+        }
 
         let closure_def = FunctionDef {
             name: closure_name.clone(),

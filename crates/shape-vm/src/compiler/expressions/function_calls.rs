@@ -20,6 +20,35 @@ use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
+/// Strict-typing-sweep (Cluster 3): map a `SlotKind` (the type-tracker's
+/// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
+/// to type closure user params from a bare `[1, 2, 3]`-literal receiver
+/// when no `local_array_element_types` entry exists yet.
+fn slot_kind_to_type_annotation(
+    kind: crate::type_tracking::SlotKind,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use crate::type_tracking::SlotKind;
+    use shape_ast::ast::TypeAnnotation;
+    Some(match kind {
+        SlotKind::Float64 => TypeAnnotation::Basic("number".to_string()),
+        SlotKind::Int64 => TypeAnnotation::Basic("int".to_string()),
+        SlotKind::Int32 => TypeAnnotation::Basic("i32".to_string()),
+        SlotKind::Int16 => TypeAnnotation::Basic("i16".to_string()),
+        SlotKind::Int8 => TypeAnnotation::Basic("i8".to_string()),
+        SlotKind::UInt64 => TypeAnnotation::Basic("u64".to_string()),
+        SlotKind::UInt32 => TypeAnnotation::Basic("u32".to_string()),
+        SlotKind::UInt16 => TypeAnnotation::Basic("u16".to_string()),
+        SlotKind::UInt8 => TypeAnnotation::Basic("u8".to_string()),
+        SlotKind::Bool => TypeAnnotation::Basic("bool".to_string()),
+        SlotKind::String => TypeAnnotation::Basic("string".to_string()),
+        // Other kinds (Decimal, BigInt, DateTime, nullable variants,
+        // pointers, etc.) are not productive for typed binary-op emission;
+        // returning None lets the closure body compile with no annotation,
+        // which is identical to the pre-fix behaviour.
+        _ => return None,
+    })
+}
+
 /// Map a return type name string to a NumericType.
 fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
     if BuiltinTypes::is_integer_type_name(type_name) {
@@ -1233,6 +1262,78 @@ impl BytecodeCompiler {
         })
     }
 
+    /// Strict-typing-sweep (Cluster 3): for HOF method calls on arrays
+    /// (`.map` / `.filter` / `.reduce` / `.forEach` / `.find` / `.findIndex`
+    /// / `.some` / `.every` / `.flatMap`), populate
+    /// `pending_closure_param_types` so the closure compile path attaches a
+    /// concrete annotation to the user param (e.g. `|x|` → `|x: int|`)
+    /// which the type-tracker installs and the binary-op compile path then
+    /// trusts.
+    ///
+    /// The receiver was already compiled by the caller, so element-type
+    /// side-tables (`array_element_types[span]`, `local_array_element_types`,
+    /// `module_binding_array_element_types`) are populated.
+    pub(crate) fn install_pending_closure_param_types_for_hof(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) {
+        // Only the simple "single closure with one user-param-of-element-type"
+        // HOFs are wired here. Reduce takes (acc, x) — both are element-type
+        // for homogeneous folds, so we hint both.
+        let is_single_arg_hof = matches!(
+            method,
+            "map" | "filter" | "forEach" | "find" | "findIndex" | "some" | "every" | "flatMap"
+        );
+        let is_reduce = method == "reduce";
+        if !is_single_arg_hof && !is_reduce {
+            return;
+        }
+        // Need at least one closure arg.
+        if args.is_empty() {
+            return;
+        }
+
+        let elem_ann_opt: Option<shape_ast::ast::TypeAnnotation> = match
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, receiver)
+        {
+            Some(shape_value::v2::concrete_type::ConcreteType::Array(inner)) => {
+                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&inner)
+            }
+            _ => None,
+        }
+        // Fallback: if the receiver is an inline array literal, infer
+        // element type from the elements via the existing inference helper.
+        // `concrete_type_for_expr` only handles array literals via
+        // `array_element_types[span]`, which is populated by HashMap
+        // method results — NOT by a plain `[1, 2, 3]` literal. This
+        // fallback closes that gap.
+        .or_else(|| {
+            if let Expr::Array(elements, _) = receiver {
+                let kind = crate::compiler::v2_array_emission::infer_array_element_type(
+                    elements,
+                    &self.type_tracker,
+                )?;
+                slot_kind_to_type_annotation(kind)
+            } else {
+                None
+            }
+        });
+        let Some(elem_ann) = elem_ann_opt else {
+            return;
+        };
+
+        let hints = if is_reduce {
+            // reduce(|acc, x| ..., init): acc and x are both elem-type for
+            // homogeneous folds. The init arg is the second positional.
+            vec![Some(elem_ann.clone()), Some(elem_ann)]
+        } else {
+            vec![Some(elem_ann)]
+        };
+        self.pending_closure_param_types = Some(hints);
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
@@ -1669,6 +1770,12 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // Strict-typing-sweep (Cluster 3): bidirectional closure inference for HOFs.
+        // For known HOF method names operating on arrays, resolve the receiver's
+        // element type and use it to type the closure arg's user params. The
+        // closure-compile path consumes `pending_closure_param_types`.
+        self.install_pending_closure_param_types_for_hof(receiver, method, args);
+
         // Compile arguments (closure_row_schema is consumed during closure compilation)
         for arg in args {
             self.compile_expr_as_value_or_placeholder(arg)?;
@@ -1676,6 +1783,8 @@ impl BytecodeCompiler {
 
         // Clear closure_row_schema after compiling args (in case it wasn't consumed)
         self.closure_row_schema = None;
+        // Clear closure-arg type hints in case the closure literal was never reached.
+        self.pending_closure_param_types = None;
 
         // UFCS: If a user-defined function exists with this name, prefer it over built-in methods.
         // This allows `extend` blocks to override built-in methods for specific types.

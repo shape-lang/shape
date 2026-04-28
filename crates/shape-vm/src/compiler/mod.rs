@@ -575,6 +575,16 @@ pub struct BytecodeCompiler {
     /// this holds the (schema_id, type_name) to tag the closure's row parameter as RowView.
     pub(crate) closure_row_schema: Option<(u32, String)>,
 
+    /// Strict-typing-sweep (Cluster 3): bidirectional closure inference for
+    /// HOF method calls. When the next compiled closure literal is the
+    /// argument to `arr.map(|x| …)` / `.filter` / `.reduce` / etc., the
+    /// outer `compile_expr_method_call` resolves the receiver's element
+    /// type and stashes per-user-param `TypeAnnotation` hints here. The
+    /// closure compile reads these hints and attaches them to params with
+    /// no explicit annotation, then clears the field. The vector indexes
+    /// USER params only (excludes synthesized capture-params).
+    pub(crate) pending_closure_param_types: Option<Vec<Option<shape_ast::ast::TypeAnnotation>>>,
+
     /// Unified type metadata for the last compiled expression.
     ///
     /// This is the single source for relational/value kind propagation

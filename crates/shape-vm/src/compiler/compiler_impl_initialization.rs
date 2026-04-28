@@ -34,6 +34,7 @@ impl BytecodeCompiler {
             function_type_ids: Vec::new(),
             emit_make_closure_heap_next: false,
             closure_row_schema: None,
+            pending_closure_param_types: None,
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
