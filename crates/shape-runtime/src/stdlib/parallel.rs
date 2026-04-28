@@ -12,7 +12,8 @@
 //! `invoke_callable` on the calling thread, but the data is partitioned
 //! and reassembled using Rayon when no callback is involved.
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleContext, ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -145,7 +146,10 @@ fn parallel_reduce(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord,
 
 /// parallel.num_threads() -> int
 ///
-/// Returns the number of threads in the Rayon thread pool.
+/// Returns the number of threads in the Rayon thread pool. The
+/// registration uses an inline closure; this helper is kept for the
+/// existing direct-call test.
+#[cfg(test)]
 fn parallel_num_threads(_args: &[ValueWord], _ctx: &ModuleContext) -> Result<ValueWord, String> {
     Ok(ValueWord::from_i64(rayon::current_num_threads() as i64))
 }
@@ -225,174 +229,167 @@ pub fn create_parallel_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::parallel");
     module.description = "Data-parallel operations using Rayon thread pool".to_string();
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "map",
-        parallel_map,
-        ModuleFunction {
-            description: "Map a function over array elements".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to map over".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "fn".to_string(),
-                    type_name: "function".to_string(),
-                    required: true,
-                    description: "Callback function applied to each element".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<any>".to_string()),
-        },
+        "Map a function over array elements",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to map over".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "fn".to_string(),
+                type_name: "function".to_string(),
+                required: true,
+                description: "Callback function applied to each element".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Array<any>".to_string()),
+        |args, ctx| parallel_map(args, ctx).map(TypedReturn::ValueWord),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "filter",
-        parallel_filter,
-        ModuleFunction {
-            description: "Filter array elements using a predicate".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to filter".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "fn".to_string(),
-                    type_name: "function".to_string(),
-                    required: true,
-                    description: "Predicate function returning bool".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<any>".to_string()),
-        },
+        "Filter array elements using a predicate",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to filter".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "fn".to_string(),
+                type_name: "function".to_string(),
+                required: true,
+                description: "Predicate function returning bool".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Array<any>".to_string()),
+        |args, ctx| parallel_filter(args, ctx).map(TypedReturn::ValueWord),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "for_each",
-        parallel_for_each,
-        ModuleFunction {
-            description: "Apply a function to each element for side effects".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to iterate".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "fn".to_string(),
-                    type_name: "function".to_string(),
-                    required: true,
-                    description: "Callback function applied to each element".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("null".to_string()),
+        "Apply a function to each element for side effects",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to iterate".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "fn".to_string(),
+                type_name: "function".to_string(),
+                required: true,
+                description: "Callback function applied to each element".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("null".to_string()),
+        |args, ctx| {
+            parallel_for_each(args, ctx)?;
+            Ok(TypedReturn::None)
         },
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "chunks",
-        parallel_chunks,
-        ModuleFunction {
-            description: "Split an array into chunks of a given size".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to chunk".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "size".to_string(),
-                    type_name: "int".to_string(),
-                    required: true,
-                    description: "Size of each chunk".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<Array<any>>".to_string()),
-        },
+        "Split an array into chunks of a given size",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to chunk".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "size".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                description: "Size of each chunk".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Array<Array<any>>".to_string()),
+        |args, ctx| parallel_chunks(args, ctx).map(TypedReturn::ValueWord),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "reduce",
-        parallel_reduce,
-        ModuleFunction {
-            description: "Reduce an array to a single value".to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to reduce".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "fn".to_string(),
-                    type_name: "function".to_string(),
-                    required: true,
-                    description: "Reducer function (accumulator, element) -> accumulator"
-                        .to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "initial".to_string(),
-                    type_name: "any".to_string(),
-                    required: true,
-                    description: "Initial accumulator value".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("any".to_string()),
-        },
+        "Reduce an array to a single value",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to reduce".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "fn".to_string(),
+                type_name: "function".to_string(),
+                required: true,
+                description: "Reducer function (accumulator, element) -> accumulator".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "initial".to_string(),
+                type_name: "any".to_string(),
+                required: true,
+                description: "Initial accumulator value".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Any,
+        |args, ctx| parallel_reduce(args, ctx).map(TypedReturn::ValueWord),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "sort",
-        parallel_sort,
-        ModuleFunction {
-            description:
-                "Sort an array, optionally with a comparator. Uses parallel sort for large arrays."
-                    .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "array".to_string(),
-                    type_name: "Array<any>".to_string(),
-                    required: true,
-                    description: "Array to sort".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "comparator".to_string(),
-                    type_name: "function".to_string(),
-                    required: false,
-                    description: "Comparator function (a, b) -> number".to_string(),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("Array<any>".to_string()),
-        },
+        "Sort an array, optionally with a comparator. Uses parallel sort for large arrays.",
+        vec![
+            ModuleParam {
+                name: "array".to_string(),
+                type_name: "Array<any>".to_string(),
+                required: true,
+                description: "Array to sort".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "comparator".to_string(),
+                type_name: "function".to_string(),
+                required: false,
+                description: "Comparator function (a, b) -> number".to_string(),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Named("Array<any>".to_string()),
+        |args, ctx| parallel_sort(args, ctx).map(TypedReturn::ValueWord),
     );
 
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "num_threads",
-        parallel_num_threads,
-        ModuleFunction {
-            description: "Return the number of threads in the Rayon thread pool".to_string(),
-            params: vec![],
-            return_type: Some("int".to_string()),
-        },
+        "Return the number of threads in the Rayon thread pool",
+        vec![],
+        ConcreteType::Int,
+        |_args, _ctx| Ok(TypedReturn::I64(rayon::current_num_threads() as i64)),
     );
 
     module
