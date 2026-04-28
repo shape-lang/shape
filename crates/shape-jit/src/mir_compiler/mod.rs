@@ -59,6 +59,7 @@ use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
 use shape_value::v2::closure_layout::ClosureLayout;
+use shape_value::v2::struct_layout::FieldKind;
 use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
@@ -211,7 +212,15 @@ pub struct MirToIR<'a, 'b> {
     /// Empty when the function being compiled is not a closure body,
     /// or has no OwnedMutable captures — non-closure functions then
     /// behave identically to pre-A.1D.2.
-    pub(crate) owned_mutable_capture_slots: HashSet<SlotId>,
+    ///
+    /// Wave C.2: the value carries the `FieldKind` of the cell's interior
+    /// payload (from `ClosureLayout::capture_inner_kind`). The Cranelift
+    /// codegen for `read_place` / `write_place` dispatches on this kind
+    /// to select the matching per-FieldKind FFI helper
+    /// (`jit_read_owned_mut_cell_<kind>` / `jit_write_owned_mut_cell_<kind>`),
+    /// so values cross the cell boundary as native Cranelift types
+    /// (i64/f64/i32/...) instead of NaN-boxed ValueWord bits.
+    pub(crate) owned_mutable_capture_slots: HashMap<SlotId, FieldKind>,
 
     // ── Track A.1E: Shared capture side-table ─────────────────────
     /// Local slots whose Cranelift variable holds the raw
@@ -245,7 +254,15 @@ pub struct MirToIR<'a, 'b> {
     /// `ClosureLayout` invariant (the three capture-kind masks are
     /// disjoint). Empty when the function being compiled is not a
     /// closure body, or has no Shared captures.
-    pub(crate) shared_capture_slots: HashSet<SlotId>,
+    ///
+    /// Wave C.2: like `owned_mutable_capture_slots`, the value carries
+    /// the inner `FieldKind` so the Cranelift load/store after the
+    /// inline `emit_shared_lock` dispatches to the correct native
+    /// width at `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`. We keep the
+    /// inline lock/unlock — only the per-kind direct load/store is
+    /// per-FieldKind — to avoid double-locking through the
+    /// `read_shared_cell_<kind>` FFI on the JIT hot path.
+    pub(crate) shared_capture_slots: HashMap<SlotId, FieldKind>,
 
     // ── Session 1 Commit 3: outer-scope Shared-cell slot side-table ─
     /// Local slots whose `BindingStorageClass` is `SharedCow` — i.e.
@@ -670,8 +687,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             stack_closure_slots: HashMap::new(),
             stack_closure_call_info: HashMap::new(),
             closure_function_layouts,
-            owned_mutable_capture_slots: HashSet::new(),
-            shared_capture_slots: HashSet::new(),
+            owned_mutable_capture_slots: HashMap::new(),
+            shared_capture_slots: HashMap::new(),
             shared_local_slots,
             closure_placeholder_fids,
             next_closure_placeholder_idx: std::cell::Cell::new(0),
@@ -759,12 +776,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if !is_cell_capture {
                 continue;
             }
+            // Wave C.2: capture the cell's interior FieldKind alongside
+            // the slot id so `read_place`/`write_place` can pick the
+            // matching per-kind FFI helper instead of NaN-boxing through
+            // the legacy ValueWord-bits path.
+            let inner_kind = layout.capture_inner_kind(i);
             match capture_kind {
                 CaptureKind::OwnedMutable => {
-                    self.owned_mutable_capture_slots.insert(param_slot);
+                    self.owned_mutable_capture_slots
+                        .insert(param_slot, inner_kind);
                 }
                 CaptureKind::Shared => {
-                    self.shared_capture_slots.insert(param_slot);
+                    self.shared_capture_slots.insert(param_slot, inner_kind);
                 }
                 CaptureKind::Immutable => unreachable!(),
             }

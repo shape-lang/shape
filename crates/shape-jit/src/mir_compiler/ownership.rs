@@ -236,8 +236,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `shared_capture_mask`, A.1A). Frame-exit `Drop` must be a
         // no-op.
         if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains(slot_id)
-                || self.shared_capture_slots.contains(slot_id)
+            if self.owned_mutable_capture_slots.contains_key(slot_id)
+                || self.shared_capture_slots.contains_key(slot_id)
             {
                 return Ok(());
             }
@@ -344,8 +344,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `op_store_shared_capture` does not modify the Arc strong
         // count either.
         if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains(slot_id)
-                || self.shared_capture_slots.contains(slot_id)
+            if self.owned_mutable_capture_slots.contains_key(slot_id)
+                || self.shared_capture_slots.contains_key(slot_id)
             {
                 return Ok(());
             }

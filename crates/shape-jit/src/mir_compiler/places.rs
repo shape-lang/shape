@@ -480,7 +480,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // runs after the closure's refcount hits zero (which
                 // happens strictly after every call using this cell
                 // returns).
-                if self.owned_mutable_capture_slots.contains(slot) {
+                if self.owned_mutable_capture_slots.contains_key(slot) {
                     let cell_ptr = self.builder.use_var(*var);
                     return Ok(self.builder.ins().load(
                         types::I64,
@@ -511,7 +511,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `Arc::from_raw` in `release_typed_closure`) only
                 // runs after the closure's refcount hits zero, which
                 // is strictly after the JIT body returns.
-                if self.shared_capture_slots.contains(slot) {
+                if self.shared_capture_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let cell_ptr = self.builder.use_var(*var);
                     self.emit_shared_lock(cell_ptr);
@@ -652,7 +652,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // which have no heap refcount; heap-typed captures
                 // would need MIR-level Drop insertion to balance retain
                 // counts (deferred — matches interpreter parity).
-                if self.owned_mutable_capture_slots.contains(slot) {
+                if self.owned_mutable_capture_slots.contains_key(slot) {
                     let var = *self.locals.get(slot).ok_or_else(|| {
                         format!("MirToIR: unknown local slot {}", slot)
                     })?;
@@ -671,7 +671,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // still owns its one strong share for frame lifetime).
                 //
                 // SAFETY: see `read_place` Shared branch.
-                if self.shared_capture_slots.contains(slot) {
+                if self.shared_capture_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let var = *self.locals.get(slot).ok_or_else(|| {
                         format!("MirToIR: unknown local slot {}", slot)
@@ -805,8 +805,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // (gated on `shared_capture_mask`, A.1A) reclaims them exactly
         // once when the closure's refcount hits zero.
         if matches!(place, Place::Local(_))
-            && (self.owned_mutable_capture_slots.contains(&slot)
-                || self.shared_capture_slots.contains(&slot))
+            && (self.owned_mutable_capture_slots.contains_key(&slot)
+                || self.shared_capture_slots.contains_key(&slot))
         {
             return Ok(());
         }
