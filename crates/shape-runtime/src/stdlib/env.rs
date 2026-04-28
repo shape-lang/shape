@@ -3,9 +3,14 @@
 //! Exports: env.get, env.has, env.all, env.args, env.cwd, env.os, env.arch
 //!
 //! Policy gated: requires Env permission at runtime.
+//!
+//! Phase 4b: 6 of 7 exports migrated to `TypedModuleExports` (the typed-return
+//! ABI). `env.get` returns `Option<string>` and is left on the legacy path
+//! pending Phase 4c's sum-typed `TypedReturn::Option` variant.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `env` module with environment variable and system info functions.
@@ -14,6 +19,7 @@ pub fn create_env_module() -> ModuleExports {
     module.description = "Environment variables and system information".to_string();
 
     // env.get(name: string) -> Option<string>
+    // PHASE 4C: Option<T> sum-typed return — left on legacy ABI for now.
     module.add_function_with_schema(
         "get",
         |args: &[ValueWord], ctx: &ModuleContext| {
@@ -42,115 +48,93 @@ pub fn create_env_module() -> ModuleExports {
     );
 
     // env.has(name: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "has",
-        |args: &[ValueWord], ctx: &ModuleContext| {
+        "Check if an environment variable is set",
+        vec![ModuleParam {
+            name: "name".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "Environment variable name".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let name = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "env.has() requires a variable name string".to_string())?;
-
-            Ok(ValueWord::from_bool(std::env::var(name).is_ok()))
-        },
-        ModuleFunction {
-            description: "Check if an environment variable is set".to_string(),
-            params: vec![ModuleParam {
-                name: "name".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "Environment variable name".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(std::env::var(name).is_ok()))
         },
     );
 
     // env.all() -> HashMap<string, string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "all",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Get all environment variables as a HashMap",
+        vec![],
+        ConcreteType::HashMapStringString,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
-            let vars: Vec<(String, String)> = std::env::vars().collect();
-            let mut keys = Vec::with_capacity(vars.len());
-            let mut values = Vec::with_capacity(vars.len());
-
-            for (k, v) in vars.into_iter() {
-                keys.push(ValueWord::from_string(Arc::new(k)));
-                values.push(ValueWord::from_string(Arc::new(v)));
-            }
-
-            Ok(ValueWord::from_hashmap_pairs(keys, values))
-        },
-        ModuleFunction {
-            description: "Get all environment variables as a HashMap".to_string(),
-            params: vec![],
-            return_type: Some("HashMap<string, string>".to_string()),
+            let pairs: Vec<(String, String)> = std::env::vars().collect();
+            Ok(TypedReturn::HashMapStringString(pairs))
         },
     );
 
     // env.args() -> Array<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "args",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Get command-line arguments as an array of strings",
+        vec![],
+        ConcreteType::ArrayString,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
-            let args: ArgVec = ArgVec::from_vec(std::env::args()
-                .map(|a| ValueWord::from_string(Arc::new(a)))
-                .collect());
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(args.into_inner())))
-        },
-        ModuleFunction {
-            description: "Get command-line arguments as an array of strings".to_string(),
-            params: vec![],
-            return_type: Some("Array<string>".to_string()),
+            let args: Vec<String> = std::env::args().collect();
+            Ok(TypedReturn::ArrayString(args))
         },
     );
 
     // env.cwd() -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "cwd",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Get the current working directory",
+        vec![],
+        ConcreteType::String,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let cwd = std::env::current_dir().map_err(|e| format!("env.cwd() failed: {}", e))?;
-            let path_str = cwd.to_string_lossy().into_owned();
-            Ok(ValueWord::from_string(Arc::new(path_str)))
-        },
-        ModuleFunction {
-            description: "Get the current working directory".to_string(),
-            params: vec![],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(cwd.to_string_lossy().into_owned()))
         },
     );
 
     // env.os() -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "os",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Get the operating system name (e.g. linux, macos, windows)",
+        vec![],
+        ConcreteType::String,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
-            Ok(ValueWord::from_string(Arc::new(
-                std::env::consts::OS.to_string(),
-            )))
-        },
-        ModuleFunction {
-            description: "Get the operating system name (e.g. linux, macos, windows)".to_string(),
-            params: vec![],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(std::env::consts::OS.to_string()))
         },
     );
 
     // env.arch() -> string
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "arch",
-        |_args: &[ValueWord], ctx: &ModuleContext| {
+        "Get the CPU architecture (e.g. x86_64, aarch64)",
+        vec![],
+        ConcreteType::String,
+        |_args, ctx| {
             crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
-            Ok(ValueWord::from_string(Arc::new(
-                std::env::consts::ARCH.to_string(),
-            )))
-        },
-        ModuleFunction {
-            description: "Get the CPU architecture (e.g. x86_64, aarch64)".to_string(),
-            params: vec![],
-            return_type: Some("string".to_string()),
+            Ok(TypedReturn::String(std::env::consts::ARCH.to_string()))
         },
     );
 
@@ -310,5 +294,23 @@ mod tests {
 
         let os_schema = module.get_schema("os").unwrap();
         assert_eq!(os_schema.return_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_env_typed_registry_populated() {
+        let module = create_env_module();
+        // 6 of 7 exports are migrated to the typed registry.
+        let typed = module.typed_exports();
+        assert!(typed.get("has").is_some());
+        assert!(typed.get("all").is_some());
+        assert!(typed.get("args").is_some());
+        assert!(typed.get("cwd").is_some());
+        assert!(typed.get("os").is_some());
+        assert!(typed.get("arch").is_some());
+        // env.get() stays on legacy path until Phase 4c.
+        assert!(typed.get("get").is_none());
+
+        let has_entry = typed.get("has").unwrap();
+        assert_eq!(has_entry.return_type, ConcreteType::Bool);
     }
 }

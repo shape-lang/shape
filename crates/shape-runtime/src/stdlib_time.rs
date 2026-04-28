@@ -1,9 +1,13 @@
 //! Native `time` module for precision timing.
 //!
 //! Exports: time.now(), time.sleep(ms), time.benchmark(fn, iterations)
+//!
+//! Phase 4b: 5 of 6 sync exports migrated to `TypedModuleExports`. The
+//! async `time.sleep` retains its dedicated async ABI (Phase 4c will
+//! generalize the typed ABI to async).
 
 use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
-use crate::type_schema::typed_object_from_pairs;
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Create the `time` module with precision timing functions.
@@ -12,20 +16,17 @@ pub fn create_time_module() -> ModuleExports {
     module.description = "Precision timing utilities".to_string();
 
     // time.now() -> Instant
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "now",
-        |_args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
-            Ok(ValueWord::from_instant(std::time::Instant::now()))
-        },
-        ModuleFunction {
-            description: "Return the current monotonic instant for measuring elapsed time"
-                .to_string(),
-            params: vec![],
-            return_type: Some("Instant".to_string()),
-        },
+        "Return the current monotonic instant for measuring elapsed time",
+        vec![],
+        ConcreteType::Instant,
+        |_args, _ctx| Ok(TypedReturn::Instant(std::time::Instant::now())),
     );
 
-    // time.sleep(ms: number) -> unit (async via tokio)
+    // time.sleep(ms: number) -> unit (async via tokio) — left on legacy
+    // async ABI; Phase 4c generalizes typed ABI to async.
     module.add_async_function_with_schema(
         "sleep",
         |args: Vec<ValueWord>| async move {
@@ -54,10 +55,20 @@ pub fn create_time_module() -> ModuleExports {
         },
     );
 
-    // time.sleep_sync(ms: number) -> unit (blocking, for non-async contexts)
-    module.add_function_with_schema(
+    // time.sleep_sync(ms: number) -> unit
+    register_typed_function(
+        &mut module,
         "sleep_sync",
-        |args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
+        "Sleep for the specified number of milliseconds (blocking)",
+        vec![ModuleParam {
+            name: "ms".to_string(),
+            type_name: "number".to_string(),
+            required: true,
+            description: "Duration in milliseconds".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        |args, _ctx| {
             let ms = args
                 .first()
                 .and_then(|a| a.as_number_coerce())
@@ -68,25 +79,34 @@ pub fn create_time_module() -> ModuleExports {
                 return Err("time.sleep_sync() duration must be non-negative".to_string());
             }
             std::thread::sleep(std::time::Duration::from_millis(ms as u64));
-            Ok(ValueWord::unit())
-        },
-        ModuleFunction {
-            description: "Sleep for the specified number of milliseconds (blocking)".to_string(),
-            params: vec![ModuleParam {
-                name: "ms".to_string(),
-                type_name: "number".to_string(),
-                required: true,
-                description: "Duration in milliseconds".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("unit".to_string()),
+            Ok(TypedReturn::Unit)
         },
     );
 
     // time.benchmark(fn, iterations?) -> object { elapsed_ms, iterations, avg_ms }
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "benchmark",
-        |args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
+        "Benchmark a function over N iterations, returning timing statistics",
+        vec![
+            ModuleParam {
+                name: "fn".to_string(),
+                type_name: "function".to_string(),
+                required: true,
+                description: "Function to benchmark".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "iterations".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Number of iterations (default: 1000)".to_string(),
+                default_snippet: Some("1000".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::TypedObject,
+        |args, _ctx| {
             let func = args
                 .first()
                 .cloned()
@@ -112,70 +132,43 @@ pub fn create_time_module() -> ModuleExports {
             let elapsed = start.elapsed();
             let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
-            // Return a result object with timing info
-            let pairs: Vec<(&str, ValueWord)> = vec![
-                ("elapsed_ms", ValueWord::from_f64(elapsed_ms)),
-                ("iterations", ValueWord::from_f64(iterations as f64)),
+            Ok(TypedReturn::TypedObject(vec![
+                ("elapsed_ms".to_string(), TypedReturn::F64(elapsed_ms)),
                 (
-                    "avg_ms",
-                    ValueWord::from_f64(elapsed_ms / iterations as f64),
+                    "iterations".to_string(),
+                    TypedReturn::F64(iterations as f64),
                 ),
-            ];
-            Ok(typed_object_from_pairs(&pairs))
-        },
-        ModuleFunction {
-            description: "Benchmark a function over N iterations, returning timing statistics"
-                .to_string(),
-            params: vec![
-                ModuleParam {
-                    name: "fn".to_string(),
-                    type_name: "function".to_string(),
-                    required: true,
-                    description: "Function to benchmark".to_string(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "iterations".to_string(),
-                    type_name: "int".to_string(),
-                    required: false,
-                    description: "Number of iterations (default: 1000)".to_string(),
-                    default_snippet: Some("1000".to_string()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("object".to_string()),
+                (
+                    "avg_ms".to_string(),
+                    TypedReturn::F64(elapsed_ms / iterations as f64),
+                ),
+            ]))
         },
     );
 
     // time.stopwatch() -> Instant (alias for now())
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stopwatch",
-        |_args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
-            Ok(ValueWord::from_instant(std::time::Instant::now()))
-        },
-        ModuleFunction {
-            description: "Start a stopwatch (returns an Instant). Call .elapsed() to read."
-                .to_string(),
-            params: vec![],
-            return_type: Some("Instant".to_string()),
-        },
+        "Start a stopwatch (returns an Instant). Call .elapsed() to read.",
+        vec![],
+        ConcreteType::Instant,
+        |_args, _ctx| Ok(TypedReturn::Instant(std::time::Instant::now())),
     );
 
     // time.millis() -> number (current epoch millis, for wall-clock timestamps)
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "millis",
-        |_args: &[ValueWord], _ctx: &crate::module_exports::ModuleContext| {
+        "Return current wall-clock time as milliseconds since Unix epoch",
+        vec![],
+        ConcreteType::Number,
+        |_args, _ctx| {
             let now = std::time::SystemTime::now();
             let since_epoch = now
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| format!("SystemTime error: {}", e))?;
-            Ok(ValueWord::from_f64(since_epoch.as_millis() as f64))
-        },
-        ModuleFunction {
-            description: "Return current wall-clock time as milliseconds since Unix epoch"
-                .to_string(),
-            params: vec![],
-            return_type: Some("number".to_string()),
+            Ok(TypedReturn::F64(since_epoch.as_millis() as f64))
         },
     );
 
@@ -306,5 +299,18 @@ mod tests {
         let bench_schema = module.get_schema("benchmark").unwrap();
         assert_eq!(bench_schema.params.len(), 2);
         assert!(!bench_schema.params[1].required);
+    }
+
+    #[test]
+    fn test_time_typed_registry_populated() {
+        let module = create_time_module();
+        let typed = module.typed_exports();
+        assert!(typed.get("now").is_some());
+        assert!(typed.get("sleep_sync").is_some());
+        assert!(typed.get("benchmark").is_some());
+        assert!(typed.get("stopwatch").is_some());
+        assert!(typed.get("millis").is_some());
+        // sleep is async — stays on legacy ABI for now.
+        assert!(typed.get("sleep").is_none());
     }
 }

@@ -73,10 +73,18 @@ pub enum TypedReturn {
     Bytes(Vec<u8>),
     /// HashMap with string keys and string values.
     HashMapStringString(Vec<(String, String)>),
-    /// Object built from string→TypedReturn pairs. Mirrors the
-    /// `from_hashmap_pairs` shape used by `crypto.ed25519_generate_keypair`,
-    /// `time.benchmark`, etc. Insertion order is preserved.
+    /// Object built from string→TypedReturn pairs, materialized as a
+    /// `HashMap` ValueWord (same shape as `from_hashmap_pairs`). Used by
+    /// e.g. `crypto.ed25519_generate_keypair` and the legacy `archive`
+    /// entry shape. Insertion order is preserved.
     ObjectPairs(Vec<(String, TypedReturn)>),
+    /// Anonymous typed object — looked up via
+    /// [`crate::type_schema::typed_object_from_pairs`] using the field
+    /// names as the schema discriminator. Panics at marshal time if no
+    /// matching predeclared schema is registered (matches the existing
+    /// helper's contract). Used by `time.benchmark` whose return shape is
+    /// `{ elapsed_ms, iterations, avg_ms }`.
+    TypedObject(Vec<(String, TypedReturn)>),
     /// Generic ValueWord-typed array (used for archive entry arrays where
     /// each element is itself a heap object). The function builds the
     /// elements as ValueWords directly. Phase 4b uses this for the
@@ -144,6 +152,17 @@ impl TypedReturn {
                 }
                 ValueWord::from_hashmap_pairs(keys, values)
             }
+            TypedReturn::TypedObject(pairs) => {
+                let owned: Vec<(String, ValueWord)> = pairs
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into_value_word()))
+                    .collect();
+                let view: Vec<(&str, ValueWord)> = owned
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone()))
+                    .collect();
+                crate::type_schema::typed_object_from_pairs(&view)
+            }
             TypedReturn::ArrayValueWord(items) => {
                 ValueWord::from_array(shape_value::vmarray_from_vec(items))
             }
@@ -171,8 +190,11 @@ pub enum ConcreteType {
     /// `Array<int>` semantically (each element a u8 widened to i64).
     Bytes,
     HashMapStringString,
-    /// Heterogeneous object built from string→typed pairs.
+    /// Heterogeneous object built from string→typed pairs (materialized
+    /// as a `HashMap`).
     Object,
+    /// Anonymous TypedObject (looked up via predeclared schema).
+    TypedObject,
     /// Array whose element shape is per-export-defined (e.g.,
     /// `Array<{name: string, data: string}>`). Carries the user-visible
     /// type-name string for documentation/LSP.
@@ -197,6 +219,7 @@ impl ConcreteType {
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
             ConcreteType::Object => "object".to_string(),
+            ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),
         }
     }
