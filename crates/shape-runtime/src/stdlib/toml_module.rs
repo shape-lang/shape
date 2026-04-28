@@ -2,7 +2,8 @@
 //!
 //! Exports: toml.parse(text), toml.stringify(value), toml.is_valid(text)
 
-use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -80,9 +81,19 @@ pub fn create_toml_module() -> ModuleExports {
     module.description = "TOML parsing and serialization".to_string();
 
     // toml.parse(text: string) -> Result<HashMap>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "parse",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Parse a TOML string into Shape values",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "TOML string to parse".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::HashMap)),
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -92,25 +103,24 @@ pub fn create_toml_module() -> ModuleExports {
                 toml::from_str(text).map_err(|e| format!("toml.parse() failed: {}", e))?;
 
             let result = toml_value_to_nanboxed(parsed);
-            Ok(ValueWord::from_ok(result))
-        },
-        ModuleFunction {
-            description: "Parse a TOML string into Shape values".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "TOML string to parse".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<HashMap>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
         },
     );
 
     // toml.stringify(value: any) -> Result<string>
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "stringify",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Serialize a Shape value to a TOML string",
+        vec![ModuleParam {
+            name: "value".to_string(),
+            type_name: "any".to_string(),
+            required: true,
+            description: "Value to serialize".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Result(Box::new(ConcreteType::String)),
+        |args, _ctx| {
             let value = args
                 .first()
                 .ok_or_else(|| "toml.stringify() requires a value argument".to_string())?;
@@ -119,43 +129,31 @@ pub fn create_toml_module() -> ModuleExports {
             let output = toml::to_string(&toml_value)
                 .map_err(|e| format!("toml.stringify() failed: {}", e))?;
 
-            Ok(ValueWord::from_ok(ValueWord::from_string(Arc::new(output))))
-        },
-        ModuleFunction {
-            description: "Serialize a Shape value to a TOML string".to_string(),
-            params: vec![ModuleParam {
-                name: "value".to_string(),
-                type_name: "any".to_string(),
-                required: true,
-                description: "Value to serialize".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("Result<string>".to_string()),
+            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
         },
     );
 
     // toml.is_valid(text: string) -> bool
-    module.add_function_with_schema(
+    register_typed_function(
+        &mut module,
         "is_valid",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        "Check if a string is valid TOML",
+        vec![ModuleParam {
+            name: "text".to_string(),
+            type_name: "string".to_string(),
+            required: true,
+            description: "String to validate as TOML".to_string(),
+            ..Default::default()
+        }],
+        ConcreteType::Bool,
+        |args, _ctx| {
             let text = args
                 .first()
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "toml.is_valid() requires a string argument".to_string())?;
 
             let valid = toml::from_str::<toml::Value>(text).is_ok();
-            Ok(ValueWord::from_bool(valid))
-        },
-        ModuleFunction {
-            description: "Check if a string is valid TOML".to_string(),
-            params: vec![ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "String to validate as TOML".to_string(),
-                ..Default::default()
-            }],
-            return_type: Some("bool".to_string()),
+            Ok(TypedReturn::Bool(valid))
         },
     );
 
