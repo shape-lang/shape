@@ -226,37 +226,23 @@ impl VirtualMachine {
         }
         use OpCode::*;
         match instruction.opcode {
-            // ===== Typed Add (raw typed stack API with fallback) =====
+            // ===== Typed Add (single-path native i64) =====
             AddInt => {
-                // E+5.3: native i64 stack discipline. Producers and consumers of
-                // Int-family slots agree on raw i64 bits — no NaN-tag decode/encode
-                // around the inner `checked_add`. The i48-range gate still applies
-                // because Shape's `int` type is i48 inline; the gate now reads
-                // native i64 directly.
-                if self.stack_top_both_i48() {
-                    // Fast path: both operands are inline i48
-                    let bi = self.pop_native_i64()?;
-                    let ai = self.pop_native_i64()?;
-                    match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 + bi as f64)?,
-                    }
-                } else {
-                    // Slow path: BigInt or coercible values
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 + bi as f64)?,
-                    }
+                // E+5.5 Unit A: single-path native i64. Producers (PushConst
+                // for Int literals, typed LoadLocalI64/StoreLocalI64,
+                // post-E+5.3 arithmetic results) all push raw native i64
+                // bits. The dual-path detector (`stack_top_both_i48`) is
+                // gone — its slow path read raw native bits as a tagged
+                // ValueWord, mis-decoding most non-NaN bit patterns.
+                //
+                // The i48-range gate still applies because Shape's `int`
+                // type is i48 inline; on overflow we promote to f64 (legacy
+                // behaviour, preserved).
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                match ai.checked_add(bi) {
+                    Some(result) if fits_i48(result) => self.push_native_i64(result)?,
+                    _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                 }
             }
             AddNumber => {
@@ -285,30 +271,13 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() + b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Sub (raw typed stack API with fallback) =====
+            // ===== Typed Sub (single-path native i64) =====
             SubInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_native_i64()?;
-                    let ai = self.pop_native_i64()?;
-                    match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 - bi as f64)?,
-                    }
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 - bi as f64)?,
-                    }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                match ai.checked_sub(bi) {
+                    Some(result) if fits_i48(result) => self.push_native_i64(result)?,
+                    _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                 }
             }
             SubNumber => {
@@ -337,30 +306,13 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() - b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Mul (raw typed stack API with fallback) =====
+            // ===== Typed Mul (single-path native i64) =====
             MulInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_native_i64()?;
-                    let ai = self.pop_native_i64()?;
-                    match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 * bi as f64)?,
-                    }
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
-                        _ => self.push_raw_f64(ai as f64 * bi as f64)?,
-                    }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                match ai.checked_mul(bi) {
+                    Some(result) if fits_i48(result) => self.push_native_i64(result)?,
+                    _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                 }
             }
             MulNumber => {
@@ -389,31 +341,14 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() * b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Div (raw typed stack API, with zero-check) =====
+            // ===== Typed Div (single-path native i64, with zero-check) =====
             DivInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_native_i64()?;
-                    let ai = self.pop_native_i64()?;
-                    if bi == 0 {
-                        return Err(VMError::DivisionByZero);
-                    }
-                    self.push_native_i64(ai / bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    if bi == 0 {
-                        return Err(VMError::DivisionByZero);
-                    }
-                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    self.push_native_i64(ai / bi)?;
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                if bi == 0 {
+                    return Err(VMError::DivisionByZero);
                 }
+                self.push_native_i64(ai / bi)?;
             }
             DivNumber => {
                 if self.stack_top_both_f64() {
@@ -451,31 +386,14 @@ impl VirtualMachine {
                     unsafe { a.as_decimal_unchecked() } / divisor,
                 ))?;
             }
-            // ===== Typed Mod (raw typed stack API, with zero-check) =====
+            // ===== Typed Mod (single-path native i64, with zero-check) =====
             ModInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_native_i64()?;
-                    let ai = self.pop_native_i64()?;
-                    if bi == 0 {
-                        return Err(VMError::DivisionByZero);
-                    }
-                    self.push_native_i64(ai % bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    if bi == 0 {
-                        return Err(VMError::DivisionByZero);
-                    }
-                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    self.push_native_i64(ai % bi)?;
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                if bi == 0 {
+                    return Err(VMError::DivisionByZero);
                 }
+                self.push_native_i64(ai % bi)?;
             }
             ModNumber => {
                 if self.stack_top_both_f64() {
@@ -513,42 +431,19 @@ impl VirtualMachine {
                     unsafe { a.as_decimal_unchecked() } % divisor,
                 ))?;
             }
-            // ===== Typed Pow (raw typed stack API with fallback) =====
+            // ===== Typed Pow (single-path native i64) =====
             PowInt => {
-                if self.stack_top_both_i48() {
-                    let exp = self.pop_native_i64()?;
-                    let base = self.pop_native_i64()?;
-                    if exp >= 0 && exp < u32::MAX as i64 {
-                        let result = base.pow(exp as u32);
-                        if fits_i48(result) {
-                            self.push_native_i64(result)?;
-                        } else {
-                            self.push_raw_f64(result as f64)?;
-                        }
+                let exp = self.pop_native_i64()?;
+                let base = self.pop_native_i64()?;
+                if exp >= 0 && exp < u32::MAX as i64 {
+                    let result = base.pow(exp as u32);
+                    if fits_i48(result) {
+                        self.push_native_i64(result)?;
                     } else {
-                        self.push_raw_f64((base as f64).powf(exp as f64))?;
+                        self.push_raw_f64(result as f64)?;
                     }
                 } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    let base = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: a.type_name(),
-                    })?;
-                    let exp = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                        expected: "int",
-                        got: b.type_name(),
-                    })?;
-                    if exp >= 0 && exp < u32::MAX as i64 {
-                        let result = base.pow(exp as u32);
-                        if fits_i48(result) {
-                            self.push_native_i64(result)?;
-                        } else {
-                            self.push_raw_f64(result as f64)?;
-                        }
-                    } else {
-                        self.push_raw_f64((base as f64).powf(exp as f64))?;
-                    }
+                    self.push_raw_f64((base as f64).powf(exp as f64))?;
                 }
             }
             PowNumber => {
@@ -585,24 +480,18 @@ impl VirtualMachine {
                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                 ))?;
             }
-            // ===== Numeric Coercion (raw typed stack API with fallback) =====
+            // ===== Numeric Coercion (single-path native) =====
             IntToNumber => {
-                if self.stack_top_is_i48() {
-                    let v = self.pop_native_i64()?;
-                    self.push_raw_f64(v as f64)?;
-                } else {
-                    let val = self.pop_raw_u64()?;
-                    self.push_raw_f64(unsafe { val.as_i64_unchecked() } as f64)?;
-                }
+                // Producer side: post-Unit-B, an Int slot holds raw native i64
+                // bits; consumer pushes raw f64 bits.
+                let v = self.pop_native_i64()?;
+                self.push_raw_f64(v as f64)?;
             }
             NumberToInt => {
-                if self.stack_top_is_f64() {
-                    let v = self.pop_raw_f64()?;
-                    self.push_native_i64(v as i64)?;
-                } else {
-                    let val = self.pop_raw_u64()?;
-                    self.push_native_i64(unsafe { val.as_f64_unchecked() } as i64)?;
-                }
+                // Producer side: a Number slot holds raw f64 bits (already
+                // honest pre-E+5.5); consumer pushes raw native i64 bits.
+                let v = self.pop_raw_f64()?;
+                self.push_native_i64(v as i64)?;
             }
             // Stage 4.2: typed negation moved here from exec_arithmetic
             NegInt => {
@@ -1858,11 +1747,14 @@ mod tests {
     /// Helper: push two i64 values, execute a typed arithmetic instruction, pop the result.
     fn exec_typed_int_binop(a: i64, b: i64, opcode: OpCode) -> i64 {
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(a).unwrap();
-        vm.push_tagged_i64(b).unwrap();
+        // E+5.5 Unit A: typed Int handlers consume native i64 bits and
+        // produce native i64 bits. Test helpers seed/read via the native
+        // pair to match the post-flip stack discipline.
+        vm.push_native_i64(a).unwrap();
+        vm.push_native_i64(b).unwrap();
         let instr = Instruction::simple(opcode);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        vm.pop_tagged_i64().unwrap()
+        vm.pop_native_i64().unwrap()
     }
 
     /// Helper: push two f64 values, execute a typed arithmetic instruction, pop the result.
@@ -1976,8 +1868,8 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_div_int_by_zero() {
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(10).unwrap();
-        vm.push_tagged_i64(0).unwrap();
+        vm.push_native_i64(10).unwrap();
+        vm.push_native_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::DivInt);
         let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
         assert!(matches!(err, VMError::DivisionByZero));
@@ -2085,7 +1977,8 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_int_to_number() {
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(42).unwrap();
+        // E+5.5 Unit A: IntToNumber consumes native i64 bits.
+        vm.push_native_i64(42).unwrap();
         let instr = Instruction::simple(OpCode::IntToNumber);
         vm.exec_typed_arithmetic(&instr).unwrap();
         let result = vm.pop_raw_f64().unwrap();
@@ -2098,7 +1991,8 @@ mod tests {
         vm.push_raw_f64(7.9).unwrap();
         let instr = Instruction::simple(OpCode::NumberToInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        let result = vm.pop_tagged_i64().unwrap();
+        // E+5.5 Unit A: NumberToInt produces native i64 bits.
+        let result = vm.pop_native_i64().unwrap();
         assert_eq!(result, 7);
     }
 
@@ -2213,28 +2107,29 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_bit_not_int() {
         // !0 == -1, !(-1) == 0 (two's complement).
+        // E+5.5 Unit A: BitNotInt is native i64 in / native i64 out.
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(0).unwrap();
+        vm.push_native_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), -1);
+        assert_eq!(vm.pop_native_i64().unwrap(), -1);
 
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(-1).unwrap();
+        vm.push_native_i64(-1).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), 0);
+        assert_eq!(vm.pop_native_i64().unwrap(), 0);
     }
 
     #[test]
     fn test_typed_arithmetic_bit_not_int_involution() {
         // !!x == x for any x.
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(0x1234_5678).unwrap();
+        vm.push_native_i64(0x1234_5678).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), 0x1234_5678);
+        assert_eq!(vm.pop_native_i64().unwrap(), 0x1234_5678);
     }
 
     // --- End-to-end through dispatch (BytecodeProgram -> vm.execute) ---
