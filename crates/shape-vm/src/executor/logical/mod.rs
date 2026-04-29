@@ -18,10 +18,16 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
+            // E+5.4: And/Or/Not are listed by `last_instruction_produces_bool()`
+            // as bool-producers eligible for the `JumpIfFalse → JumpIfFalseTrusted`
+            // upgrade. JumpIfFalseTrusted now pops native bool bits, so these
+            // logical ops must push native bool too. The FilterExpr branches
+            // (heap path used by query DSL) keep pushing a heap-tagged ValueWord
+            // — those values are never fed to JumpIfFalseTrusted (filters are
+            // consumed by query plumbing, not control flow).
             And => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                // FilterExpr AND FilterExpr → compound FilterExpr (HeapValue path)
                 if a.is_heap() || b.is_heap() {
                     if let (Some(left), Some(right)) =
                         (raw_helpers::extract_filter_expr(a.raw_bits()), raw_helpers::extract_filter_expr(b.raw_bits()))
@@ -31,17 +37,15 @@ impl VirtualMachine {
                             Box::new(right.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_tagged_bool(a.is_truthy() && b.is_truthy())?;
+                        self.push_native_bool(a.is_truthy() && b.is_truthy())?;
                     }
                 } else {
-                    // Fast path: non-heap values, just check truthiness
-                    self.push_tagged_bool(a.is_truthy() && b.is_truthy())?;
+                    self.push_native_bool(a.is_truthy() && b.is_truthy())?;
                 }
             }
             Or => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                // FilterExpr OR FilterExpr → compound FilterExpr (HeapValue path)
                 if a.is_heap() || b.is_heap() {
                     if let (Some(left), Some(right)) =
                         (raw_helpers::extract_filter_expr(a.raw_bits()), raw_helpers::extract_filter_expr(b.raw_bits()))
@@ -51,27 +55,24 @@ impl VirtualMachine {
                             Box::new(right.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_tagged_bool(a.is_truthy() || b.is_truthy())?;
+                        self.push_native_bool(a.is_truthy() || b.is_truthy())?;
                     }
                 } else {
-                    // Fast path: non-heap values, just check truthiness
-                    self.push_tagged_bool(a.is_truthy() || b.is_truthy())?;
+                    self.push_native_bool(a.is_truthy() || b.is_truthy())?;
                 }
             }
             Not => {
                 let val = self.pop_raw_u64()?;
-                // FilterExpr NOT → compound FilterExpr (HeapValue path)
                 if val.is_heap() {
                     if let Some(node) = raw_helpers::extract_filter_expr(val.raw_bits()) {
                         self.push_raw_u64(ValueWord::from_filter_expr(Arc::new(FilterNode::Not(
                             Box::new(node.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_tagged_bool(!val.is_truthy())?;
+                        self.push_native_bool(!val.is_truthy())?;
                     }
                 } else {
-                    // Fast path: non-heap value, just negate truthiness
-                    self.push_tagged_bool(!val.is_truthy())?;
+                    self.push_native_bool(!val.is_truthy())?;
                 }
             }
             _ => unreachable!(

@@ -99,18 +99,18 @@ impl VirtualMachine {
     /// JumpIfFalse — trusted variant.
     ///
     /// The compiler has proved the condition is a boolean value.
-    /// Uses raw `pop_tagged_bool` to skip ValueWord materialization entirely.
+    /// E+5.4: producers (typed comparison, `Not`) now push raw native bool
+    /// bits (0u64 / 1u64), not NaN-tagged ValueWord — uses `pop_native_bool`
+    /// to read those bits directly with no decode overhead. The legacy
+    /// `op_jump_if_false` (above) handles polymorphic ValueWord input via
+    /// `is_truthy()` and is unaffected.
     #[inline(always)]
     pub(in crate::executor) fn op_jump_if_false_trusted(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            debug_assert!(
-                self.stack_top_is_bool(),
-                "Trusted JumpIfFalse invariant violated"
-            );
-            let cond = self.pop_tagged_bool()?;
+            let cond = self.pop_native_bool()?;
             if !cond {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
