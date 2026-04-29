@@ -521,6 +521,28 @@ impl VirtualMachine {
             | StoreLocal
             | StoreLocalTyped
             | StoreLocalDrop
+            | LoadLocalI64
+            | LoadLocalU64
+            | LoadLocalF64
+            | LoadLocalI32
+            | LoadLocalU32
+            | LoadLocalI16
+            | LoadLocalU16
+            | LoadLocalI8
+            | LoadLocalU8
+            | LoadLocalBool
+            | LoadLocalPtr
+            | StoreLocalI64
+            | StoreLocalU64
+            | StoreLocalF64
+            | StoreLocalI32
+            | StoreLocalU32
+            | StoreLocalI16
+            | StoreLocalU16
+            | StoreLocalI8
+            | StoreLocalU8
+            | StoreLocalBool
+            | StoreLocalPtr
             | LoadModuleBinding
             | StoreModuleBinding
             | StoreModuleBindingTyped
