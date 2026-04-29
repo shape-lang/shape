@@ -1048,6 +1048,128 @@ define_opcodes! {
     /// Operand: Local(idx).
     StoreSharedCapturePtr = 0x16B, Variable, pops: 1, pushes: 0;
 
+    // ===== Wave E+3: per-FieldKind typed local load/store opcodes =====
+    //
+    // These are the typed counterparts of the legacy `LoadLocal` (0x50) /
+    // `StoreLocal` (0x51). For each `FieldKind` (I64, U64, F64, I32, U32,
+    // I16, U16, I8, U8, Bool, Ptr) we have a Load/Store pair that:
+    //
+    // * reads / writes the local slot at `bp + idx` directly as raw 8-byte
+    //   bits, with no NaN-box tag check, no ValueWord wrapping, no
+    //   `clone_from_bits`, no SharedCell auto-deref.
+    // * skips refcount management even for the `Ptr` kind — refcount
+    //   semantics are the IR's responsibility (matches D.1 / D.2 Ptr
+    //   contract; the c-stdlib-msgpack pattern from commit afb1651 is the
+    //   precedent).
+    //
+    // SAFETY invariants — enforced by the compiler (Wave E+ codegen):
+    //   * The emitter only fires `LoadLocal<Kind>` / `StoreLocal<Kind>` on
+    //     a slot whose proven SlotKind matches `<Kind>`. The slot's bits
+    //     were last written by a matching-Kind `StoreLocal<Kind>` (or a
+    //     producer that emitted matching native bits), so a raw read
+    //     reinterprets the correct bit pattern.
+    //   * Sub-i64 kinds (I32/U32/I16/U16/I8/U8/Bool) carry the value in
+    //     the low N bits of the 8-byte slot; the upper bits are
+    //     unspecified. Producers must zero/sign-extend appropriately
+    //     (matches D.1 store-side truncation convention).
+    //   * For `Ptr` slots, neither Load nor Store performs `vw_clone` /
+    //     `vw_drop`. The IR pairs each typed Ptr load/store with the
+    //     matching retain/release before/after.
+    //
+    // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
+    // Load reads from the local slot and pushes a raw native value onto
+    // the stack via `push_raw_u64`. Store pops a native value via
+    // `pop_raw_u64`, then writes the raw 8-byte bits to the slot.
+    //
+    // The legacy `LoadLocal` (0x50) / `StoreLocal` (0x51) stay live for
+    // unproven-type positions; the typed forms are dead until Wave E+4
+    // flips the emitter.
+    //
+    // Code range: 0x16C..=0x181 (22 codes total). Ordering: I64, U64, F64,
+    // I32, U32, I16, U16, I8, U8, Bool, Ptr — Loads first (0x16C..=0x176),
+    // Stores second (0x177..=0x181).
+
+    /// Load `i64` from local slot — reads raw 8 bytes, pushes as i64.
+    /// Operand: Local(idx).
+    LoadLocalI64 = 0x16C, Variable, pops: 0, pushes: 1;
+    /// Load `u64` from local slot — reads raw 8 bytes, pushes as u64.
+    /// Operand: Local(idx).
+    LoadLocalU64 = 0x16D, Variable, pops: 0, pushes: 1;
+    /// Load `f64` from local slot — reads raw 8 bytes, pushes as f64.
+    /// Operand: Local(idx).
+    LoadLocalF64 = 0x16E, Variable, pops: 0, pushes: 1;
+    /// Load `i32` from local slot — reads low 4 bytes, sign-extends to
+    /// i64 in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalI32 = 0x16F, Variable, pops: 0, pushes: 1;
+    /// Load `u32` from local slot — reads low 4 bytes, zero-extends to
+    /// u64 in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalU32 = 0x170, Variable, pops: 0, pushes: 1;
+    /// Load `i16` from local slot — reads low 2 bytes, sign-extends to
+    /// i64 in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalI16 = 0x171, Variable, pops: 0, pushes: 1;
+    /// Load `u16` from local slot — reads low 2 bytes, zero-extends to
+    /// u64 in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalU16 = 0x172, Variable, pops: 0, pushes: 1;
+    /// Load `i8` from local slot — reads low byte, sign-extends to i64
+    /// in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalI8 = 0x173, Variable, pops: 0, pushes: 1;
+    /// Load `u8` from local slot — reads low byte, zero-extends to u64
+    /// in the 8-byte stack slot. Operand: Local(idx).
+    LoadLocalU8 = 0x174, Variable, pops: 0, pushes: 1;
+    /// Load `bool` from local slot — reads low byte (zero ⇒ false;
+    /// non-zero ⇒ true) and pushes the raw 8 bytes back. Operand: Local(idx).
+    LoadLocalBool = 0x175, Variable, pops: 0, pushes: 1;
+    /// Load `Ptr` from local slot — reads raw 8 bytes (a ValueWord bit
+    /// pattern carrying a NaN-boxed Arc/Box pointer) and pushes them.
+    /// The handler does NOT clone/retain — refcount semantics are the
+    /// caller's responsibility. Operand: Local(idx).
+    LoadLocalPtr = 0x176, Variable, pops: 0, pushes: 1;
+
+    /// Store `i64` to local slot — pops raw i64, writes 8 bytes to slot.
+    /// Operand: Local(idx).
+    StoreLocalI64 = 0x177, Variable, pops: 1, pushes: 0;
+    /// Store `u64` to local slot — pops raw u64, writes 8 bytes to slot.
+    /// Operand: Local(idx).
+    StoreLocalU64 = 0x178, Variable, pops: 1, pushes: 0;
+    /// Store `f64` to local slot — pops raw f64, writes 8 bytes to slot.
+    /// Operand: Local(idx).
+    StoreLocalF64 = 0x179, Variable, pops: 1, pushes: 0;
+    /// Store `i32` to local slot — pops 8-byte slot, truncates to i32
+    /// (low 4 bytes, sign-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalI32 = 0x17A, Variable, pops: 1, pushes: 0;
+    /// Store `u32` to local slot — pops 8-byte slot, truncates to u32
+    /// (low 4 bytes, zero-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalU32 = 0x17B, Variable, pops: 1, pushes: 0;
+    /// Store `i16` to local slot — pops 8-byte slot, truncates to i16
+    /// (low 2 bytes, sign-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalI16 = 0x17C, Variable, pops: 1, pushes: 0;
+    /// Store `u16` to local slot — pops 8-byte slot, truncates to u16
+    /// (low 2 bytes, zero-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalU16 = 0x17D, Variable, pops: 1, pushes: 0;
+    /// Store `i8` to local slot — pops 8-byte slot, truncates to i8
+    /// (low byte, sign-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalI8 = 0x17E, Variable, pops: 1, pushes: 0;
+    /// Store `u8` to local slot — pops 8-byte slot, truncates to u8
+    /// (low byte, zero-extended back into 8-byte slot for storage).
+    /// Operand: Local(idx).
+    StoreLocalU8 = 0x17F, Variable, pops: 1, pushes: 0;
+    /// Store `bool` to local slot — pops raw 8-byte slot, writes a
+    /// canonical 0 or 1 in the slot's low byte (any nonzero pop ⇒ 1).
+    /// Operand: Local(idx).
+    StoreLocalBool = 0x180, Variable, pops: 1, pushes: 0;
+    /// Store `Ptr` to local slot — pops raw 8 bytes (a ValueWord bit
+    /// pattern carrying a NaN-boxed Arc/Box pointer) and writes them
+    /// to the slot. The handler does NOT release the previous payload
+    /// nor retain the new one — refcount semantics are the caller's
+    /// responsibility (matches the D.1 / D.2 Ptr contract).
+    /// Operand: Local(idx).
+    StoreLocalPtr = 0x181, Variable, pops: 1, pushes: 0;
+
     // ===== Wave E+3: per-FieldKind typed `ReturnValue<Kind>` opcodes =====
     //
     // Typed counterparts of the legacy `ReturnValue` (0x45). The handler
