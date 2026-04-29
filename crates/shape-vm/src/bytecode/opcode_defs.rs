@@ -1170,6 +1170,135 @@ define_opcodes! {
     /// Operand: Local(idx).
     StoreLocalPtr = 0x181, Variable, pops: 1, pushes: 0;
 
+    // ===== Wave E+3: per-FieldKind typed module-binding opcodes =====
+    //
+    // These are the typed counterparts of the legacy
+    // `LoadModuleBinding` (0x52) / `StoreModuleBinding` (0x53). For each
+    // payload `FieldKind` (I64, U64, F64, I32, U32, I16, U16, I8, U8,
+    // Bool, Ptr) we have a Load/Store pair that:
+    //
+    //   * Load reads the 8-byte slot at `module_bindings[idx]` and pushes
+    //     a raw native value with the appropriate width interpretation.
+    //   * Store pops a raw native value, optionally truncates/extends to
+    //     the declared width, and writes the 8-byte slot at
+    //     `module_bindings[idx]`.
+    //
+    // Stack convention mirrors Wave D (typed OwnedMutable opcodes
+    // 0x140-0x155): Load pushes via `push_raw_u64` with the native value
+    // sign- or zero-extended into the 8-byte stack slot. Store pops via
+    // `pop_raw_u64` and reinterprets the low bits as the declared type.
+    //
+    // The legacy `LoadModuleBinding` (0x52) / `StoreModuleBinding` (0x53)
+    // remain live for unproven-type module bindings; the typed opcodes
+    // below stay dead until Wave E+4 flips the emitter to dispatch them
+    // for statically-typed module-binding positions.
+    //
+    // SAFETY invariants — enforced by the compiler (Wave E+4 codegen):
+    //   * `LoadModuleBinding<Kind>` / `StoreModuleBinding<Kind>` are only
+    //     emitted when the module binding at index `idx` has a static
+    //     type matching `<Kind>` and has only ever been written by typed
+    //     stores of the same kind (i.e. never aliased through a legacy
+    //     `StoreModuleBinding` that may install a heap-tagged ValueWord
+    //     subject to `vw_drop` semantics on subsequent legacy writes).
+    //   * For Ptr, refcount management lives in the IR — the load does
+    //     not retain and the store does not release. Wave E+4 pairs
+    //     `LoadModuleBindingPtr` with `vw_clone` and `StoreModuleBindingPtr`
+    //     with `vw_drop` of the prior payload (matches the
+    //     c-stdlib-msgpack pattern from commit afb1651).
+    //
+    // Opcode codes 0x182..=0x197 (22 codes total). Ordering matches Wave
+    // D: I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr — Loads
+    // first (0x182..=0x18C), then Stores (0x18D..=0x197).
+
+    /// Load an `i64` from `module_bindings[idx]` — reads the 8-byte slot
+    /// as i64 and pushes the raw bits onto the stack. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingI64 = 0x182, Variable, pops: 0, pushes: 1;
+    /// Load a `u64` from `module_bindings[idx]` — reads the 8-byte slot
+    /// as u64 and pushes the raw bits. Operand: ModuleBinding(idx).
+    LoadModuleBindingU64 = 0x183, Variable, pops: 0, pushes: 1;
+    /// Load an `f64` from `module_bindings[idx]` — reads the 8-byte slot
+    /// as f64 and pushes the raw bits. Operand: ModuleBinding(idx).
+    LoadModuleBindingF64 = 0x184, Variable, pops: 0, pushes: 1;
+    /// Load an `i32` from `module_bindings[idx]` — reads the low 4 bytes
+    /// of the slot as i32, sign-extends to i64, pushes the raw bits.
+    /// Operand: ModuleBinding(idx).
+    LoadModuleBindingI32 = 0x185, Variable, pops: 0, pushes: 1;
+    /// Load a `u32` from `module_bindings[idx]` — reads the low 4 bytes
+    /// of the slot as u32, zero-extends to u64, pushes. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingU32 = 0x186, Variable, pops: 0, pushes: 1;
+    /// Load an `i16` from `module_bindings[idx]` — reads the low 2 bytes
+    /// of the slot as i16, sign-extends to i64, pushes. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingI16 = 0x187, Variable, pops: 0, pushes: 1;
+    /// Load a `u16` from `module_bindings[idx]` — reads the low 2 bytes
+    /// of the slot as u16, zero-extends to u64, pushes. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingU16 = 0x188, Variable, pops: 0, pushes: 1;
+    /// Load an `i8` from `module_bindings[idx]` — reads the low byte of
+    /// the slot as i8, sign-extends to i64, pushes. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingI8 = 0x189, Variable, pops: 0, pushes: 1;
+    /// Load a `u8` from `module_bindings[idx]` — reads the low byte of
+    /// the slot as u8, zero-extends to u64, pushes. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingU8 = 0x18A, Variable, pops: 0, pushes: 1;
+    /// Load a `bool` from `module_bindings[idx]` — reads the low byte
+    /// (zero ⇒ false; non-zero ⇒ true), pushes 0/1 as raw u64. Operand:
+    /// ModuleBinding(idx).
+    LoadModuleBindingBool = 0x18B, Variable, pops: 0, pushes: 1;
+    /// Load a `Ptr` from `module_bindings[idx]` — reads the 8-byte slot
+    /// as raw u64 (a ValueWord bit pattern carrying a NaN-boxed
+    /// Arc/Box pointer) and pushes. Refcount retain semantics for Ptr
+    /// payloads are the caller's responsibility — this opcode does NOT
+    /// `vw_clone`. Operand: ModuleBinding(idx).
+    LoadModuleBindingPtr = 0x18C, Variable, pops: 0, pushes: 1;
+
+    /// Store an `i64` to `module_bindings[idx]` — pops raw i64 bits,
+    /// writes the full 8-byte slot. Operand: ModuleBinding(idx).
+    StoreModuleBindingI64 = 0x18D, Variable, pops: 1, pushes: 0;
+    /// Store a `u64` to `module_bindings[idx]` — pops raw u64 bits,
+    /// writes the full 8-byte slot. Operand: ModuleBinding(idx).
+    StoreModuleBindingU64 = 0x18E, Variable, pops: 1, pushes: 0;
+    /// Store an `f64` to `module_bindings[idx]` — pops raw f64 bits,
+    /// writes the full 8-byte slot. Operand: ModuleBinding(idx).
+    StoreModuleBindingF64 = 0x18F, Variable, pops: 1, pushes: 0;
+    /// Store an `i32` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to i32, sign-extends to i64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingI32 = 0x190, Variable, pops: 1, pushes: 0;
+    /// Store a `u32` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to u32, zero-extends to u64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingU32 = 0x191, Variable, pops: 1, pushes: 0;
+    /// Store an `i16` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to i16, sign-extends to i64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingI16 = 0x192, Variable, pops: 1, pushes: 0;
+    /// Store a `u16` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to u16, zero-extends to u64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingU16 = 0x193, Variable, pops: 1, pushes: 0;
+    /// Store an `i8` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to i8, sign-extends to i64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingI8 = 0x194, Variable, pops: 1, pushes: 0;
+    /// Store a `u8` to `module_bindings[idx]` — pops raw u64, truncates
+    /// to u8, zero-extends to u64, writes the 8-byte slot. Operand:
+    /// ModuleBinding(idx).
+    StoreModuleBindingU8 = 0x195, Variable, pops: 1, pushes: 0;
+    /// Store a `bool` to `module_bindings[idx]` — pops raw u64 (any
+    /// non-zero bit pattern ⇒ true), writes the 8-byte slot as 0 or 1.
+    /// Operand: ModuleBinding(idx).
+    StoreModuleBindingBool = 0x196, Variable, pops: 1, pushes: 0;
+    /// Store a `Ptr` to `module_bindings[idx]` — pops raw 8-byte bits (a
+    /// ValueWord carrying a NaN-boxed Arc/Box pointer) and writes the
+    /// slot. The caller is responsible for refcount semantics — this
+    /// opcode does NOT release the previous payload nor retain the new
+    /// one. Operand: ModuleBinding(idx).
+    StoreModuleBindingPtr = 0x197, Variable, pops: 1, pushes: 0;
+
     // ===== Wave E+3: per-FieldKind typed `ReturnValue<Kind>` opcodes =====
     //
     // Typed counterparts of the legacy `ReturnValue` (0x45). The handler
