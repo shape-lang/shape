@@ -1576,9 +1576,26 @@ impl BytecodeCompiler {
 
         // Map primitive type-annotation names to `SlotKind` (handles
         // both `Basic("bool")` and `Reference("Bool")`-style entries).
-        ann.as_type_name_str()
-            .and_then(primitive_type_name_to_storage_hint)
-            .unwrap_or(StorageHint::Unknown)
+        // Also resolve through `type_aliases` so a callee declaring a
+        // typed return like `fn make() -> MyInt { 42 }; type MyInt = int`
+        // round-trips through `synthesize_value_word_from_raw` with the
+        // correct kind. Without this, `as_type_name_str()` returns the
+        // alias name and `primitive_type_name_to_storage_hint` returns
+        // None, so the host boundary falls back to passthrough and the
+        // raw native int bits get reinterpreted as a tagged ValueWord.
+        let name = match ann.as_type_name_str() {
+            Some(n) => n,
+            None => return StorageHint::Unknown,
+        };
+        if let Some(hint) = primitive_type_name_to_storage_hint(name) {
+            return hint;
+        }
+        if let Some(aliased) = self.type_aliases.get(name) {
+            if let Some(hint) = primitive_type_name_to_storage_hint(aliased.as_str()) {
+                return hint;
+            }
+        }
+        StorageHint::Unknown
     }
 
     pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {
