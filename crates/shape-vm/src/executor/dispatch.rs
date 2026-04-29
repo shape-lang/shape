@@ -14,16 +14,61 @@ impl VirtualMachine {
     ///
     /// # Arguments
     /// * `ctx` - Optional ExecutionContext for trading operations (rows, indicators, etc.)
+    ///
+    /// Returns a `ValueWord` representing the program's final value. Wave E+4
+    /// flips top-level emission to typed opcodes that push raw native bits
+    /// (no NaN-box tag) onto the stack. To keep the host boundary stable,
+    /// `execute()` synthesises a tagged `ValueWord` from those raw bits per
+    /// the program's declared top-level return kind (read from
+    /// `BytecodeProgram::top_level_frame.return_kind` when present and not
+    /// `Unknown`). When the kind is unknown — the legacy / pre-E+4
+    /// situation — the raw bits are interpreted directly as a tagged
+    /// `ValueWord` (passthrough), preserving the historical behaviour.
+    ///
+    /// Hosts that want raw bits should call [`Self::execute_raw`] instead
+    /// and synthesize a `ValueWord` themselves (see
+    /// `crate::test_utils::eval_with_kind` for an example).
     pub fn execute(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
+        let return_kind = self.program_top_level_return_kind();
+        let bits = self.execute_raw(ctx)?;
+        Ok(synthesize_value_word_from_raw(bits, return_kind))
+    }
+
+    /// Execute the loaded program and return the raw u64 bits at the top of
+    /// stack. After Wave E+4 flips top-level emission, those bits may be
+    /// raw native values (e.g. `i64`, `f64::to_bits()`, `0u64`/`1u64` for
+    /// bool, raw heap pointer for ptr) rather than tagged `ValueWord` bits.
+    /// Use this when the host wants to control kind-hint synthesis itself,
+    /// or when interpreting the bits as a non-default kind.
+    pub fn execute_raw(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<u64, VMError> {
         match self.execute_with_suspend(ctx)? {
-            ExecutionResult::Completed(value) => Ok(value),
+            ExecutionResult::Completed(value) => Ok(value.into_raw_bits()),
             ExecutionResult::Suspended { future_id, .. } => Err(VMError::Suspended {
                 future_id,
                 resume_ip: 0,
             }),
+        }
+    }
+
+    /// Read the program's declared top-level return kind, if present.
+    ///
+    /// Returns `Some(kind)` when `top_level_frame.return_kind` is set to a
+    /// concrete `SlotKind` (i.e. the compiler proved a return type for the
+    /// top-level program). Returns `None` for the legacy / unproven case,
+    /// signalling that raw bits should be passed through as a
+    /// `ValueWord` directly.
+    #[inline]
+    fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
+        let kind = self.program.top_level_frame.as_ref()?.return_kind;
+        match kind {
+            crate::type_tracking::SlotKind::Unknown => None,
+            _ => Some(kind),
         }
     }
 
@@ -983,4 +1028,160 @@ impl VirtualMachine {
     }
 
     // apply_pending_resume() and apply_pending_frame_resume() moved to resume.rs
+}
+
+/// Synthesize a tagged `ValueWord` from raw native bits per the
+/// supplied `SlotKind`. Used by [`VirtualMachine::execute`] to bridge the
+/// host boundary after Wave E+4 flips top-level emission to typed opcodes
+/// that leave raw bits on the stack.
+///
+/// When `kind` is `None`, the bits are returned unchanged — i.e. they are
+/// already a tagged `ValueWord`. This is the pre-E+4 / unproven-type path,
+/// matching the historical behaviour of `execute()`.
+///
+/// The encoding mirrors `unmarshal_jit_result` in `jit_abi.rs` (which
+/// targets the JIT call boundary). Both kinds of boundary need the same
+/// bits → `ValueWord` synthesis; we do not share the function only because
+/// `unmarshal_jit_result` is gated behind the `jit` feature today and
+/// shape-vm's host-side `execute()` must work without it.
+#[inline]
+pub(crate) fn synthesize_value_word_from_raw(
+    bits: u64,
+    kind: Option<crate::type_tracking::SlotKind>,
+) -> ValueWord {
+    use crate::type_tracking::SlotKind;
+    let Some(kind) = kind else {
+        return ValueWord::from_raw_bits(bits);
+    };
+    match kind {
+        // Signed / sub-i64 ints all flow through the i48 inline path.
+        SlotKind::Int8
+        | SlotKind::NullableInt8
+        | SlotKind::Int16
+        | SlotKind::NullableInt16
+        | SlotKind::Int32
+        | SlotKind::NullableInt32
+        | SlotKind::Int64
+        | SlotKind::NullableInt64
+        | SlotKind::IntSize
+        | SlotKind::NullableIntSize => ValueWord::from_i64(bits as i64),
+
+        // Unsigned sub-i64 ints fit in i64.
+        SlotKind::UInt8
+        | SlotKind::NullableUInt8
+        | SlotKind::UInt16
+        | SlotKind::NullableUInt16
+        | SlotKind::UInt32
+        | SlotKind::NullableUInt32
+        | SlotKind::UIntSize
+        | SlotKind::NullableUIntSize => ValueWord::from_i64(bits as i64),
+
+        // U64 may exceed i64::MAX — promote to native u64 heap encoding.
+        SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+            if bits <= i64::MAX as u64 {
+                ValueWord::from_i64(bits as i64)
+            } else {
+                ValueWord::from_native_u64(bits)
+            }
+        }
+
+        // Float64: NaN-boxed encoding (re-tag via from_f64 to ensure the
+        // result respects the canonical NaN-box representation; the bits
+        // arriving from a typed `ReturnValueF64` are an `f64::to_bits()`
+        // payload, which is exactly what `from_f64` expects after a round
+        // trip through `f64::from_bits`).
+        SlotKind::Float64 | SlotKind::NullableFloat64 => {
+            ValueWord::from_f64(f64::from_bits(bits))
+        }
+
+        // Bool: 0 → false, anything else → true.
+        SlotKind::Bool => ValueWord::from_bool(bits != 0),
+
+        // String / Dynamic / Unknown: passthrough — bits already encode
+        // a tagged ValueWord (heap pointer, NaN-box, etc.).
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => {
+            ValueWord::from_raw_bits(bits)
+        }
+    }
+}
+
+#[cfg(test)]
+mod execute_raw_tests {
+    use super::*;
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::VMConfig;
+    use crate::type_tracking::SlotKind;
+
+    /// Today, no top-level program declares a typed return; verify that
+    /// `execute()` and `execute_raw()` agree on the result bits and that
+    /// the synthesizer falls through to passthrough.
+    #[test]
+    fn execute_raw_matches_execute_for_legacy_program() {
+        let program = shape_ast::parser::parse_program("42").expect("parse");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile");
+
+        // First run: tagged ValueWord via execute()
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode.clone());
+        let tagged = vm.execute(None).expect("execute");
+
+        // Second run: raw bits via execute_raw()
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let raw = vm.execute_raw(None).expect("execute_raw");
+
+        assert_eq!(
+            tagged.into_raw_bits(),
+            raw,
+            "execute and execute_raw disagree on bits for legacy program"
+        );
+    }
+
+    #[test]
+    fn synthesize_int64_from_raw_bits() {
+        let raw = 12345i64 as u64;
+        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Int64));
+        assert_eq!(vw.as_i64(), Some(12345));
+    }
+
+    #[test]
+    fn synthesize_int64_negative() {
+        let raw = (-7i64) as u64;
+        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Int64));
+        assert_eq!(vw.as_i64(), Some(-7));
+    }
+
+    #[test]
+    fn synthesize_float64_from_raw_bits() {
+        let raw = 3.14159f64.to_bits();
+        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Float64));
+        assert_eq!(vw.as_f64(), Some(3.14159));
+    }
+
+    #[test]
+    fn synthesize_bool_true() {
+        let vw = synthesize_value_word_from_raw(1, Some(SlotKind::Bool));
+        assert_eq!(vw.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn synthesize_bool_false() {
+        let vw = synthesize_value_word_from_raw(0, Some(SlotKind::Bool));
+        assert_eq!(vw.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn synthesize_passthrough_when_kind_is_none() {
+        let original = ValueWord::from_f64(2.5);
+        let vw = synthesize_value_word_from_raw(original.into_raw_bits(), None);
+        assert_eq!(vw.as_f64(), Some(2.5));
+    }
+
+    #[test]
+    fn synthesize_passthrough_when_kind_is_unknown_via_dynamic() {
+        let original = ValueWord::from_bool(true);
+        let vw = synthesize_value_word_from_raw(original.into_raw_bits(), Some(SlotKind::Dynamic));
+        assert_eq!(vw.as_bool(), Some(true));
+    }
 }
