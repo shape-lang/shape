@@ -1200,12 +1200,73 @@ impl BytecodeCompiler {
             // field correctly declares `return_kind`.
             OpCode::GetFieldTyped => self.get_field_typed_native_kind(instr),
 
-            // Everything else (GetField, GetProp, Call*, NewTypedObject,
-            // ReturnValue / ReturnOwned (legacy tagged), MakeArray,
-            // MakeMap, etc.) is polymorphic / not-yet-flipped — return
-            // None.
+            // ===== Call — propagate the callee's typed-return kind =====
+            // Wave E+3 `op_return_value_<kind>` handlers route the raw
+            // u64 bits the callee pushed straight back to the caller's
+            // stack via `return_value_inner` → `push_raw_u64`. So when
+            // the callee body ends in `ReturnValueI64`, the caller sees
+            // raw native i64 bits on top of stack after the Call. We
+            // need to declare that to the host boundary so the
+            // synthesizer re-tags them; otherwise `f64::from_bits(0x63)`
+            // round-trips through `as_i64()` as `None`.
+            OpCode::Call => self.call_native_kind(instr),
+
+            // Everything else (GetField, GetProp, NewTypedObject,
+            // legacy `ReturnValue` (tagged), MakeArray, MakeMap, etc.)
+            // is polymorphic / not-yet-flipped — return None.
             _ => None,
         }
+    }
+
+    /// Resolve the raw-native kind of a `Call` instruction by inspecting
+    /// the callee's compiled body for a typed `ReturnValue<Kind>` opcode.
+    /// Returns the matching `StorageHint` if all return sites in the
+    /// callee body use the same typed return kind; `None` otherwise (the
+    /// legacy polymorphic `ReturnValue` path, or mixed kinds).
+    fn call_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::Function(fid)) = &instr.operand else {
+            return None;
+        };
+        // FunctionId(u16) — look up the compiled function body.
+        let func = self.program.functions.get(fid.0 as usize)?;
+        let entry = func.entry_point;
+        let end = entry.checked_add(func.body_length)?;
+        if end > self.program.instructions.len() {
+            return None;
+        }
+        // Scan the body for typed `ReturnValue<Kind>` opcodes. If the
+        // callee uses a single typed-return kind across all return sites,
+        // declare that kind for the call result. Mixed kinds (e.g. one
+        // path returns int and another returns Unit) fall through to
+        // `Unknown`. The legacy untyped `ReturnValue` (0x45) also
+        // disqualifies — its caller-side transport is tagged ValueWord.
+        let mut found: Option<StorageHint> = None;
+        for instr in &self.program.instructions[entry..end] {
+            let kind = match instr.opcode {
+                OpCode::ReturnValueI64
+                | OpCode::ReturnValueU64
+                | OpCode::ReturnValueI32
+                | OpCode::ReturnValueU32
+                | OpCode::ReturnValueI16
+                | OpCode::ReturnValueU16
+                | OpCode::ReturnValueI8
+                | OpCode::ReturnValueU8 => Some(StorageHint::Int64),
+                OpCode::ReturnValueF64 => Some(StorageHint::Float64),
+                OpCode::ReturnValueBool => Some(StorageHint::Bool),
+                // Legacy / pointer / generic typed-return — disqualify.
+                // Note: `ReturnOwned` (0x... -> `op_promote_to_owned`) is
+                // misleadingly named — it's a stack-top promotion helper,
+                // NOT a return opcode. Don't treat it as a disqualifier.
+                OpCode::ReturnValue | OpCode::ReturnValuePtr => return None,
+                _ => continue,
+            };
+            match (found, kind) {
+                (None, k) => found = k,
+                (Some(a), Some(b)) if a == b => {}
+                _ => return None,
+            }
+        }
+        found
     }
 
     /// Resolve the raw-native kind of a `PushConst` instruction by reading
@@ -1725,11 +1786,34 @@ impl BytecodeCompiler {
             _ => return StorageHint::Unknown,
         };
 
-        // Walk into a function-call shape: function-call expressions
-        // are the dominant case for top-level program shapes that
-        // declare a return type via `fn name() -> T { ... }; name()`.
-        let call_name = match expr {
+        // Walk into a call-shape: function-call / qualified-namespace-call
+        // expressions are the dominant case for top-level program shapes
+        // that declare a return type via `fn name() -> T { ... }; name()`
+        // or `mod m { fn name() -> T { ... } } m::name()`.
+        // For MethodCall (e.g. `obj.method()`), we don't have direct
+        // access to the receiver's type at this AST-level inspection,
+        // but the producer-side check (`last_emitted_native_kind` →
+        // `call_native_kind`) inspects the compiled callee body and
+        // picks up the typed-return kind directly when the callee uses
+        // `ReturnValue<Kind>` opcodes uniformly.
+        if let Expr::MethodCall { .. } = expr {
+            return self.last_emitted_native_kind().unwrap_or(StorageHint::Unknown);
+        }
+
+        let owned_qualified;
+        let call_name: &str = match expr {
             Expr::FunctionCall { name, .. } => name.as_str(),
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                ..
+            } => {
+                // Reconstruct the fully-qualified `namespace::function`
+                // key that `register_function` (statements.rs:529) uses
+                // when inserting module-scoped function defs.
+                owned_qualified = format!("{}::{}", namespace, function);
+                owned_qualified.as_str()
+            }
             _ => return StorageHint::Unknown,
         };
 
@@ -1754,10 +1838,7 @@ impl BytecodeCompiler {
         // Also resolve through `type_aliases` so a callee declaring a
         // typed return like `fn make() -> MyInt { 42 }; type MyInt = int`
         // round-trips through `synthesize_value_word_from_raw` with the
-        // correct kind. Without this, `as_type_name_str()` returns the
-        // alias name and `primitive_type_name_to_storage_hint` returns
-        // None, so the host boundary falls back to passthrough and the
-        // raw native int bits get reinterpreted as a tagged ValueWord.
+        // correct kind.
         let name = match ann.as_type_name_str() {
             Some(n) => n,
             None => return StorageHint::Unknown,
@@ -1767,6 +1848,19 @@ impl BytecodeCompiler {
                 self.type_aliases
                     .get(name)
                     .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
+            })
+            .or_else(|| {
+                // Try qualified alias name `<namespace>::<name>` if the
+                // call was qualified — module-scoped `type Alias = int`
+                // is registered as `m::Alias` in the alias map.
+                if let shape_ast::ast::Expr::QualifiedFunctionCall { namespace, .. } = expr {
+                    let q = format!("{}::{}", namespace, name);
+                    self.type_aliases
+                        .get(&q)
+                        .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
+                } else {
+                    None
+                }
             })
             .unwrap_or(StorageHint::Unknown);
 
