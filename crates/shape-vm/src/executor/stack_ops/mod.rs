@@ -212,29 +212,36 @@ impl VirtualMachine {
                 .get(idx as usize)
                 .ok_or(VMError::InvalidOperand)?;
 
-            // Stage 2.2: For typed scalar constants (Number/Int/Bool), push the
-            // raw bits directly via push_raw_* — skips the ValueWord wrapper
-            // construction so downstream typed handlers (e.g. exec_typed_arithmetic)
-            // can pop_raw_* without unwrapping. Encoding is identical to what
-            // ValueWord::from_*() would produce, so legacy pop_vw consumers
-            // (which transmute the raw bits back into a ValueWord) keep working.
+            // E+5.5 Unit B: For typed scalar constants (Number/Int/Bool), push the
+            // raw native bits — no NaN-tag encoding. Downstream typed handlers
+            // (exec_typed_arithmetic single-path post-E+5.5, typed comparisons,
+            // typed control flow) consume these native bits directly via
+            // pop_native_i64/pop_native_bool. The ValueWord-tagged consumers
+            // that previously read pop_raw_u64 + decode are gone for Int/Bool
+            // (they're polymorphic-only; producers proven to be Int/Bool
+            // emit typed Loads/Stores per Unit C, so polymorphic readers
+            // never see Int/Bool literals at this stage).
+            //
+            // Out-of-range BigInt remains heap-boxed via ValueWord::from_i64.
             match constant {
                 crate::bytecode::Constant::Number(n) => {
                     return self.push_raw_f64(*n);
                 }
                 crate::bytecode::Constant::Int(i) => {
-                    // In-range i48: push raw tagged bits. Out-of-range falls
-                    // back to ValueWord::from_i64 which heap-boxes as BigInt.
+                    // In-range i48: push raw native i64 bits, no NaN-tag.
+                    // Out-of-range falls back to ValueWord::from_i64 which
+                    // heap-boxes as BigInt (consumers handle via the
+                    // polymorphic decode path).
                     if *i >= shape_value::tag_bits::I48_MIN && *i <= shape_value::tag_bits::I48_MAX {
-                        return self.push_tagged_i64(*i);
+                        return self.push_native_i64(*i);
                     }
                     return self.push_raw_u64(ValueWord::from_i64(*i));
                 }
                 crate::bytecode::Constant::UInt(u) => {
-                    // In-range i48 (u <= I48_MAX): push raw tagged bits.
-                    // Otherwise fall back to ValueWord constructors.
+                    // In-range i48 (u <= I48_MAX): push raw native i64 bits.
+                    // Otherwise fall back to ValueWord constructors (heap-boxed).
                     if *u <= shape_value::tag_bits::I48_MAX as u64 {
-                        return self.push_tagged_i64(*u as i64);
+                        return self.push_native_i64(*u as i64);
                     }
                     return if *u <= i64::MAX as u64 {
                         self.push_raw_u64(ValueWord::from_i64(*u as i64))
@@ -243,7 +250,7 @@ impl VirtualMachine {
                     };
                 }
                 crate::bytecode::Constant::Bool(b) => {
-                    return self.push_tagged_bool(*b);
+                    return self.push_native_bool(*b);
                 }
                 crate::bytecode::Constant::Null => return self.push_raw_u64(ValueWord::none()),
                 crate::bytecode::Constant::Unit => return self.push_raw_u64(ValueWord::unit()),
