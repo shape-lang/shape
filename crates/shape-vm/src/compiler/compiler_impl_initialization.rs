@@ -39,6 +39,7 @@ impl BytecodeCompiler {
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
             last_expr_numeric_type: None,
+            top_level_program_return_kind: crate::type_tracking::StorageHint::Unknown,
             current_expr_result_mode: ExprResultMode::Value,
             last_expr_reference_result: ExprReferenceResult::default(),
             local_callable_pass_modes: HashMap::new(),
@@ -465,7 +466,11 @@ impl BytecodeCompiler {
                 foreign_functions: self.program.foreign_functions.clone(),
                 native_struct_layouts: self.program.native_struct_layouts.clone(),
                 debug_info: self.program.debug_info.clone(),
-                top_level_frame: None,
+                // E+5.5 Unit C step 2: propagate the typed top-level frame
+                // through the content-addressed path so the linker can
+                // forward it to `BytecodeProgram` and the VM host boundary
+                // synthesises a tagged ValueWord on `vm.execute()`.
+                top_level_frame: self.program.top_level_frame.clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.

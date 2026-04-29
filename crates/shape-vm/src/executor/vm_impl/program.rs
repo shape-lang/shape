@@ -188,6 +188,10 @@ impl VirtualMachine {
             // per-function `ClosureLayout` side-table so the VM
             // `op_make_closure` producer can emit `HeapValue::ClosureRaw`.
             closure_function_layouts: linked.closure_function_layouts.clone(),
+            // E+5.5 Unit C step 2: propagate the typed top-level frame so
+            // `vm.execute()` synthesises a tagged ValueWord at the host
+            // boundary per the program's declared return kind.
+            top_level_frame: linked.top_level_frame,
             ..BytecodeProgram::default()
         };
 

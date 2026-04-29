@@ -1622,20 +1622,22 @@ impl BytecodeCompiler {
 
         // Build top-level FrameDescriptor so JIT can use per-slot type info.
         //
-        // E+5.5 Unit C step 2: also populate `return_kind` from
-        // `infer_top_level_return_kind` (numeric-type signal first, then
-        // last-expr type-info). When set, the host boundary
+        // E+5.5 Unit C step 2: read the return-kind captured RIGHT AFTER
+        // the last item compiled (in `compiler_impl_reference_model.rs:1282`)
+        // — pre drop-scope-emission and Halt — so `last_expr_*` reflects
+        // the program's final value at the moment of capture, not after
+        // teardown opcodes have overwritten it. Falls back to a fresh
+        // inference if nothing was captured. When set, the host boundary
         // `synthesize_value_word_from_raw` in `execute()` synthesises a
         // tagged ValueWord from the typed top-level return bits — this
         // is what makes typed top-level programs (Int/Bool/Float64 ending
         // in arithmetic, comparisons, or typed-load) round-trip cleanly
         // through `vm.execute()` post-Unit-A/B native arithmetic flip.
-        // Without this, the raw native bits are passed through to the
-        // host as if they were a tagged ValueWord — fine for legacy
-        // dynamic programs (raw bits ARE a ValueWord) but wrong for
-        // post-flip Int/Bool: e.g. native `0u64` would land as ValueWord
-        // unit, not int 0.
-        let return_kind = self.infer_top_level_return_kind();
+        let return_kind = if self.top_level_program_return_kind != StorageHint::Unknown {
+            self.top_level_program_return_kind
+        } else {
+            self.infer_top_level_return_kind()
+        };
         let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
         let has_trusted = self
             .program

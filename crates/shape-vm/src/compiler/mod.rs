@@ -604,6 +604,13 @@ pub struct BytecodeCompiler {
     /// Read by binary op compilation to emit typed opcodes (e.g., MulInt).
     pub(crate) last_expr_numeric_type: Option<crate::type_tracking::NumericType>,
 
+    /// E+5.5 Unit C step 2: captured top-level program return-kind, snapshotted
+    /// right after the last item compiles (before drop-scope emission and
+    /// Halt overwrite `last_expr_*`). Consumed by
+    /// `populate_program_storage_hints` to populate
+    /// `top_level_frame.return_kind` for host-boundary ValueWord synthesis.
+    pub(crate) top_level_program_return_kind: crate::type_tracking::StorageHint,
+
     /// Result mode for the expression currently being compiled.
     pub(crate) current_expr_result_mode: ExprResultMode,
 
