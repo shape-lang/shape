@@ -134,10 +134,23 @@ impl BytecodeCompiler {
             // and pushes the inner ValueWord bits.
             if let Some(&shared_idx) = self.shared_closure_captures.get(name) {
                 debug_assert_eq!(upvalue_idx, shared_idx);
-                self.emit(Instruction::new(
-                    OpCode::LoadSharedCapture,
-                    Some(Operand::Local(shared_idx)),
-                ));
+                // A2-refined / task #17: dispatch to Wave D.2's typed
+                // `LoadSharedCapture<Kind>` opcodes (codes 0x156-0x160)
+                // by looking up the cell's interior `FieldKind` from
+                // `shared_capture_inner_kinds` (populated alongside
+                // `shared_closure_captures` at closure-construction
+                // time). Each typed opcode acquires the cell's mutex,
+                // reads the matching native payload via
+                // `read_shared_<kind>`, and pushes raw native bytes via
+                // `push_raw_u64`. Falls back to the legacy
+                // `LoadSharedCapture` (0x134) for unresolved capture
+                // types — Wave G removes the legacy opcode after every
+                // resolved emit path is type-aware.
+                let opcode = match self.shared_capture_inner_kinds.get(name).copied() {
+                    Some(kind) => crate::compiler::helpers::shared_typed_load_opcode(kind),
+                    None => OpCode::LoadSharedCapture,
+                };
+                self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
                 self.last_expr_numeric_type = None;

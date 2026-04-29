@@ -279,10 +279,23 @@ impl BytecodeCompiler {
                     // ValueWord bits.
                     if let Some(&shared_idx) = self.shared_closure_captures.get(name.as_str()) {
                         debug_assert_eq!(upvalue_idx, shared_idx);
-                        self.emit(Instruction::new(
-                            OpCode::StoreSharedCapture,
-                            Some(Operand::Local(shared_idx)),
-                        ));
+                        // A2-refined / task #17: dispatch to Wave D.2's typed
+                        // `StoreSharedCapture<Kind>` opcodes (codes
+                        // 0x161-0x16B) by looking up the cell's interior
+                        // `FieldKind` from `shared_capture_inner_kinds`.
+                        // Falls back to legacy `StoreSharedCapture` (0x135)
+                        // for unresolved capture types.
+                        let opcode = match self
+                            .shared_capture_inner_kinds
+                            .get(name.as_str())
+                            .copied()
+                        {
+                            Some(kind) => {
+                                crate::compiler::helpers::shared_typed_store_opcode(kind)
+                            }
+                            None => OpCode::StoreSharedCapture,
+                        };
+                        self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                         return Ok(());
                     }
                     // Track A.1C.2b + Wave E: OwnedMutable (let mut)
