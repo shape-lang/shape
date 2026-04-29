@@ -1087,6 +1087,181 @@ impl BytecodeCompiler {
             .unwrap_or(false)
     }
 
+    /// Returns the `StorageHint` whose raw-native transport matches the bits
+    /// the LAST emitted instruction will leave on top of the stack.
+    ///
+    /// Wave E+5 made many arithmetic / comparison / typed-load opcodes push
+    /// raw native bits (`i64`/`f64`/`bool`) instead of tagged `ValueWord`
+    /// bits. The host-boundary `synthesize_value_word_from_raw` decodes the
+    /// stack-top bits per `top_level_frame.return_kind`; if the kind says
+    /// `Int64` but the producer pushed a tagged ValueWord, the synthesizer
+    /// re-encodes the tag bits as a raw i64 and corrupts the result
+    /// (observed as `0xfff9...` payloads bleeding through into `as_i64()`).
+    ///
+    /// This helper inspects the just-emitted opcode and returns the
+    /// `StorageHint` it actually produces in raw bits. Callers in the
+    /// program-return-kind inference path (see `infer_top_level_return_kind`
+    /// / `populate_program_storage_hints`) gate kind declaration on this so
+    /// only opcodes that have been flipped to the native transport drive a
+    /// typed `return_kind`. Polymorphic / not-yet-flipped producers
+    /// (`GetField`, `GetProp`, `Call`, `MakeTypedObject`, …) return `None`
+    /// and the program return falls through to `Unknown` (passthrough
+    /// synthesis), preserving the pre-E+5 contract.
+    pub(super) fn last_emitted_native_kind(&self) -> Option<StorageHint> {
+        let instr = self.program.instructions.last()?;
+        match instr.opcode {
+            // ===== Raw i64 producers (Wave E+5.3 + Unit B) =====
+            // Single-path Int arithmetic / bitwise / negation. The dynamic
+            // `BitAnd` / `BitOr` / etc. opcodes are polymorphic
+            // (output-tagged) — only the typed `*Int` variants push raw
+            // native bits.
+            OpCode::AddInt
+            | OpCode::SubInt
+            | OpCode::MulInt
+            | OpCode::DivInt
+            | OpCode::ModInt
+            | OpCode::PowInt
+            | OpCode::NegInt
+            | OpCode::BitAndInt
+            | OpCode::BitOrInt
+            | OpCode::BitXorInt
+            | OpCode::BitShlInt
+            | OpCode::BitShrInt
+            | OpCode::BitNotInt
+            // Typed local / module-binding load (Wave E+3) — push raw i64.
+            | OpCode::LoadLocalI64
+            | OpCode::LoadLocalU64
+            | OpCode::LoadLocalI32
+            | OpCode::LoadLocalU32
+            | OpCode::LoadLocalI16
+            | OpCode::LoadLocalU16
+            | OpCode::LoadLocalI8
+            | OpCode::LoadLocalU8
+            | OpCode::LoadModuleBindingI64
+            | OpCode::LoadModuleBindingU64
+            | OpCode::LoadModuleBindingI32
+            | OpCode::LoadModuleBindingU32
+            | OpCode::LoadModuleBindingI16
+            | OpCode::LoadModuleBindingU16
+            | OpCode::LoadModuleBindingI8
+            | OpCode::LoadModuleBindingU8
+            // Typed array length / map length / string length helpers all
+            // push raw i64 (see arithmetic mod tests for these).
+            | OpCode::ArrayLenTyped
+            | OpCode::MapLenTyped
+            | OpCode::StringLenTyped => Some(StorageHint::Int64),
+
+            // ===== Raw f64 producers =====
+            OpCode::AddNumber
+            | OpCode::SubNumber
+            | OpCode::MulNumber
+            | OpCode::DivNumber
+            | OpCode::ModNumber
+            | OpCode::PowNumber
+            | OpCode::NegNumber
+            | OpCode::LoadLocalF64
+            | OpCode::LoadModuleBindingF64 => Some(StorageHint::Float64),
+
+            // ===== Raw bool producers (Wave E+5.4) =====
+            OpCode::EqInt
+            | OpCode::NeqInt
+            | OpCode::LtInt
+            | OpCode::LteInt
+            | OpCode::GtInt
+            | OpCode::GteInt
+            | OpCode::EqNumber
+            | OpCode::NeqNumber
+            | OpCode::LtNumber
+            | OpCode::LteNumber
+            | OpCode::GtNumber
+            | OpCode::GteNumber
+            | OpCode::EqString
+            | OpCode::EqDecimal
+            | OpCode::LtDecimal
+            | OpCode::LteDecimal
+            | OpCode::GtDecimal
+            | OpCode::GteDecimal
+            | OpCode::IsNull
+            | OpCode::Not
+            | OpCode::LoadLocalBool
+            | OpCode::LoadModuleBindingBool => Some(StorageHint::Bool),
+
+            // ===== PushConst — depends on the constant kind =====
+            // In-range Int/UInt + Bool literals push raw native bits per
+            // Unit B; everything else pushes tagged ValueWord bits.
+            OpCode::PushConst => self.push_const_native_kind(instr),
+
+            // ===== GetFieldTyped — depends on the field type tag =====
+            // Post-Wave E+5 `push_field_value` (typed_object_ops.rs:90)
+            // pushes raw native bits for I64/F64/Bool field tags on
+            // non-heap slots; other tags fall back to tagged ValueWord.
+            // We classify the typed-int / typed-bool / typed-f64 case
+            // here so a top-level `obj.x` ending in an int / bool / f64
+            // field correctly declares `return_kind`.
+            OpCode::GetFieldTyped => self.get_field_typed_native_kind(instr),
+
+            // Everything else (GetField, GetProp, Call*, NewTypedObject,
+            // ReturnValue / ReturnOwned (legacy tagged), MakeArray,
+            // MakeMap, etc.) is polymorphic / not-yet-flipped — return
+            // None.
+            _ => None,
+        }
+    }
+
+    /// Resolve the raw-native kind of a `PushConst` instruction by reading
+    /// the constant pool entry at the operand index. Mirrors the
+    /// `op_push_const` decision tree (Unit B): in-range Int/UInt push raw
+    /// i64; Bool pushes raw bool; Number pushes raw f64; everything else is
+    /// a tagged ValueWord push.
+    fn push_const_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::Const(idx)) = &instr.operand else {
+            return None;
+        };
+        let constant = self.program.constants.get(*idx as usize)?;
+        match constant {
+            Constant::Number(_) => Some(StorageHint::Float64),
+            Constant::Int(i) => {
+                if *i >= shape_value::tag_bits::I48_MIN
+                    && *i <= shape_value::tag_bits::I48_MAX
+                {
+                    Some(StorageHint::Int64)
+                } else {
+                    None
+                }
+            }
+            Constant::UInt(u) => {
+                if *u <= shape_value::tag_bits::I48_MAX as u64 {
+                    Some(StorageHint::Int64)
+                } else {
+                    None
+                }
+            }
+            Constant::Bool(_) => Some(StorageHint::Bool),
+            _ => None,
+        }
+    }
+
+    /// Resolve the raw-native kind of a `GetFieldTyped` instruction by
+    /// reading the `field_type_tag` from its operand. Mirrors the post-E+5
+    /// `push_field_value` decision tree (typed_object_ops.rs:90).
+    fn get_field_typed_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        use crate::executor::typed_object_ops::{
+            FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64, FIELD_TAG_TIMESTAMP,
+        };
+        let Some(Operand::TypedField {
+            field_type_tag, ..
+        }) = &instr.operand
+        else {
+            return None;
+        };
+        match *field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => Some(StorageHint::Int64),
+            FIELD_TAG_F64 => Some(StorageHint::Float64),
+            FIELD_TAG_BOOL => Some(StorageHint::Bool),
+            _ => None,
+        }
+    }
+
     /// Patch a jump instruction with the correct offset
     pub(super) fn patch_jump(&mut self, jump_idx: usize) {
         let offset = self.program.current_offset() as i32 - jump_idx as i32 - 1;
@@ -1587,26 +1762,63 @@ impl BytecodeCompiler {
             Some(n) => n,
             None => return StorageHint::Unknown,
         };
-        if let Some(hint) = primitive_type_name_to_storage_hint(name) {
-            return hint;
+        let inferred = primitive_type_name_to_storage_hint(name)
+            .or_else(|| {
+                self.type_aliases
+                    .get(name)
+                    .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
+            })
+            .unwrap_or(StorageHint::Unknown);
+
+        if inferred == StorageHint::Unknown {
+            return StorageHint::Unknown;
         }
-        if let Some(aliased) = self.type_aliases.get(name) {
-            if let Some(hint) = primitive_type_name_to_storage_hint(aliased.as_str()) {
-                return hint;
-            }
+
+        // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
+        // Top-level `name()` calls compile to polymorphic `Call*` opcodes
+        // that push tagged `ValueWord` bits — `last_emitted_native_kind`
+        // returns `None` for these, which correctly steers the program
+        // return kind to `Unknown` (passthrough synthesis) rather than
+        // re-encoding tagged bits as raw int.
+        let Some(native_kind) = self.last_emitted_native_kind() else {
+            return StorageHint::Unknown;
+        };
+
+        if matches!(
+            inferred,
+            StorageHint::Int8
+                | StorageHint::UInt8
+                | StorageHint::Int16
+                | StorageHint::UInt16
+                | StorageHint::Int32
+                | StorageHint::UInt32
+                | StorageHint::Int64
+                | StorageHint::UInt64
+        ) && native_kind == StorageHint::Int64
+        {
+            return inferred;
         }
-        StorageHint::Unknown
+
+        if native_kind == inferred {
+            inferred
+        } else {
+            StorageHint::Unknown
+        }
     }
 
     pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {
-        // Priority 1: numeric-type signal.
-        if let Some(nt) = self.last_expr_numeric_type {
-            match nt {
-                crate::type_tracking::NumericType::Number => return StorageHint::Float64,
-                crate::type_tracking::NumericType::Int => return StorageHint::Int64,
+        // Inferred kind from compile-time numeric / type-info tracking.
+        // This is the *intended* program return kind. We must still verify
+        // the producer-side stack discipline matches before declaring it
+        // (see `last_emitted_native_kind` and the gating below).
+        let inferred: StorageHint = self
+            .last_expr_numeric_type
+            .and_then(|nt| match nt {
+                crate::type_tracking::NumericType::Number => Some(StorageHint::Float64),
+                crate::type_tracking::NumericType::Int => Some(StorageHint::Int64),
                 crate::type_tracking::NumericType::IntWidth(w) => {
                     use shape_ast::IntWidth;
-                    return match w {
+                    Some(match w {
                         IntWidth::I8 => StorageHint::Int8,
                         IntWidth::U8 => StorageHint::UInt8,
                         IntWidth::I16 => StorageHint::Int16,
@@ -1614,20 +1826,73 @@ impl BytecodeCompiler {
                         IntWidth::I32 => StorageHint::Int32,
                         IntWidth::U32 => StorageHint::UInt32,
                         IntWidth::U64 => StorageHint::UInt64,
-                    };
+                    })
                 }
                 // Decimal isn't a `SlotKind` variant — fall through to
                 // Unknown so synthesis stays in passthrough.
-                crate::type_tracking::NumericType::Decimal => {}
-            }
+                crate::type_tracking::NumericType::Decimal => None,
+            })
+            .or_else(|| {
+                self.last_expr_type_info.as_ref().and_then(|info| {
+                    if info.storage_hint != StorageHint::Unknown {
+                        Some(info.storage_hint)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or(StorageHint::Unknown);
+
+        if inferred == StorageHint::Unknown {
+            return StorageHint::Unknown;
         }
-        // Priority 2: type_info storage_hint.
-        if let Some(info) = &self.last_expr_type_info {
-            if info.storage_hint != StorageHint::Unknown {
-                return info.storage_hint;
-            }
+
+        // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
+        //
+        // Many expression compilers (property access, method/function call,
+        // typed-object construction, …) propagate `last_expr_numeric_type`
+        // from the AST-level type so binary-op typed dispatch (`MulInt`
+        // etc.) still emits the right opcode for them. But the producer
+        // opcodes for those expressions remain polymorphic — they push a
+        // tagged `ValueWord`, not raw native bits. Declaring a typed
+        // `top_level_frame.return_kind` for such producers makes
+        // `synthesize_value_word_from_raw` re-encode the tagged bits as
+        // raw int (or f64 / bool), corrupting the program result.
+        //
+        // We only declare the kind when the LAST emitted opcode is on the
+        // known raw-native producer list. Otherwise we fall through to
+        // `Unknown` so the host boundary uses passthrough synthesis,
+        // matching the pre-E+5 contract for polymorphic producers.
+        let native_kind = match self.last_emitted_native_kind() {
+            Some(kind) => kind,
+            None => return StorageHint::Unknown,
+        };
+
+        // Width-aware check: if the inferred kind is a sub-i64 width
+        // (Int8/U8/…/U32) and the producer is `Int64` (the catch-all for
+        // all integer arithmetic / load opcodes), prefer the inferred
+        // narrow kind. The synthesizer reads raw i64 bits identically for
+        // all signed-int widths, so this is safe.
+        if matches!(
+            inferred,
+            StorageHint::Int8
+                | StorageHint::UInt8
+                | StorageHint::Int16
+                | StorageHint::UInt16
+                | StorageHint::Int32
+                | StorageHint::UInt32
+                | StorageHint::Int64
+                | StorageHint::UInt64
+        ) && native_kind == StorageHint::Int64
+        {
+            return inferred;
         }
-        StorageHint::Unknown
+
+        if native_kind == inferred {
+            inferred
+        } else {
+            StorageHint::Unknown
+        }
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.

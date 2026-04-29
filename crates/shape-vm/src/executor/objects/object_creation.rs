@@ -42,16 +42,30 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        // Pop field values from stack (in reverse order since stack is LIFO)
-        let mut nb_fields: Vec<ValueWord> = Vec::with_capacity(field_count as usize);
-        for _ in 0..field_count {
-            nb_fields.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
-        }
-        nb_fields.reverse();
-
+        // Wave E+5 / task #98: integer-typed fields whose producer was a
+        // native-int PushConst (Unit B) leave raw native i64 bits on the
+        // stack — `0x000000000000002A` for `42`, not the tagged
+        // `0xFFF9_0000_0000_002A`. We need the field-types lookup BEFORE
+        // popping so we can decode each slot per its declared type.
         let field_types: Option<Vec<FieldType>> = self
             .lookup_schema(schema_id as u32)
             .map(|schema| schema.fields.iter().map(|f| f.field_type.clone()).collect());
+
+        // Pop raw u64 bits, then decode per field type (raw native vs
+        // tagged ValueWord — see `decode_field_bits_for_type`).
+        let mut raw_fields: Vec<u64> = Vec::with_capacity(field_count as usize);
+        for _ in 0..field_count {
+            raw_fields.push(self.pop_raw_u64()?);
+        }
+        raw_fields.reverse();
+        let nb_fields: Vec<ValueWord> = raw_fields
+            .iter()
+            .enumerate()
+            .map(|(i, &bits)| {
+                let field_type = field_types.as_ref().and_then(|types| types.get(i));
+                decode_field_bits_for_type(bits, field_type)
+            })
+            .collect();
 
         // Allocate slots: one ValueSlot per field (ValueWord-native path)
         let mut slots = Vec::with_capacity(field_count as usize);
@@ -241,6 +255,61 @@ impl VirtualMachine {
             self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)))
         }
     }
+}
+
+/// Wave E+5 / task #98: decode raw stack bits into a tagged `ValueWord`,
+/// disambiguating per the declared field type so that fields whose producer
+/// pushed *raw native bits* (e.g. Unit-B `op_push_const Int(42)` →
+/// `0x000000000000002A`) are correctly recovered as ValueWord ints, while
+/// fields whose producer pushed *tagged ValueWord bits* (the legacy
+/// polymorphic path, `0xFFF9_0000_0000_002A`) round-trip unchanged.
+///
+/// The disambiguation key is `is_tagged(bits)`: tagged ValueWords have the
+/// canonical NaN-box prefix `0xFFF8`; raw native i64 / bool values do not.
+///
+/// For `FieldType::Any` (enum tuple payloads etc.), small untagged bits are
+/// most likely raw-native-int output from a post-Unit-B `PushConst Int(...)`
+/// since real `Any` slots encode their value as a tagged ValueWord (heap
+/// pointer or NaN-boxed inline). We use the i48 range as the cutoff;
+/// out-of-range untagged bits stay on the tagged-passthrough path so larger
+/// raw f64 / heap-pointer values aren't misclassified.
+fn decode_field_bits_for_type(bits: u64, field_type: Option<&FieldType>) -> ValueWord {
+    use shape_value::tag_bits::is_tagged;
+    let is_int_field = matches!(
+        field_type,
+        Some(
+            FieldType::I64
+                | FieldType::I8
+                | FieldType::I16
+                | FieldType::I32
+                | FieldType::U8
+                | FieldType::U16
+                | FieldType::U32
+                | FieldType::U64
+        )
+    );
+    if is_int_field && !is_tagged(bits) {
+        // Raw native i64 / sub-i64 bits — re-tag as a ValueWord int so
+        // `nb_to_slot_with_field_type` can extract via `as_i64()`. Out of
+        // i48 range falls back to a heap-boxed BigInt.
+        return ValueWord::from_i64(bits as i64);
+    }
+    if matches!(field_type, Some(FieldType::Bool)) && !is_tagged(bits) {
+        // Raw native bool: 0 → false, anything else → true.
+        return ValueWord::from_bool(bits != 0);
+    }
+    // For `Any` fields (e.g. enum tuple payloads), an untagged scalar
+    // whose magnitude fits in i48 is most likely raw-native-int output
+    // from a post-Unit-B `PushConst Int(...)`.
+    if matches!(field_type, Some(FieldType::Any)) && !is_tagged(bits) {
+        let signed = bits as i64;
+        if signed >= shape_value::tag_bits::I48_MIN
+            && signed <= shape_value::tag_bits::I48_MAX
+        {
+            return ValueWord::from_i64(signed);
+        }
+    }
+    ValueWord::from_raw_bits(bits)
 }
 
 /// Convert a ValueWord to a ValueSlot using schema field type when available.
