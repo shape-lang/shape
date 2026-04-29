@@ -228,12 +228,17 @@ impl VirtualMachine {
         match instruction.opcode {
             // ===== Typed Add (raw typed stack API with fallback) =====
             AddInt => {
+                // E+5.3: native i64 stack discipline. Producers and consumers of
+                // Int-family slots agree on raw i64 bits — no NaN-tag decode/encode
+                // around the inner `checked_add`. The i48-range gate still applies
+                // because Shape's `int` type is i48 inline; the gate now reads
+                // native i64 directly.
                 if self.stack_top_both_i48() {
                     // Fast path: both operands are inline i48
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
+                    let bi = self.pop_native_i64()?;
+                    let ai = self.pop_native_i64()?;
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                     }
                 } else {
@@ -249,7 +254,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                     }
                 }
@@ -283,10 +288,10 @@ impl VirtualMachine {
             // ===== Typed Sub (raw typed stack API with fallback) =====
             SubInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
+                    let bi = self.pop_native_i64()?;
+                    let ai = self.pop_native_i64()?;
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 } else {
@@ -301,7 +306,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 }
@@ -335,10 +340,10 @@ impl VirtualMachine {
             // ===== Typed Mul (raw typed stack API with fallback) =====
             MulInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
+                    let bi = self.pop_native_i64()?;
+                    let ai = self.pop_native_i64()?;
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 } else {
@@ -353,7 +358,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_native_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 }
@@ -387,12 +392,12 @@ impl VirtualMachine {
             // ===== Typed Div (raw typed stack API, with zero-check) =====
             DivInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
+                    let bi = self.pop_native_i64()?;
+                    let ai = self.pop_native_i64()?;
                     if bi == 0 {
                         return Err(VMError::DivisionByZero);
                     }
-                    self.push_tagged_i64(ai / bi)?;
+                    self.push_native_i64(ai / bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
@@ -407,7 +412,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_tagged_i64(ai / bi)?;
+                    self.push_native_i64(ai / bi)?;
                 }
             }
             DivNumber => {
@@ -449,12 +454,12 @@ impl VirtualMachine {
             // ===== Typed Mod (raw typed stack API, with zero-check) =====
             ModInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
+                    let bi = self.pop_native_i64()?;
+                    let ai = self.pop_native_i64()?;
                     if bi == 0 {
                         return Err(VMError::DivisionByZero);
                     }
-                    self.push_tagged_i64(ai % bi)?;
+                    self.push_native_i64(ai % bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
@@ -469,7 +474,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_tagged_i64(ai % bi)?;
+                    self.push_native_i64(ai % bi)?;
                 }
             }
             ModNumber => {
@@ -511,12 +516,12 @@ impl VirtualMachine {
             // ===== Typed Pow (raw typed stack API with fallback) =====
             PowInt => {
                 if self.stack_top_both_i48() {
-                    let exp = self.pop_tagged_i64()?;
-                    let base = self.pop_tagged_i64()?;
+                    let exp = self.pop_native_i64()?;
+                    let base = self.pop_native_i64()?;
                     if exp >= 0 && exp < u32::MAX as i64 {
                         let result = base.pow(exp as u32);
                         if fits_i48(result) {
-                            self.push_tagged_i64(result)?;
+                            self.push_native_i64(result)?;
                         } else {
                             self.push_raw_f64(result as f64)?;
                         }
@@ -537,7 +542,7 @@ impl VirtualMachine {
                     if exp >= 0 && exp < u32::MAX as i64 {
                         let result = base.pow(exp as u32);
                         if fits_i48(result) {
-                            self.push_tagged_i64(result)?;
+                            self.push_native_i64(result)?;
                         } else {
                             self.push_raw_f64(result as f64)?;
                         }
@@ -583,7 +588,7 @@ impl VirtualMachine {
             // ===== Numeric Coercion (raw typed stack API with fallback) =====
             IntToNumber => {
                 if self.stack_top_is_i48() {
-                    let v = self.pop_tagged_i64()?;
+                    let v = self.pop_native_i64()?;
                     self.push_raw_f64(v as f64)?;
                 } else {
                     let val = self.pop_raw_u64()?;
@@ -593,16 +598,16 @@ impl VirtualMachine {
             NumberToInt => {
                 if self.stack_top_is_f64() {
                     let v = self.pop_raw_f64()?;
-                    self.push_tagged_i64(v as i64)?;
+                    self.push_native_i64(v as i64)?;
                 } else {
                     let val = self.pop_raw_u64()?;
-                    self.push_tagged_i64(unsafe { val.as_f64_unchecked() } as i64)?;
+                    self.push_native_i64(unsafe { val.as_f64_unchecked() } as i64)?;
                 }
             }
             // Stage 4.2: typed negation moved here from exec_arithmetic
             NegInt => {
-                let val = self.pop_tagged_i64()?;
-                self.push_tagged_i64(-val)?;
+                let val = self.pop_native_i64()?;
+                self.push_native_i64(-val)?;
             }
             NegNumber => {
                 // Mirror `MulNumber`'s fast/slow split (BUG5): the fast path
@@ -644,36 +649,37 @@ impl VirtualMachine {
             // bytecode. Semantics match the dynamic fallback exactly
             // (plain i64 `&` / `|` / `^` / `<<` / `>>` / `!`) — no
             // rhs-masking, matching the documented `>>` / `<<` semantics
-            // already shipped in Shape. Operands are raw i48-tagged int
-            // slots per the v2 runtime spec; no tag checks, no coercion.
+            // already shipped in Shape. E+5.3: operands and result are
+            // raw native i64 bits; producers and consumers agree on the
+            // native stack discipline — no NaN-tag decode/encode.
             BitAndInt => {
-                let b = self.pop_tagged_i64()?;
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(a & b)?;
+                let b = self.pop_native_i64()?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(a & b)?;
             }
             BitOrInt => {
-                let b = self.pop_tagged_i64()?;
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(a | b)?;
+                let b = self.pop_native_i64()?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(a | b)?;
             }
             BitXorInt => {
-                let b = self.pop_tagged_i64()?;
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(a ^ b)?;
+                let b = self.pop_native_i64()?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(a ^ b)?;
             }
             BitShlInt => {
-                let b = self.pop_tagged_i64()?;
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(a << b)?;
+                let b = self.pop_native_i64()?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(a << b)?;
             }
             BitShrInt => {
-                let b = self.pop_tagged_i64()?;
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(a >> b)?;
+                let b = self.pop_native_i64()?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(a >> b)?;
             }
             BitNotInt => {
-                let a = self.pop_tagged_i64()?;
-                self.push_tagged_i64(!a)?;
+                let a = self.pop_native_i64()?;
+                self.push_native_i64(!a)?;
             }
             _ => unreachable!(
                 "exec_typed_arithmetic called with non-typed-arithmetic opcode: {:?}",
