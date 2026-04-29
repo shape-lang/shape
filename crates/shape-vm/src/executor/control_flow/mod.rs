@@ -1207,7 +1207,20 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn op_return_value(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
 
+    /// Shared inner body for `op_return_value` and the typed
+    /// `op_return_value_<kind>` family (Wave E+3, opcodes 0x198..=0x1A2).
+    ///
+    /// The typed variants are *transport-neutral*: they pop the return
+    /// value as raw u64 (same as the legacy `ReturnValue`) and feed it
+    /// here for frame cleanup + caller-side push. The encoded `<Kind>`
+    /// is a static annotation for the JIT and downstream consumers, not
+    /// a runtime dispatch — so all 11 typed handlers and the legacy
+    /// handler share this body verbatim.
+    #[inline]
+    fn return_value_inner(&mut self, return_value: u64) -> Result<(), VMError> {
         if let Some(frame) = self.call_stack.pop() {
             // Restore instruction pointer
             self.ip = frame.return_ip;
@@ -1236,6 +1249,74 @@ impl VirtualMachine {
             self.ip = self.program.instructions.len();
         }
         Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Wave E+3: typed `ReturnValue<Kind>` handlers (opcodes 0x198..=0x1A2)
+    //
+    // Each typed handler is a thin wrapper around `return_value_inner`.
+    // The handler bodies are identical at runtime — the encoded `<Kind>`
+    // exists for static type information so the caller's stack
+    // discipline is known at the call site (consumed by the JIT and
+    // other downstream tooling).
+    //
+    // The legacy `op_return_value` (0x45) stays live for unproven-type
+    // return positions.
+    // ─────────────────────────────────────────────────────────────────
+
+    pub(in crate::executor) fn op_return_value_i64(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_u64(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_f64(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_i32(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_u32(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_i16(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_u16(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_i8(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_u8(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_bool(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
+    }
+
+    pub(in crate::executor) fn op_return_value_ptr(&mut self) -> Result<(), VMError> {
+        let return_value = self.pop_raw_u64()?;
+        self.return_value_inner(return_value)
     }
 }
 
