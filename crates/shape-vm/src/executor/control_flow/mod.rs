@@ -1745,3 +1745,150 @@ mod a1b_make_closure_tests {
     // closures capturing the same `var x` observe each other's writes
     // via the Arc).
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave E+3: typed `ReturnValue<Kind>` round-trip tests
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One test per FieldKind from the task brief: I64, F64, Bool, Ptr.
+// Each test builds a small program of the form
+//
+//     PushConst <value>
+//     PushConst <arg_count = 0>
+//     Call func_0
+//     Jump <past func body>
+//     [func_0 body]:
+//         PushConst <value>
+//         <ReturnValue<Kind>>
+//
+// and verifies the value the typed handler pushed onto the caller's
+// stack survives frame cleanup with the correct bits. Because the
+// typed handler's body is identical to the legacy `op_return_value`
+// (the encoded `<Kind>` is a static-only annotation), the test's
+// purpose is to verify dispatch is wired correctly, not to test
+// distinct runtime behaviour.
+#[cfg(test)]
+mod e3_typed_return_value_tests {
+    use crate::bytecode::{BytecodeProgram, Constant, Function, Instruction, OpCode, Operand};
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::heap_value::HeapValue;
+    use shape_value::{FunctionId, ValueWord, ValueWordExt};
+
+    /// Helper: build a tiny function that pushes `body_const_idx` and
+    /// returns via the given typed-return opcode. The caller code is:
+    /// PushConst(arg_count=0), Call(func_0), Halt.
+    ///
+    /// Returns the executed program's top-of-stack ValueWord.
+    fn run_typed_return(typed_opcode: OpCode, body_const: Constant) -> ValueWord {
+        let mut program = BytecodeProgram::default();
+        // Caller-side constants:
+        //   slot 0: arg_count = 0 (as Int — Call pops via as_number_coerce)
+        let c_argc = program.add_constant(Constant::Int(0));
+        // Function-body constant:
+        //   slot 1: the value the function returns.
+        let c_body = program.add_constant(body_const);
+
+        // Emit caller-side instructions (top-level).
+        //   0: PushConst(c_argc)         -- arg count
+        //   1: Call func_0               -- return_ip = 2
+        //   2: Jump +2                   -- skip over func body (3, 4)
+        //   3..: func body
+        //   <last>: Halt
+        program
+            .instructions
+            .push(Instruction::new(OpCode::PushConst, Some(Operand::Const(c_argc))));
+        program
+            .instructions
+            .push(Instruction::new(OpCode::Call, Some(Operand::Function(FunctionId(0)))));
+        // Jump offset is computed relative to ip *after* dispatch (i.e.
+        // ip=3 once Jump executes; we want to land at the Halt at ip=5).
+        program
+            .instructions
+            .push(Instruction::new(OpCode::Jump, Some(Operand::Offset(2))));
+
+        // Function body (entry_point = 3):
+        //   3: PushConst(c_body)
+        //   4: <typed_opcode>
+        let entry_point = program.instructions.len();
+        program
+            .instructions
+            .push(Instruction::new(OpCode::PushConst, Some(Operand::Const(c_body))));
+        program.instructions.push(Instruction::simple(typed_opcode));
+        let body_length = program.instructions.len() - entry_point;
+
+        // Trailing Halt at top level.
+        program.instructions.push(Instruction::simple(OpCode::Halt));
+
+        program.functions.push(Function {
+            name: "__e3_typed_return_test".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point,
+            body_length,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        });
+        program.top_level_locals_count = 0;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        vm.execute(None).expect("execute").clone()
+    }
+
+    #[test]
+    fn return_value_i64_round_trip() {
+        // ReturnValueI64 (0x198) — the function returns 12345 as an i64.
+        // The handler shares its body with the legacy ReturnValue: pop 1
+        // raw u64, frame-clean, push 1 onto the caller's stack. Verifies
+        // dispatch fires and the bits survive frame teardown.
+        let result = run_typed_return(OpCode::ReturnValueI64, Constant::Int(12345));
+        assert_eq!(result.as_i64(), Some(12345));
+    }
+
+    #[test]
+    fn return_value_f64_round_trip() {
+        // ReturnValueF64 (0x19A) — the function returns 2.71828 as an f64.
+        let result = run_typed_return(OpCode::ReturnValueF64, Constant::Number(2.71828));
+        assert!(
+            (result.as_f64().expect("f64") - 2.71828).abs() < 1e-12,
+            "f64 should round-trip through ReturnValueF64"
+        );
+    }
+
+    #[test]
+    fn return_value_bool_round_trip() {
+        // ReturnValueBool (0x1A1) — the function returns `true`.
+        let result = run_typed_return(OpCode::ReturnValueBool, Constant::Bool(true));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn return_value_ptr_round_trip() {
+        // ReturnValuePtr (0x1A2) — the function returns a string heap
+        // value. Ownership transfer is by raw bit-level pass-through,
+        // so the caller-side ValueWord must still resolve to the same
+        // string after frame cleanup. If frame cleanup dropped the bits
+        // before pushing them back, the heap allocation would be freed
+        // and the assertion would fail (or trip the leak detector under
+        // miri / ASan).
+        let result = run_typed_return(
+            OpCode::ReturnValuePtr,
+            Constant::String("e3-return-ptr".to_string()),
+        );
+        let hv = result
+            .as_heap_ref()
+            .expect("ReturnValuePtr should preserve the heap-tagged value");
+        match hv {
+            HeapValue::String(s) => assert_eq!(s.as_str(), "e3-return-ptr"),
+            other => panic!("Expected HeapValue::String, got {}", other.type_name()),
+        }
+    }
+}
