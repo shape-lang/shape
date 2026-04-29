@@ -348,9 +348,31 @@ impl BytecodeCompiler {
                 .get(name.as_str())
                 .map(|schema| (schema.id, name.to_string())),
             shape_ast::ast::TypeAnnotation::Object(fields) => {
-                let field_refs: Vec<&str> =
-                    fields.iter().map(|field| field.name.as_str()).collect();
-                let schema_id = self.type_tracker.register_inline_object_schema(&field_refs);
+                // Register the inline schema with typed field info so downstream
+                // RowView field accesses (`row.open`) can resolve column type
+                // and emit typed LoadCol* opcodes / numeric-type hints.
+                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
+                    .iter()
+                    .map(|field| {
+                        let ft = BytecodeCompiler::type_annotation_to_field_type(
+                            &field.type_annotation,
+                        );
+                        (field.name.as_str(), ft)
+                    })
+                    .collect();
+                let schema_id = self
+                    .type_tracker
+                    .register_inline_object_schema_typed(&typed_fields);
+                // Also register field contracts so downstream callable-field
+                // unwrapping (e.g. nested `() => Table<{...}>` returns) and
+                // any contract-based field lookups see the annotated types.
+                let mut contracts =
+                    std::collections::HashMap::with_capacity(fields.len());
+                for field in fields {
+                    contracts.insert(field.name.clone(), field.type_annotation.clone());
+                }
+                self.type_tracker
+                    .register_object_field_contracts(schema_id, contracts);
                 let schema_name = self
                     .type_tracker
                     .schema_registry()
