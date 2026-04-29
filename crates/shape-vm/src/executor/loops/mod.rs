@@ -107,7 +107,7 @@ impl VirtualMachine {
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
         {
             let done = idx < 0 || idx as u32 >= view.len;
-            self.push_raw_bool(done)?;
+            self.push_tagged_bool(done)?;
             return Ok(());
         }
         // Handle unified arrays (bit-47 tagged) for iteration.
@@ -119,7 +119,7 @@ impl VirtualMachine {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
                 };
                 let done = idx < 0 || idx as usize >= arr.len();
-                self.push_raw_bool(done)?;
+                self.push_tagged_bool(done)?;
                 return Ok(());
             }
         }
@@ -171,7 +171,7 @@ impl VirtualMachine {
                 });
             }
         };
-        self.push_raw_bool(done)?;
+        self.push_tagged_bool(done)?;
         Ok(())
     }
 

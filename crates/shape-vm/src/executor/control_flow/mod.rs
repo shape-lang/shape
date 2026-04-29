@@ -99,7 +99,7 @@ impl VirtualMachine {
     /// JumpIfFalse — trusted variant.
     ///
     /// The compiler has proved the condition is a boolean value.
-    /// Uses raw `pop_raw_bool` to skip ValueWord materialization entirely.
+    /// Uses raw `pop_tagged_bool` to skip ValueWord materialization entirely.
     #[inline(always)]
     pub(in crate::executor) fn op_jump_if_false_trusted(
         &mut self,
@@ -110,7 +110,7 @@ impl VirtualMachine {
                 self.stack_top_is_bool(),
                 "Trusted JumpIfFalse invariant violated"
             );
-            let cond = self.pop_raw_bool()?;
+            let cond = self.pop_tagged_bool()?;
             if !cond {
                 self.ip = (self.ip as i32 + offset) as usize;
             }

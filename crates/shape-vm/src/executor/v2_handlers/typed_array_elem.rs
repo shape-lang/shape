@@ -96,7 +96,7 @@ impl VirtualMachine {
 
     fn op_get_elem_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let index = self.pop_raw_i64()?;
+        let index = self.pop_tagged_i64()?;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -164,7 +164,7 @@ impl VirtualMachine {
 
     fn op_get_elem_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let index = self.pop_raw_i64()?;
+        let index = self.pop_tagged_i64()?;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -233,7 +233,7 @@ impl VirtualMachine {
     fn op_set_elem_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
         let value_bits = self.pop_raw_u64()?;
-        let index = self.pop_raw_i64()?;
+        let index = self.pop_tagged_i64()?;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -313,7 +313,7 @@ impl VirtualMachine {
     fn op_set_elem_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
         let value_bits = self.pop_raw_u64()?;
-        let index = self.pop_raw_i64()?;
+        let index = self.pop_tagged_i64()?;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,

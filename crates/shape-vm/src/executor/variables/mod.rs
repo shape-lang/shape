@@ -1102,7 +1102,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Push the bool as a 0/1
         // u64 — matches D.2's typed-bool convention; Wave E will rewire to
-        // `push_raw_bool` once typed-bool stack helpers are unified.
+        // `push_tagged_bool` once typed-bool stack helpers are unified.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_bool(cell_ptr) };
         self.push_raw_u64(value as u64)
     }
@@ -1685,7 +1685,7 @@ impl VirtualMachine {
         // store the resulting bool on the stack as a 0 or 1 in the
         // 8-byte slot via `push_raw_u64` to keep the slot's bit pattern
         // unambiguously typed for the typed-Bool reader (Wave E /
-        // future JIT lowering will rewire to `push_raw_bool` once
+        // future JIT lowering will rewire to `push_tagged_bool` once
         // typed-bool stack helpers are unified).
         let value = unsafe { shape_value::v2::closure_raw::read_shared_bool(cell_ptr) };
         self.push_raw_u64(value as u64)
@@ -2469,12 +2469,12 @@ impl VirtualMachine {
                     if is_tagged(bits) && get_tag(bits) == TAG_INT =>
                 {
                     // Slot holds i48-tagged bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_raw_i64 can decode.
+                    // the encoding so downstream pop_tagged_i64 can decode.
                     return self.push_raw_u64(bits);
                 }
                 SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
                     // Slot holds TAG_BOOL bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_raw_bool can decode.
+                    // the encoding so downstream pop_tagged_bool can decode.
                     return self.push_raw_u64(bits);
                 }
                 _ => {
@@ -2560,7 +2560,7 @@ impl VirtualMachine {
                     if is_tagged(bits) && get_tag(bits) == TAG_INT =>
                 {
                     // Slot holds i48-tagged bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_raw_i64 can decode.
+                    // the encoding so downstream pop_tagged_i64 can decode.
                     return self.push_raw_u64(bits);
                 }
                 SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {

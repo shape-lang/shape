@@ -515,7 +515,7 @@ impl VirtualMachine {
         let value = self.pop_raw_u64()?;
         let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_i64(i)
+        self.push_tagged_i64(i)
     }
 
     /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
@@ -544,7 +544,7 @@ impl VirtualMachine {
         let value = self.pop_raw_u64()?;
         let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_bool(b)
+        self.push_tagged_bool(b)
     }
 
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.

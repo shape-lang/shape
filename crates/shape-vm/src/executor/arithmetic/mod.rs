@@ -230,10 +230,10 @@ impl VirtualMachine {
             AddInt => {
                 if self.stack_top_both_i48() {
                     // Fast path: both operands are inline i48
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                     }
                 } else {
@@ -249,7 +249,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                     }
                 }
@@ -283,10 +283,10 @@ impl VirtualMachine {
             // ===== Typed Sub (raw typed stack API with fallback) =====
             SubInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 } else {
@@ -301,7 +301,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 }
@@ -335,10 +335,10 @@ impl VirtualMachine {
             // ===== Typed Mul (raw typed stack API with fallback) =====
             MulInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 } else {
@@ -353,7 +353,7 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        Some(result) if fits_i48(result) => self.push_tagged_i64(result)?,
                         _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 }
@@ -387,12 +387,12 @@ impl VirtualMachine {
             // ===== Typed Div (raw typed stack API, with zero-check) =====
             DivInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
                     if bi == 0 {
                         return Err(VMError::DivisionByZero);
                     }
-                    self.push_raw_i64(ai / bi)?;
+                    self.push_tagged_i64(ai / bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
@@ -407,7 +407,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_raw_i64(ai / bi)?;
+                    self.push_tagged_i64(ai / bi)?;
                 }
             }
             DivNumber => {
@@ -449,12 +449,12 @@ impl VirtualMachine {
             // ===== Typed Mod (raw typed stack API, with zero-check) =====
             ModInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
                     if bi == 0 {
                         return Err(VMError::DivisionByZero);
                     }
-                    self.push_raw_i64(ai % bi)?;
+                    self.push_tagged_i64(ai % bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
@@ -469,7 +469,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_raw_i64(ai % bi)?;
+                    self.push_tagged_i64(ai % bi)?;
                 }
             }
             ModNumber => {
@@ -511,12 +511,12 @@ impl VirtualMachine {
             // ===== Typed Pow (raw typed stack API with fallback) =====
             PowInt => {
                 if self.stack_top_both_i48() {
-                    let exp = self.pop_raw_i64()?;
-                    let base = self.pop_raw_i64()?;
+                    let exp = self.pop_tagged_i64()?;
+                    let base = self.pop_tagged_i64()?;
                     if exp >= 0 && exp < u32::MAX as i64 {
                         let result = base.pow(exp as u32);
                         if fits_i48(result) {
-                            self.push_raw_i64(result)?;
+                            self.push_tagged_i64(result)?;
                         } else {
                             self.push_raw_f64(result as f64)?;
                         }
@@ -537,7 +537,7 @@ impl VirtualMachine {
                     if exp >= 0 && exp < u32::MAX as i64 {
                         let result = base.pow(exp as u32);
                         if fits_i48(result) {
-                            self.push_raw_i64(result)?;
+                            self.push_tagged_i64(result)?;
                         } else {
                             self.push_raw_f64(result as f64)?;
                         }
@@ -583,7 +583,7 @@ impl VirtualMachine {
             // ===== Numeric Coercion (raw typed stack API with fallback) =====
             IntToNumber => {
                 if self.stack_top_is_i48() {
-                    let v = self.pop_raw_i64()?;
+                    let v = self.pop_tagged_i64()?;
                     self.push_raw_f64(v as f64)?;
                 } else {
                     let val = self.pop_raw_u64()?;
@@ -593,16 +593,16 @@ impl VirtualMachine {
             NumberToInt => {
                 if self.stack_top_is_f64() {
                     let v = self.pop_raw_f64()?;
-                    self.push_raw_i64(v as i64)?;
+                    self.push_tagged_i64(v as i64)?;
                 } else {
                     let val = self.pop_raw_u64()?;
-                    self.push_raw_i64(unsafe { val.as_f64_unchecked() } as i64)?;
+                    self.push_tagged_i64(unsafe { val.as_f64_unchecked() } as i64)?;
                 }
             }
             // Stage 4.2: typed negation moved here from exec_arithmetic
             NegInt => {
-                let val = self.pop_raw_i64()?;
-                self.push_raw_i64(-val)?;
+                let val = self.pop_tagged_i64()?;
+                self.push_tagged_i64(-val)?;
             }
             NegNumber => {
                 // Mirror `MulNumber`'s fast/slow split (BUG5): the fast path
@@ -647,33 +647,33 @@ impl VirtualMachine {
             // already shipped in Shape. Operands are raw i48-tagged int
             // slots per the v2 runtime spec; no tag checks, no coercion.
             BitAndInt => {
-                let b = self.pop_raw_i64()?;
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(a & b)?;
+                let b = self.pop_tagged_i64()?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(a & b)?;
             }
             BitOrInt => {
-                let b = self.pop_raw_i64()?;
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(a | b)?;
+                let b = self.pop_tagged_i64()?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(a | b)?;
             }
             BitXorInt => {
-                let b = self.pop_raw_i64()?;
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(a ^ b)?;
+                let b = self.pop_tagged_i64()?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(a ^ b)?;
             }
             BitShlInt => {
-                let b = self.pop_raw_i64()?;
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(a << b)?;
+                let b = self.pop_tagged_i64()?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(a << b)?;
             }
             BitShrInt => {
-                let b = self.pop_raw_i64()?;
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(a >> b)?;
+                let b = self.pop_tagged_i64()?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(a >> b)?;
             }
             BitNotInt => {
-                let a = self.pop_raw_i64()?;
-                self.push_raw_i64(!a)?;
+                let a = self.pop_tagged_i64()?;
+                self.push_tagged_i64(!a)?;
             }
             _ => unreachable!(
                 "exec_typed_arithmetic called with non-typed-arithmetic opcode: {:?}",
@@ -776,12 +776,12 @@ impl VirtualMachine {
         // For sub-i64 widths: wrapping arithmetic + truncation
         if let Some(int_w) = width.to_int_width() {
             let result = wrapping_op(ai, bi);
-            return self.push_raw_i64(int_w.truncate(result));
+            return self.push_tagged_i64(int_w.truncate(result));
         }
 
         // I64: checked with f64 fallback on overflow
         match checked(ai, bi) {
-            Some(result) => self.push_raw_i64(result),
+            Some(result) => self.push_tagged_i64(result),
             None => self.push_raw_f64(overflow_fallback(ai, bi)),
         }
     }
@@ -808,9 +808,9 @@ impl VirtualMachine {
         })?;
         let result = op(ai, bi);
         if let Some(int_w) = width.to_int_width() {
-            self.push_raw_i64(int_w.truncate(result))
+            self.push_tagged_i64(int_w.truncate(result))
         } else {
-            self.push_raw_i64(result)
+            self.push_tagged_i64(result)
         }
     }
 
@@ -863,7 +863,7 @@ impl VirtualMachine {
         } else {
             ai.cmp(&bi) as i64
         };
-        self.push_raw_i64(ord)
+        self.push_tagged_i64(ord)
     }
 
     #[inline(always)]
@@ -879,7 +879,7 @@ impl VirtualMachine {
             got: b.type_name(),
         })?;
         let ord = lhs.partial_cmp(&rhs).map_or(0i64, |o| o as i64);
-        self.push_raw_i64(ord)
+        self.push_tagged_i64(ord)
     }
 
     #[inline(always)]
@@ -972,10 +972,10 @@ impl VirtualMachine {
             nb.as_f64().map(|f| f as i64).unwrap_or(0)
         });
         if let Some(int_w) = width.to_int_width() {
-            self.push_raw_i64(int_w.truncate(raw))
+            self.push_tagged_i64(int_w.truncate(raw))
         } else {
             // I64 or float: no truncation
-            self.push_raw_i64(raw)
+            self.push_tagged_i64(raw)
         }
     }
 
@@ -1852,11 +1852,11 @@ mod tests {
     /// Helper: push two i64 values, execute a typed arithmetic instruction, pop the result.
     fn exec_typed_int_binop(a: i64, b: i64, opcode: OpCode) -> i64 {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(a).unwrap();
-        vm.push_raw_i64(b).unwrap();
+        vm.push_tagged_i64(a).unwrap();
+        vm.push_tagged_i64(b).unwrap();
         let instr = Instruction::simple(opcode);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        vm.pop_raw_i64().unwrap()
+        vm.pop_tagged_i64().unwrap()
     }
 
     /// Helper: push two f64 values, execute a typed arithmetic instruction, pop the result.
@@ -1872,15 +1872,15 @@ mod tests {
     #[test]
     fn test_raw_i64_roundtrip() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(42).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 42);
+        vm.push_tagged_i64(42).unwrap();
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 42);
     }
 
     #[test]
     fn test_raw_i64_negative_roundtrip() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(-123).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -123);
+        vm.push_tagged_i64(-123).unwrap();
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -123);
     }
 
     #[test]
@@ -1900,7 +1900,7 @@ mod tests {
     #[test]
     fn test_raw_stack_underflow_i64() {
         let mut vm = make_raw_vm();
-        assert!(vm.pop_raw_i64().is_err());
+        assert!(vm.pop_tagged_i64().is_err());
     }
 
     #[test]
@@ -1970,8 +1970,8 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_div_int_by_zero() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(10).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(10).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::DivInt);
         let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
         assert!(matches!(err, VMError::DivisionByZero));
@@ -1987,8 +1987,8 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_mod_int_by_zero() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(10).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(10).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::ModInt);
         let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
         assert!(matches!(err, VMError::DivisionByZero));
@@ -2079,7 +2079,7 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_int_to_number() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(42).unwrap();
+        vm.push_tagged_i64(42).unwrap();
         let instr = Instruction::simple(OpCode::IntToNumber);
         vm.exec_typed_arithmetic(&instr).unwrap();
         let result = vm.pop_raw_f64().unwrap();
@@ -2092,7 +2092,7 @@ mod tests {
         vm.push_raw_f64(7.9).unwrap();
         let instr = Instruction::simple(OpCode::NumberToInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        let result = vm.pop_raw_i64().unwrap();
+        let result = vm.pop_tagged_i64().unwrap();
         assert_eq!(result, 7);
     }
 
@@ -2101,7 +2101,7 @@ mod tests {
     #[test]
     fn test_raw_push_i64_pop_as_value_word() {
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(99).unwrap();
+        vm.push_tagged_i64(99).unwrap();
         let vw = vm.pop_raw_u64().unwrap();
         assert_eq!(vw.as_i64(), Some(99));
     }
@@ -2115,10 +2115,10 @@ mod tests {
     }
 
     #[test]
-    fn test_value_word_push_pop_raw_i64() {
+    fn test_value_word_push_pop_tagged_i64() {
         let mut vm = make_raw_vm();
         vm.push_raw_u64(ValueWord::from_i64(77)).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 77);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 77);
     }
 
     #[test]
@@ -2131,7 +2131,7 @@ mod tests {
     // ===== R5.1B: Typed bitwise opcodes via raw API =====
     //
     // These exercise the executor handlers added in R5.1B. Values stay
-    // inside i48 range so `pop_raw_i64` / `push_raw_i64` round-trip
+    // inside i48 range so `pop_tagged_i64` / `push_tagged_i64` round-trip
     // cleanly; the compiler will not emit these typed variants unless
     // both operands are proved to be `int` (i.e. i48-safe).
 
@@ -2208,27 +2208,27 @@ mod tests {
     fn test_typed_arithmetic_bit_not_int() {
         // !0 == -1, !(-1) == 0 (two's complement).
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -1);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -1);
 
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(-1).unwrap();
+        vm.push_tagged_i64(-1).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 0);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 0);
     }
 
     #[test]
     fn test_typed_arithmetic_bit_not_int_involution() {
         // !!x == x for any x.
         let mut vm = make_raw_vm();
-        vm.push_raw_i64(0x1234_5678).unwrap();
+        vm.push_tagged_i64(0x1234_5678).unwrap();
         let instr = Instruction::simple(OpCode::BitNotInt);
         vm.exec_typed_arithmetic(&instr).unwrap();
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 0x1234_5678);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 0x1234_5678);
     }
 
     // --- End-to-end through dispatch (BytecodeProgram -> vm.execute) ---

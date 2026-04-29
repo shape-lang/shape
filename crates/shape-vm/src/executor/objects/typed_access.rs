@@ -352,7 +352,7 @@ impl VirtualMachine {
 
     /// StringConcatInt: pop (string, i64 int), push `format!("{}{}", s, i)`.
     fn op_string_concat_int(&mut self) -> Result<(), VMError> {
-        let i = self.pop_raw_i64()?;
+        let i = self.pop_tagged_i64()?;
         let s_bits = self.pop_raw_u64()?;
         let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
             expected: "string",
@@ -389,7 +389,7 @@ impl VirtualMachine {
     /// for the divergence from the pre-R5.5 fallback (which produced
     /// garbage numeric tails for bool RHS).
     fn op_string_concat_bool(&mut self) -> Result<(), VMError> {
-        let b = self.pop_raw_bool()?;
+        let b = self.pop_tagged_bool()?;
         let s_bits = self.pop_raw_u64()?;
         let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
             expected: "string",

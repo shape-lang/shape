@@ -116,7 +116,7 @@ pub fn op_typed_array_free(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:f64]
 pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -135,7 +135,7 @@ pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -146,14 +146,14 @@ pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     let val = typed_array_get_i64(arr_ptr, index as u32);
-    vm.push_raw_i64(val)
+    vm.push_tagged_i64(val)
 }
 
 /// Handle TypedArrayGetI32: pop index (i64), pop array_ptr (u64), push i32 (as i64).
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -165,14 +165,14 @@ pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
     }
     let val = typed_array_get_i32(arr_ptr, index as u32);
     // i32 is widened to i64 on the stack
-    vm.push_raw_i64(val as i64)
+    vm.push_tagged_i64(val as i64)
 }
 
 /// Handle TypedArrayGetBool: pop index (i64), pop array_ptr (u64), push bool.
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:u64(0|1)]
 pub fn op_typed_array_get_bool(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -183,7 +183,7 @@ pub fn op_typed_array_get_bool(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     let val = typed_array_get_bool(arr_ptr, index as u32);
-    vm.push_raw_bool(val)
+    vm.push_tagged_bool(val)
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ pub fn op_typed_array_get_bool(vm: &mut VirtualMachine) -> Result<(), VMError> {
 /// Stack: [..., array_ptr:u64, index:i64, value:f64] -> [...]
 pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
     let val = vm.pop_raw_f64()?;
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -213,8 +213,8 @@ pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()?;
-    let index = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -232,8 +232,8 @@ pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()? as i32;
-    let index = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()? as i32;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -252,7 +252,7 @@ pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
 /// Stack: [..., array_ptr:u64, index:i64, value:u64(0|1)] -> [...]
 pub fn op_typed_array_set_bool(vm: &mut VirtualMachine) -> Result<(), VMError> {
     let val = vm.pop_raw_u64()? != 0;
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
@@ -288,7 +288,7 @@ pub fn op_typed_array_push_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let new_ptr = typed_array_push_i64(arr_ptr, val);
@@ -300,7 +300,7 @@ pub fn op_typed_array_push_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()? as i32;
+    let val = vm.pop_tagged_i64()? as i32;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let new_ptr = typed_array_push_i32(arr_ptr, val);
@@ -331,7 +331,7 @@ pub fn op_typed_array_len(vm: &mut VirtualMachine) -> Result<(), VMError> {
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = typed_array_len(arr_ptr);
-    vm.push_raw_i64(len as i64)
+    vm.push_tagged_i64(len as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +371,7 @@ mod tests {
         let mut vm = make_test_vm();
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 0);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 0);
     }
 
     // ---- Push + Get (f64) ----
@@ -399,34 +399,34 @@ mod tests {
         // Check length
         vm.push_raw_u64(arr_bits).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 3);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 3);
 
         // Get element 0
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
         assert_eq!(vm.pop_raw_f64().unwrap(), 1.5);
 
         // Get element 1
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
         assert_eq!(vm.pop_raw_f64().unwrap(), 2.7);
 
         // Get element 2
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(2).unwrap();
+        vm.push_tagged_i64(2).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
         assert_eq!(vm.pop_raw_f64().unwrap(), 3.14);
 
         // Out of bounds
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(3).unwrap();
+        vm.push_tagged_i64(3).unwrap();
         assert!(op_typed_array_get_f64(&mut vm).is_err());
 
         // Negative index
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(-1).unwrap();
+        vm.push_tagged_i64(-1).unwrap();
         assert!(op_typed_array_get_f64(&mut vm).is_err());
 
         // Free
@@ -441,13 +441,13 @@ mod tests {
 
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
 
-        vm.push_raw_i64(100).unwrap();
+        vm.push_tagged_i64(100).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        vm.push_raw_i64(-200).unwrap();
+        vm.push_tagged_i64(-200).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        vm.push_raw_i64(i64::MAX).unwrap();
+        vm.push_tagged_i64(i64::MAX).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
         let arr_bits = vm.pop_raw_u64().unwrap();
@@ -455,23 +455,23 @@ mod tests {
         // Len
         vm.push_raw_u64(arr_bits).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 3);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 3);
 
         // Get elements
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 100);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 100);
 
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -200);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -200);
 
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(2).unwrap();
+        vm.push_tagged_i64(2).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), i64::MAX);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), i64::MAX);
 
         typed_array_free(u64_to_ptr(arr_bits));
     }
@@ -484,10 +484,10 @@ mod tests {
 
         op_typed_array_alloc_i32(&mut vm, 4).unwrap();
 
-        vm.push_raw_i64(42).unwrap();
+        vm.push_tagged_i64(42).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
-        vm.push_raw_i64(-99).unwrap();
+        vm.push_tagged_i64(-99).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
         let arr_bits = vm.pop_raw_u64().unwrap();
@@ -495,18 +495,18 @@ mod tests {
         // Len
         vm.push_raw_u64(arr_bits).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 2);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 2);
 
         // Get elements (i32 widened to i64)
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 42);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 42);
 
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -99);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -99);
 
         typed_array_free(u64_to_ptr(arr_bits));
     }
@@ -529,24 +529,24 @@ mod tests {
 
         // Set index 0 to 42.0
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         vm.push_raw_f64(42.0).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
         // Set index 1 to -1.5
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         vm.push_raw_f64(-1.5).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
         // Verify
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
         assert_eq!(vm.pop_raw_f64().unwrap(), 42.0);
 
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
         assert_eq!(vm.pop_raw_f64().unwrap(), -1.5);
 
@@ -559,35 +559,35 @@ mod tests {
 
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
 
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
         let arr_bits = vm.pop_raw_u64().unwrap();
 
         // Set index 0
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
-        vm.push_raw_i64(999).unwrap();
+        vm.push_tagged_i64(0).unwrap();
+        vm.push_tagged_i64(999).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Set index 1
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
-        vm.push_raw_i64(-888).unwrap();
+        vm.push_tagged_i64(1).unwrap();
+        vm.push_tagged_i64(-888).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Verify
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 999);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 999);
 
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -888);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -888);
 
         typed_array_free(u64_to_ptr(arr_bits));
     }
@@ -598,22 +598,22 @@ mod tests {
 
         op_typed_array_alloc_i32(&mut vm, 4).unwrap();
 
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
         let arr_bits = vm.pop_raw_u64().unwrap();
 
         // Set index 0 to 777
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
-        vm.push_raw_i64(777).unwrap();
+        vm.push_tagged_i64(0).unwrap();
+        vm.push_tagged_i64(777).unwrap();
         op_typed_array_set_i32(&mut vm).unwrap();
 
         // Verify
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(0).unwrap();
+        vm.push_tagged_i64(0).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 777);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 777);
 
         typed_array_free(u64_to_ptr(arr_bits));
     }
@@ -650,12 +650,12 @@ mod tests {
 
         vm.push_raw_u64(arr_bits).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 5);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 5);
 
         // Verify all values survived realloc
         for i in 0..5 {
             vm.push_raw_u64(arr_bits).unwrap();
-            vm.push_raw_i64(i).unwrap();
+            vm.push_tagged_i64(i).unwrap();
             op_typed_array_get_f64(&mut vm).unwrap();
             let val = vm.pop_raw_f64().unwrap();
             let expected = i as f64 * 1.1;
@@ -686,7 +686,7 @@ mod tests {
 
         // Try to set index 1 (len is 1, so out of bounds)
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
+        vm.push_tagged_i64(1).unwrap();
         vm.push_raw_f64(99.0).unwrap();
         assert!(op_typed_array_set_f64(&mut vm).is_err());
 
@@ -714,11 +714,11 @@ mod tests {
         // Check len == 4
         vm.push_raw_u64(arr_bits).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), 4);
+        assert_eq!(vm.pop_tagged_i64().unwrap(), 4);
 
         // Modify index 2: 3.0 -> 30.0
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(2).unwrap();
+        vm.push_tagged_i64(2).unwrap();
         vm.push_raw_f64(30.0).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
@@ -726,7 +726,7 @@ mod tests {
         let expected = [1.0, 2.0, 30.0, 4.0];
         for (i, &exp) in expected.iter().enumerate() {
             vm.push_raw_u64(arr_bits).unwrap();
-            vm.push_raw_i64(i as i64).unwrap();
+            vm.push_tagged_i64(i as i64).unwrap();
             op_typed_array_get_f64(&mut vm).unwrap();
             let got = vm.pop_raw_f64().unwrap();
             assert_eq!(got, exp, "mismatch at index {}", i);
@@ -743,7 +743,7 @@ mod tests {
 
         let values: [i64; 4] = [10, 20, 30, 40];
         for &v in &values {
-            vm.push_raw_i64(v).unwrap();
+            vm.push_tagged_i64(v).unwrap();
             op_typed_array_push_i64(&mut vm).unwrap();
         }
 
@@ -751,17 +751,17 @@ mod tests {
 
         // Set index 1: 20 -> -200
         vm.push_raw_u64(arr_bits).unwrap();
-        vm.push_raw_i64(1).unwrap();
-        vm.push_raw_i64(-200).unwrap();
+        vm.push_tagged_i64(1).unwrap();
+        vm.push_tagged_i64(-200).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Verify
         let expected: [i64; 4] = [10, -200, 30, 40];
         for (i, &exp) in expected.iter().enumerate() {
             vm.push_raw_u64(arr_bits).unwrap();
-            vm.push_raw_i64(i as i64).unwrap();
+            vm.push_tagged_i64(i as i64).unwrap();
             op_typed_array_get_i64(&mut vm).unwrap();
-            assert_eq!(vm.pop_raw_i64().unwrap(), exp, "mismatch at i={}", i);
+            assert_eq!(vm.pop_tagged_i64().unwrap(), exp, "mismatch at i={}", i);
         }
 
         typed_array_free(u64_to_ptr(arr_bits));

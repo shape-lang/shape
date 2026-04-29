@@ -104,13 +104,13 @@ impl VirtualMachine {
             // (Decimal comparisons remain on the heap path.)
             GtInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai > bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai > bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() > b.as_i64_unchecked()
                     })?;
                 }
@@ -119,11 +119,11 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a > b)?;
+                    self.push_tagged_bool(a > b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() > b.as_f64_unchecked()
                     })?;
                 }
@@ -131,19 +131,19 @@ impl VirtualMachine {
             GtDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_raw_bool(unsafe {
+                self.push_tagged_bool(unsafe {
                     a.as_decimal_unchecked() > b.as_decimal_unchecked()
                 })?;
             }
             LtInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai < bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai < bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() < b.as_i64_unchecked()
                     })?;
                 }
@@ -152,11 +152,11 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a < b)?;
+                    self.push_tagged_bool(a < b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() < b.as_f64_unchecked()
                     })?;
                 }
@@ -164,19 +164,19 @@ impl VirtualMachine {
             LtDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_raw_bool(unsafe {
+                self.push_tagged_bool(unsafe {
                     a.as_decimal_unchecked() < b.as_decimal_unchecked()
                 })?;
             }
             GteInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai >= bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai >= bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() >= b.as_i64_unchecked()
                     })?;
                 }
@@ -185,11 +185,11 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a >= b)?;
+                    self.push_tagged_bool(a >= b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() >= b.as_f64_unchecked()
                     })?;
                 }
@@ -197,19 +197,19 @@ impl VirtualMachine {
             GteDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_raw_bool(unsafe {
+                self.push_tagged_bool(unsafe {
                     a.as_decimal_unchecked() >= b.as_decimal_unchecked()
                 })?;
             }
             LteInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai <= bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai <= bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() <= b.as_i64_unchecked()
                     })?;
                 }
@@ -218,11 +218,11 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a <= b)?;
+                    self.push_tagged_bool(a <= b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() <= b.as_f64_unchecked()
                     })?;
                 }
@@ -230,19 +230,19 @@ impl VirtualMachine {
             LteDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_raw_bool(unsafe {
+                self.push_tagged_bool(unsafe {
                     a.as_decimal_unchecked() <= b.as_decimal_unchecked()
                 })?;
             }
             EqInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai == bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai == bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() == b.as_i64_unchecked()
                     })?;
                 }
@@ -253,24 +253,24 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a == b)?;
+                    self.push_tagged_bool(a == b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() == b.as_f64_unchecked()
                     })?;
                 }
             }
             NeqInt => {
                 if self.stack_top_both_i48() {
-                    let bi = self.pop_raw_i64()?;
-                    let ai = self.pop_raw_i64()?;
-                    self.push_raw_bool(ai != bi)?;
+                    let bi = self.pop_tagged_i64()?;
+                    let ai = self.pop_tagged_i64()?;
+                    self.push_tagged_bool(ai != bi)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_i64_unchecked() != b.as_i64_unchecked()
                     })?;
                 }
@@ -280,11 +280,11 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_raw_bool(a != b)?;
+                    self.push_tagged_bool(a != b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_raw_bool(unsafe {
+                    self.push_tagged_bool(unsafe {
                         a.as_f64_unchecked() != b.as_f64_unchecked()
                     })?;
                 }
@@ -312,7 +312,7 @@ impl VirtualMachine {
                         _ => false,
                     },
                 };
-                self.push_raw_bool(eq)?;
+                self.push_tagged_bool(eq)?;
             }
             EqDecimal => {
                 let b = self.pop_raw_u64()?;
@@ -321,32 +321,32 @@ impl VirtualMachine {
                     (Some(ad), Some(bd)) => ad == bd,
                     _ => false,
                 };
-                self.push_raw_bool(eq)?;
+                self.push_tagged_bool(eq)?;
             }
             // Stage 4.2: typed ordered comparison for strings (lexicographic).
             GtString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") > b.as_str().unwrap_or("");
-                self.push_raw_bool(result)?;
+                self.push_tagged_bool(result)?;
             }
             LtString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") < b.as_str().unwrap_or("");
-                self.push_raw_bool(result)?;
+                self.push_tagged_bool(result)?;
             }
             GteString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") >= b.as_str().unwrap_or("");
-                self.push_raw_bool(result)?;
+                self.push_tagged_bool(result)?;
             }
             LteString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") <= b.as_str().unwrap_or("");
-                self.push_raw_bool(result)?;
+                self.push_tagged_bool(result)?;
             }
             // Stage 2.6.5.1: typed absence check. Pops one value, pushes a
             // bool that is true iff the value is the None or Unit sentinel.
@@ -364,7 +364,7 @@ impl VirtualMachine {
                 let is_absent = v.is_none() || v.is_unit();
                 // FR.3: real release (was no-op drop of Copy u64).
                 vw_drop(v);
-                self.push_raw_bool(is_absent)?;
+                self.push_tagged_bool(is_absent)?;
             }
             // NOTE: Trusted comparison variants removed — consolidated into
             // the typed variants above (GtInt, LtInt, etc.).
@@ -417,44 +417,44 @@ mod tests {
     #[test]
     fn typed_int_eq_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_raw_i64(42).unwrap();
-        vm.push_raw_i64(42).unwrap();
+        vm.push_tagged_i64(42).unwrap();
+        vm.push_tagged_i64(42).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
     }
 
     #[test]
     fn typed_int_neq_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_raw_i64(1).unwrap();
-        vm.push_raw_i64(2).unwrap();
+        vm.push_tagged_i64(1).unwrap();
+        vm.push_tagged_i64(2).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::NeqInt));
     }
 
     #[test]
     fn typed_int_lt_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_raw_i64(-5).unwrap();
-        vm.push_raw_i64(3).unwrap();
+        vm.push_tagged_i64(-5).unwrap();
+        vm.push_tagged_i64(3).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LtInt));
     }
 
     #[test]
     fn typed_int_gt_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_raw_i64(7).unwrap();
-        vm.push_raw_i64(3).unwrap();
+        vm.push_tagged_i64(7).unwrap();
+        vm.push_tagged_i64(3).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GtInt));
     }
 
     #[test]
     fn typed_int_gte_lte_boundary_equal() {
         let mut vm = make_vm();
-        vm.push_raw_i64(10).unwrap();
-        vm.push_raw_i64(10).unwrap();
+        vm.push_tagged_i64(10).unwrap();
+        vm.push_tagged_i64(10).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GteInt));
         let mut vm = make_vm();
-        vm.push_raw_i64(10).unwrap();
-        vm.push_raw_i64(10).unwrap();
+        vm.push_tagged_i64(10).unwrap();
+        vm.push_tagged_i64(10).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LteInt));
     }
 

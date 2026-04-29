@@ -346,22 +346,36 @@ impl VirtualMachine {
         }
     }
 
-    // --- Raw typed stack ops (zero NaN-box overhead) ---
+    // --- Stack helper naming convention (post-E+5.2) ---
     //
-    // These bypass ValueWord construction/destruction entirely.  The caller
-    // (typed opcodes) guarantees the value on the stack has the declared type,
-    // so we can reinterpret the raw u64 bits directly.
+    // - `push_raw_u64`/`pop_raw_u64`: untyped 8-byte transport, no semantic.
+    // - `push_raw_f64`/`pop_raw_f64`: plain f64 bits, no tagging.
+    // - `push_tagged_i64`/`pop_tagged_i64`: NaN-tagged i48 ValueWord. Use when
+    //   the consumer expects a tagged ValueWord (today's arithmetic +
+    //   comparison opcodes pre-E+5.3 / pre-E+5.4).
+    // - `push_tagged_bool`/`pop_tagged_bool`: NaN-tagged bool ValueWord.
+    // - `push_native_i64`/`pop_native_i64`: raw native i64 bits, no tagging.
+    //   Use when the consumer expects native bits (E+5.3+ typed arithmetic
+    //   after the flip).
+    // - `push_native_bool`/`pop_native_bool`: raw native 0/1 bits.
+    //
+    // The tagged_* helpers bypass ValueWord construction/destruction entirely
+    // by inlining the NaN-box encode/decode.  The caller (typed opcodes)
+    // guarantees the value on the stack has the declared type, so we can
+    // reinterpret the raw u64 bits directly.
 
-    /// Pop an i64 from the stack, assuming the top-of-stack is a NaN-boxed i48.
+    /// Pop an i64 from the stack, decoding a NaN-tagged i48 ValueWord.
     ///
     /// Reads the raw u64 bits, sign-extends the 48-bit payload to i64, and
     /// writes a None sentinel over the slot.  No ValueWord Clone/Drop overhead.
     ///
     /// # Safety contract
-    /// The compiler must have proven the value is `int` (i48 inline).
+    /// The compiler must have proven the value is `int` (i48 inline) and that
+    /// the consumer expects a tagged ValueWord (not raw native bits).  Use
+    /// `pop_native_i64` if the producer wrote raw native bits without tagging.
     /// If the value is not i48-tagged, the result is garbage (but memory-safe).
     #[inline(always)]
-    pub(crate) fn pop_raw_i64(&mut self) -> Result<i64, VMError> {
+    pub(crate) fn pop_tagged_i64(&mut self) -> Result<i64, VMError> {
         if self.sp == 0 {
             return Err(VMError::StackUnderflow);
         }
@@ -378,12 +392,14 @@ impl VirtualMachine {
         }
     }
 
-    /// Push an i64 as a NaN-boxed i48 value.
+    /// Push an i64 onto the stack as a NaN-tagged i48 ValueWord.
     ///
     /// Values must be in the i48 range [-2^47, 2^47-1].
-    /// Writes the raw tagged u64 directly into the stack slot.
+    /// Writes the raw tagged u64 directly into the stack slot.  Use
+    /// `push_native_i64` if you want truly raw native bits without tagging
+    /// (E+5.3+ typed arithmetic after the flip).
     #[inline(always)]
-    pub(crate) fn push_raw_i64(&mut self, value: i64) -> Result<(), VMError> {
+    pub(crate) fn push_tagged_i64(&mut self, value: i64) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
             // Cold path: grow via push_raw_u64_slow
             return self.push_raw_u64(ValueWord::from_i64(value));
@@ -462,15 +478,17 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Pop a bool from the stack, assuming the top-of-stack is a NaN-boxed bool.
+    /// Pop a bool from the stack, decoding a NaN-tagged bool ValueWord.
     ///
     /// Reads the raw u64 bits and decodes the bool payload.  No ValueWord overhead.
     ///
     /// # Safety contract
-    /// The compiler must have proven the value is `bool`.
+    /// The compiler must have proven the value is `bool` and that the consumer
+    /// expects a tagged ValueWord (not raw native bits).  Use `pop_native_bool`
+    /// if the producer wrote raw native bits without tagging.
     /// If the value is not bool-tagged, the result is garbage (but memory-safe).
     #[inline(always)]
-    pub(crate) fn pop_raw_bool(&mut self) -> Result<bool, VMError> {
+    pub(crate) fn pop_tagged_bool(&mut self) -> Result<bool, VMError> {
         if self.sp == 0 {
             return Err(VMError::StackUnderflow);
         }
@@ -485,12 +503,13 @@ impl VirtualMachine {
         }
     }
 
-    /// Push a bool directly onto the stack as a NaN-boxed bool tag.
+    /// Push a bool onto the stack as a NaN-tagged bool ValueWord.
     ///
     /// Writes the raw tagged u64 directly into the stack slot — no ValueWord
-    /// construction/Drop overhead.
+    /// construction/Drop overhead.  Use `push_native_bool` if you want raw
+    /// native 0/1 bits without tagging (E+5.4+ typed comparisons after the flip).
     #[inline(always)]
-    pub(crate) fn push_raw_bool(&mut self, value: bool) -> Result<(), VMError> {
+    pub(crate) fn push_tagged_bool(&mut self, value: bool) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
             // Cold path: grow via push_raw_u64_slow
             return self.push_raw_u64(ValueWord::from_bool(value));
@@ -566,18 +585,18 @@ mod raw_stack_tests {
     #[test]
     fn raw_bool_round_trip_true() {
         let mut vm = make_vm();
-        vm.push_raw_bool(true).unwrap();
+        vm.push_tagged_bool(true).unwrap();
         assert!(vm.stack_top_is_bool());
-        let v = vm.pop_raw_bool().unwrap();
+        let v = vm.pop_tagged_bool().unwrap();
         assert_eq!(v, true);
     }
 
     #[test]
     fn raw_bool_round_trip_false() {
         let mut vm = make_vm();
-        vm.push_raw_bool(false).unwrap();
+        vm.push_tagged_bool(false).unwrap();
         assert!(vm.stack_top_is_bool());
-        let v = vm.pop_raw_bool().unwrap();
+        let v = vm.pop_tagged_bool().unwrap();
         assert_eq!(v, false);
     }
 
@@ -585,7 +604,7 @@ mod raw_stack_tests {
     fn raw_bool_compatible_with_vw_pop() {
         // pop_vw on a raw_bool slot must materialize a bool ValueWord
         let mut vm = make_vm();
-        vm.push_raw_bool(true).unwrap();
+        vm.push_tagged_bool(true).unwrap();
         let vw = vm.pop_raw_u64().unwrap();
         assert!(vw.is_bool());
         assert_eq!(unsafe { vw.as_bool_unchecked() }, true);
@@ -593,11 +612,11 @@ mod raw_stack_tests {
 
     #[test]
     fn vw_bool_compatible_with_raw_pop() {
-        // push_vw of a bool followed by pop_raw_bool must yield same value
+        // push_vw of a bool followed by pop_tagged_bool must yield same value
         let mut vm = make_vm();
         vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
         assert!(vm.stack_top_is_bool());
-        assert_eq!(vm.pop_raw_bool().unwrap(), true);
+        assert_eq!(vm.pop_tagged_bool().unwrap(), true);
     }
 
     // ----- f64 round-trip including NaN -----
@@ -636,23 +655,23 @@ mod raw_stack_tests {
     fn raw_i64_round_trip_max_i48() {
         const I48_MAX: i64 = (1i64 << 47) - 1;
         let mut vm = make_vm();
-        vm.push_raw_i64(I48_MAX).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), I48_MAX);
+        vm.push_tagged_i64(I48_MAX).unwrap();
+        assert_eq!(vm.pop_tagged_i64().unwrap(), I48_MAX);
     }
 
     #[test]
     fn raw_i64_round_trip_min_i48() {
         const I48_MIN: i64 = -(1i64 << 47);
         let mut vm = make_vm();
-        vm.push_raw_i64(I48_MIN).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), I48_MIN);
+        vm.push_tagged_i64(I48_MIN).unwrap();
+        assert_eq!(vm.pop_tagged_i64().unwrap(), I48_MIN);
     }
 
     #[test]
     fn raw_i64_round_trip_negative() {
         let mut vm = make_vm();
-        vm.push_raw_i64(-12345).unwrap();
-        assert_eq!(vm.pop_raw_i64().unwrap(), -12345);
+        vm.push_tagged_i64(-12345).unwrap();
+        assert_eq!(vm.pop_tagged_i64().unwrap(), -12345);
     }
 
     // ----- Underflow -----
@@ -660,8 +679,8 @@ mod raw_stack_tests {
     #[test]
     fn raw_pop_underflows() {
         let mut vm = make_vm();
-        assert!(vm.pop_raw_bool().is_err());
-        assert!(vm.pop_raw_i64().is_err());
+        assert!(vm.pop_tagged_bool().is_err());
+        assert!(vm.pop_tagged_i64().is_err());
         assert!(vm.pop_raw_f64().is_err());
         assert!(vm.pop_raw_u64().is_err());
     }

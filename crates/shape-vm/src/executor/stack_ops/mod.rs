@@ -226,7 +226,7 @@ impl VirtualMachine {
                     // In-range i48: push raw tagged bits. Out-of-range falls
                     // back to ValueWord::from_i64 which heap-boxes as BigInt.
                     if *i >= shape_value::tag_bits::I48_MIN && *i <= shape_value::tag_bits::I48_MAX {
-                        return self.push_raw_i64(*i);
+                        return self.push_tagged_i64(*i);
                     }
                     return self.push_raw_u64(ValueWord::from_i64(*i));
                 }
@@ -234,7 +234,7 @@ impl VirtualMachine {
                     // In-range i48 (u <= I48_MAX): push raw tagged bits.
                     // Otherwise fall back to ValueWord constructors.
                     if *u <= shape_value::tag_bits::I48_MAX as u64 {
-                        return self.push_raw_i64(*u as i64);
+                        return self.push_tagged_i64(*u as i64);
                     }
                     return if *u <= i64::MAX as u64 {
                         self.push_raw_u64(ValueWord::from_i64(*u as i64))
@@ -243,7 +243,7 @@ impl VirtualMachine {
                     };
                 }
                 crate::bytecode::Constant::Bool(b) => {
-                    return self.push_raw_bool(*b);
+                    return self.push_tagged_bool(*b);
                 }
                 crate::bytecode::Constant::Null => return self.push_raw_u64(ValueWord::none()),
                 crate::bytecode::Constant::Unit => return self.push_raw_u64(ValueWord::unit()),

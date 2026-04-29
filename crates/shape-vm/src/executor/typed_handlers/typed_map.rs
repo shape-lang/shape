@@ -101,7 +101,7 @@ impl VirtualMachine {
                         None
                     };
                     match result {
-                        Some(v) => self.push_raw_i64(v)?,
+                        Some(v) => self.push_tagged_i64(v)?,
                         None => self.push_raw_u64(Self::NONE_BITS)?,
                     }
                     Ok(())
@@ -125,7 +125,7 @@ impl VirtualMachine {
 
                 // ── i64-keyed Get ───────────────────────────────────────
                 OpCode::TypedMapI64F64Get => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64F64;
                     match unsafe { TypedMapI64F64::get_i64(map, key) } {
                         Some(v) => self.push_raw_f64(v)?,
@@ -134,16 +134,16 @@ impl VirtualMachine {
                     Ok(())
                 }
                 OpCode::TypedMapI64I64Get => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64I64;
                     match unsafe { TypedMapI64I64::get_i64(map, key) } {
-                        Some(v) => self.push_raw_i64(v)?,
+                        Some(v) => self.push_tagged_i64(v)?,
                         None => self.push_raw_u64(Self::NONE_BITS)?,
                     }
                     Ok(())
                 }
                 OpCode::TypedMapI64PtrGet => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64Ptr;
                     match unsafe { TypedMapI64Ptr::get_i64(map, key) } {
                         Some(p) => self.push_raw_u64(p as u64)?,
@@ -166,7 +166,7 @@ impl VirtualMachine {
                     Ok(())
                 }
                 OpCode::TypedMapStringI64Set => {
-                    let val = self.pop_raw_i64()?;
+                    let val = self.pop_tagged_i64()?;
                     let key_vw = self.pop_raw_u64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapStringI64;
                     if let Some(key_str) = key_vw.as_str() {
@@ -193,7 +193,7 @@ impl VirtualMachine {
                 // ── i64-keyed Set ───────────────────────────────────────
                 OpCode::TypedMapI64F64Set => {
                     let val = self.pop_raw_f64()?;
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64F64;
                     unsafe {
                         let _ = TypedMapI64F64::insert_i64(map, key, val);
@@ -201,8 +201,8 @@ impl VirtualMachine {
                     Ok(())
                 }
                 OpCode::TypedMapI64I64Set => {
-                    let val = self.pop_raw_i64()?;
-                    let key = self.pop_raw_i64()?;
+                    let val = self.pop_tagged_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64I64;
                     unsafe {
                         let _ = TypedMapI64I64::insert_i64(map, key, val);
@@ -211,7 +211,7 @@ impl VirtualMachine {
                 }
                 OpCode::TypedMapI64PtrSet => {
                     let val = self.pop_raw_u64()? as *const u8;
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64Ptr;
                     unsafe {
                         let _ = TypedMapI64Ptr::insert_i64(map, key, val);
@@ -230,7 +230,7 @@ impl VirtualMachine {
                     } else {
                         false
                     };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
                 OpCode::TypedMapStringI64Has => {
@@ -243,7 +243,7 @@ impl VirtualMachine {
                     } else {
                         false
                     };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
                 OpCode::TypedMapStringPtrHas => {
@@ -256,30 +256,30 @@ impl VirtualMachine {
                     } else {
                         false
                     };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
 
                 // ── i64-keyed Has ───────────────────────────────────────
                 OpCode::TypedMapI64F64Has => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64F64;
                     let present = unsafe { TypedMapI64F64::contains_key_i64(map, key) };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
                 OpCode::TypedMapI64I64Has => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64I64;
                     let present = unsafe { TypedMapI64I64::contains_key_i64(map, key) };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
                 OpCode::TypedMapI64PtrHas => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *const TypedMapI64Ptr;
                     let present = unsafe { TypedMapI64Ptr::contains_key_i64(map, key) };
-                    self.push_raw_bool(present)?;
+                    self.push_tagged_bool(present)?;
                     Ok(())
                 }
 
@@ -320,7 +320,7 @@ impl VirtualMachine {
 
                 // ── i64-keyed Delete ───────────────────────────────────
                 OpCode::TypedMapI64F64Delete => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64F64;
                     unsafe {
                         let _ = TypedMapI64F64::remove_i64(map, key);
@@ -328,7 +328,7 @@ impl VirtualMachine {
                     Ok(())
                 }
                 OpCode::TypedMapI64I64Delete => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64I64;
                     unsafe {
                         let _ = TypedMapI64I64::remove_i64(map, key);
@@ -336,7 +336,7 @@ impl VirtualMachine {
                     Ok(())
                 }
                 OpCode::TypedMapI64PtrDelete => {
-                    let key = self.pop_raw_i64()?;
+                    let key = self.pop_tagged_i64()?;
                     let map = self.pop_raw_u64()? as *mut TypedMapI64Ptr;
                     unsafe {
                         let _ = TypedMapI64Ptr::remove_i64(map, key);

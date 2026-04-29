@@ -83,7 +83,7 @@ impl VirtualMachine {
             // ── Element access (get) ────────────────────────────────
 
             OpCode::TypedArrayGetF64 => {
-                let index = self.pop_raw_i64()? as u32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<f64>;
                 let len = unsafe { TypedArray::len(arr) };
@@ -99,7 +99,7 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayGetI64 => {
-                let index = self.pop_raw_i64()? as u32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<i64>;
                 let len = unsafe { TypedArray::len(arr) };
@@ -110,12 +110,12 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                self.push_raw_i64(val)?;
+                self.push_tagged_i64(val)?;
                 Ok(())
             }
 
             OpCode::TypedArrayGetI32 => {
-                let index = self.pop_raw_i64()? as u32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<i32>;
                 let len = unsafe { TypedArray::len(arr) };
@@ -127,12 +127,12 @@ impl VirtualMachine {
                         })?
                 };
                 // Store i32 sign-extended as raw i64.
-                self.push_raw_i64(val as i64)?;
+                self.push_tagged_i64(val as i64)?;
                 Ok(())
             }
 
             OpCode::TypedArrayGetBool => {
-                let index = self.pop_raw_i64()? as u32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<u8>;
                 let len = unsafe { TypedArray::len(arr) };
@@ -143,7 +143,7 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                self.push_raw_bool(val != 0)?;
+                self.push_tagged_bool(val != 0)?;
                 Ok(())
             }
 
@@ -151,7 +151,7 @@ impl VirtualMachine {
 
             OpCode::TypedArraySetF64 => {
                 let val = self.pop_raw_f64()?;
-                let index = self.pop_raw_i64()? as u32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<f64>;
                 unsafe {
@@ -161,8 +161,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetI64 => {
-                let val = self.pop_raw_i64()?;
-                let index = self.pop_raw_i64()? as u32;
+                let val = self.pop_tagged_i64()?;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
                 unsafe {
@@ -172,8 +172,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetI32 => {
-                let val = self.pop_raw_i64()? as i32;
-                let index = self.pop_raw_i64()? as u32;
+                let val = self.pop_tagged_i64()? as i32;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
                 unsafe {
@@ -183,8 +183,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetBool => {
-                let val = self.pop_raw_bool()?;
-                let index = self.pop_raw_i64()? as u32;
+                let val = self.pop_tagged_bool()?;
+                let index = self.pop_tagged_i64()? as u32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
                 unsafe {
@@ -206,7 +206,7 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushI64 => {
-                let val = self.pop_raw_i64()?;
+                let val = self.pop_tagged_i64()?;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
                 unsafe {
@@ -216,7 +216,7 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushI32 => {
-                let val = self.pop_raw_i64()? as i32;
+                let val = self.pop_tagged_i64()? as i32;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
                 unsafe {
@@ -226,7 +226,7 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushBool => {
-                let val = self.pop_raw_bool()?;
+                let val = self.pop_tagged_bool()?;
                 let arr_vw = self.pop_raw_u64()?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
                 unsafe {
@@ -242,7 +242,7 @@ impl VirtualMachine {
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<u8>;
                 // len field is at a fixed offset regardless of T — safe to read via any T.
                 let len = unsafe { TypedArray::len(arr) };
-                self.push_raw_i64(len as i64)?;
+                self.push_tagged_i64(len as i64)?;
                 Ok(())
             }
 

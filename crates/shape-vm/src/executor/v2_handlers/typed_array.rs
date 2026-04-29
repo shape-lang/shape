@@ -115,7 +115,7 @@ pub fn op_typed_array_free(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:f64]
 pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -134,7 +134,7 @@ pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -145,14 +145,14 @@ pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     let val = unsafe { typed_array_get_i64(arr_ptr, index as u32) };
-    vm.push_raw_i64(val)
+    vm.push_tagged_i64(val)
 }
 
 /// Handle TypedArrayGetI32: pop index (i64), pop array_ptr (u64), push i32 (as i64).
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -164,7 +164,7 @@ pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
     }
     let val = unsafe { typed_array_get_i32(arr_ptr, index as u32) };
     // i32 is widened to i64 on the stack
-    vm.push_raw_i64(val as i64)
+    vm.push_tagged_i64(val as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
 /// Stack: [..., array_ptr:u64, index:i64, value:f64] -> [...]
 pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
     let val = vm.pop_raw_f64()?;
-    let index = vm.pop_raw_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -194,8 +194,8 @@ pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()?;
-    let index = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()?;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -213,8 +213,8 @@ pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()? as i32;
-    let index = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()? as i32;
+    let index = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
@@ -250,7 +250,7 @@ pub fn op_typed_array_push_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()?;
+    let val = vm.pop_tagged_i64()?;
     let arr_bits = vm.pop_raw_u64()?;
     let mut arr_ptr = u64_to_ptr(arr_bits);
     unsafe { typed_array_push_i64(&mut arr_ptr, val) };
@@ -262,7 +262,7 @@ pub fn op_typed_array_push_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val = vm.pop_raw_i64()? as i32;
+    let val = vm.pop_tagged_i64()? as i32;
     let arr_bits = vm.pop_raw_u64()?;
     let mut arr_ptr = u64_to_ptr(arr_bits);
     unsafe { typed_array_push_i32(&mut arr_ptr, val) };
@@ -281,7 +281,7 @@ pub fn op_typed_array_len(vm: &mut VirtualMachine) -> Result<(), VMError> {
     let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
-    vm.push_raw_i64(len as i64)
+    vm.push_tagged_i64(len as i64)
 }
 
 // ---------------------------------------------------------------------------

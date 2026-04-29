@@ -28,7 +28,7 @@ impl VirtualMachine {
                 let struct_bits = self.pop_raw_u64()?;
                 let struct_ptr = struct_bits as *const u8;
                 let val: i64 = unsafe { *(struct_ptr.add(offset) as *const i64) };
-                self.push_raw_i64(val)
+                self.push_tagged_i64(val)
             }
             OpCode::FieldLoadI32 => {
                 let offset = instruction.operand_field_offset() as usize;
@@ -36,14 +36,14 @@ impl VirtualMachine {
                 let struct_ptr = struct_bits as *const u8;
                 let val: i32 = unsafe { *(struct_ptr.add(offset) as *const i32) };
                 // Widen to i64 for the NaN-boxed stack
-                self.push_raw_i64(val as i64)
+                self.push_tagged_i64(val as i64)
             }
             OpCode::FieldLoadBool => {
                 let offset = instruction.operand_field_offset() as usize;
                 let struct_bits = self.pop_raw_u64()?;
                 let struct_ptr = struct_bits as *const u8;
                 let val: u8 = unsafe { *struct_ptr.add(offset) };
-                self.push_raw_bool(val != 0)
+                self.push_tagged_bool(val != 0)
             }
             OpCode::FieldLoadPtr => {
                 let offset = instruction.operand_field_offset() as usize;
@@ -65,7 +65,7 @@ impl VirtualMachine {
             }
             OpCode::FieldStoreI64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let i = self.pop_raw_i64()?;
+                let i = self.pop_tagged_i64()?;
                 let struct_bits = self.pop_raw_u64()?;
                 let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i64) = i };
@@ -73,7 +73,7 @@ impl VirtualMachine {
             }
             OpCode::FieldStoreI32 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let i = self.pop_raw_i64()? as i32;
+                let i = self.pop_tagged_i64()? as i32;
                 let struct_bits = self.pop_raw_u64()?;
                 let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i32) = i };

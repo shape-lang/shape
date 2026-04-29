@@ -35,7 +35,7 @@ impl VirtualMachine {
                 // always in-bounds for any valid typed enum object.
                 let tag: u8 = unsafe { *enum_ptr.add(ENUM_TAG_OFFSET) };
                 // Push as i64 (sign-extended through u8 → i64).
-                self.push_raw_i64(tag as i64)
+                self.push_tagged_i64(tag as i64)
             }
             OpCode::EnumPayloadField => {
                 // Operand encodes the byte offset within the payload area.
