@@ -1500,4 +1500,22 @@ mod tests {
         );
         assert_eq!(result.as_i64(), Some(60));
     }
+
+    // ── E+5.4: typed-loop termination after native bool flip ────────
+    //
+    // PLANNED: end-to-end loop-termination tests for `let mut i: int = 0;
+    // while i < 5 { i = i + 1 }; i`. These are deferred to a follow-up wave
+    // because the loop class is gated on producer-side coordination that
+    // E+5.4 alone doesn't supply: range-counter loops use the generic
+    // `LoadLocal` + `PushConst` opcode pair which still pushes NaN-tagged
+    // i48 bits, while the post-E+5.3 `AddInt` fast path and the new E+5.4
+    // `LtInt` consumer both decode their inputs as native i64 — so the
+    // tagged producer / native consumer mismatch in AddInt produces a
+    // negative-going counter that doesn't fit i48, falls through to f64
+    // promotion, and the loop never terminates. Fixing this requires
+    // either (a) flipping `LoadLocal`/`PushConst` Int paths to native i64
+    // production, or (b) reverting the AddInt + LtInt fast paths to read
+    // tagged bits via `pop_tagged_i64`. The decision is part of the wider
+    // E+5.5 coordinator workstream — see vm-comparison-flip's report to
+    // phase-3c-coordinator.
 }

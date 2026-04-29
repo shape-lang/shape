@@ -626,4 +626,49 @@ mod tests {
         vm.push_raw_u64(ValueWord::from_bool(false)).unwrap();
         assert!(!run_is_null(&mut vm));
     }
+
+    // ----- E+5.4 verification: native bool output, native i64 Int input -----
+
+    /// GtInt of two native i64 inputs writes raw 0u64/1u64 to the stack — no
+    /// NaN-tag bits set. Verifies the new producer contract end-to-end.
+    #[test]
+    fn e5_4_gt_int_writes_native_bool_bits() {
+        let mut vm = make_vm();
+        vm.push_native_i64(7).unwrap();
+        vm.push_native_i64(3).unwrap();
+        let instr = Instruction { opcode: OpCode::GtInt, operand: None };
+        vm.exec_typed_comparison(&instr).unwrap();
+        // Top of stack must hold raw 1u64, not a NaN-tagged ValueWord.
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 1u64, "expected raw 1u64 for true, got {:#x}", bits);
+        assert!(
+            !shape_value::tag_bits::is_tagged(bits),
+            "GtInt result must NOT be NaN-tagged after E+5.4"
+        );
+
+        let mut vm = make_vm();
+        vm.push_native_i64(3).unwrap();
+        vm.push_native_i64(7).unwrap();
+        let instr = Instruction { opcode: OpCode::GtInt, operand: None };
+        vm.exec_typed_comparison(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 0u64, "expected raw 0u64 for false, got {:#x}", bits);
+    }
+
+    /// EqString still uses the polymorphic pop_raw_u64 input path
+    /// (heap pointer transport), but the output side flipped to native bool.
+    /// Confirms the input-side polymorphism survives the output-side flip.
+    #[test]
+    fn e5_4_eq_string_native_bool_with_heap_input() {
+        let mut vm = make_vm();
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("xyz".to_string())))
+            .unwrap();
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("xyz".to_string())))
+            .unwrap();
+        let instr = Instruction { opcode: OpCode::EqString, operand: None };
+        vm.exec_typed_comparison(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 1u64);
+        assert!(!shape_value::tag_bits::is_tagged(bits));
+    }
 }
