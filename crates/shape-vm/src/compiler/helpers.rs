@@ -1233,6 +1233,23 @@ impl BytecodeCompiler {
             // so this dispatch is independent of #16.
             OpCode::LoadSharedModuleBinding => self.load_shared_module_binding_native_kind(instr),
 
+            // ===== DerefLoad — propagate the projected field's typed
+            // kind (Wave E+5-cleanup / task #92) =====
+            //
+            // The typed-field-place path in
+            // `compile_expr_property_access` emits the sequence
+            // `MakeRef → MakeFieldRef(TypedField{..,field_type_tag}) →
+            // StoreLocal(temp) → DerefLoad(temp)`. The just-emitted
+            // `DerefLoad` does not carry the field tag in its own
+            // operand (it's `Operand::Local(temp)`), but the matching
+            // `MakeFieldRef` two instructions back does. Post-Wave-E+5
+            // `op_deref_load` recognises a `RefProjection::TypedField`
+            // with int / bool / f64 tag and pushes raw native bits via
+            // `push_field_value`. Mirror that here so a top-level
+            // program ending in e.g. `obj.x` (where x is `int`) declares
+            // `return_kind = Int64` for the host-boundary synthesizer.
+            OpCode::DerefLoad => self.deref_load_native_kind(),
+
             // Everything else (GetField, GetProp, NewTypedObject,
             // legacy `ReturnValue` (tagged), MakeArray, MakeMap, etc.)
             // is polymorphic / not-yet-flipped — return None.
@@ -1366,6 +1383,57 @@ impl BytecodeCompiler {
         };
         match self.type_tracker.get_module_binding_storage_hint(*idx) {
             kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// Wave E+5-cleanup task #92: resolve the raw-native kind of a
+    /// `DerefLoad` instruction by walking back through the just-emitted
+    /// instructions to find the matching `MakeFieldRef` and reading its
+    /// `field_type_tag` operand. The typed-field-place emit pattern
+    /// (see `compile_expr_property_access`) is:
+    ///
+    /// ```text
+    ///   MakeRef(root)
+    ///   MakeFieldRef(TypedField{..,field_type_tag})
+    ///   StoreLocal(temp)
+    ///   DerefLoad(temp)        // current instruction
+    /// ```
+    ///
+    /// The `MakeFieldRef` is exactly two instructions before the
+    /// `DerefLoad` in this canonical form, so we look back at
+    /// `instructions[-3]` and decode its tag. Other `DerefLoad` emit
+    /// sites (e.g. ref-parameter reads in `identifiers.rs`, raw `&`
+    /// references) emit `LoadLocal → DerefLoad` or similar without an
+    /// intervening `MakeFieldRef` — those return `None` here and stay
+    /// on the polymorphic path, which is correct: the underlying
+    /// projection is a `Stack` / `ModuleBinding` / `Index` ref whose
+    /// payload may not be a native-kinded scalar.
+    ///
+    /// Mirrors `get_field_typed_native_kind` for the matching
+    /// `GetFieldTyped` flip already in place.
+    fn deref_load_native_kind(&self) -> Option<StorageHint> {
+        use crate::executor::typed_object_ops::{
+            FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64, FIELD_TAG_TIMESTAMP,
+        };
+        let n = self.program.instructions.len();
+        if n < 4 {
+            return None;
+        }
+        let make_field_ref = &self.program.instructions[n - 3];
+        if make_field_ref.opcode != OpCode::MakeFieldRef {
+            return None;
+        }
+        let Some(Operand::TypedField {
+            field_type_tag, ..
+        }) = &make_field_ref.operand
+        else {
+            return None;
+        };
+        match *field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => Some(StorageHint::Int64),
+            FIELD_TAG_F64 => Some(StorageHint::Float64),
+            FIELD_TAG_BOOL => Some(StorageHint::Bool),
             _ => None,
         }
     }
