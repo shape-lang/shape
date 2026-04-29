@@ -1211,6 +1211,28 @@ impl BytecodeCompiler {
             // round-trips through `as_i64()` as `None`.
             OpCode::Call => self.call_native_kind(instr),
 
+            // ===== LoadSharedModuleBinding — propagate the binding's
+            // typed kind (A2-refined / task #105 / residual b) =====
+            //
+            // Top-level `var x: int = 0` captured by a closure becomes
+            // a module binding promoted to `Arc<SharedCell>` via
+            // `AllocSharedModuleBinding`. The cell's payload is
+            // whatever the producer pushed at promotion time; post-
+            // Wave E+5 that payload is raw native bits when the
+            // binding's declared type is a proven primitive
+            // (Int / Float / Bool). `op_load_shared_module_binding`
+            // reads the cell's inner payload and pushes it via
+            // `push_raw_u64`. So a top-level program ending in `n`
+            // (where `var n: int = 0`) produces raw native i64 bits at
+            // the eval boundary; without this arm,
+            // `synthesize_value_word_from_raw` falls back to
+            // passthrough and `as_i64()` returns None on the raw
+            // (untagged) bits. We consult `module_binding_storage_hint`
+            // — module-binding type-tracker entries survive
+            // cell-promotion (unlike local slot entries; see task #16),
+            // so this dispatch is independent of #16.
+            OpCode::LoadSharedModuleBinding => self.load_shared_module_binding_native_kind(instr),
+
             // Everything else (GetField, GetProp, NewTypedObject,
             // legacy `ReturnValue` (tagged), MakeArray, MakeMap, etc.)
             // is polymorphic / not-yet-flipped — return None.
@@ -1319,6 +1341,31 @@ impl BytecodeCompiler {
             FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => Some(StorageHint::Int64),
             FIELD_TAG_F64 => Some(StorageHint::Float64),
             FIELD_TAG_BOOL => Some(StorageHint::Bool),
+            _ => None,
+        }
+    }
+
+    /// A2-refined task #105 / residual b: resolve the raw-native kind of
+    /// a `LoadSharedModuleBinding` instruction by consulting the
+    /// binding's type tracker entry. The cell's inner payload encoding
+    /// mirrors the binding's declared `StorageHint` post-Wave E+5: a
+    /// top-level `var n: int = 0` stores raw native i64 in the cell,
+    /// `var x: number` stores raw f64, `var b: bool` stores raw bool.
+    /// Returns the matching hint when the binding's type-tracker entry
+    /// maps to one of the three native-kinded `StorageHint` variants;
+    /// `None` for unresolved hints (Dynamic, Unknown, sub-i64 widths
+    /// whose nullable/tagged variant matters at the host boundary,
+    /// etc.).
+    ///
+    /// Independent of #16 (cell-pointer slot type-tracking). Module-
+    /// binding type-tracker entries survive cell-promotion via
+    /// `AllocSharedModuleBinding`, unlike local slot entries.
+    fn load_shared_module_binding_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
+            return None;
+        };
+        match self.type_tracker.get_module_binding_storage_hint(*idx) {
+            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
             _ => None,
         }
     }
