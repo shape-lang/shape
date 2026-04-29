@@ -430,24 +430,65 @@ impl VirtualMachine {
                                 let field_index = field.index as usize;
                                 if field_index < slots.len() {
                                     let is_heap = (*heap_mask & (1u64 << field_index)) != 0;
+                                    // Wave E+5-cleanup producer flip (sister of task #92):
+                                    // for native scalar field tags (I64/Timestamp/F64/Bool)
+                                    // against non-heap slots, push raw native bits via
+                                    // `push_field_value` so post-Wave-E+5 typed arithmetic /
+                                    // comparison consumers (`AddInt`, `MulInt`, `EqInt`,
+                                    // `JumpIfFalseTrusted`, …) `pop_native_*` correctly.
+                                    // Without this flip, e.g. `a.x + b.y` inside
+                                    // `fn sum(a: A, b: B) -> int` returns garbage bits.
+                                    // Mirrors `push_field_value`
+                                    // (typed_object_ops.rs:90) and the matching
+                                    // `op_deref_load` flip from task #92.
+                                    if !is_heap {
+                                        use crate::executor::typed_object_ops::push_field_value;
+                                        match &field.field_type {
+                                            shape_runtime::type_schema::FieldType::I64
+                                            | shape_runtime::type_schema::FieldType::Timestamp => {
+                                                return push_field_value(
+                                                    self,
+                                                    &slots[field_index],
+                                                    false,
+                                                    crate::executor::typed_object_ops::FIELD_TAG_I64,
+                                                );
+                                            }
+                                            shape_runtime::type_schema::FieldType::Bool => {
+                                                return push_field_value(
+                                                    self,
+                                                    &slots[field_index],
+                                                    false,
+                                                    crate::executor::typed_object_ops::FIELD_TAG_BOOL,
+                                                );
+                                            }
+                                            shape_runtime::type_schema::FieldType::F64 => {
+                                                return push_field_value(
+                                                    self,
+                                                    &slots[field_index],
+                                                    false,
+                                                    crate::executor::typed_object_ops::FIELD_TAG_F64,
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    // Heap-bearing fields, decimals, width integers,
+                                    // and other non-primitive types stay on the
+                                    // legacy tagged-ValueWord transport.
                                     let result = match &field.field_type {
                                         shape_runtime::type_schema::FieldType::I64
                                         | shape_runtime::type_schema::FieldType::Timestamp => {
-                                            if is_heap {
-                                                slots[field_index].as_heap_nb()
-                                            } else {
-                                                ValueWord::from_i64(slots[field_index].as_i64())
-                                            }
+                                            // is_heap branch only — non-heap was
+                                            // handled by `push_field_value` above.
+                                            slots[field_index].as_heap_nb()
                                         }
                                         shape_runtime::type_schema::FieldType::Bool => {
-                                            if is_heap {
-                                                slots[field_index].as_heap_nb()
-                                            } else {
-                                                ValueWord::from_bool(slots[field_index].as_bool())
-                                            }
+                                            slots[field_index].as_heap_nb()
                                         }
-                                        shape_runtime::type_schema::FieldType::F64
-                                        | shape_runtime::type_schema::FieldType::Decimal => {
+                                        shape_runtime::type_schema::FieldType::F64 => {
+                                            slots[field_index].as_heap_nb()
+                                        }
+                                        shape_runtime::type_schema::FieldType::Decimal => {
                                             if is_heap {
                                                 slots[field_index].as_heap_nb()
                                             } else {
