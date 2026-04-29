@@ -3318,6 +3318,15 @@ impl VirtualMachine {
     ///
     /// The operand is the local slot holding the TAG_REF value. We extract the
     /// absolute stack index from the ref, then clone the value at that location.
+    ///
+    /// Wave E+5-cleanup producer flip: when the ref is a `TypedField`
+    /// projection with an int / bool / f64 field tag against a non-heap
+    /// slot, push raw native bits via `push_native_*` to align with the
+    /// post-Wave-E+5 typed arithmetic / comparison consumers (`MulInt`,
+    /// `EqInt`, `JumpIfFalseTrusted`, …) which `pop_native_*` raw bits.
+    /// Mirrors `push_field_value` in `executor/typed_object_ops.rs:90`.
+    /// Other projections / heap-slot fields fall back to the legacy
+    /// tagged-ValueWord transport via `push_raw_u64`.
     pub(in crate::executor) fn op_deref_load(
         &mut self,
         instruction: &Instruction,
@@ -3333,6 +3342,49 @@ impl VirtualMachine {
                         .to_string(),
                 )
             })?;
+
+            // Producer-side flip for TypedField projections: read the
+            // backing slot directly and push raw native bits when the
+            // declared field tag is one of the three native scalar
+            // kinds against a non-heap slot. Everything else (heap
+            // slot, non-native tag, Stack/ModuleBinding/Index/MatrixRow
+            // projections) goes through the legacy tagged path below.
+            if let RefTarget::Projected(ref data) = target {
+                if let RefProjection::TypedField {
+                    field_idx,
+                    field_type_tag,
+                    ..
+                } = &data.projection
+                {
+                    use crate::executor::typed_object_ops::{
+                        push_field_value, FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64,
+                        FIELD_TAG_TIMESTAMP,
+                    };
+                    if matches!(
+                        *field_type_tag,
+                        FIELD_TAG_I64 | FIELD_TAG_F64 | FIELD_TAG_BOOL | FIELD_TAG_TIMESTAMP
+                    ) {
+                        if let Some(base_value) = self.resolve_ref_value(&data.base) {
+                            let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
+                            if let Some((_schema_id, slots, heap_mask)) =
+                                raw_helpers::extract_typed_object(bits)
+                            {
+                                let index = *field_idx as usize;
+                                if index < slots.len() {
+                                    let is_heap = (heap_mask & (1u64 << index)) != 0;
+                                    return push_field_value(
+                                        self,
+                                        &slots[index],
+                                        is_heap,
+                                        *field_type_tag,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let nb = self.read_ref_target(&target)?;
             self.push_raw_u64(nb)?;
         } else {
