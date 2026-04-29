@@ -725,39 +725,24 @@ impl VirtualMachine {
         // typed helper is in-bounds and aligned. The closure's
         // refcounted block keeps the box alive for the duration of
         // this handler invocation.
-        let vw_bits: u64 = unsafe {
+        //
+        // E+5.5 Unit A: post-flip Int/Bool/F64 producers push native bits.
+        // For typed-interior cells we mirror that contract — push raw
+        // native bits so downstream typed arithmetic and comparison
+        // consumers (now native-only post-Unit-A) read coherent values.
+        // Heap-bearing kinds (Ptr) still push pointer bits unchanged.
+        let bits: u64 = unsafe {
             match kind {
-                FieldKind::I64 => ValueWord::from_i64(read_owned_mutable_i64(cell_ptr as *mut i64)),
-                FieldKind::U64 => {
-                    let v = read_owned_mutable_u64(cell_ptr as *mut u64);
-                    // u64 → ValueWord via `from_i64`; values > i64::MAX
-                    // round-trip through BigInt via the existing
-                    // i48-overflow path (matches `write_capture_typed`'s
-                    // U64 lossy semantics).
-                    ValueWord::from_i64(v as i64)
-                }
-                FieldKind::F64 => ValueWord::from_f64(read_owned_mutable_f64(cell_ptr as *mut f64)),
-                FieldKind::I32 => {
-                    ValueWord::from_i64(read_owned_mutable_i32(cell_ptr as *mut i32) as i64)
-                }
-                FieldKind::U32 => {
-                    ValueWord::from_i64(read_owned_mutable_u32(cell_ptr as *mut u32) as i64)
-                }
-                FieldKind::I16 => {
-                    ValueWord::from_i64(read_owned_mutable_i16(cell_ptr as *mut i16) as i64)
-                }
-                FieldKind::U16 => {
-                    ValueWord::from_i64(read_owned_mutable_u16(cell_ptr as *mut u16) as i64)
-                }
-                FieldKind::I8 => {
-                    ValueWord::from_i64(read_owned_mutable_i8(cell_ptr as *mut i8) as i64)
-                }
-                FieldKind::U8 => {
-                    ValueWord::from_i64(read_owned_mutable_u8(cell_ptr as *mut u8) as i64)
-                }
-                FieldKind::Bool => {
-                    ValueWord::from_bool(read_owned_mutable_bool(cell_ptr as *mut bool))
-                }
+                FieldKind::I64 => read_owned_mutable_i64(cell_ptr as *mut i64) as u64,
+                FieldKind::U64 => read_owned_mutable_u64(cell_ptr as *mut u64),
+                FieldKind::F64 => read_owned_mutable_f64(cell_ptr as *mut f64).to_bits(),
+                FieldKind::I32 => read_owned_mutable_i32(cell_ptr as *mut i32) as i64 as u64,
+                FieldKind::U32 => read_owned_mutable_u32(cell_ptr as *mut u32) as u64,
+                FieldKind::I16 => read_owned_mutable_i16(cell_ptr as *mut i16) as i64 as u64,
+                FieldKind::U16 => read_owned_mutable_u16(cell_ptr as *mut u16) as u64,
+                FieldKind::I8 => read_owned_mutable_i8(cell_ptr as *mut i8) as i64 as u64,
+                FieldKind::U8 => read_owned_mutable_u8(cell_ptr as *mut u8) as u64,
+                FieldKind::Bool => read_owned_mutable_bool(cell_ptr as *mut bool) as u64,
                 FieldKind::Ptr => {
                     // Pass-through: the cell holds the raw 8-byte
                     // heap-pointer bit pattern (an Arc share). Reading
@@ -768,7 +753,7 @@ impl VirtualMachine {
                 }
             }
         };
-        self.push_raw_u64(vw_bits)
+        self.push_raw_u64(ValueWord::from_raw_bits(bits))
     }
 
     /// `StoreOwnedMutableCapture { idx }`: pop a ValueWord and write it
@@ -820,7 +805,12 @@ impl VirtualMachine {
         })?;
         let kind = layout.capture_inner_kind(idx as usize);
         record_heap_write();
-        let vw: ValueWord = new_bits;
+        let raw_bits = new_bits.raw_bits();
+        // E+5.5 Unit A: post-flip the producer pushed raw native bits for
+        // typed-interior cells (Int/Bool/F64). Reinterpret the raw 8-byte
+        // slot directly through the typed write helper. Heap (Ptr) keeps
+        // the prior pre-flip ValueWord pass-through with its drop-on-
+        // replace semantics for the previous heap share.
         // SAFETY: `cell_ptr` was produced by the matching
         // `closure_raw::alloc_owned_mutable_<kind>(initial)` in
         // `op_make_closure`; the interior FieldKind is determined by
@@ -828,46 +818,20 @@ impl VirtualMachine {
         // an aligned in-bounds store into the typed `Box<T>`.
         unsafe {
             match kind {
-                FieldKind::I64 => write_owned_mutable_i64(
-                    cell_ptr as *mut i64,
-                    vw.as_i64().unwrap_or(0),
-                ),
-                FieldKind::U64 => write_owned_mutable_u64(
-                    cell_ptr as *mut u64,
-                    vw.as_u64_value().unwrap_or(0),
-                ),
-                FieldKind::F64 => write_owned_mutable_f64(
-                    cell_ptr as *mut f64,
-                    vw.as_number_coerce().unwrap_or(0.0),
-                ),
-                FieldKind::I32 => write_owned_mutable_i32(
-                    cell_ptr as *mut i32,
-                    vw.as_i64().unwrap_or(0) as i32,
-                ),
-                FieldKind::U32 => write_owned_mutable_u32(
-                    cell_ptr as *mut u32,
-                    vw.as_i64().unwrap_or(0) as u32,
-                ),
-                FieldKind::I16 => write_owned_mutable_i16(
-                    cell_ptr as *mut i16,
-                    vw.as_i64().unwrap_or(0) as i16,
-                ),
-                FieldKind::U16 => write_owned_mutable_u16(
-                    cell_ptr as *mut u16,
-                    vw.as_i64().unwrap_or(0) as u16,
-                ),
-                FieldKind::I8 => write_owned_mutable_i8(
-                    cell_ptr as *mut i8,
-                    vw.as_i64().unwrap_or(0) as i8,
-                ),
-                FieldKind::U8 => write_owned_mutable_u8(
-                    cell_ptr as *mut u8,
-                    vw.as_i64().unwrap_or(0) as u8,
-                ),
-                FieldKind::Bool => write_owned_mutable_bool(
-                    cell_ptr as *mut bool,
-                    vw.as_bool().unwrap_or(false),
-                ),
+                FieldKind::I64 => write_owned_mutable_i64(cell_ptr as *mut i64, raw_bits as i64),
+                FieldKind::U64 => write_owned_mutable_u64(cell_ptr as *mut u64, raw_bits),
+                FieldKind::F64 => {
+                    write_owned_mutable_f64(cell_ptr as *mut f64, f64::from_bits(raw_bits))
+                }
+                FieldKind::I32 => write_owned_mutable_i32(cell_ptr as *mut i32, raw_bits as i32),
+                FieldKind::U32 => write_owned_mutable_u32(cell_ptr as *mut u32, raw_bits as u32),
+                FieldKind::I16 => write_owned_mutable_i16(cell_ptr as *mut i16, raw_bits as i16),
+                FieldKind::U16 => write_owned_mutable_u16(cell_ptr as *mut u16, raw_bits as u16),
+                FieldKind::I8 => write_owned_mutable_i8(cell_ptr as *mut i8, raw_bits as i8),
+                FieldKind::U8 => write_owned_mutable_u8(cell_ptr as *mut u8, raw_bits as u8),
+                FieldKind::Bool => {
+                    write_owned_mutable_bool(cell_ptr as *mut bool, raw_bits != 0)
+                }
                 FieldKind::Ptr => {
                     // Release the previous heap-refcount share before
                     // overwriting the cell, mirroring the immutable-Ptr
