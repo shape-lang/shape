@@ -12,7 +12,7 @@ use crate::{
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::nanboxed::RefTarget;
-use shape_value::value_word_drop::vw_drop;
+use shape_value::value_word_drop::{vw_clone, vw_drop};
 use shape_value::{RefProjection, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 impl VirtualMachine {
@@ -744,12 +744,16 @@ impl VirtualMachine {
                 FieldKind::U8 => read_owned_mutable_u8(cell_ptr as *mut u8) as u64,
                 FieldKind::Bool => read_owned_mutable_bool(cell_ptr as *mut bool) as u64,
                 FieldKind::Ptr => {
-                    // Pass-through: the cell holds the raw 8-byte
-                    // heap-pointer bit pattern (an Arc share). Reading
-                    // it without a clone delegates the share-management
-                    // contract to the caller exactly as the pre-D.3
-                    // path did — the load does NOT bump the refcount.
-                    read_owned_mutable_ptr(cell_ptr as *mut u64)
+                    // Polymorphic legacy 0x132 cannot rely on the IR to
+                    // pair the load with `vw_clone` (the typed D.1 Ptr
+                    // handler can — it is emitted from sites the IR
+                    // pairs with vw_clone/vw_drop). The cell retains
+                    // its share; the stack copy must own a separate
+                    // share so the consumer can `vw_drop` it without
+                    // dangling the cell, and a subsequent realloc
+                    // through one share keeps the other alive.
+                    let cell_bits = read_owned_mutable_ptr(cell_ptr as *mut u64);
+                    vw_clone(cell_bits)
                 }
             }
         };
@@ -1346,7 +1350,13 @@ impl VirtualMachine {
     /// strong-count share is held by the closure (the block owns the
     /// `Arc::into_raw`-produced share); this handler only reborrows the
     /// underlying allocation via `&*cell_ptr` — the reference's lifetime
-    /// is bounded by this handler invocation. No retain/release traffic.
+    /// is bounded by this handler invocation.
+    ///
+    /// Polymorphic 0x12C cannot rely on the IR to pair the load with
+    /// `vw_clone` (the typed D.2 handlers can — emitted only from sites
+    /// the IR pairs with vw_clone/vw_drop). The cell retains its share;
+    /// the stack copy must own a separate share so the consumer can
+    /// `vw_drop` it without dangling the cell's payload.
     fn op_load_shared_capture(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
@@ -1374,7 +1384,10 @@ impl VirtualMachine {
             drop(guard);
             bits
         };
-        self.push_raw_u64(value_bits)
+        // Retain heap shares for the stack copy. Inline scalars are
+        // unaffected (`vw_clone` returns the bits unchanged).
+        let owned = vw_clone(value_bits);
+        self.push_raw_u64(owned)
     }
 
     /// `StoreSharedCapture { idx }`: pop a ValueWord, acquire the
@@ -1404,11 +1417,18 @@ impl VirtualMachine {
         // the mutex for exclusive access, overwrite the 8-byte ValueWord
         // payload, then drop the guard. The Arc strong-count share owned
         // by the closure remains intact.
+        //
+        // Polymorphic 0x12D mirrors the legacy load: release the previous
+        // payload's share before installing the new one. The popped
+        // `new_bits` carries an owning share transferred from the stack
+        // (no retain here). For inline scalars `vw_drop` is a no-op.
         unsafe {
             let cell: &SharedCell = &*cell_ptr;
             let mut guard = cell.lock();
+            let prev = *guard;
             *guard = new_bits;
             drop(guard);
+            vw_drop(prev);
         }
         Ok(())
     }
