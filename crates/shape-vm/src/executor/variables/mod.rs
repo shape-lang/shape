@@ -6193,12 +6193,199 @@ mod tests {
         // overwrite — vw_drop both to release.
         use shape_value::value_word_drop::vw_drop;
         // SAFETY: bp+0 is the live slot holding new_bits.
-        let live_slot_bits = vm.stack[vm.current_locals_base()];
+        let bp = vm.current_locals_base();
+        let live_slot_bits = vm.stack[bp];
         vw_drop(live_slot_bits);
+        // Zero the slot so the VM's `Drop` impl (which runs
+        // `vw_drop_slice` over the live stack window) does not
+        // double-release the share we just dropped.
+        vm.stack[bp] = VirtualMachine::NONE_BITS;
         assert_eq!(StdArc::strong_count(&payload_b), 1);
         vw_drop(initial_bits);
         assert_eq!(StdArc::strong_count(&payload_a), 1);
 
         vm.call_stack.pop();
+    }
+
+    // ===== Wave E+3: typed module-binding round-trip tests =====
+    //
+    // Eight assertions across four FieldKinds (I64, F64, Bool, Ptr).
+    // Each test:
+    //   * synthesizes a module-binding slot with a known starting value,
+    //   * executes the typed Load opcode and asserts the popped raw u64
+    //     bits match the expected native interpretation,
+    //   * executes the typed Store with a fresh raw u64 and asserts that
+    //     `vm.module_bindings[idx]` updated to the expected raw bits.
+    //
+    // The Ptr case additionally verifies Wave D's
+    // "vw_clone-before-Load / vw_drop-NOT-on-Store" invariant: the
+    // strong count of the captured Arc payload is unchanged across both
+    // the Load (no retain) and the Store (no release of the prior
+    // payload, no retain of the new one).
+
+    #[test]
+    fn typed_module_binding_i64_round_trip() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        // Seed slot 3 with 12345 (raw i64 bits).
+        while vm.module_bindings.len() <= 3 {
+            vm.module_bindings.push(VirtualMachine::NONE_BITS);
+        }
+        vm.module_bindings[3] = 12345i64 as u64;
+
+        let load = Instruction::new(
+            OpCode::LoadModuleBindingI64,
+            Some(Operand::ModuleBinding(3)),
+        );
+        vm.op_load_module_binding_i64(&load).unwrap();
+        let popped = vm.pop_raw_u64().unwrap();
+        assert_eq!(popped as i64, 12345i64);
+
+        let store = Instruction::new(
+            OpCode::StoreModuleBindingI64,
+            Some(Operand::ModuleBinding(3)),
+        );
+        vm.push_raw_u64(-9876i64 as u64).unwrap();
+        vm.op_store_module_binding_i64(&store).unwrap();
+        assert_eq!(vm.module_bindings[3] as i64, -9876i64);
+    }
+
+    #[test]
+    fn typed_module_binding_f64_round_trip() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        while vm.module_bindings.len() <= 5 {
+            vm.module_bindings.push(VirtualMachine::NONE_BITS);
+        }
+        vm.module_bindings[5] = 3.14159_f64.to_bits();
+
+        let load = Instruction::new(
+            OpCode::LoadModuleBindingF64,
+            Some(Operand::ModuleBinding(5)),
+        );
+        vm.op_load_module_binding_f64(&load).unwrap();
+        let popped = vm.pop_raw_u64().unwrap();
+        assert_eq!(f64::from_bits(popped), 3.14159_f64);
+
+        let store = Instruction::new(
+            OpCode::StoreModuleBindingF64,
+            Some(Operand::ModuleBinding(5)),
+        );
+        vm.push_raw_u64((-2.71828_f64).to_bits()).unwrap();
+        vm.op_store_module_binding_f64(&store).unwrap();
+        assert_eq!(f64::from_bits(vm.module_bindings[5]), -2.71828_f64);
+    }
+
+    #[test]
+    fn typed_module_binding_bool_round_trip() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        while vm.module_bindings.len() <= 7 {
+            vm.module_bindings.push(VirtualMachine::NONE_BITS);
+        }
+        // Seed with `true` (1) and verify Load returns 1.
+        vm.module_bindings[7] = 1u64;
+
+        let load = Instruction::new(
+            OpCode::LoadModuleBindingBool,
+            Some(Operand::ModuleBinding(7)),
+        );
+        vm.op_load_module_binding_bool(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
+
+        // Seed with non-zero non-1 (0xFF) — Load must normalise to 1
+        // (any non-zero low byte ⇒ true).
+        vm.module_bindings[7] = 0xFFu64;
+        vm.op_load_module_binding_bool(&load).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
+
+        let store = Instruction::new(
+            OpCode::StoreModuleBindingBool,
+            Some(Operand::ModuleBinding(7)),
+        );
+        // Store false (0).
+        vm.push_raw_u64(0u64).unwrap();
+        vm.op_store_module_binding_bool(&store).unwrap();
+        assert_eq!(vm.module_bindings[7], 0);
+
+        // Store true via raw 0xDEADBEEF — handler must normalise to 1.
+        vm.push_raw_u64(0xDEADBEEFu64).unwrap();
+        vm.op_store_module_binding_bool(&store).unwrap();
+        assert_eq!(vm.module_bindings[7], 1);
+    }
+
+    #[test]
+    fn typed_module_binding_ptr_no_refcount_traffic() {
+        // Ptr Load/Store are bit-pass-through — neither retains the new
+        // share nor releases the prior share. Wave E+4 IR is responsible
+        // for vw_clone before Load and vw_drop on Store. Verify by
+        // checking strong-counts straddling each handler invocation.
+        use shape_value::value_word_drop::vw_drop;
+        use std::sync::Arc as StdArc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let payload_a: StdArc<String> = StdArc::new(
+            "module-binding-ptr-test-a-payload-longer-than-intern-threshold".to_string(),
+        );
+        let initial_bits = ValueWord::from_string(payload_a.clone()).into_raw_bits();
+        // Refcount: 2 (payload_a local + initial_bits's Arc share).
+        let baseline_a = StdArc::strong_count(&payload_a);
+        assert_eq!(baseline_a, 2);
+
+        while vm.module_bindings.len() <= 9 {
+            vm.module_bindings.push(VirtualMachine::NONE_BITS);
+        }
+        vm.module_bindings[9] = initial_bits;
+
+        // Load: must not clone the heap share.
+        let load = Instruction::new(
+            OpCode::LoadModuleBindingPtr,
+            Some(Operand::ModuleBinding(9)),
+        );
+        vm.op_load_module_binding_ptr(&load).unwrap();
+        let loaded = vm.pop_raw_u64().unwrap();
+        assert_eq!(loaded, initial_bits);
+        assert_eq!(
+            StdArc::strong_count(&payload_a),
+            baseline_a,
+            "LoadModuleBindingPtr must not clone the heap share"
+        );
+
+        // Store a fresh payload — handler must NOT release the previous
+        // share or retain the new one.
+        let payload_b: StdArc<String> = StdArc::new(
+            "module-binding-ptr-test-b-payload-longer-than-intern-threshold".to_string(),
+        );
+        let new_bits = ValueWord::from_string(payload_b.clone()).into_raw_bits();
+        let baseline_b = StdArc::strong_count(&payload_b);
+        assert_eq!(baseline_b, 2);
+
+        let store = Instruction::new(
+            OpCode::StoreModuleBindingPtr,
+            Some(Operand::ModuleBinding(9)),
+        );
+        vm.push_raw_u64(new_bits).unwrap();
+        vm.op_store_module_binding_ptr(&store).unwrap();
+        assert_eq!(vm.module_bindings[9], new_bits);
+        assert_eq!(
+            StdArc::strong_count(&payload_b),
+            baseline_b,
+            "StoreModuleBindingPtr must not retain the new share"
+        );
+        assert_eq!(
+            StdArc::strong_count(&payload_a),
+            baseline_a,
+            "StoreModuleBindingPtr must not release the previous share"
+        );
+
+        // Cleanup: slot now holds new_bits. Original initial_bits leaked
+        // by the overwrite — drop both. (Wave E+4 IR will pair these
+        // with vw_clone/vw_drop so this leak doesn't happen in real
+        // emitted bytecode.) Zero the slot afterwards so the VM's Drop
+        // impl does not also release the live share via
+        // `vw_drop_slice`.
+        let live_bits = vm.module_bindings[9];
+        vw_drop(live_bits);
+        vm.module_bindings[9] = VirtualMachine::NONE_BITS;
+        assert_eq!(StdArc::strong_count(&payload_b), 1);
+        vw_drop(initial_bits);
+        assert_eq!(StdArc::strong_count(&payload_a), 1);
     }
 }
