@@ -1048,6 +1048,55 @@ define_opcodes! {
     /// Operand: Local(idx).
     StoreSharedCapturePtr = 0x16B, Variable, pops: 1, pushes: 0;
 
+    // ===== Wave E+3: per-FieldKind typed `ReturnValue<Kind>` opcodes =====
+    //
+    // Typed counterparts of the legacy `ReturnValue` (0x45). The handler
+    // body is identical to `op_return_value` — pops the return value as
+    // raw 8-byte bits, pops the call frame, releases the callee's
+    // register window, then pushes the return value onto the caller's
+    // stack. The encoded `<Kind>` carries no runtime difference; it is
+    // a *static* annotation for the JIT and downstream consumers so the
+    // caller's stack discipline is known at the call site.
+    //
+    // Stack effect: pops 1 (the return value of the matching native
+    // kind), pushes 1 onto the caller's frame after frame cleanup. The
+    // legacy `ReturnValue` (0x45) stays live for unproven-type return
+    // positions.
+    //
+    // Code range: 0x198..=0x1A2 (11 codes total). Ordering matches the
+    // FieldKind canonical ordering used elsewhere in this file (D.1 /
+    // D.2): I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr.
+    /// Return with `i64` value — pops 1 raw i64, frame-cleans, pushes 1.
+    ReturnValueI64 = 0x198, Control, pops: 1, pushes: 0;
+    /// Return with `u64` value — pops 1 raw u64, frame-cleans, pushes 1.
+    ReturnValueU64 = 0x199, Control, pops: 1, pushes: 0;
+    /// Return with `f64` value — pops 1 raw f64, frame-cleans, pushes 1.
+    ReturnValueF64 = 0x19A, Control, pops: 1, pushes: 0;
+    /// Return with `i32` value — pops 1 raw i32 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueI32 = 0x19B, Control, pops: 1, pushes: 0;
+    /// Return with `u32` value — pops 1 raw u32 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueU32 = 0x19C, Control, pops: 1, pushes: 0;
+    /// Return with `i16` value — pops 1 raw i16 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueI16 = 0x19D, Control, pops: 1, pushes: 0;
+    /// Return with `u16` value — pops 1 raw u16 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueU16 = 0x19E, Control, pops: 1, pushes: 0;
+    /// Return with `i8` value — pops 1 raw i8 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueI8 = 0x19F, Control, pops: 1, pushes: 0;
+    /// Return with `u8` value — pops 1 raw u8 (in i64 slot),
+    /// frame-cleans, pushes 1.
+    ReturnValueU8 = 0x1A0, Control, pops: 1, pushes: 0;
+    /// Return with `bool` value — pops 1 raw bool, frame-cleans, pushes 1.
+    ReturnValueBool = 0x1A1, Control, pops: 1, pushes: 0;
+    /// Return with `Ptr` value — pops 1 raw 8-byte ValueWord pointer
+    /// payload, frame-cleans, pushes 1. Ownership transfer is by raw
+    /// bit-level pass-through; the handler does NOT retain or release.
+    ReturnValuePtr = 0x1A2, Control, pops: 1, pushes: 0;
+
     // ===== Track A.1C.1: Shared outer-scope (`var`) cell opcodes =====
     //
     // These are the *outer-scope* counterpart to A.1B's capture-side
