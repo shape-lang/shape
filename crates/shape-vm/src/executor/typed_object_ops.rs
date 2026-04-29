@@ -72,6 +72,39 @@ pub(in crate::executor) fn read_slot_fast(
     }
 }
 
+/// Push the field-load result onto the VM stack using the post-E+5 native
+/// transport for scalar field tags (I64/F64/Bool on non-heap slots).
+///
+/// This aligns the producer with post-E+5.4 typed comparison/arithmetic
+/// consumers (`EqInt`, `AddInt`, `JumpIfFalseTrusted`, …) which now
+/// `pop_native_*` raw bits instead of decoding a NaN-tagged ValueWord.
+/// Without this alignment, e.g. enum-match `__variant` compares would push
+/// a tagged i48 ValueWord and then `EqInt` would `pop_native_i64` raw
+/// transmuted bits — never equal to the native-bits constant pushed by
+/// post-Unit-B `PushConst(Int)`.
+///
+/// All other tags fall back to `read_slot_fast` + `push_raw_u64` (the
+/// pre-flip ValueWord-tagged transport), preserving downstream consumers
+/// that still expect a ValueWord (heap kinds, decimal, string, any).
+#[inline(always)]
+pub(in crate::executor) fn push_field_value(
+    vm: &mut super::VirtualMachine,
+    slot: &ValueSlot,
+    is_heap: bool,
+    field_type_tag: u16,
+) -> Result<(), VMError> {
+    if !is_heap {
+        match field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => return vm.push_native_i64(slot.as_i64()),
+            FIELD_TAG_F64 => return vm.push_raw_f64(slot.as_f64()),
+            FIELD_TAG_BOOL => return vm.push_native_bool(slot.as_bool()),
+            _ => {}
+        }
+    }
+    let nb = read_slot_fast(slot, is_heap, field_type_tag);
+    vm.push_raw_u64(nb)
+}
+
 /// Convert a field_type_tag back to a FieldType for set operations.
 pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
     match tag {
@@ -142,9 +175,7 @@ impl TypedObjectOps for super::VirtualMachine {
                         let src_idx = hit.field_idx as usize;
                         if src_idx < slots.len() {
                             let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
-                            let result =
-                                read_slot_fast(&slots[src_idx], is_heap, hit.field_type_tag);
-                            return self.push_raw_u64(result);
+                            return push_field_value(self, &slots[src_idx], is_heap, hit.field_type_tag);
                         }
                     }
 
@@ -189,9 +220,7 @@ impl TypedObjectOps for super::VirtualMachine {
                             let src_idx = hit.field_idx as usize;
                             if src_idx < slots.len() {
                                 let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
-                                let result =
-                                    read_slot_fast(&slots[src_idx], is_heap, hit.field_type_tag);
-                                return self.push_raw_u64(result);
+                                return push_field_value(self, &slots[src_idx], is_heap, hit.field_type_tag);
                             }
                         }
                     }
@@ -218,8 +247,7 @@ impl TypedObjectOps for super::VirtualMachine {
                                 src_field_idx,
                                 tag,
                             );
-                            let result = read_slot_fast(&slots[src_idx], is_heap, tag);
-                            return self.push_raw_u64(result);
+                            return push_field_value(self, &slots[src_idx], is_heap, tag);
                         }
                     }
                     return self.push_raw_u64(ValueWord::none());
@@ -235,8 +263,7 @@ impl TypedObjectOps for super::VirtualMachine {
 
                 if field_index < slots.len() {
                     let is_heap = (*heap_mask & (1u64 << field_index)) != 0;
-                    let result = read_slot_fast(&slots[field_index], is_heap, *field_type_tag);
-                    return self.push_raw_u64(result);
+                    return push_field_value(self, &slots[field_index], is_heap, *field_type_tag);
                 } else {
                     return self.push_raw_u64(ValueWord::none());
                 }
