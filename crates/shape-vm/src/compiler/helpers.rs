@@ -1502,6 +1502,117 @@ impl BytecodeCompiler {
         self.program.function_local_storage_hints[func_idx] = hints;
     }
 
+    /// Wave E+4 commit 4: infer the top-level program's return-value
+    /// `SlotKind` from the last compiled expression's tracked type metadata.
+    ///
+    /// Source of truth (in priority order):
+    ///   1. `self.last_expr_numeric_type` — set by literals, var loads, and
+    ///      arithmetic; reliable signal for primitive numerics.
+    ///   2. `self.last_expr_type_info.storage_hint` — covers Bool, String,
+    ///      and any nullable / sub-i64 widths the type-tracker has resolved.
+    ///
+    /// Returns `SlotKind::Unknown` when no signal is available — this
+    /// preserves pre-E+4 behaviour at the host boundary (synthesis stays in
+    /// passthrough mode and the existing `eval()` path round-trips legacy
+    /// ValueWord bits unchanged).
+    ///
+    /// **Why this is a host-boundary policy decision, not a per-site
+    /// emission flip**: the `synthesize_value_word_from_raw` helper at the
+    /// host boundary fires once at `vm.execute()` exit. Setting
+    /// `return_kind` for top-level resolves the boundary-encoding gap that
+    /// the Wave E.1/E.2 typed-capture-Load flips opened (raw native bits
+    /// reach the host without re-encoding). It does NOT touch any
+    /// per-instruction emission and does NOT affect inner pipeline
+    /// stack discipline; bits flow native through the inner pipeline as
+    /// intended.
+    /// Wave E+4 commit 4 fallback: when `last_expr_*` is None at the
+    /// end of the last top-level item compile (a known gap for primitive-
+    /// type returns like `bool` and `string` — see `type_info_from_annotation`
+    /// in `function_calls.rs:384` which only resolves user-defined types
+    /// from the schema registry, leaving primitives unresolved), inspect
+    /// the AST item directly to extract the program's return-kind.
+    ///
+    /// Today supports the common case: `Item::Expression(Expr::FunctionCall)`
+    /// with a name resolvable via `function_defs[name].return_type` (a
+    /// `TypeAnnotation::Basic` for primitive types). Returns `Unknown` for
+    /// other shapes (the caller falls back to passthrough at the host
+    /// boundary, preserving pre-E+4 semantics).
+    pub(super) fn infer_top_level_return_kind_from_item(
+        &self,
+        item: &shape_ast::ast::Item,
+    ) -> StorageHint {
+        use shape_ast::ast::{Expr, Item, Statement};
+
+        // Extract the trailing expression of a top-level item, if any.
+        let expr: &Expr = match item {
+            Item::Expression(expr, _) => expr,
+            Item::Statement(Statement::Expression(expr, _), _) => expr,
+            _ => return StorageHint::Unknown,
+        };
+
+        // Walk into a function-call shape: function-call expressions
+        // are the dominant case for top-level program shapes that
+        // declare a return type via `fn name() -> T { ... }; name()`.
+        let call_name = match expr {
+            Expr::FunctionCall { name, .. } => name.as_str(),
+            _ => return StorageHint::Unknown,
+        };
+
+        // Resolve callee return annotation. Try regular function defs
+        // first, then foreign function defs (different struct types,
+        // can't chain via `or_else` directly).
+        let return_ann: Option<&TypeAnnotation> = self
+            .function_defs
+            .get(call_name)
+            .and_then(|def| def.return_type.as_ref())
+            .or_else(|| {
+                self.foreign_function_defs
+                    .get(call_name)
+                    .and_then(|def| def.return_type.as_ref())
+            });
+        let Some(ann) = return_ann else {
+            return StorageHint::Unknown;
+        };
+
+        // Map primitive type-annotation names to `SlotKind` (handles
+        // both `Basic("bool")` and `Reference("Bool")`-style entries).
+        ann.as_type_name_str()
+            .and_then(primitive_type_name_to_storage_hint)
+            .unwrap_or(StorageHint::Unknown)
+    }
+
+    pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {
+        // Priority 1: numeric-type signal.
+        if let Some(nt) = self.last_expr_numeric_type {
+            match nt {
+                crate::type_tracking::NumericType::Number => return StorageHint::Float64,
+                crate::type_tracking::NumericType::Int => return StorageHint::Int64,
+                crate::type_tracking::NumericType::IntWidth(w) => {
+                    use shape_ast::IntWidth;
+                    return match w {
+                        IntWidth::I8 => StorageHint::Int8,
+                        IntWidth::U8 => StorageHint::UInt8,
+                        IntWidth::I16 => StorageHint::Int16,
+                        IntWidth::U16 => StorageHint::UInt16,
+                        IntWidth::I32 => StorageHint::Int32,
+                        IntWidth::U32 => StorageHint::UInt32,
+                        IntWidth::U64 => StorageHint::UInt64,
+                    };
+                }
+                // Decimal isn't a `SlotKind` variant — fall through to
+                // Unknown so synthesis stays in passthrough.
+                crate::type_tracking::NumericType::Decimal => {}
+            }
+        }
+        // Priority 2: type_info storage_hint.
+        if let Some(info) = &self.last_expr_type_info {
+            if info.storage_hint != StorageHint::Unknown {
+                return info.storage_hint;
+            }
+        }
+        StorageHint::Unknown
+    }
+
     /// Populate program-level storage hints for top-level locals and module bindings.
     pub(super) fn populate_program_storage_hints(&mut self) {
         let top_hints: Vec<StorageHint> = (0..self.next_local)
@@ -3364,6 +3475,38 @@ pub(crate) mod typed_emit_metrics {
     pub fn reset() {}
 }
 
+/// Wave E+4 commit 4: map a primitive type-annotation name (e.g.
+/// `"bool"`, `"int"`, `"number"`, `"string"`, sub-i64 widths like
+/// `"i32"`) to its `StorageHint`. Returns `None` for non-primitive /
+/// user-defined / unrecognised names — the caller falls back to
+/// `Unknown`, which preserves pre-E+4 passthrough semantics at the host
+/// boundary.
+///
+/// Mirrors the canonical-name policy from
+/// `BuiltinTypes::is_integer_type_name` / `is_number_type_name` for the
+/// numeric family, plus the explicit primitive cases the compiler's
+/// schema registry doesn't enrol.
+#[inline]
+pub(crate) fn primitive_type_name_to_storage_hint(name: &str) -> Option<StorageHint> {
+    Some(match name {
+        // Numeric primitives.
+        "int" | "Int" | "i64" => StorageHint::Int64,
+        "u64" | "UInt" => StorageHint::UInt64,
+        "i8" => StorageHint::Int8,
+        "u8" => StorageHint::UInt8,
+        "i16" => StorageHint::Int16,
+        "u16" => StorageHint::UInt16,
+        "i32" => StorageHint::Int32,
+        "u32" => StorageHint::UInt32,
+        "isize" => StorageHint::IntSize,
+        "usize" => StorageHint::UIntSize,
+        "number" | "Number" | "f32" | "f64" => StorageHint::Float64,
+        "bool" | "Bool" => StorageHint::Bool,
+        "string" | "String" => StorageHint::String,
+        _ => return None,
+    })
+}
+
 /// Map a `StorageHint` to its typed `LoadLocal<Kind>` opcode (E+3 codes
 /// 0x16C-0x176). Returns `None` for hints that don't have a typed form.
 #[inline]
@@ -4999,5 +5142,39 @@ mod tests {
         // Final reset so the per-test counter state doesn't leak into
         // sibling tests run in this module.
         typed_emit_metrics::reset();
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_e4_bool_canary_top_level_frame() {
+        // PROBE only — run with `cargo test -- --ignored --nocapture
+        // probe_e4_bool_canary_top_level_frame`. Not part of the gate.
+        for src in [
+            "fn ret_bool() -> bool { true }\n\
+             ret_bool()",
+            "fn ret_bool2() -> bool { let x: bool = true; x }\n\
+             ret_bool2()",
+            "fn main() -> bool {\n\
+                 let mut flag: bool = false\n\
+                 let f = || { flag = true; flag }\n\
+                 f()\n\
+             }\n\
+             main()",
+        ] {
+            eprintln!("\n--- src = {:?} ---", src.split('\n').next().unwrap_or(""));
+            let (bits, kind) = crate::test_utils::eval_raw(src);
+            eprintln!("eval_raw → bits = 0x{:x}, kind = {:?}", bits, kind);
+            let val = crate::test_utils::eval(src);
+            use shape_value::ValueWordExt;
+            eprintln!("eval → as_bool = {:?}, as_i64 = {:?}", val.as_bool(), val.as_i64());
+            // Probe the VM's loaded program directly.
+            let parsed2 = shape_ast::parser::parse_program(src).expect("parse2");
+            let compiler2 = BytecodeCompiler::new();
+            let bytecode2 = compiler2.compile(&parsed2).expect("compile2");
+            eprintln!("after compile2: top_level_frame = {:?}", bytecode2.top_level_frame);
+            let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
+            vm.load_program(bytecode2);
+            eprintln!("after load: vm.program.top_level_frame = {:?}", vm.program.top_level_frame);
+        }
     }
 }
