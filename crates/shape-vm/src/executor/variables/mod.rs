@@ -3476,6 +3476,419 @@ impl VirtualMachine {
         Ok(())
     }
 
+    // ── Wave E+3: per-FieldKind typed module-binding opcodes ────────────
+    //
+    // Twenty-two handlers — eleven Loads and eleven Stores — paired with
+    // the opcode definitions at 0x182..=0x197 in `bytecode/opcode_defs.rs`.
+    // The handlers mirror the legacy `op_load_module_binding` /
+    // `op_store_module_binding` shape but read/write the slot's 8 raw
+    // bytes directly without `vw_clone` / `vw_drop`: the typed contract
+    // says the slot holds a raw native value (i64/u64/f64/i32/.../bool),
+    // so heap-pointer refcount traffic is encoded in the IR around these
+    // opcodes rather than inside them. For Ptr the same rule applies —
+    // Wave E+4 wraps the Load/Store pair with `vw_clone`/`vw_drop`
+    // (matches the c-stdlib-msgpack pattern from commit afb1651, mirroring
+    // Wave D's typed OwnedMutable Ptr handlers).
+    //
+    // Stores grow `module_bindings` to fit `idx` if necessary (matches
+    // legacy `op_store_module_binding`). Loads return `0` (raw bits) for
+    // out-of-bounds slots — there is no in-band error; OOB indicates a
+    // compiler bug since the static contract requires the slot to be
+    // initialised by a matching typed Store before the Load fires.
+
+    fn op_load_module_binding_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_module_binding_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_module_binding_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_module_binding_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Sign-extend low 4 bytes to i64 — matches Wave D's
+        // `op_load_owned_mutable_capture_i32` width-extension convention.
+        let value = bits as i32 as i64 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Zero-extend low 4 bytes.
+        let value = bits as u32 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Sign-extend low 2 bytes to i64.
+        let value = bits as i16 as i64 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Zero-extend low 2 bytes.
+        let value = bits as u16 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Sign-extend low byte to i64.
+        let value = bits as i8 as i64 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Zero-extend low byte.
+        let value = bits as u8 as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // Push 0/1 — any non-zero low byte ⇒ true. Mirrors Wave D's
+        // bool stack convention.
+        let value = ((bits as u8) != 0) as u64;
+        self.push_raw_u64(value)
+    }
+
+    fn op_load_module_binding_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let index = idx as usize;
+        let bits = if index < self.module_bindings.len() {
+            self.binding_read_raw(index).into_raw_bits()
+        } else {
+            0u64
+        };
+        // The 8-byte payload is a ValueWord bit pattern carrying a
+        // NaN-boxed Arc/Box pointer. The handler does NOT clone/retain —
+        // refcount semantics are the caller's (Wave E+4 IR) responsibility.
+        self.push_raw_u64(bits)
+    }
+
+    fn op_store_module_binding_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()?;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        // Direct slot write — typed contract guarantees prior value is
+        // either NONE_BITS (initial) or a raw native value from a
+        // previous typed Store. No `vw_drop` of the prior value.
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_u64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()?;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()?;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Truncate to i32, sign-extend back to i64 for the 8-byte slot.
+        let value = self.pop_raw_u64()? as i32 as i64 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_u32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Truncate to u32, zero-extend.
+        let value = self.pop_raw_u64()? as u32 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_i16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()? as i16 as i64 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_u16(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()? as u16 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_i8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()? as i8 as i64 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_u8(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()? as u8 as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Any non-zero bit pattern ⇒ true.
+        let value = (self.pop_raw_u64()? != 0) as u64;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
+    fn op_store_module_binding_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.pop_raw_u64()?;
+        let index = idx as usize;
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+        }
+        record_heap_write();
+        // The 8-byte payload is a ValueWord bit pattern carrying a
+        // NaN-boxed Arc/Box pointer. The handler does NOT release the
+        // previous payload nor retain the new one — refcount semantics
+        // are the caller's (Wave E+4 IR) responsibility, mirroring Wave
+        // D's `op_store_owned_mutable_capture_ptr`.
+        self.module_bindings[index] = value;
+        Ok(())
+    }
+
     // ── V1.1B: ownership-aware local opcodes ─────────────────────────────
     //
     // Phase 1 of the ownership-aware runtime spec introduces three new
