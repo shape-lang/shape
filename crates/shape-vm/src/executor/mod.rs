@@ -8,7 +8,7 @@ mod builtins;
 mod call_convention;
 mod comparison;
 mod control_flow;
-mod dispatch;
+pub(crate) mod dispatch;
 mod exceptions;
 pub(crate) mod ic_fast_paths;
 mod jit_ops;

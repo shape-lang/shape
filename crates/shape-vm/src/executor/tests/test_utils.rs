@@ -1,14 +1,43 @@
 //! Shared test utilities for executor tests.
 //!
 //! Provides common helpers for compiling and executing Shape source code
-//! in tests, reducing duplication across test modules.
+//! in tests, reducing duplication across test modules. Mirrors the
+//! kind-hint API documented in `crate::test_utils` (see that module for
+//! the design rationale).
 
 use crate::VMConfig;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
+use crate::type_tracking::SlotKind;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 
-/// Compile and execute Shape source code, returning the final value.
+/// Compile + execute Shape source code, returning the **raw u64 bits**
+/// at the top of stack plus the program's declared top-level return
+/// kind (if any). Mirrors `crate::test_utils::eval_raw`.
+pub fn eval_raw(source: &str) -> (u64, Option<SlotKind>) {
+    let program = shape_ast::parser::parse_program(source).expect("parse failed");
+    let mut compiler = BytecodeCompiler::new();
+    compiler.set_source(source);
+    let bytecode = compiler.compile(&program).expect("compile failed");
+    let kind = top_level_return_kind(&bytecode);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let bits = vm.execute_raw(None).expect("execution failed");
+    (bits, kind)
+}
+
+#[inline]
+fn top_level_return_kind(program: &crate::bytecode::BytecodeProgram) -> Option<SlotKind> {
+    let kind = program.top_level_frame.as_ref()?.return_kind;
+    match kind {
+        SlotKind::Unknown => None,
+        _ => Some(kind),
+    }
+}
+
+/// Compile and execute Shape source code, returning the final value as
+/// a tagged `ValueWord`. Synthesises from raw bits per the program's
+/// declared top-level return kind, or passthrough when unknown.
 /// Panics on parse, compile, or execution failure.
 pub fn eval(source: &str) -> ValueWord {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
@@ -33,6 +62,14 @@ pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     vm.execute(None).map(|v| v.clone())
+}
+
+/// Compile + execute and synthesise a tagged `ValueWord` from the raw
+/// bits per the supplied `SlotKind`. Use when a test needs typed-bits
+/// decoding for a program that doesn't declare a top-level return type.
+pub fn eval_with_kind(source: &str, expected: SlotKind) -> ValueWord {
+    let (bits, _) = eval_raw(source);
+    crate::executor::dispatch::synthesize_value_word_from_raw(bits, Some(expected))
 }
 
 /// Compile Shape source code and return the bytecode program.
@@ -79,4 +116,28 @@ pub fn compile_with_prelude(source: &str) -> Result<crate::bytecode::BytecodePro
     compiler
         .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))
+}
+
+/// Evaluate Shape source and return the result as a native `i64`.
+/// Panics if the value cannot be decoded as an integer.
+pub fn eval_typed_i64(source: &str) -> i64 {
+    eval_with_kind(source, SlotKind::Int64)
+        .as_i64()
+        .expect("eval_typed_i64: result is not an integer")
+}
+
+/// Evaluate Shape source and return the result as a native `f64`.
+/// Panics if the value cannot be decoded as a float.
+pub fn eval_typed_f64(source: &str) -> f64 {
+    eval_with_kind(source, SlotKind::Float64)
+        .as_f64()
+        .expect("eval_typed_f64: result is not a float")
+}
+
+/// Evaluate Shape source and return the result as a native `bool`.
+/// Panics if the value cannot be decoded as a boolean.
+pub fn eval_typed_bool(source: &str) -> bool {
+    eval_with_kind(source, SlotKind::Bool)
+        .as_bool()
+        .expect("eval_typed_bool: result is not a boolean")
 }
