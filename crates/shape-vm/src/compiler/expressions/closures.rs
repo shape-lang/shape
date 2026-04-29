@@ -3565,6 +3565,47 @@ mod tests {
     }
 
     #[test]
+    fn test_task_106_call_native_kind_skips_nested_function_spans_var_case() {
+        // Task #106: `call_native_kind` must skip nested function bodies
+        // when scanning the callee's body span — otherwise an inner
+        // closure's defensive trailing `ReturnValue` (PushNull fallback
+        // after the typed `ReturnValueI64`) trips the disqualifier and
+        // we wrongly classify a typed-returning callee as polymorphic.
+        //
+        // Var-with-shared-capture case: `outer` returns `int`; inner
+        // closure mutates the captured `var n`. Top-level program ends
+        // in `outer()` — must round-trip through `as_i64()` correctly.
+        let val = run_program_top_level(
+            "fn outer() -> int {\n\
+                 var n: int = 0\n\
+                 let f = || { n = n + 1 }\n\
+                 f()\n\
+                 n\n\
+             }\n\
+             outer()",
+        );
+        assert_eq!(val.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_task_106_call_native_kind_skips_nested_function_spans_let_case() {
+        // Task #106 counterfactual: same nested-function-span issue
+        // surfaces with an immutable `let` binding too — no
+        // `AllocSharedLocal`, no `var`, but the inner closure's
+        // defensive trailing `ReturnValue` still pollutes outer's
+        // body scan in `call_native_kind` without the skip-predicate.
+        let val = run_program_top_level(
+            "fn outer() -> int {\n\
+                 let n: int = 7\n\
+                 let f = || { n + 1 }\n\
+                 f()\n\
+             }\n\
+             outer()",
+        );
+        assert_eq!(val.as_i64(), Some(8));
+    }
+
+    #[test]
     fn test_a1c2b_let_mut_closure_emits_owned_mutable_opcodes() {
         // Witness the full opcode migration end-to-end: the compiler
         // emits A.1B's OwnedMutable opcodes for let-mut captures.

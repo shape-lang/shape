@@ -1267,12 +1267,38 @@ impl BytecodeCompiler {
             return None;
         };
         // FunctionId(u16) — look up the compiled function body.
-        let func = self.program.functions.get(fid.0 as usize)?;
+        let callee_idx = fid.0 as usize;
+        let func = self.program.functions.get(callee_idx)?;
         let entry = func.entry_point;
         let end = entry.checked_add(func.body_length)?;
         if end > self.program.instructions.len() {
             return None;
         }
+        // Task #106: nested function bodies are physically embedded inside
+        // the outer's `[entry..end]` instruction span via the jump-over
+        // emission pattern (see `compiler/functions.rs:990-1005`). Build
+        // a list of (nested_entry, nested_end) ranges for every other
+        // function whose body lies strictly within `[entry..end]`, so the
+        // scanner below can skip them — otherwise a nested closure's
+        // defensive trailing `ReturnValue` (PushNull + ReturnValue
+        // fallback after a typed `ReturnValueI64`) trips the disqualifier
+        // and we incorrectly classify a typed-returning callee as
+        // polymorphic.
+        let mut nested_ranges: Vec<(usize, usize)> = Vec::new();
+        for (other_idx, other) in self.program.functions.iter().enumerate() {
+            if other_idx == callee_idx {
+                continue;
+            }
+            let o_entry = other.entry_point;
+            let Some(o_end) = o_entry.checked_add(other.body_length) else {
+                continue;
+            };
+            // Strictly nested inside this callee's span.
+            if o_entry >= entry && o_end <= end && o_entry > entry {
+                nested_ranges.push((o_entry, o_end));
+            }
+        }
+        nested_ranges.sort_unstable_by_key(|&(s, _)| s);
         // Scan the body for typed `ReturnValue<Kind>` opcodes. If the
         // callee uses a single typed-return kind across all return sites,
         // declare that kind for the call result. Mixed kinds (e.g. one
@@ -1280,7 +1306,25 @@ impl BytecodeCompiler {
         // `Unknown`. The legacy untyped `ReturnValue` (0x45) also
         // disqualifies — its caller-side transport is tagged ValueWord.
         let mut found: Option<StorageHint> = None;
-        for instr in &self.program.instructions[entry..end] {
+        let mut pos = entry;
+        let mut nested_cursor = 0;
+        while pos < end {
+            // If `pos` is inside a nested function's range, jump past it.
+            // `nested_ranges` is sorted; advance the cursor past any range
+            // we've stepped over.
+            while nested_cursor < nested_ranges.len()
+                && nested_ranges[nested_cursor].1 <= pos
+            {
+                nested_cursor += 1;
+            }
+            if nested_cursor < nested_ranges.len() {
+                let (n_start, n_end) = nested_ranges[nested_cursor];
+                if pos >= n_start && pos < n_end {
+                    pos = n_end;
+                    continue;
+                }
+            }
+            let instr = &self.program.instructions[pos];
             let kind = match instr.opcode {
                 OpCode::ReturnValueI64
                 | OpCode::ReturnValueU64
@@ -1297,13 +1341,17 @@ impl BytecodeCompiler {
                 // misleadingly named — it's a stack-top promotion helper,
                 // NOT a return opcode. Don't treat it as a disqualifier.
                 OpCode::ReturnValue | OpCode::ReturnValuePtr => return None,
-                _ => continue,
+                _ => {
+                    pos += 1;
+                    continue;
+                }
             };
             match (found, kind) {
                 (None, k) => found = k,
                 (Some(a), Some(b)) if a == b => {}
                 _ => return None,
             }
+            pos += 1;
         }
         found
     }
