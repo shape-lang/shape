@@ -2764,7 +2764,6 @@ impl VirtualMachine {
     /// Operand: TypedLocal(idx, width)
     fn op_store_local_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         if let Some(Operand::TypedLocal(idx, width)) = instruction.operand {
-            let nb = self.pop_raw_u64()?;
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
 
@@ -2772,19 +2771,26 @@ impl VirtualMachine {
                 self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             }
 
-            // Truncate the value to the declared width
-            let truncated = if let Some(int_w) = width.to_int_width() {
-                let raw = Self::int_operand(&nb).unwrap_or(0);
-                ValueWord::from_i64(int_w.truncate(raw))
+            // E+5.5 Unit A: post-Unit-B PushConst Int and typed-Int
+            // arithmetic produce raw native i64 bits, so consume them
+            // natively and write the (possibly width-truncated) raw bits
+            // back to the slot. Storing a Number into a typed-Int local
+            // would have already gone through `NumberToInt`, which produces
+            // native i64 bits.
+            let truncated_bits: u64 = if let Some(int_w) = width.to_int_width() {
+                let raw = self.pop_native_i64()?;
+                int_w.truncate(raw) as u64
             } else {
-                // I64 or float width: no truncation
-                nb
+                // I64 or float width: no truncation. For float widths the
+                // slot carries `f64::to_bits()` (raw f64 bits); for I64 the
+                // native i64 bits.
+                self.pop_raw_u64()?.raw_bits()
             };
 
             // Track A.1C.3: SharedCell wrapper retired.
             record_heap_write();
-            write_barrier_slot(self.stack[slot], truncated.raw_bits());
-            self.stack_write_raw(slot, truncated);
+            write_barrier_slot(self.stack[slot], truncated_bits);
+            self.stack_write_raw(slot, ValueWord::from_raw_bits(truncated_bits));
         } else {
             return Err(VMError::InvalidOperand);
         }

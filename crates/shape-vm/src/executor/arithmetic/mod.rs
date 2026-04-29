@@ -655,28 +655,22 @@ impl VirtualMachine {
         checked: impl FnOnce(i64, i64) -> Option<i64>,
         overflow_fallback: impl FnOnce(i64, i64) -> f64,
     ) -> Result<(), VMError> {
-        let b = self.pop_raw_u64()?;
-        let a = self.pop_raw_u64()?;
-
-        let (ai, bi) = if a.is_i64() && b.is_i64() {
-            (unsafe { a.as_i64_unchecked() }, unsafe {
-                b.as_i64_unchecked()
-            })
-        } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b)) {
-            (ai, bi)
-        } else {
-            return Err(Self::compact_int_type_error(&a, &b));
-        };
+        // E+5.5 Unit A: compact int arithmetic operates on native i64 bits
+        // to match PushConst Int (Unit B) and the typed-Int handlers above.
+        // Producer/consumer agreement is maintained — sub-i64 widths still
+        // truncate, and i64-overflow still falls back to f64.
+        let bi = self.pop_native_i64()?;
+        let ai = self.pop_native_i64()?;
 
         // For sub-i64 widths: wrapping arithmetic + truncation
         if let Some(int_w) = width.to_int_width() {
             let result = wrapping_op(ai, bi);
-            return self.push_tagged_i64(int_w.truncate(result));
+            return self.push_native_i64(int_w.truncate(result));
         }
 
         // I64: checked with f64 fallback on overflow
         match checked(ai, bi) {
-            Some(result) => self.push_tagged_i64(result),
+            Some(result) => self.push_native_i64(result),
             None => self.push_raw_f64(overflow_fallback(ai, bi)),
         }
     }
@@ -687,25 +681,17 @@ impl VirtualMachine {
         width: NumericWidth,
         op: impl FnOnce(i64, i64) -> i64,
     ) -> Result<(), VMError> {
-        let b = self.pop_raw_u64()?;
-        let a = self.pop_raw_u64()?;
-
-        let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-            expected: "int",
-            got: b.type_name(),
-        })?;
+        // E+5.5 Unit A: native i64 transport.
+        let bi = self.pop_native_i64()?;
+        let ai = self.pop_native_i64()?;
         if bi == 0 {
             return Err(VMError::DivisionByZero);
         }
-        let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-            expected: "int",
-            got: a.type_name(),
-        })?;
         let result = op(ai, bi);
         if let Some(int_w) = width.to_int_width() {
-            self.push_tagged_i64(int_w.truncate(result))
+            self.push_native_i64(int_w.truncate(result))
         } else {
-            self.push_tagged_i64(result)
+            self.push_native_i64(result)
         }
     }
 
@@ -742,27 +728,25 @@ impl VirtualMachine {
 
     #[inline(always)]
     fn compact_int_cmp(&mut self, width: NumericWidth) -> Result<(), VMError> {
-        let b = self.pop_raw_u64()?;
-        let a = self.pop_raw_u64()?;
-        let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-            expected: "int",
-            got: a.type_name(),
-        })?;
-        let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-            expected: "int",
-            got: b.type_name(),
-        })?;
-        // For unsigned widths, compare as unsigned
+        // E+5.5 Unit A: native i64 transport. CmpTyped's i64 ordinal output
+        // (-1/0/1) is pushed as native i64 — consumers downstream of CmpTyped
+        // pop it as native i64 (typed cmp consumers are width-aware
+        // ordinal-readers, not bool predicates).
+        let bi = self.pop_native_i64()?;
+        let ai = self.pop_native_i64()?;
         let ord = if width.is_unsigned() {
             (ai as u64).cmp(&(bi as u64)) as i64
         } else {
             ai.cmp(&bi) as i64
         };
-        self.push_tagged_i64(ord)
+        self.push_native_i64(ord)
     }
 
     #[inline(always)]
     fn compact_float_cmp(&mut self) -> Result<(), VMError> {
+        // Number operands stay polymorphic-decoded today (Number producers
+        // are mixed); the ordinal output is native i64 for parity with
+        // `compact_int_cmp` above.
         let b = self.pop_raw_u64()?;
         let a = self.pop_raw_u64()?;
         let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
@@ -774,7 +758,7 @@ impl VirtualMachine {
             got: b.type_name(),
         })?;
         let ord = lhs.partial_cmp(&rhs).map_or(0i64, |o| o as i64);
-        self.push_tagged_i64(ord)
+        self.push_native_i64(ord)
     }
 
     #[inline(always)]
@@ -852,6 +836,16 @@ impl VirtualMachine {
     }
 
     /// Execute CastWidth: pop value, truncate to declared width, push result.
+    /// E+5.5 Unit A: native i64 transport in/out. Producer is the
+    /// post-Unit-B PushConst Int path or a typed-Int arithmetic result —
+    /// raw native i64 bits straight from the stack, no NaN-decode. The
+    /// out-of-range BigInt (heap-tagged) case is rare and was previously
+    /// handled via `int_operand`; that path now requires producers to
+    /// emit `NumberToInt`/`Int64ToNumber` first, or the BigInt path is
+    /// unsupported (post-Unit-B `Constant::UInt(u64::MAX)` literals are
+    /// the only known producer and they emit a heap-tagged ValueWord
+    /// directly — see `op_push_const`'s out-of-range UInt branch). For
+    /// the in-range path the post-Unit-B native bits round-trip cleanly.
     #[inline(always)]
     pub(in crate::executor) fn op_cast_width(
         &mut self,
@@ -861,16 +855,12 @@ impl VirtualMachine {
             Some(Operand::Width(w)) => w,
             _ => return Err(VMError::InvalidOperand),
         };
-        let nb = self.pop_raw_u64()?;
-        let raw = Self::int_operand(&nb).unwrap_or_else(|| {
-            // If not an int, try to extract from number
-            nb.as_f64().map(|f| f as i64).unwrap_or(0)
-        });
+        let raw = self.pop_native_i64()?;
         if let Some(int_w) = width.to_int_width() {
-            self.push_tagged_i64(int_w.truncate(raw))
+            self.push_native_i64(int_w.truncate(raw))
         } else {
             // I64 or float: no truncation
-            self.push_tagged_i64(raw)
+            self.push_native_i64(raw)
         }
     }
 
@@ -900,26 +890,13 @@ impl VirtualMachine {
     }
 
     /// Bitwise binary op fallback; int+int only.
+    /// E+5.5 Unit A: native i64 transport in/out — matches PushConst Int
+    /// producers (Unit B) and the typed Int arithmetic family. Operands are
+    /// raw native bits; the result is pushed as native bits.
     fn exec_dyn_bit_binary(&mut self, op: OpCode) -> Result<(), VMError> {
         use OpCode::*;
-        let b = self.pop_raw_u64()?;
-        let a = self.pop_raw_u64()?;
-        let (Some(a_int), Some(b_int)) = (a.as_i64(), b.as_i64()) else {
-            let name = match op {
-                BitXor => "XOR",
-                BitAnd => "AND",
-                BitOr => "OR",
-                BitShl => "shift left",
-                BitShr => "shift right",
-                _ => "bitwise op",
-            };
-            return Err(VMError::RuntimeError(format!(
-                "Bitwise {} requires integer operands, got {} and {}",
-                name,
-                a.type_name(),
-                b.type_name()
-            )));
-        };
+        let b_int = self.pop_native_i64()?;
+        let a_int = self.pop_native_i64()?;
         let result = match op {
             BitXor => a_int ^ b_int,
             BitAnd => a_int & b_int,
@@ -928,19 +905,13 @@ impl VirtualMachine {
             BitShr => a_int >> b_int,
             _ => unreachable!(),
         };
-        self.push_raw_u64(ValueWord::from_i64(result))
+        self.push_native_i64(result)
     }
 
     /// Bitwise NOT fallback; int only.
     fn exec_dyn_bit_unary(&mut self) -> Result<(), VMError> {
-        let a = self.pop_raw_u64()?;
-        let Some(a_int) = a.as_i64() else {
-            return Err(VMError::RuntimeError(format!(
-                "Bitwise NOT requires integer operand, got {}",
-                a.type_name()
-            )));
-        };
-        self.push_raw_u64(ValueWord::from_i64(!a_int))
+        let a_int = self.pop_native_i64()?;
+        self.push_native_i64(!a_int)
     }
 
 }
@@ -1114,6 +1085,16 @@ mod tests {
         }
     }
 
+    /// E+5.5 Unit A: dynamic bitwise opcodes operate on native i64 bits;
+    /// declare a typed Int top-level frame so `vm.execute()` synthesises
+    /// a tagged ValueWord at the host boundary.
+    fn run_bit_op_int_return(program: &mut BytecodeProgram) {
+        program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
+            slots: Vec::new(),
+            return_kind: crate::type_tracking::SlotKind::Int64,
+        });
+    }
+
     #[test]
     fn test_bitwise_xor() {
         let mut program = BytecodeProgram::default();
@@ -1125,6 +1106,7 @@ mod tests {
             Instruction::simple(OpCode::BitXor),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -1142,6 +1124,7 @@ mod tests {
             Instruction::simple(OpCode::BitAnd),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -1159,6 +1142,7 @@ mod tests {
             Instruction::simple(OpCode::BitOr),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -1177,6 +1161,7 @@ mod tests {
             Instruction::simple(OpCode::BitShl),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -1192,6 +1177,7 @@ mod tests {
             Instruction::simple(OpCode::BitShr),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program2);
         let mut vm2 = VirtualMachine::new(VMConfig::default());
         vm2.load_program(program2);
         let result2 = vm2.execute(None).unwrap().clone();
@@ -1207,6 +1193,7 @@ mod tests {
             Instruction::simple(OpCode::BitNot),
             Instruction::simple(OpCode::Halt),
         ];
+        run_bit_op_int_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -1256,6 +1243,26 @@ mod tests {
             Instruction::new(op, Some(Operand::Width(width))),
             Instruction::simple(OpCode::Halt),
         ];
+        // E+5.5 Unit A: post-flip the operand stack carries native bits, so
+        // `vm.execute()` synthesises a tagged ValueWord at the host boundary
+        // per `top_level_frame.return_kind`. Set the kind explicitly here
+        // since this hand-crafted program bypasses the compiler.
+        //
+        // Result kind: CmpTyped always produces an i64 ordinal (-1/0/1)
+        // regardless of operand width; arithmetic ops produce a value of the
+        // operand width family (Int for integer widths, Float64 for floats).
+        let kind = if op == OpCode::CmpTyped {
+            crate::type_tracking::SlotKind::Int64
+        } else if width.is_integer() {
+            crate::type_tracking::SlotKind::Int64
+        } else {
+            crate::type_tracking::SlotKind::Float64
+        };
+        program.top_level_frame =
+            Some(crate::type_tracking::FrameDescriptor {
+                slots: Vec::new(),
+                return_kind: kind,
+            });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap()
@@ -1485,6 +1492,15 @@ mod tests {
     // Width-aware arithmetic tests (Sprint 3)
     // ========================================================================
 
+    /// Set the program's typed top-level frame so post-Unit-A native i64
+    /// results synthesise into a tagged Int ValueWord at the host boundary.
+    fn set_int64_return(program: &mut BytecodeProgram) {
+        program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
+            slots: Vec::new(),
+            return_kind: crate::type_tracking::SlotKind::Int64,
+        });
+    }
+
     /// Helper: run AddTyped with a given width on two integer constants.
     fn run_typed_add(a: i64, b: i64, width: NumericWidth) -> ValueWord {
         let mut program = BytecodeProgram::default();
@@ -1496,6 +1512,7 @@ mod tests {
             Instruction::new(OpCode::AddTyped, Some(Operand::Width(width))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
@@ -1511,6 +1528,7 @@ mod tests {
             Instruction::new(OpCode::SubTyped, Some(Operand::Width(width))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
@@ -1526,6 +1544,7 @@ mod tests {
             Instruction::new(OpCode::MulTyped, Some(Operand::Width(width))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
@@ -1539,6 +1558,7 @@ mod tests {
             Instruction::new(OpCode::CastWidth, Some(Operand::Width(width))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
@@ -1557,6 +1577,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = local + 1;
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
@@ -1696,16 +1717,21 @@ mod tests {
     #[test]
     fn test_cast_width_u64_max_to_i8() {
         // u64::MAX (all ones) cast to i8 should give -1.
-        // Use Constant::UInt to push a native u64 value.
+        // E+5.5 Unit A: hand-write the native bits onto the stack (the
+        // post-Unit-B PushConst path takes the heap-boxed BigInt route
+        // for `Constant::UInt(u64::MAX)`, which CastWidth does not
+        // currently traverse — that was Wave G follow-up #71's
+        // mixed-transport audit).
         let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::UInt(u64::MAX));
         program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
             Instruction::new(OpCode::CastWidth, Some(Operand::Width(NumericWidth::I8))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
+        // Seed the stack with native u64::MAX bits before execute.
+        vm.push_native_i64(u64::MAX as i64).unwrap();
         let result = vm.execute(None).unwrap();
         assert_eq!(
             result.as_i64(),
@@ -1718,14 +1744,14 @@ mod tests {
     fn test_cast_width_u64_max_to_u8() {
         // u64::MAX cast to u8 should give 255 (0xFF).
         let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::UInt(u64::MAX));
         program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
             Instruction::new(OpCode::CastWidth, Some(Operand::Width(NumericWidth::U8))),
             Instruction::simple(OpCode::Halt),
         ];
+        set_int64_return(&mut program);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
+        vm.push_native_i64(u64::MAX as i64).unwrap();
         let result = vm.execute(None).unwrap();
         assert_eq!(
             result.as_i64(),
@@ -1885,8 +1911,8 @@ mod tests {
     #[test]
     fn test_typed_arithmetic_mod_int_by_zero() {
         let mut vm = make_raw_vm();
-        vm.push_tagged_i64(10).unwrap();
-        vm.push_tagged_i64(0).unwrap();
+        vm.push_native_i64(10).unwrap();
+        vm.push_native_i64(0).unwrap();
         let instr = Instruction::simple(OpCode::ModInt);
         let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
         assert!(matches!(err, VMError::DivisionByZero));
@@ -2149,6 +2175,12 @@ mod tests {
             Instruction::simple(OpCode::BitAndInt),
             Instruction::simple(OpCode::Halt),
         ];
+        // E+5.5 Unit A: declare the typed top-level return so `vm.execute()`
+        // synthesises a tagged Int ValueWord from the native i64 result.
+        program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
+            slots: Vec::new(),
+            return_kind: crate::type_tracking::SlotKind::Int64,
+        });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -2166,6 +2198,10 @@ mod tests {
             Instruction::simple(OpCode::BitShlInt),
             Instruction::simple(OpCode::Halt),
         ];
+        program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
+            slots: Vec::new(),
+            return_kind: crate::type_tracking::SlotKind::Int64,
+        });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();
@@ -2181,6 +2217,10 @@ mod tests {
             Instruction::simple(OpCode::BitNotInt),
             Instruction::simple(OpCode::Halt),
         ];
+        program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
+            slots: Vec::new(),
+            return_kind: crate::type_tracking::SlotKind::Int64,
+        });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap().clone();

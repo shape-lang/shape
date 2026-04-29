@@ -1620,16 +1620,33 @@ impl BytecodeCompiler {
             .collect();
         self.program.top_level_local_storage_hints = top_hints.clone();
 
-        // Build top-level FrameDescriptor so JIT can use per-slot type info
+        // Build top-level FrameDescriptor so JIT can use per-slot type info.
+        //
+        // E+5.5 Unit C step 2: also populate `return_kind` from
+        // `infer_top_level_return_kind` (numeric-type signal first, then
+        // last-expr type-info). When set, the host boundary
+        // `synthesize_value_word_from_raw` in `execute()` synthesises a
+        // tagged ValueWord from the typed top-level return bits — this
+        // is what makes typed top-level programs (Int/Bool/Float64 ending
+        // in arithmetic, comparisons, or typed-load) round-trip cleanly
+        // through `vm.execute()` post-Unit-A/B native arithmetic flip.
+        // Without this, the raw native bits are passed through to the
+        // host as if they were a tagged ValueWord — fine for legacy
+        // dynamic programs (raw bits ARE a ValueWord) but wrong for
+        // post-flip Int/Bool: e.g. native `0u64` would land as ValueWord
+        // unit, not int 0.
+        let return_kind = self.infer_top_level_return_kind();
         let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
         let has_trusted = self
             .program
             .instructions
             .iter()
             .any(|i| i.opcode.is_trusted());
-        if has_any_known || has_trusted {
-            self.program.top_level_frame =
-                Some(crate::type_tracking::FrameDescriptor::from_slots(top_hints));
+        let has_typed_return = return_kind != StorageHint::Unknown;
+        if has_any_known || has_trusted || has_typed_return {
+            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(top_hints);
+            frame.return_kind = return_kind;
+            self.program.top_level_frame = Some(frame);
         }
 
         let mut module_binding_hints = vec![StorageHint::Unknown; self.module_bindings.len()];
