@@ -2291,4 +2291,97 @@ mod tests {
         let result = vm.execute(None).unwrap().clone();
         assert_eq!(result, ValueWord::from_i64(-1));
     }
+
+    // ===== E+5.3 native-bits verification =====
+    //
+    // After the flip, Int-family handlers produce raw native i64 bits — no
+    // NaN-tagging, no make_tagged on the result. These tests verify the
+    // bit-for-bit native discipline by reading the result via `pop_raw_u64`
+    // (no decode) and comparing the raw u64 against the expected
+    // i64-as-u64 bit pattern.
+    //
+    // Tested handlers below: NegInt and BitAndInt. Both have a single
+    // execution path with no `stack_top_both_i48()` gate — they
+    // unconditionally call pop_native_i64 / push_native_i64 — so they're
+    // exercisable from native producers without hitting the dual-path
+    // ambiguity that AddInt/SubInt/etc. carry pre-E+5.5.
+    //
+    // The dual-path Int handlers (AddInt/SubInt/MulInt/DivInt/ModInt/PowInt)
+    // and IntToNumber/NumberToInt are NOT directly testable in isolation
+    // post-E+5.3: their fast path requires tagged producers (via
+    // stack_top_both_i48 / stack_top_is_i48) but reads them as native
+    // (wrong); their slow path requires tagged producers (int_operand
+    // decode) and produces native output. The cleanest in-isolation
+    // exercise for those will arrive once E+5.5 audits and aligns
+    // consumer expectations. End-to-end programs (existing
+    // test_typed_arithmetic_add_int and friends) drive the fast path
+    // through the dispatch table; they document the interim breakage
+    // and feed E+5.5's audit.
+
+    #[test]
+    fn test_e53_neg_int_pushes_native_sign_bit() {
+        // Native i64 semantics: -1 has bit 63 set (two's complement
+        // all-ones pattern). The pre-flip tagged encoding put the sign
+        // info in the i48 payload + the NaN-tag in bits 49..63 — so the
+        // result u64 had a different bit pattern even though it decoded
+        // to -1. This test asserts the POST-flip native bit pattern is
+        // the raw i64 transmute, not a NaN-boxed ValueWord.
+        let mut vm = make_raw_vm();
+        vm.push_native_i64(1).unwrap();
+        let instr = Instruction::simple(OpCode::NegInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, (-1i64) as u64, "NegInt(1) must produce raw i64 -1");
+        // Sign bit (63) is set on raw i64 transport.
+        assert_ne!(bits & (1u64 << 63), 0, "native i64 sign bit must be set");
+        // Confirm this is NOT the tagged ValueWord encoding of -1.
+        let tagged_neg_one = ValueWord::from_i64(-1);
+        assert_ne!(
+            bits, tagged_neg_one,
+            "result must be raw i64 bits, not a tagged ValueWord"
+        );
+    }
+
+    #[test]
+    fn test_e53_neg_int_large_i48_boundary() {
+        // Boundary value near the i48 limit. After the flip, NegInt
+        // operates on raw native i64 bits — no truncation to i48
+        // payload, no tag re-encoding. (`int` is i48 inline at the type
+        // level, but the native transport carries full i64 bits; the
+        // i48 invariant is enforced by the producer/consumer agreement,
+        // not by NegInt itself.)
+        let mut vm = make_raw_vm();
+        let val: i64 = 0x7FFF_FFFF_FFFF; // I48_MAX
+        vm.push_native_i64(val).unwrap();
+        let instr = Instruction::simple(OpCode::NegInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, (-val) as u64);
+    }
+
+    #[test]
+    fn test_e53_bit_and_int_native_bits() {
+        // BitAndInt has a single path (pop_native_i64 / push_native_i64)
+        // post-flip — no tag-check gate. Producer pushes native, the
+        // handler `&`s native bits, pushes native bits.
+        let mut vm = make_raw_vm();
+        vm.push_native_i64(0xFF).unwrap();
+        vm.push_native_i64(0x0F).unwrap();
+        let instr = Instruction::simple(OpCode::BitAndInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 0x0Fu64, "BitAndInt result must be raw native bits");
+
+        // Negative-AND: -1 (all-ones) & x == x, in native i64.
+        let mut vm = make_raw_vm();
+        vm.push_native_i64(-1).unwrap();
+        vm.push_native_i64(0x1234).unwrap();
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 0x1234u64);
+
+        // Sanity: result is NOT the NaN-boxed encoding of 0x1234.
+        let tagged = ValueWord::from_i64(0x1234);
+        assert_ne!(bits, tagged);
+    }
 }
