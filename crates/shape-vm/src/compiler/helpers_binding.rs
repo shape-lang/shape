@@ -311,6 +311,15 @@ impl BytecodeCompiler {
     ///
     /// For any other mode (including `Unknown`, `BorrowedFromParam`,
     /// `Shared`, `Static`), emits the plain `ReturnValue` — today's behavior.
+    ///
+    /// Wave E+4: when the last expression's type is statically resolvable
+    /// to a `StorageHint`, emit the typed `ReturnValue<Kind>` (E+3 codes
+    /// 0x198-0x1A2) via `emit_return_value_for_hint`. The typed and
+    /// polymorphic Return handlers are *transport-neutral* (same body,
+    /// same bits-through behavior), so this flip is behaviorally
+    /// equivalent at the inner-function boundary — the encoded `<Kind>`
+    /// is a static annotation for the JIT and downstream consumers.
+    /// Unproven types fall back to polymorphic `ReturnValue`.
     pub(super) fn emit_return_value_with_ownership(&mut self) {
         use crate::bytecode::{Instruction, OpCode};
         if matches!(
@@ -319,7 +328,42 @@ impl BytecodeCompiler {
         ) {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
-        self.emit(Instruction::simple(OpCode::ReturnValue));
+        let hint = self.last_expr_numeric_type_to_storage_hint();
+        self.emit_return_value_for_hint(hint);
+    }
+
+    /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
+    /// `last_expr_type_info` for the typed-Return helper. Mirrors the
+    /// priority order used by `infer_top_level_return_kind`. Returns
+    /// `StorageHint::Unknown` when no signal is available — the helper
+    /// then routes to the polymorphic legacy `ReturnValue`.
+    fn last_expr_numeric_type_to_storage_hint(&self) -> crate::type_tracking::StorageHint {
+        use crate::type_tracking::StorageHint;
+        if let Some(nt) = self.last_expr_numeric_type {
+            match nt {
+                crate::type_tracking::NumericType::Number => return StorageHint::Float64,
+                crate::type_tracking::NumericType::Int => return StorageHint::Int64,
+                crate::type_tracking::NumericType::IntWidth(w) => {
+                    use shape_ast::IntWidth;
+                    return match w {
+                        IntWidth::I8 => StorageHint::Int8,
+                        IntWidth::U8 => StorageHint::UInt8,
+                        IntWidth::I16 => StorageHint::Int16,
+                        IntWidth::U16 => StorageHint::UInt16,
+                        IntWidth::I32 => StorageHint::Int32,
+                        IntWidth::U32 => StorageHint::UInt32,
+                        IntWidth::U64 => StorageHint::UInt64,
+                    };
+                }
+                crate::type_tracking::NumericType::Decimal => {}
+            }
+        }
+        if let Some(info) = &self.last_expr_type_info {
+            if info.storage_hint != StorageHint::Unknown {
+                return info.storage_hint;
+            }
+        }
+        StorageHint::Unknown
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a

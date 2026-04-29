@@ -5122,20 +5122,65 @@ mod tests {
             ));
         }
 
-        // Pin: every fixture must produce an empty joint distribution
-        // until per-site flips begin. If this fails after an
-        // intentional per-site flip, update the assertions with the
-        // post-flip distribution per fixture.
+        // Wave E+4 (resumed): post-flip baseline. The
+        // `emit_return_value_with_ownership` helper now uses
+        // `emit_return_value_for_hint`, so any function body whose
+        // last-expression's type is unproven records a
+        // `return_value`-category fallback with a `dynamic`/`unknown`
+        // label. Proven types (`fn add() -> int { a+b }`) do NOT
+        // fall back — they hit the typed `ReturnValueI64` opcode.
+        //
+        // The expected per-fixture joint-distribution snapshot below
+        // is Wave G's audit baseline. Any change must be a deliberate
+        // emission policy update, captured by editing this assertion.
+        // (`typed_primitives` and `heap_string` end with proven-type
+        // function returns and stay empty; `closure_capture_int`,
+        // `option_int`, and `untyped_dynamic` exercise paths whose
+        // return-type isn't reachable from `last_expr_*` and surface
+        // the polymorphic fallback.)
         for (name, snap) in &results {
-            assert!(
-                snap.is_empty(),
-                "fixture '{name}': expected empty fallback distribution while \
-                 emit-helpers are uncalled (commit 3c83afa baseline). \
-                 Got {} entries: {:?}. \
-                 If this is the result of an intentional per-site flip, \
-                 update this test with the new per-fixture distribution.",
-                snap.len(),
-                snap
+            let want: &[((&'static str, &'static str), u64)] = match *name {
+                // `fn add(a: int, b: int) -> int { a + b }; add(2, 3)`
+                // — `add`'s last expr is `a+b` (AddInt), which sets
+                // `last_expr_numeric_type = Int`, so `emit_return_value_for_hint`
+                // routes to `ReturnValueI64` (no fallback).
+                "typed_primitives" => &[],
+                // `fn main() -> int { ... f(3) }; main()` — the
+                // closure body's `n` read sets last_expr's storage_hint
+                // through `LoadOwnedMutableCaptureI64` paths; outer
+                // `main()` body's last expr is `f(3)` whose return-type
+                // isn't reachable on the function-call path that resets
+                // last_expr_* (see function_calls.rs:1006 analysis).
+                "closure_capture_int" => &[(("return_value", "unknown"), 1)],
+                // `fn greet() -> string { let s: string = "hello"; s }; greet()`
+                // — `s` is a `String`-typed identifier; `String` maps to
+                // a `Ptr` `FieldKind` only via the conservative policy,
+                // and `storage_hint_to_field_kind` returns None for
+                // `String` so the helper records a `string`-labelled
+                // fallback. (Will resolve once the per-Ptr emit path
+                // pairs vw_clone/vw_drop.)
+                "heap_string" => &[(("return_value", "string"), 1)],
+                // `fn maybe() -> Option<int> { ... }; maybe()` — `Option<int>`
+                // resolves to nullable_i64 today; the helper's policy
+                // routes `nullable_*` to fallback.
+                "option_int" => &[(("return_value", "unknown"), 1)],
+                // `fn dyn_id() { let x = 42; x }; dyn_id()` — fn body
+                // proven int (typed return), but the outer `dyn_id()`
+                // call's result is not consumed; no fallback expected.
+                "untyped_dynamic" => &[],
+                other => panic!("unexpected fixture name {other:?}"),
+            };
+            let actual: std::collections::HashMap<(&'static str, &'static str), u64> =
+                snap.iter().copied().collect();
+            let expected: std::collections::HashMap<(&'static str, &'static str), u64> =
+                want.iter().copied().collect();
+            assert_eq!(
+                actual, expected,
+                "fixture '{name}': joint-distribution mismatch.\n\
+                 Wave G audit baseline change? Update the per-fixture\n\
+                 expected distribution in this test.\n\
+                 Got: {snap:?}\n\
+                 Want: {want:?}"
             );
         }
 
