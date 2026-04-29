@@ -3233,41 +3233,115 @@ pub(crate) fn storage_hint_to_field_kind(
 /// `LoadModuleBinding` / `StoreModuleBinding` / `ReturnValue` opcodes can
 /// be deleted.
 ///
-/// Categories (`category` arg in `record_polymorphic_fallback`):
+/// Two views are recorded simultaneously:
+///   * **Per-category** — coarse total by emit-site family. Useful for "how
+///     many polymorphic Loads vs Stores vs Returns survive".
+///   * **Per-(category, hint)** — fine-grained breakdown by the
+///     `StorageHint` that drove the fallback. Useful for "is the residual
+///     fallback dominated by `Dynamic`/`Unknown` (genuinely-unproven sites,
+///     accept) or by `String`/nullable widths (heap/null sentinel — design
+///     gap, plumb a fix)".
+///
+/// Categories:
 ///   * `"load_local"` — `emit_load_local_for_hint` fallback.
 ///   * `"store_local"` — `emit_store_local_for_hint` fallback.
-///   * `"load_module_binding"` — `emit_load_module_binding_for_hint` fallback.
-///   * `"store_module_binding"` — `emit_store_module_binding_for_hint` fallback.
+///   * `"load_module_binding"` — `emit_load_module_binding_for_hint`.
+///   * `"store_module_binding"` — `emit_store_module_binding_for_hint`.
 ///   * `"return_value"` — `emit_return_value_for_hint` fallback.
+///
+/// Hint labels are the lower-snake-case `StorageHint` variant name
+/// (`"dynamic"`, `"unknown"`, `"string"`, `"nullable_int64"`, ...). The
+/// mapping is `storage_hint_label`.
 #[cfg(debug_assertions)]
 pub(crate) mod typed_emit_metrics {
+    use crate::type_tracking::StorageHint;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
-    static COUNTERS: OnceLock<Mutex<HashMap<&'static str, u64>>> = OnceLock::new();
+    /// Per-category total fallback counts.
+    static CATEGORY_COUNTERS: OnceLock<Mutex<HashMap<&'static str, u64>>> = OnceLock::new();
+    /// Per-(category, hint) joint distribution. Hint label is from
+    /// `storage_hint_label`.
+    static JOINT_COUNTERS: OnceLock<Mutex<HashMap<(&'static str, &'static str), u64>>> =
+        OnceLock::new();
 
-    pub(crate) fn record_polymorphic_fallback(category: &'static str) {
-        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(mut g) = counters.lock() {
-            *g.entry(category).or_insert(0) += 1;
+    /// Map a `StorageHint` to a stable `'static` label suitable for
+    /// keying the joint counter. Lower-snake-case variant names.
+    pub(crate) fn storage_hint_label(hint: StorageHint) -> &'static str {
+        match hint {
+            StorageHint::Float64 => "f64",
+            StorageHint::NullableFloat64 => "nullable_f64",
+            StorageHint::Int8 => "i8",
+            StorageHint::NullableInt8 => "nullable_i8",
+            StorageHint::UInt8 => "u8",
+            StorageHint::NullableUInt8 => "nullable_u8",
+            StorageHint::Int16 => "i16",
+            StorageHint::NullableInt16 => "nullable_i16",
+            StorageHint::UInt16 => "u16",
+            StorageHint::NullableUInt16 => "nullable_u16",
+            StorageHint::Int32 => "i32",
+            StorageHint::NullableInt32 => "nullable_i32",
+            StorageHint::UInt32 => "u32",
+            StorageHint::NullableUInt32 => "nullable_u32",
+            StorageHint::Int64 => "i64",
+            StorageHint::NullableInt64 => "nullable_i64",
+            StorageHint::UInt64 => "u64",
+            StorageHint::NullableUInt64 => "nullable_u64",
+            StorageHint::IntSize => "isize",
+            StorageHint::NullableIntSize => "nullable_isize",
+            StorageHint::UIntSize => "usize",
+            StorageHint::NullableUIntSize => "nullable_usize",
+            StorageHint::Bool => "bool",
+            StorageHint::String => "string",
+            StorageHint::Dynamic => "dynamic",
+            StorageHint::Unknown => "unknown",
         }
     }
 
-    /// Snapshot the current fallback counters. Used by tests in Wave E+4
-    /// and Wave G's cleanup audit. Returns `(category, count)` pairs.
+    /// Record a polymorphic fallback. Bumps both the per-category counter
+    /// and the (category, hint-label) joint counter.
+    pub(crate) fn record_polymorphic_fallback(category: &'static str, hint: StorageHint) {
+        let cat = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = cat.lock() {
+            *g.entry(category).or_insert(0) += 1;
+        }
+        let joint = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = joint.lock() {
+            *g.entry((category, storage_hint_label(hint))).or_insert(0) += 1;
+        }
+    }
+
+    /// Snapshot the per-category counters. Sorted by category. Used by
+    /// Wave E+4 tests and Wave G's cleanup audit.
     pub fn snapshot() -> Vec<(&'static str, u64)> {
-        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let counters = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         let g = counters.lock().expect("typed_emit_metrics lock poisoned");
         let mut v: Vec<_> = g.iter().map(|(k, v)| (*k, *v)).collect();
         v.sort_by_key(|(k, _)| *k);
         v
     }
 
-    /// Reset the counter for use across test iterations.
+    /// Snapshot the (category, hint) joint distribution. Sorted by
+    /// (category, hint). Useful for "what hints are driving the residual
+    /// fallback" — `Dynamic`/`Unknown` are genuinely-unproven, anything
+    /// else suggests a design gap.
+    pub fn snapshot_joint() -> Vec<((&'static str, &'static str), u64)> {
+        let counters = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let g = counters.lock().expect("typed_emit_metrics joint lock poisoned");
+        let mut v: Vec<_> = g.iter().map(|(k, v)| (*k, *v)).collect();
+        v.sort_by_key(|(k, _)| *k);
+        v
+    }
+
+    /// Reset both counters for use across test iterations.
     pub fn reset() {
-        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(mut g) = counters.lock() {
+        let cat = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = cat.lock() {
+            g.clear();
+        }
+        let joint = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = joint.lock() {
             g.clear();
         }
     }
@@ -3275,8 +3349,16 @@ pub(crate) mod typed_emit_metrics {
 
 #[cfg(not(debug_assertions))]
 pub(crate) mod typed_emit_metrics {
-    pub(crate) fn record_polymorphic_fallback(_category: &'static str) {}
+    use crate::type_tracking::StorageHint;
+
+    pub(crate) fn storage_hint_label(_hint: StorageHint) -> &'static str {
+        ""
+    }
+    pub(crate) fn record_polymorphic_fallback(_category: &'static str, _hint: StorageHint) {}
     pub fn snapshot() -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
+    pub fn snapshot_joint() -> Vec<((&'static str, &'static str), u64)> {
         Vec::new()
     }
     pub fn reset() {}
@@ -3402,7 +3484,7 @@ impl BytecodeCompiler {
     /// once an emit site explicitly opts in.
     pub(super) fn emit_load_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
         let opcode = typed_load_local_opcode(hint).unwrap_or_else(|| {
-            typed_emit_metrics::record_polymorphic_fallback("load_local");
+            typed_emit_metrics::record_polymorphic_fallback("load_local", hint);
             OpCode::LoadLocal
         });
         self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
@@ -3419,7 +3501,7 @@ impl BytecodeCompiler {
     /// path so refcount accounting is preserved.
     pub(super) fn emit_store_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
         let opcode = typed_store_local_opcode(hint).unwrap_or_else(|| {
-            typed_emit_metrics::record_polymorphic_fallback("store_local");
+            typed_emit_metrics::record_polymorphic_fallback("store_local", hint);
             OpCode::StoreLocal
         });
         self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
@@ -3435,7 +3517,7 @@ impl BytecodeCompiler {
         hint: StorageHint,
     ) {
         let opcode = typed_load_module_binding_opcode(hint).unwrap_or_else(|| {
-            typed_emit_metrics::record_polymorphic_fallback("load_module_binding");
+            typed_emit_metrics::record_polymorphic_fallback("load_module_binding", hint);
             OpCode::LoadModuleBinding
         });
         self.emit(Instruction::new(
@@ -3454,7 +3536,7 @@ impl BytecodeCompiler {
         hint: StorageHint,
     ) {
         let opcode = typed_store_module_binding_opcode(hint).unwrap_or_else(|| {
-            typed_emit_metrics::record_polymorphic_fallback("store_module_binding");
+            typed_emit_metrics::record_polymorphic_fallback("store_module_binding", hint);
             OpCode::StoreModuleBinding
         });
         self.emit(Instruction::new(
@@ -3472,7 +3554,7 @@ impl BytecodeCompiler {
     /// site; no runtime difference at the executor level today.
     pub(super) fn emit_return_value_for_hint(&mut self, hint: StorageHint) {
         let opcode = typed_return_value_opcode(hint).unwrap_or_else(|| {
-            typed_emit_metrics::record_polymorphic_fallback("return_value");
+            typed_emit_metrics::record_polymorphic_fallback("return_value", hint);
             OpCode::ReturnValue
         });
         self.emit(Instruction::simple(opcode));
@@ -4567,5 +4649,171 @@ mod tests {
             "flag: false",
             "string + bool false"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Wave E+4: emit-helper unit tests + fallback-counter instrumentation
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Direct unit test for the 5 emit-helpers — verifies that each
+    /// proven primitive `StorageHint` produces the matching typed opcode,
+    /// and each unproven hint falls through to the polymorphic legacy
+    /// opcode while bumping the fallback counter.
+    ///
+    /// This test does NOT exercise an end-to-end Shape program — that
+    /// would tangle with Wave E+4.5's eval-harness migration. Instead it
+    /// constructs a fresh `BytecodeCompiler`, invokes the helpers
+    /// directly, and inspects `program.instructions`. Any future
+    /// per-site flip in compiler/* will exercise these helpers under
+    /// realistic conditions; this test pins the helper contract.
+    #[test]
+    fn test_e4_typed_emit_helpers_pin_typed_vs_polymorphic() {
+        use crate::bytecode::OpCode;
+        use crate::type_tracking::StorageHint;
+        use super::typed_emit_metrics;
+
+        typed_emit_metrics::reset();
+
+        let mut compiler = BytecodeCompiler::new();
+        let start = compiler.program.instructions.len();
+
+        // Each helper invocation, paired with the expected emitted opcode.
+        // Proven primitives → typed opcode; unproven → polymorphic legacy.
+        let cases: &[(&str, OpCode)] = &[
+            // load_local: I64 / F64 / Bool / Dynamic / Unknown / String / NullableInt64.
+            ("load_i64", OpCode::LoadLocalI64),
+            ("load_f64", OpCode::LoadLocalF64),
+            ("load_bool", OpCode::LoadLocalBool),
+            ("load_dynamic_falls_back", OpCode::LoadLocal),
+            ("load_unknown_falls_back", OpCode::LoadLocal),
+            ("load_string_falls_back", OpCode::LoadLocal),
+            ("load_nullable_int64_falls_back", OpCode::LoadLocal),
+            // store_local mirror.
+            ("store_i64", OpCode::StoreLocalI64),
+            ("store_f64", OpCode::StoreLocalF64),
+            ("store_bool", OpCode::StoreLocalBool),
+            ("store_dynamic_falls_back", OpCode::StoreLocal),
+            ("store_unknown_falls_back", OpCode::StoreLocal),
+            ("store_string_falls_back", OpCode::StoreLocal),
+            ("store_nullable_int64_falls_back", OpCode::StoreLocal),
+            // load_module_binding: I32 / Bool / Dynamic.
+            ("load_mb_i32", OpCode::LoadModuleBindingI32),
+            ("load_mb_bool", OpCode::LoadModuleBindingBool),
+            ("load_mb_dynamic_falls_back", OpCode::LoadModuleBinding),
+            // store_module_binding mirror.
+            ("store_mb_i32", OpCode::StoreModuleBindingI32),
+            ("store_mb_bool", OpCode::StoreModuleBindingBool),
+            ("store_mb_dynamic_falls_back", OpCode::StoreModuleBinding),
+            // return_value: F64 / Bool / String / Unknown.
+            ("ret_f64", OpCode::ReturnValueF64),
+            ("ret_bool", OpCode::ReturnValueBool),
+            ("ret_string_falls_back", OpCode::ReturnValue),
+            ("ret_unknown_falls_back", OpCode::ReturnValue),
+        ];
+
+        // Emission sequence — must match `cases` 1:1 in order.
+        compiler.emit_load_local_for_hint(0, StorageHint::Int64);
+        compiler.emit_load_local_for_hint(0, StorageHint::Float64);
+        compiler.emit_load_local_for_hint(0, StorageHint::Bool);
+        compiler.emit_load_local_for_hint(0, StorageHint::Dynamic);
+        compiler.emit_load_local_for_hint(0, StorageHint::Unknown);
+        compiler.emit_load_local_for_hint(0, StorageHint::String);
+        compiler.emit_load_local_for_hint(0, StorageHint::NullableInt64);
+
+        compiler.emit_store_local_for_hint(0, StorageHint::Int64);
+        compiler.emit_store_local_for_hint(0, StorageHint::Float64);
+        compiler.emit_store_local_for_hint(0, StorageHint::Bool);
+        compiler.emit_store_local_for_hint(0, StorageHint::Dynamic);
+        compiler.emit_store_local_for_hint(0, StorageHint::Unknown);
+        compiler.emit_store_local_for_hint(0, StorageHint::String);
+        compiler.emit_store_local_for_hint(0, StorageHint::NullableInt64);
+
+        compiler.emit_load_module_binding_for_hint(0, StorageHint::Int32);
+        compiler.emit_load_module_binding_for_hint(0, StorageHint::Bool);
+        compiler.emit_load_module_binding_for_hint(0, StorageHint::Dynamic);
+
+        compiler.emit_store_module_binding_for_hint(0, StorageHint::Int32);
+        compiler.emit_store_module_binding_for_hint(0, StorageHint::Bool);
+        compiler.emit_store_module_binding_for_hint(0, StorageHint::Dynamic);
+
+        compiler.emit_return_value_for_hint(StorageHint::Float64);
+        compiler.emit_return_value_for_hint(StorageHint::Bool);
+        compiler.emit_return_value_for_hint(StorageHint::String);
+        compiler.emit_return_value_for_hint(StorageHint::Unknown);
+
+        let emitted: Vec<_> = compiler.program.instructions[start..]
+            .iter()
+            .map(|i| i.opcode)
+            .collect();
+        assert_eq!(emitted.len(), cases.len(), "case count mismatch");
+        for (i, (label, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                emitted[i], *expected,
+                "case '{label}' (idx {i}): expected {expected:?}, got {:?}",
+                emitted[i]
+            );
+        }
+
+        // Per-category fallback totals: count how many `_falls_back`
+        // entries each category had.
+        let snap: std::collections::HashMap<&'static str, u64> =
+            typed_emit_metrics::snapshot().into_iter().collect();
+        assert_eq!(snap.get("load_local").copied().unwrap_or(0), 4);
+        assert_eq!(snap.get("store_local").copied().unwrap_or(0), 4);
+        assert_eq!(snap.get("load_module_binding").copied().unwrap_or(0), 1);
+        assert_eq!(snap.get("store_module_binding").copied().unwrap_or(0), 1);
+        assert_eq!(snap.get("return_value").copied().unwrap_or(0), 2);
+
+        // Per-(category, hint) joint distribution: verify the fallback
+        // labels reflect WHICH hints drove each fallback. This is the
+        // signal Wave G's audit needs (`Dynamic`/`Unknown` are
+        // genuinely-unproven; `String`/nullable widths are heap/null
+        // sentinel design gaps).
+        let joint: std::collections::HashMap<(&'static str, &'static str), u64> =
+            typed_emit_metrics::snapshot_joint().into_iter().collect();
+        assert_eq!(joint.get(&("load_local", "dynamic")).copied().unwrap_or(0), 1);
+        assert_eq!(joint.get(&("load_local", "unknown")).copied().unwrap_or(0), 1);
+        assert_eq!(joint.get(&("load_local", "string")).copied().unwrap_or(0), 1);
+        assert_eq!(
+            joint.get(&("load_local", "nullable_i64")).copied().unwrap_or(0),
+            1
+        );
+        assert_eq!(joint.get(&("return_value", "string")).copied().unwrap_or(0), 1);
+        assert_eq!(joint.get(&("return_value", "unknown")).copied().unwrap_or(0), 1);
+    }
+
+    /// Pins the `storage_hint_to_field_kind` policy: only proven
+    /// non-nullable primitive widths return `Some(...)`. Nullable
+    /// widths, IntSize/UIntSize, String, Dynamic, Unknown return
+    /// `None`. Wave G's policy may extend this; this test calls out
+    /// the change site if so.
+    #[test]
+    fn test_e4_storage_hint_to_field_kind_policy() {
+        use crate::type_tracking::StorageHint;
+        use shape_value::v2::struct_layout::FieldKind;
+
+        // Proven primitives — Some(...).
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Float64), Some(FieldKind::F64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int64), Some(FieldKind::I64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt64), Some(FieldKind::U64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int32), Some(FieldKind::I32));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt32), Some(FieldKind::U32));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int16), Some(FieldKind::I16));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt16), Some(FieldKind::U16));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int8), Some(FieldKind::I8));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt8), Some(FieldKind::U8));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Bool), Some(FieldKind::Bool));
+
+        // Polymorphic-fallback hints — None.
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Dynamic), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Unknown), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::String), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::IntSize), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UIntSize), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableFloat64), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt64), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
     }
 }
