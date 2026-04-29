@@ -141,10 +141,18 @@ fn run_table_count_loop(table_nb: ValueWord) -> ValueWord {
         Constant::Int(1),          // 2: one
     ];
 
+    // E+5.5: count is computed via `AddInt` which now produces native i64
+    // bits; `LoadLocal(2)` reads them back as native i64. Declare the
+    // top-level return kind so `execute()` synthesizes a tagged i48
+    // ValueWord for the test's `as_i64()` assertion.
+    let mut top_level_frame = crate::type_tracking::FrameDescriptor::with_unknown_slots(3);
+    top_level_frame.return_kind = crate::type_tracking::SlotKind::Int64;
+
     let program = BytecodeProgram {
         instructions,
         constants,
         top_level_locals_count: 3, // locals 0=table, 1=idx, 2=count
+        top_level_frame: Some(top_level_frame),
         ..Default::default()
     };
 

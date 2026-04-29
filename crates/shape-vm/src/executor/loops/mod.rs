@@ -7,8 +7,45 @@ use crate::{
     executor::{LoopContext, VirtualMachine},
 };
 use shape_value::heap_value::HeapValue;
+use shape_value::tag_bits::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_INT};
 use shape_value::{TypedArrayData, TableViewData, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
+
+/// Decode a loop iterator-protocol index from raw stack bits.
+///
+/// E+5.5: typed locals and `AddInt`/`PushConst Int` push native i64 raw bits
+/// (no NaN-tag). The legacy `as_number_coerce()` decode path interprets
+/// untagged bits as f64, which silently mangles small native i64 values
+/// (e.g., raw bits 1 → subnormal f64 ≈ 5e-324 → cast to i64 = 0), causing
+/// for-loops to never advance. This decoder handles all three encodings the
+/// idx slot may carry:
+///   - Tagged i48 (`TAG_INT`): legacy compiler emit sites that haven't
+///     migrated to native i64 yet.
+///   - Untagged subnormal-or-zero with non-zero raw bits: native i64
+///     (post-E+5.5 typed slot or `AddInt` result).
+///   - Untagged normal f64 (or canonical zero): real f64 value (test
+///     harness using `Constant::Number(N.0)` for the idx).
+#[inline(always)]
+fn decode_iter_idx(bits: u64) -> Result<i64, VMError> {
+    if is_tagged(bits) {
+        if get_tag(bits) == TAG_INT {
+            return Ok(sign_extend_i48(get_payload(bits)));
+        }
+        return Err(VMError::TypeError {
+            expected: "number",
+            got: "unknown",
+        });
+    }
+    // Untagged: distinguish native i64 from f64. f64::from_bits(N) for
+    // 1 <= N < 2^52 is always subnormal (exponent bits = 0), so any
+    // subnormal-with-nonzero-bits is unambiguously native i64.
+    let f = f64::from_bits(bits);
+    if f.is_subnormal() && bits != 0 {
+        Ok(bits as i64)
+    } else {
+        Ok(f as i64)
+    }
+}
 
 impl VirtualMachine {
     #[inline(always)]
@@ -96,12 +133,9 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_iter_done(&mut self) -> Result<(), VMError> {
-        let idx_nb = self.pop_raw_u64()?;
+        let idx_bits = self.pop_raw_u64()?;
         let iter = self.pop_raw_u64()?;
-        let idx = idx_nb.as_number_coerce().ok_or(VMError::TypeError {
-            expected: "number",
-            got: "unknown",
-        })? as i64;
+        let idx = decode_iter_idx(idx_bits)?;
         // v2 typed array fast path: read len directly from the stamped header.
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
@@ -176,11 +210,9 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_iter_next(&mut self) -> Result<(), VMError> {
-        let idx_nb = self.pop_raw_u64()?;
+        let idx_bits = self.pop_raw_u64()?;
         let iter = self.pop_raw_u64()?;
-        let idx = idx_nb.as_number_coerce().ok_or_else(|| {
-            VMError::RuntimeError("Expected number for iterator index".to_string())
-        })? as i64;
+        let idx = decode_iter_idx(idx_bits)?;
         // v2 typed array fast path: read element through the stamped header.
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
