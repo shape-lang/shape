@@ -541,6 +541,62 @@ impl VirtualMachine {
         Ok(())
     }
 
+    // --- Native (truly raw) typed stack ops — dead code today, used by E+5.3+ ---
+    //
+    // These push/pop raw native bits with no NaN-boxing or i48 sign extension.
+    // The compiler must arrange for the producer and consumer to agree on the
+    // native encoding — these helpers never produce a tagged ValueWord.
+
+    /// Push an i64 onto the stack as RAW NATIVE BITS — no NaN-boxing, no tagging.
+    ///
+    /// Used by E+5.3+ typed-arithmetic opcodes after the flip; the compiler
+    /// must have arranged for the consumer to expect native bits, not tagged.
+    #[inline(always)]
+    pub fn push_native_i64(&mut self, value: i64) -> Result<(), VMError> {
+        if self.sp >= self.stack.len() {
+            return self.push_raw_u64_slow(value as u64);
+        }
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
+            std::ptr::write(ptr, value as u64); // raw bits, no tagging
+        }
+        self.sp += 1;
+        Ok(())
+    }
+
+    /// Pop a raw i64 from the stack — no NaN-decoding, no sign-extension from i48.
+    ///
+    /// The compiler must have proven the slot was last written by
+    /// `push_native_i64` or equivalent.  Performs a raw transmute of the 8-byte
+    /// slot bits to i64.
+    #[inline(always)]
+    pub fn pop_native_i64(&mut self) -> Result<i64, VMError> {
+        if self.sp == 0 {
+            return Err(VMError::StackUnderflow);
+        }
+        self.sp -= 1;
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp);
+            let bits = std::ptr::read(ptr as *const u64);
+            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
+            Ok(bits as i64) // raw transmute, no decode
+        }
+    }
+
+    /// Push a bool onto the stack as RAW NATIVE BITS — 0u64 or 1u64.
+    #[inline(always)]
+    pub fn push_native_bool(&mut self, value: bool) -> Result<(), VMError> {
+        self.push_raw_u64(value as u64)
+    }
+
+    /// Pop a raw bool from the stack — no NaN-decoding.
+    ///
+    /// Treats 0u64 as `false`, anything else as `true`.
+    #[inline(always)]
+    pub fn pop_native_bool(&mut self) -> Result<bool, VMError> {
+        self.pop_raw_u64().map(|bits| bits != 0)
+    }
+
     // ===== Hash and frame helpers =====
 
     pub(crate) fn blob_hash_for_function(&self, func_id: u16) -> Option<FunctionHash> {
@@ -693,5 +749,71 @@ mod raw_stack_tests {
         let bits: u64 = 0x12345678_9abcdef0;
         vm.push_raw_u64(bits).unwrap();
         assert_eq!(vm.pop_raw_u64().unwrap(), bits);
+    }
+
+    // ----- Native helpers (E+5.3+ — truly raw, no NaN-boxing) -----
+
+    #[test]
+    fn native_i64_round_trip_positive() {
+        let mut vm = make_vm();
+        vm.push_native_i64(123_456_789).unwrap();
+        assert_eq!(vm.pop_native_i64().unwrap(), 123_456_789);
+    }
+
+    #[test]
+    fn native_i64_round_trip_negative() {
+        let mut vm = make_vm();
+        vm.push_native_i64(-987_654_321).unwrap();
+        assert_eq!(vm.pop_native_i64().unwrap(), -987_654_321);
+    }
+
+    #[test]
+    fn native_i64_round_trip_full_range_no_tag() {
+        // Full i64 range — bits that would never fit in an i48-tagged slot.
+        let mut vm = make_vm();
+        let value: i64 = i64::MIN + 1; // most-negative-plus-one to avoid abs() trap
+        vm.push_native_i64(value).unwrap();
+        assert_eq!(vm.pop_native_i64().unwrap(), value);
+    }
+
+    #[test]
+    fn native_i64_writes_no_tag_bits() {
+        // Confirm the slot contains raw native bits (not NaN-tagged) immediately
+        // after push_native_i64 by reading back via pop_raw_u64.
+        let mut vm = make_vm();
+        let value: i64 = 0x0123_4567_89AB_CDEF;
+        vm.push_native_i64(value).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, value as u64, "expected raw bits, got tagged encoding");
+    }
+
+    #[test]
+    fn native_bool_round_trip_true() {
+        let mut vm = make_vm();
+        vm.push_native_bool(true).unwrap();
+        assert_eq!(vm.pop_native_bool().unwrap(), true);
+    }
+
+    #[test]
+    fn native_bool_round_trip_false() {
+        let mut vm = make_vm();
+        vm.push_native_bool(false).unwrap();
+        assert_eq!(vm.pop_native_bool().unwrap(), false);
+    }
+
+    #[test]
+    fn native_bool_writes_no_tag_bits() {
+        // push_native_bool(true) must write 1u64, not the NaN-tagged bool encoding.
+        let mut vm = make_vm();
+        vm.push_native_bool(true).unwrap();
+        let bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(bits, 1u64, "expected raw 1, got tagged encoding");
+    }
+
+    #[test]
+    fn native_pop_underflows() {
+        let mut vm = make_vm();
+        assert!(vm.pop_native_i64().is_err());
+        assert!(vm.pop_native_bool().is_err());
     }
 }
