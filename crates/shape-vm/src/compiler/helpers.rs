@@ -3161,6 +3161,324 @@ pub(crate) fn owned_mutable_typed_store_opcode(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Wave E+4: typed-emission helpers for Load/Store local + module-binding +
+// ReturnValue.
+//
+// These map a *proven* `StorageHint` to one of Wave E+3's typed opcodes
+// (codes 0x16C-0x1A2). When the hint cannot be coerced to a concrete
+// `FieldKind` (Dynamic / Unknown / nullable widths whose null sentinel
+// can't be transported as raw native bits without losing information),
+// the helpers fall back to the polymorphic legacy opcode. The legacy
+// opcodes stay live; Wave G later audits whether they still have any
+// emit sites and removes them if dead.
+//
+// Per-Ptr ownership: typed Ptr opcodes do NOT clone/drop. The IR
+// pairs `LoadLocalPtr` with `vw_clone` and `StoreLocalPtr` with
+// `vw_drop` of the prior payload (matches Wave D's c-stdlib-msgpack
+// pattern). Callers that flip Ptr-Kind sites must add the matching
+// retain/release; until then, leave Ptr sites on the polymorphic
+// fallback (which preserves the legacy refcount semantics).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Map a `StorageHint` to a `FieldKind` when the hint represents a
+/// statically-proven primitive. Returns `None` for `Dynamic`, `Unknown`,
+/// nullable widths (whose null sentinel relies on ValueWord encoding,
+/// not raw native bits), `String` (heap-bearing — Ptr Kind, but legacy
+/// emit path manages ownership; routed to polymorphic until per-Ptr
+/// audit lands), and any future variant we don't recognize.
+#[inline]
+pub(crate) fn storage_hint_to_field_kind(
+    hint: StorageHint,
+) -> Option<shape_value::v2::struct_layout::FieldKind> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match hint {
+        // Proven non-nullable primitives — safe to flip to typed.
+        StorageHint::Float64 => FieldKind::F64,
+        StorageHint::Int64 => FieldKind::I64,
+        StorageHint::UInt64 => FieldKind::U64,
+        StorageHint::Int32 => FieldKind::I32,
+        StorageHint::UInt32 => FieldKind::U32,
+        StorageHint::Int16 => FieldKind::I16,
+        StorageHint::UInt16 => FieldKind::U16,
+        StorageHint::Int8 => FieldKind::I8,
+        StorageHint::UInt8 => FieldKind::U8,
+        StorageHint::IntSize | StorageHint::UIntSize => return None,
+        StorageHint::Bool => FieldKind::Bool,
+        // Heap-bearing / nullable / unresolved → polymorphic fallback.
+        // String is a Ptr by storage but routes via the legacy
+        // LoadLocal/StoreLocal path that does refcount accounting; until
+        // emit sites pair vw_clone/vw_drop with typed Ptr ops, leave
+        // String on polymorphic.
+        StorageHint::String => return None,
+        StorageHint::NullableFloat64
+        | StorageHint::NullableInt8
+        | StorageHint::NullableUInt8
+        | StorageHint::NullableInt16
+        | StorageHint::NullableUInt16
+        | StorageHint::NullableInt32
+        | StorageHint::NullableUInt32
+        | StorageHint::NullableInt64
+        | StorageHint::NullableUInt64
+        | StorageHint::NullableIntSize
+        | StorageHint::NullableUIntSize
+        | StorageHint::Dynamic
+        | StorageHint::Unknown => return None,
+    })
+}
+
+/// Wave E+4 fallback counter — increments under `debug_assertions` whenever
+/// a typed-emission helper takes the polymorphic-legacy fallback. Wave G
+/// reads this to decide whether the legacy `LoadLocal` / `StoreLocal` /
+/// `LoadModuleBinding` / `StoreModuleBinding` / `ReturnValue` opcodes can
+/// be deleted.
+///
+/// Categories (`category` arg in `record_polymorphic_fallback`):
+///   * `"load_local"` — `emit_load_local_for_hint` fallback.
+///   * `"store_local"` — `emit_store_local_for_hint` fallback.
+///   * `"load_module_binding"` — `emit_load_module_binding_for_hint` fallback.
+///   * `"store_module_binding"` — `emit_store_module_binding_for_hint` fallback.
+///   * `"return_value"` — `emit_return_value_for_hint` fallback.
+#[cfg(debug_assertions)]
+pub(crate) mod typed_emit_metrics {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static COUNTERS: OnceLock<Mutex<HashMap<&'static str, u64>>> = OnceLock::new();
+
+    pub(crate) fn record_polymorphic_fallback(category: &'static str) {
+        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = counters.lock() {
+            *g.entry(category).or_insert(0) += 1;
+        }
+    }
+
+    /// Snapshot the current fallback counters. Used by tests in Wave E+4
+    /// and Wave G's cleanup audit. Returns `(category, count)` pairs.
+    pub fn snapshot() -> Vec<(&'static str, u64)> {
+        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let g = counters.lock().expect("typed_emit_metrics lock poisoned");
+        let mut v: Vec<_> = g.iter().map(|(k, v)| (*k, *v)).collect();
+        v.sort_by_key(|(k, _)| *k);
+        v
+    }
+
+    /// Reset the counter for use across test iterations.
+    pub fn reset() {
+        let counters = COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut g) = counters.lock() {
+            g.clear();
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) mod typed_emit_metrics {
+    pub(crate) fn record_polymorphic_fallback(_category: &'static str) {}
+    pub fn snapshot() -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
+    pub fn reset() {}
+}
+
+/// Map a `StorageHint` to its typed `LoadLocal<Kind>` opcode (E+3 codes
+/// 0x16C-0x176). Returns `None` for hints that don't have a typed form.
+#[inline]
+pub(crate) fn typed_load_local_opcode(hint: StorageHint) -> Option<OpCode> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match storage_hint_to_field_kind(hint)? {
+        FieldKind::I64 => OpCode::LoadLocalI64,
+        FieldKind::U64 => OpCode::LoadLocalU64,
+        FieldKind::F64 => OpCode::LoadLocalF64,
+        FieldKind::I32 => OpCode::LoadLocalI32,
+        FieldKind::U32 => OpCode::LoadLocalU32,
+        FieldKind::I16 => OpCode::LoadLocalI16,
+        FieldKind::U16 => OpCode::LoadLocalU16,
+        FieldKind::I8 => OpCode::LoadLocalI8,
+        FieldKind::U8 => OpCode::LoadLocalU8,
+        FieldKind::Bool => OpCode::LoadLocalBool,
+        FieldKind::Ptr => OpCode::LoadLocalPtr,
+    })
+}
+
+/// Map a `StorageHint` to its typed `StoreLocal<Kind>` opcode (E+3 codes
+/// 0x177-0x181). Returns `None` for hints that don't have a typed form.
+#[inline]
+pub(crate) fn typed_store_local_opcode(hint: StorageHint) -> Option<OpCode> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match storage_hint_to_field_kind(hint)? {
+        FieldKind::I64 => OpCode::StoreLocalI64,
+        FieldKind::U64 => OpCode::StoreLocalU64,
+        FieldKind::F64 => OpCode::StoreLocalF64,
+        FieldKind::I32 => OpCode::StoreLocalI32,
+        FieldKind::U32 => OpCode::StoreLocalU32,
+        FieldKind::I16 => OpCode::StoreLocalI16,
+        FieldKind::U16 => OpCode::StoreLocalU16,
+        FieldKind::I8 => OpCode::StoreLocalI8,
+        FieldKind::U8 => OpCode::StoreLocalU8,
+        FieldKind::Bool => OpCode::StoreLocalBool,
+        FieldKind::Ptr => OpCode::StoreLocalPtr,
+    })
+}
+
+/// Map a `StorageHint` to its typed `LoadModuleBinding<Kind>` opcode
+/// (E+3 codes 0x182-0x18C). Returns `None` for unproven hints.
+#[inline]
+pub(crate) fn typed_load_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match storage_hint_to_field_kind(hint)? {
+        FieldKind::I64 => OpCode::LoadModuleBindingI64,
+        FieldKind::U64 => OpCode::LoadModuleBindingU64,
+        FieldKind::F64 => OpCode::LoadModuleBindingF64,
+        FieldKind::I32 => OpCode::LoadModuleBindingI32,
+        FieldKind::U32 => OpCode::LoadModuleBindingU32,
+        FieldKind::I16 => OpCode::LoadModuleBindingI16,
+        FieldKind::U16 => OpCode::LoadModuleBindingU16,
+        FieldKind::I8 => OpCode::LoadModuleBindingI8,
+        FieldKind::U8 => OpCode::LoadModuleBindingU8,
+        FieldKind::Bool => OpCode::LoadModuleBindingBool,
+        FieldKind::Ptr => OpCode::LoadModuleBindingPtr,
+    })
+}
+
+/// Map a `StorageHint` to its typed `StoreModuleBinding<Kind>` opcode
+/// (E+3 codes 0x18D-0x197). Returns `None` for unproven hints.
+#[inline]
+pub(crate) fn typed_store_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match storage_hint_to_field_kind(hint)? {
+        FieldKind::I64 => OpCode::StoreModuleBindingI64,
+        FieldKind::U64 => OpCode::StoreModuleBindingU64,
+        FieldKind::F64 => OpCode::StoreModuleBindingF64,
+        FieldKind::I32 => OpCode::StoreModuleBindingI32,
+        FieldKind::U32 => OpCode::StoreModuleBindingU32,
+        FieldKind::I16 => OpCode::StoreModuleBindingI16,
+        FieldKind::U16 => OpCode::StoreModuleBindingU16,
+        FieldKind::I8 => OpCode::StoreModuleBindingI8,
+        FieldKind::U8 => OpCode::StoreModuleBindingU8,
+        FieldKind::Bool => OpCode::StoreModuleBindingBool,
+        FieldKind::Ptr => OpCode::StoreModuleBindingPtr,
+    })
+}
+
+/// Map a `StorageHint` to its typed `ReturnValue<Kind>` opcode (E+3
+/// codes 0x198-0x1A2). Returns `None` for unproven hints.
+#[inline]
+pub(crate) fn typed_return_value_opcode(hint: StorageHint) -> Option<OpCode> {
+    use shape_value::v2::struct_layout::FieldKind;
+    Some(match storage_hint_to_field_kind(hint)? {
+        FieldKind::I64 => OpCode::ReturnValueI64,
+        FieldKind::U64 => OpCode::ReturnValueU64,
+        FieldKind::F64 => OpCode::ReturnValueF64,
+        FieldKind::I32 => OpCode::ReturnValueI32,
+        FieldKind::U32 => OpCode::ReturnValueU32,
+        FieldKind::I16 => OpCode::ReturnValueI16,
+        FieldKind::U16 => OpCode::ReturnValueU16,
+        FieldKind::I8 => OpCode::ReturnValueI8,
+        FieldKind::U8 => OpCode::ReturnValueU8,
+        FieldKind::Bool => OpCode::ReturnValueBool,
+        FieldKind::Ptr => OpCode::ReturnValuePtr,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave E+4: BytecodeCompiler emit-helpers — typed-or-polymorphic dispatch
+// ─────────────────────────────────────────────────────────────────────────
+
+impl BytecodeCompiler {
+    /// Emit a `LoadLocal<Kind>` (E+3 codes 0x16C-0x176) when the proven
+    /// `StorageHint` maps to a `FieldKind`, otherwise fall back to the
+    /// polymorphic legacy `LoadLocal` (0x50). The fallback path is
+    /// instrumented by `typed_emit_metrics` so Wave G can audit how many
+    /// emit sites still need the polymorphic form.
+    ///
+    /// Per-Ptr ownership: for `FieldKind::Ptr` slots, the caller is
+    /// responsible for pairing this with a `vw_clone` retain of the
+    /// loaded value (matching D.1 / D.2 Ptr semantics). Today
+    /// `storage_hint_to_field_kind` returns `None` for `String` /
+    /// heap-bearing hints so callers stay on the polymorphic path that
+    /// does the refcount accounting; per-Ptr typed-Load is unlocked
+    /// once an emit site explicitly opts in.
+    pub(super) fn emit_load_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
+        let opcode = typed_load_local_opcode(hint).unwrap_or_else(|| {
+            typed_emit_metrics::record_polymorphic_fallback("load_local");
+            OpCode::LoadLocal
+        });
+        self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
+    }
+
+    /// Emit a `StoreLocal<Kind>` (E+3 codes 0x177-0x181) when the proven
+    /// `StorageHint` maps to a `FieldKind`, otherwise fall back to the
+    /// polymorphic legacy `StoreLocal` (0x51).
+    ///
+    /// Per-Ptr ownership: for `FieldKind::Ptr` slots, the caller is
+    /// responsible for pairing this with a `vw_drop` of the prior payload
+    /// before the typed Store overwrites the slot. As with the load helper,
+    /// today `String` and heap-bearing hints route to the polymorphic
+    /// path so refcount accounting is preserved.
+    pub(super) fn emit_store_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
+        let opcode = typed_store_local_opcode(hint).unwrap_or_else(|| {
+            typed_emit_metrics::record_polymorphic_fallback("store_local");
+            OpCode::StoreLocal
+        });
+        self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
+    }
+
+    /// Emit a `LoadModuleBinding<Kind>` (E+3 codes 0x182-0x18C) when the
+    /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
+    /// the polymorphic legacy `LoadModuleBinding` (0x52). Per-Ptr ownership
+    /// rules mirror `emit_load_local_for_hint`.
+    pub(super) fn emit_load_module_binding_for_hint(
+        &mut self,
+        binding_idx: u16,
+        hint: StorageHint,
+    ) {
+        let opcode = typed_load_module_binding_opcode(hint).unwrap_or_else(|| {
+            typed_emit_metrics::record_polymorphic_fallback("load_module_binding");
+            OpCode::LoadModuleBinding
+        });
+        self.emit(Instruction::new(
+            opcode,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+    }
+
+    /// Emit a `StoreModuleBinding<Kind>` (E+3 codes 0x18D-0x197) when the
+    /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
+    /// the polymorphic legacy `StoreModuleBinding` (0x53). Per-Ptr
+    /// ownership rules mirror `emit_store_local_for_hint`.
+    pub(super) fn emit_store_module_binding_for_hint(
+        &mut self,
+        binding_idx: u16,
+        hint: StorageHint,
+    ) {
+        let opcode = typed_store_module_binding_opcode(hint).unwrap_or_else(|| {
+            typed_emit_metrics::record_polymorphic_fallback("store_module_binding");
+            OpCode::StoreModuleBinding
+        });
+        self.emit(Instruction::new(
+            opcode,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+    }
+
+    /// Emit a `ReturnValue<Kind>` (E+3 codes 0x198-0x1A2) when the
+    /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back
+    /// to the polymorphic legacy `ReturnValue` (0x45). The typed handlers
+    /// are *transport-neutral* (same body as the legacy handler) — the
+    /// `<Kind>` is a static annotation for the JIT and downstream
+    /// consumers so the caller's stack discipline is known at the call
+    /// site; no runtime difference at the executor level today.
+    pub(super) fn emit_return_value_for_hint(&mut self, hint: StorageHint) {
+        let opcode = typed_return_value_opcode(hint).unwrap_or_else(|| {
+            typed_emit_metrics::record_polymorphic_fallback("return_value");
+            OpCode::ReturnValue
+        });
+        self.emit(Instruction::simple(opcode));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;
