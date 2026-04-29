@@ -377,6 +377,29 @@ impl VirtualMachine {
             LoadModuleBinding => self.op_load_module_binding(instruction)?,
             StoreModuleBinding => self.op_store_module_binding(instruction)?,
             StoreModuleBindingTyped => self.op_store_module_binding_typed(instruction)?,
+            // Wave E+3: typed module-binding opcodes (0x182..=0x197).
+            LoadModuleBindingI64 => self.op_load_module_binding_i64(instruction)?,
+            LoadModuleBindingU64 => self.op_load_module_binding_u64(instruction)?,
+            LoadModuleBindingF64 => self.op_load_module_binding_f64(instruction)?,
+            LoadModuleBindingI32 => self.op_load_module_binding_i32(instruction)?,
+            LoadModuleBindingU32 => self.op_load_module_binding_u32(instruction)?,
+            LoadModuleBindingI16 => self.op_load_module_binding_i16(instruction)?,
+            LoadModuleBindingU16 => self.op_load_module_binding_u16(instruction)?,
+            LoadModuleBindingI8 => self.op_load_module_binding_i8(instruction)?,
+            LoadModuleBindingU8 => self.op_load_module_binding_u8(instruction)?,
+            LoadModuleBindingBool => self.op_load_module_binding_bool(instruction)?,
+            LoadModuleBindingPtr => self.op_load_module_binding_ptr(instruction)?,
+            StoreModuleBindingI64 => self.op_store_module_binding_i64(instruction)?,
+            StoreModuleBindingU64 => self.op_store_module_binding_u64(instruction)?,
+            StoreModuleBindingF64 => self.op_store_module_binding_f64(instruction)?,
+            StoreModuleBindingI32 => self.op_store_module_binding_i32(instruction)?,
+            StoreModuleBindingU32 => self.op_store_module_binding_u32(instruction)?,
+            StoreModuleBindingI16 => self.op_store_module_binding_i16(instruction)?,
+            StoreModuleBindingU16 => self.op_store_module_binding_u16(instruction)?,
+            StoreModuleBindingI8 => self.op_store_module_binding_i8(instruction)?,
+            StoreModuleBindingU8 => self.op_store_module_binding_u8(instruction)?,
+            StoreModuleBindingBool => self.op_store_module_binding_bool(instruction)?,
+            StoreModuleBindingPtr => self.op_store_module_binding_ptr(instruction)?,
             LoadClosure => self.op_load_closure(instruction)?,
             StoreClosure => self.op_store_closure(instruction)?,
             CloseUpvalue => self.op_close_upvalue(instruction)?,
@@ -5978,6 +6001,204 @@ mod tests {
         // SAFETY: cell came from `alloc_owned_mutable_ptr` =
         // `Box::into_raw(Box::new(initial_bits: u64))`. Reclaim once.
         unsafe { drop(Box::from_raw(cell)) };
+        vm.call_stack.pop();
+    }
+
+    // ===== Wave E+3: typed local load/store handler tests =====
+
+    /// Reserve `n` local slots above the current `bp` (i.e. raise `sp`
+    /// past `bp + n`). The slots are zeroed; the typed Load/Store
+    /// handlers will read/write them by index.
+    fn reserve_local_slots(vm: &mut VirtualMachine, n: usize) {
+        for _ in 0..n {
+            vm.push_raw_u64(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn e3_load_store_local_i64_round_trip() {
+        // I64 round-trip: StoreLocalI64 → LoadLocalI64 returns the same
+        // 64-bit pattern. No NaN-box tag, no ValueWord wrapping.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
+        reserve_local_slots(&mut vm, 1);
+
+        let store = Instruction::new(OpCode::StoreLocalI64, Some(Operand::Local(0)));
+        let load = Instruction::new(OpCode::LoadLocalI64, Some(Operand::Local(0)));
+
+        // Push a raw i64 value and store it.
+        let value: i64 = -123_456_789_012;
+        vm.push_raw_u64(value as u64).unwrap();
+        vm.op_store_local_i64(&store).unwrap();
+
+        // Load it back — bits must be byte-equal to what we stored.
+        vm.op_load_local_i64(&load).unwrap();
+        let loaded = vm.pop_raw_u64().unwrap() as i64;
+        assert_eq!(loaded, value, "i64 round-trip preserves the bit pattern");
+
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn e3_load_store_local_f64_round_trip() {
+        // F64 round-trip: raw f64 bits passed through both directions
+        // without NaN-box mangling.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
+        reserve_local_slots(&mut vm, 1);
+
+        let store = Instruction::new(OpCode::StoreLocalF64, Some(Operand::Local(0)));
+        let load = Instruction::new(OpCode::LoadLocalF64, Some(Operand::Local(0)));
+
+        let value: f64 = 3.141_592_653_589_793;
+        vm.push_raw_u64(value.to_bits()).unwrap();
+        vm.op_store_local_f64(&store).unwrap();
+
+        vm.op_load_local_f64(&load).unwrap();
+        let loaded = f64::from_bits(vm.pop_raw_u64().unwrap());
+        assert_eq!(loaded, value, "f64 round-trip preserves the value");
+
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn e3_load_store_local_bool_round_trip() {
+        // Bool round-trip: StoreLocalBool canonicalizes any nonzero pop
+        // to 1; LoadLocalBool returns the canonical bits unchanged.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
+        reserve_local_slots(&mut vm, 2);
+
+        let store0 = Instruction::new(OpCode::StoreLocalBool, Some(Operand::Local(0)));
+        let load0 = Instruction::new(OpCode::LoadLocalBool, Some(Operand::Local(0)));
+        let store1 = Instruction::new(OpCode::StoreLocalBool, Some(Operand::Local(1)));
+        let load1 = Instruction::new(OpCode::LoadLocalBool, Some(Operand::Local(1)));
+
+        // Slot 0: store `false` (0) and read back.
+        vm.push_raw_u64(0).unwrap();
+        vm.op_store_local_bool(&store0).unwrap();
+        vm.op_load_local_bool(&load0).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), 0, "false round-trips as 0");
+
+        // Slot 1: store a nonzero pattern (e.g. 0xDEADBEEF) — must
+        // canonicalize to 1.
+        vm.push_raw_u64(0xDEAD_BEEF).unwrap();
+        vm.op_store_local_bool(&store1).unwrap();
+        vm.op_load_local_bool(&load1).unwrap();
+        assert_eq!(
+            vm.pop_raw_u64().unwrap(),
+            1,
+            "nonzero pop canonicalizes to 1"
+        );
+
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn e3_load_store_local_i32_truncation_and_sign_extension() {
+        // I32 store truncates to low 4 bytes; load sign-extends back.
+        // 0xAAAA_BBBB_8000_0000 stored as i32 → 0x8000_0000 (i32::MIN);
+        // load sign-extends to 0xFFFF_FFFF_8000_0000.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
+        reserve_local_slots(&mut vm, 1);
+
+        let store = Instruction::new(OpCode::StoreLocalI32, Some(Operand::Local(0)));
+        let load = Instruction::new(OpCode::LoadLocalI32, Some(Operand::Local(0)));
+
+        // Push a u64 with non-canonical high bits — store must truncate.
+        let raw: u64 = 0xAAAA_BBBB_8000_0000;
+        vm.push_raw_u64(raw).unwrap();
+        vm.op_store_local_i32(&store).unwrap();
+
+        // Load — sign-extends low 4 bytes (0x8000_0000 = i32::MIN) to i64.
+        vm.op_load_local_i32(&load).unwrap();
+        let loaded = vm.pop_raw_u64().unwrap() as i64;
+        assert_eq!(
+            loaded,
+            i32::MIN as i64,
+            "i32 store truncates and load sign-extends"
+        );
+
+        vm.call_stack.pop();
+    }
+
+    #[test]
+    fn e3_load_store_local_ptr_no_refcount_traffic() {
+        // Ptr round-trip: LoadLocalPtr / StoreLocalPtr must NOT
+        // clone/release the heap share. Mirrors the D.1 Ptr-aliasing
+        // contract: refcount semantics are the IR's responsibility.
+        let mut vm = fresh_vm_for_capture_opcode_test();
+        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
+        reserve_local_slots(&mut vm, 1);
+
+        // Mint a long-string Arc share (longer than the 32-byte intern
+        // threshold so the Arc strong count is the load-bearing
+        // refcount we observe).
+        let payload_a: StdArc<String> = StdArc::new(
+            "hello-e3-local-ptr-a-payload-longer-than-intern-threshold".to_string(),
+        );
+        let initial_bits = ValueWord::from_string(payload_a.clone()).into_raw_bits();
+        // External strong count: 1 (`payload_a`) + 1 (`initial_bits`) = 2.
+        let baseline_a = StdArc::strong_count(&payload_a);
+        assert_eq!(baseline_a, 2);
+
+        let store = Instruction::new(OpCode::StoreLocalPtr, Some(Operand::Local(0)));
+        let load = Instruction::new(OpCode::LoadLocalPtr, Some(Operand::Local(0)));
+
+        // Store: pushes `initial_bits` and runs StoreLocalPtr. The
+        // handler does NOT retain — strong count must remain unchanged.
+        vm.push_raw_u64(initial_bits).unwrap();
+        vm.op_store_local_ptr(&store).unwrap();
+        assert_eq!(
+            StdArc::strong_count(&payload_a),
+            baseline_a,
+            "StoreLocalPtr must not retain the new share"
+        );
+
+        // Load: handler does NOT clone — strong count still unchanged.
+        vm.op_load_local_ptr(&load).unwrap();
+        let loaded_bits = vm.pop_raw_u64().unwrap();
+        assert_eq!(loaded_bits, initial_bits);
+        assert_eq!(
+            StdArc::strong_count(&payload_a),
+            baseline_a,
+            "LoadLocalPtr must not clone the heap share"
+        );
+
+        // Overwrite with a fresh payload — handler must NOT release the
+        // previous share (matches D.1 / D.2 Ptr semantics).
+        let payload_b: StdArc<String> = StdArc::new(
+            "hello-e3-local-ptr-b-payload-longer-than-intern-threshold".to_string(),
+        );
+        let new_bits = ValueWord::from_string(payload_b.clone()).into_raw_bits();
+        let baseline_b = StdArc::strong_count(&payload_b);
+        assert_eq!(baseline_b, 2);
+
+        vm.push_raw_u64(new_bits).unwrap();
+        vm.op_store_local_ptr(&store).unwrap();
+        assert_eq!(
+            StdArc::strong_count(&payload_b),
+            baseline_b,
+            "StoreLocalPtr must not retain the new share (overwrite)"
+        );
+        assert_eq!(
+            StdArc::strong_count(&payload_a),
+            baseline_a,
+            "StoreLocalPtr must not release the previous share (overwrite)"
+        );
+
+        // Cleanup: the slot now holds `new_bits` (one share of payload_b).
+        // The original `initial_bits` share of payload_a is leaked by the
+        // overwrite — vw_drop both to release.
+        use shape_value::value_word_drop::vw_drop;
+        // SAFETY: bp+0 is the live slot holding new_bits.
+        let live_slot_bits = vm.stack[vm.current_locals_base()];
+        vw_drop(live_slot_bits);
+        assert_eq!(StdArc::strong_count(&payload_b), 1);
+        vw_drop(initial_bits);
+        assert_eq!(StdArc::strong_count(&payload_a), 1);
+
         vm.call_stack.pop();
     }
 }

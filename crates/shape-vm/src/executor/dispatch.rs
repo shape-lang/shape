@@ -546,6 +546,28 @@ impl VirtualMachine {
             | LoadModuleBinding
             | StoreModuleBinding
             | StoreModuleBindingTyped
+            | LoadModuleBindingI64
+            | LoadModuleBindingU64
+            | LoadModuleBindingF64
+            | LoadModuleBindingI32
+            | LoadModuleBindingU32
+            | LoadModuleBindingI16
+            | LoadModuleBindingU16
+            | LoadModuleBindingI8
+            | LoadModuleBindingU8
+            | LoadModuleBindingBool
+            | LoadModuleBindingPtr
+            | StoreModuleBindingI64
+            | StoreModuleBindingU64
+            | StoreModuleBindingF64
+            | StoreModuleBindingI32
+            | StoreModuleBindingU32
+            | StoreModuleBindingI16
+            | StoreModuleBindingU16
+            | StoreModuleBindingI8
+            | StoreModuleBindingU8
+            | StoreModuleBindingBool
+            | StoreModuleBindingPtr
             | LoadClosure
             | StoreClosure
             | CloseUpvalue
