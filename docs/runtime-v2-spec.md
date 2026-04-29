@@ -359,6 +359,43 @@ let y = some_untyped_thing           // ← type error: unresolved type
 
 ---
 
+## Host Boundary: ValueWord as Serialization Format
+
+**Status**: Wave E+4.5 (2026-04-27). Internal pipeline is end-to-end native bits; `ValueWord` retained only at the host boundary.
+
+After Wave E+ flips Load/Store/Return to typed opcodes that push/pop **raw native bits** (no NaN-box tag) inside the VM, the host (test harness, REPL, CLI script-runner, embedder) is responsible for synthesising a tagged `ValueWord` from those bits at the boundary, given a kind hint.
+
+### API
+
+`shape-vm` exposes two execution entry points on `VirtualMachine`:
+
+- `execute(ctx) -> Result<ValueWord, VMError>` — synthesises a tagged `ValueWord` from the raw bits per the program's declared top-level return kind (read from `BytecodeProgram::top_level_frame.return_kind`). When the kind is unknown — the legacy / pre-E+4 situation — the bits are returned as a `ValueWord` directly (passthrough). Existing callers stay unmodified.
+
+- `execute_raw(ctx) -> Result<u64, VMError>` — returns raw u64 bits at the top of stack. Use when the host wants full control of synthesis.
+
+Test helpers in `shape_vm::test_utils` mirror the pattern: `eval_raw(src) -> (u64, Option<SlotKind>)`, `eval(src) -> ValueWord` (synthesises automatically), `eval_with_kind(src, SlotKind) -> ValueWord` (forces synthesis per supplied kind), and per-kind convenience wrappers `eval_typed_i64`, `eval_typed_f64`, `eval_typed_bool`.
+
+### Encoding
+
+The synthesizer (`crate::executor::dispatch::synthesize_value_word_from_raw`) mirrors `unmarshal_jit_result` from `jit_abi.rs` for the JIT call boundary. Both kinds of boundary need the same bits→`ValueWord` synthesis:
+
+| SlotKind | Decoding |
+|----------|----------|
+| Int8/16/32/64 (+ nullable / IntSize) | `ValueWord::from_i64(bits as i64)` |
+| UInt8/16/32 (+ nullable / UIntSize) | `ValueWord::from_i64(bits as i64)` (fits) |
+| UInt64 (+ nullable) | `from_i64` if `bits ≤ i64::MAX`, else `from_native_u64(bits)` |
+| Float64 (+ nullable) | `ValueWord::from_f64(f64::from_bits(bits))` (re-canonicalises NaN-box) |
+| Bool | `ValueWord::from_bool(bits != 0)` |
+| String / Dynamic / Unknown | `ValueWord::from_raw_bits(bits)` (passthrough) |
+
+### Why ValueWord persists at the boundary
+
+The internal pipeline does not need `ValueWord`. But the host has legitimate reasons to want a tagged representation: pretty-printing for the REPL, MessagePack serialisation for the wire protocol, `Display`/`Debug` impls, comptime evaluation that interleaves with runtime values, and dynamic-language interop (PyO3 / deno_core) that doesn't carry static type info across the boundary. `ValueWord` is the canonical serialisation format for those use cases.
+
+The CLI / REPL embedder (e.g. `BytecodeExecutor::execute` in `shape-vm/src/execution.rs`) propagates the synthesised `ValueWord` upward and the printer / serialiser layer handles it correctly without further changes — synthesis happens before the value leaves `vm.execute()`.
+
+---
+
 ## Non-Goals
 
 - **Dynamic typing**: No `any` type, no runtime type dispatch, no fallback
