@@ -962,6 +962,8 @@ impl BytecodeCompiler {
             std::mem::take(&mut self.owned_mutable_closure_captures);
         let saved_owned_mutable_capture_inner_kinds =
             std::mem::take(&mut self.owned_mutable_capture_inner_kinds);
+        let saved_shared_capture_inner_kinds =
+            std::mem::take(&mut self.shared_capture_inner_kinds);
         let _ = closure_is_escaping;
         for (i, name) in captured_vars.iter().enumerate() {
             if mutable_flags.get(i).copied().unwrap_or(false) {
@@ -978,6 +980,20 @@ impl BytecodeCompiler {
                 // differ between locals and module bindings.
                 if matches!(kind, CaptureKind::Shared) {
                     self.shared_closure_captures.insert(name.clone(), i as u16);
+                    // A2-refined / task #17: record the cell's interior
+                    // `FieldKind` so the closure body's Shared read/write
+                    // emit sites can dispatch to the typed Wave D.2
+                    // opcodes (codes 0x156-0x16B), mirroring the
+                    // OwnedMutable population a few lines below. The
+                    // inner kind is derived from the captured binding's
+                    // resolved `ConcreteType`. Falls back to `Ptr` when
+                    // the type isn't statically resolved.
+                    let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
+                    let inner_kind = concrete_type_for_expr(self, &ident_expr)
+                        .map(|ct| ct.to_field_kind())
+                        .unwrap_or(shape_value::v2::struct_layout::FieldKind::Ptr);
+                    self.shared_capture_inner_kinds
+                        .insert(name.clone(), inner_kind);
                 }
                 // Track A.1C.2b: OwnedMutable (let mut) captures route
                 // through the A.1B Load/StoreOwnedMutableCapture
@@ -1023,6 +1039,7 @@ impl BytecodeCompiler {
         self.shared_closure_captures = saved_shared_captures;
         self.owned_mutable_closure_captures = saved_owned_mutable_captures;
         self.owned_mutable_capture_inner_kinds = saved_owned_mutable_capture_inner_kinds;
+        self.shared_capture_inner_kinds = saved_shared_capture_inner_kinds;
 
         // Capture boxing decisions
         // ────────────────────────

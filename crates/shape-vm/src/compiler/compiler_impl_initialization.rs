@@ -132,6 +132,7 @@ impl BytecodeCompiler {
             shared_closure_captures: HashMap::new(),
             owned_mutable_closure_captures: HashMap::new(),
             owned_mutable_capture_inner_kinds: HashMap::new(),
+            shared_capture_inner_kinds: HashMap::new(),
             boxed_locals: HashSet::new(),
             shared_locals: HashSet::new(),
             owned_mutable_locals: HashSet::new(),

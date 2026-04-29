@@ -3667,6 +3667,55 @@ pub(crate) fn owned_mutable_typed_store_opcode(
     }
 }
 
+/// Map a Shared closure-cell interior `FieldKind` to its typed
+/// `LoadSharedCapture<Kind>` opcode (D.2 codes 0x156-0x160). Mirrors
+/// `owned_mutable_typed_load_opcode`. Used by the closure-body Shared
+/// capture read emission to dispatch on the cell's interior FieldKind
+/// (recorded in `shared_capture_inner_kinds`) instead of the legacy
+/// polymorphic `LoadSharedCapture` (0x134).
+#[inline]
+pub(crate) fn shared_typed_load_opcode(
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> OpCode {
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::I64 => OpCode::LoadSharedCaptureI64,
+        FieldKind::U64 => OpCode::LoadSharedCaptureU64,
+        FieldKind::F64 => OpCode::LoadSharedCaptureF64,
+        FieldKind::I32 => OpCode::LoadSharedCaptureI32,
+        FieldKind::U32 => OpCode::LoadSharedCaptureU32,
+        FieldKind::I16 => OpCode::LoadSharedCaptureI16,
+        FieldKind::U16 => OpCode::LoadSharedCaptureU16,
+        FieldKind::I8 => OpCode::LoadSharedCaptureI8,
+        FieldKind::U8 => OpCode::LoadSharedCaptureU8,
+        FieldKind::Bool => OpCode::LoadSharedCaptureBool,
+        FieldKind::Ptr => OpCode::LoadSharedCapturePtr,
+    }
+}
+
+/// Map a Shared closure-cell interior `FieldKind` to its typed
+/// `StoreSharedCapture<Kind>` opcode (D.2 codes 0x161-0x16B). Mirrors
+/// `owned_mutable_typed_store_opcode`.
+#[inline]
+pub(crate) fn shared_typed_store_opcode(
+    kind: shape_value::v2::struct_layout::FieldKind,
+) -> OpCode {
+    use shape_value::v2::struct_layout::FieldKind;
+    match kind {
+        FieldKind::I64 => OpCode::StoreSharedCaptureI64,
+        FieldKind::U64 => OpCode::StoreSharedCaptureU64,
+        FieldKind::F64 => OpCode::StoreSharedCaptureF64,
+        FieldKind::I32 => OpCode::StoreSharedCaptureI32,
+        FieldKind::U32 => OpCode::StoreSharedCaptureU32,
+        FieldKind::I16 => OpCode::StoreSharedCaptureI16,
+        FieldKind::U16 => OpCode::StoreSharedCaptureU16,
+        FieldKind::I8 => OpCode::StoreSharedCaptureI8,
+        FieldKind::U8 => OpCode::StoreSharedCaptureU8,
+        FieldKind::Bool => OpCode::StoreSharedCaptureBool,
+        FieldKind::Ptr => OpCode::StoreSharedCapturePtr,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Wave E+4: typed-emission helpers for Load/Store local + module-binding +
 // ReturnValue.
