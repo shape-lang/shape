@@ -2745,6 +2745,403 @@ impl VirtualMachine {
         Ok(())
     }
 
+    // ===== Wave E+3: per-FieldKind typed local load/store handlers =====
+    //
+    // Typed counterparts of `op_load_local` / `op_store_local`. Each
+    // handler reads/writes the local slot at `bp + idx` directly as raw
+    // 8-byte bits, bypassing ValueWord wrapping, NaN-box tag checks, and
+    // SharedCell auto-deref. The compiler proves the slot kind matches
+    // `<Kind>` before emitting the typed opcode; mismatches are a
+    // compiler bug.
+    //
+    // For sub-i64 integer kinds (I32/U32/I16/U16/I8/U8): on store, the
+    // popped 8-byte slot is truncated to the declared width and
+    // sign/zero-extended back into 8 bytes for storage (matches D.1 store
+    // truncation). On load, the slot's bits already carry the
+    // matching-Kind encoding written by a paired Store, so a raw read +
+    // sign/zero-extend reconstructs the original i64-shaped value.
+    //
+    // `Bool` follows the same convention as D.1's StoreOwnedMutableBool:
+    // any nonzero pop is treated as true; the slot stores 0 or 1.
+    //
+    // `Ptr` is raw bit-level pass-through. Neither Load nor Store
+    // performs `vw_clone` / `vw_drop`. The IR pairs each typed Ptr
+    // load/store with the matching retain/release before/after — see
+    // commit afb1651 (c-stdlib-msgpack pattern).
+
+    fn op_load_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalI64 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // SAFETY: compiler proved the slot's kind is I64 — the bits were
+        // written by a matching-Kind StoreLocalI64. Read raw 8 bytes.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalU64 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalF64 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalI32 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low 4 bytes as i32, sign-extend to i64 for the 8-byte stack slot.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as i32;
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalU32 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low 4 bytes as u32, zero-extend to u64.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as u32;
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalI16 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low 2 bytes as i16, sign-extend to i64.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as i16;
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalU16 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low 2 bytes as u16, zero-extend to u64.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as u16;
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalI8 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low byte as i8, sign-extend to i64.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as i8;
+        self.push_raw_u64(value as i64 as u64)
+    }
+
+    fn op_load_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalU8 slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Read low byte as u8, zero-extend to u64.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        let value = bits as u8;
+        self.push_raw_u64(value as u64)
+    }
+
+    fn op_load_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalBool slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // The slot was written by a paired StoreLocalBool that canonicalized
+        // to 0 or 1 in the low byte. Pass the raw bits through unchanged.
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_load_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalPtr slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // Raw 8-byte read. Refcount semantics are the IR's responsibility
+        // — the handler does NOT clone/retain. The IR pairs LoadLocalPtr
+        // with `vw_clone` (matches the c-stdlib-msgpack pattern in commit
+        // afb1651, mirroring `op_load_owned_mutable_capture_ptr`).
+        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+        self.push_raw_u64(bits)
+    }
+
+    fn op_store_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        // SAFETY: compiler proved the slot's kind is I64. No SharedCell
+        // wrap, no refcount on the old bits — scalar i64 has no
+        // ownership.
+        self.stack[slot] = new_bits;
+        Ok(())
+    }
+
+    fn op_store_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_bits;
+        Ok(())
+    }
+
+    fn op_store_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_bits;
+        Ok(())
+    }
+
+    fn op_store_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Truncate to i32 (low 4 bytes), sign-extend back to i64 for storage.
+        let new_value = self.pop_raw_u64()? as i32;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as i64 as u64;
+        Ok(())
+    }
+
+    fn op_store_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Truncate to u32 (low 4 bytes), zero-extend back to u64 for storage.
+        let new_value = self.pop_raw_u64()? as u32;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as u64;
+        Ok(())
+    }
+
+    fn op_store_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i16;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as i64 as u64;
+        Ok(())
+    }
+
+    fn op_store_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u16;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as u64;
+        Ok(())
+    }
+
+    fn op_store_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as i8;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as i64 as u64;
+        Ok(())
+    }
+
+    fn op_store_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_value = self.pop_raw_u64()? as u8;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value as u64;
+        Ok(())
+    }
+
+    fn op_store_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Any nonzero pop ⇒ true (matches D.1's StoreOwnedMutableCaptureBool
+        // convention). Canonicalize to 0 or 1 for storage.
+        let new_value = (self.pop_raw_u64()? != 0) as u64;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        self.stack[slot] = new_value;
+        Ok(())
+    }
+
+    fn op_store_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let new_bits = self.pop_raw_u64()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+        }
+        record_heap_write();
+        // SAFETY: caller's IR has paired this store with a vw_drop earlier
+        // (or this is the first write to a fresh slot). The handler does
+        // NOT release the previous payload nor retain the new one —
+        // refcount semantics are the IR's responsibility. Matches D.1 /
+        // D.2 Ptr semantics.
+        self.stack[slot] = new_bits;
+        Ok(())
+    }
+
     /// Load value from a module_binding variable slot.
     pub(in crate::executor) fn op_load_module_binding(
         &mut self,
