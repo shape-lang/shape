@@ -356,28 +356,37 @@ impl BytecodeCompiler {
                         // Borrow check: reject writes to borrowed variables
                         let source_loc = self.span_to_source_location(*id_span);
                         self.check_named_binding_write_allowed(name, Some(source_loc))?;
-                        self.emit(Instruction::new(
-                            OpCode::StoreLocal,
-                            Some(Operand::Local(local_idx)),
-                        ));
-                        // Patch StoreLocal → StoreLocalTyped for width-typed locals
-                        // so reassignment truncates to the declared width.
-                        if let Some(type_name) = self
+
+                        // E+5.5 Unit C step 1: typed local assignment for
+                        // width-typed locals (i32 / u16 / etc.) — patch
+                        // through the existing `StoreLocalTyped` lane that
+                        // does width truncation. For other proven Int /
+                        // Bool / F64 / Ptr slots, emit the typed
+                        // `StoreLocal<Kind>` (E+3 codes 0x177-0x181) so
+                        // the slot's bit-pattern stays in lockstep with
+                        // the post-Unit-A native producer contract.
+                        // Unproven hints fall back to polymorphic
+                        // `StoreLocal`.
+                        let width_typed = self
                             .type_tracker
                             .get_local_type(local_idx)
                             .and_then(|info| info.type_name.as_deref())
-                        {
-                            if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
-                                if let Some(last) = self.program.instructions.last_mut() {
-                                    if last.opcode == OpCode::StoreLocal {
-                                        last.opcode = OpCode::StoreLocalTyped;
-                                        last.operand = Some(Operand::TypedLocal(
-                                            local_idx,
-                                            crate::bytecode::NumericWidth::from_int_width(w),
-                                        ));
-                                    }
-                                }
-                            }
+                            .and_then(shape_ast::IntWidth::from_name);
+                        if let Some(w) = width_typed {
+                            self.emit(Instruction::new(
+                                OpCode::StoreLocalTyped,
+                                Some(Operand::TypedLocal(
+                                    local_idx,
+                                    crate::bytecode::NumericWidth::from_int_width(w),
+                                )),
+                            ));
+                        } else {
+                            let hint = self
+                                .type_tracker
+                                .get_local_type(local_idx)
+                                .map(|info| info.storage_hint)
+                                .unwrap_or(crate::type_tracking::StorageHint::Unknown);
+                            self.emit_store_local_for_hint(local_idx, hint);
                         }
                     }
                     if !self.local_binding_is_reference_value(local_idx) {

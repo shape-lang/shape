@@ -254,16 +254,34 @@ impl BytecodeCompiler {
         let decision = self.query_ownership_decision(span);
 
         let opcode = match decision {
-            Some(OwnershipDecision::Move) => OpCode::LoadLocalMove,
-            Some(OwnershipDecision::Clone) => OpCode::LoadLocalClone,
-            _ => {
-                // Copy types or no MIR info: use existing LoadLocal
-                // (backward compatible, zero behavioral change)
-                OpCode::LoadLocal
-            }
+            Some(OwnershipDecision::Move) => Some(OpCode::LoadLocalMove),
+            Some(OwnershipDecision::Clone) => Some(OpCode::LoadLocalClone),
+            _ => None,
         };
 
-        self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
+        if let Some(op) = opcode {
+            // Move/Clone path is heap-aware and does its own native vs Arc
+            // share dispatch; leave it unchanged.
+            self.emit(Instruction::new(op, Some(Operand::Local(slot))));
+            return;
+        }
+
+        // E+5.5 Unit C step 1: Copy types with no MIR Move/Clone decision —
+        // emit the typed `LoadLocal<Kind>` (E+3 codes 0x16C-0x176) when the
+        // slot's StorageHint maps to a `FieldKind` (proven Int / Bool /
+        // F64 / sub-i64 widths). The typed handler reads raw 8-byte bits
+        // and pushes them unchanged — preserves the post-Unit-A native
+        // discipline through the slot. For unproven hints (Dynamic,
+        // Unknown, String, nullable widths, etc.) the helper falls back
+        // to the polymorphic legacy `LoadLocal`. This wires the
+        // primary local-load emit site to the typed-flip pathway from
+        // commit `3c83afa`.
+        let hint = self
+            .type_tracker
+            .get_local_type(slot)
+            .map(|info| info.storage_hint)
+            .unwrap_or(crate::type_tracking::StorageHint::Unknown);
+        self.emit_load_local_for_hint(slot, hint);
     }
 
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
@@ -334,10 +352,26 @@ impl BytecodeCompiler {
 
     /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
     /// `last_expr_type_info` for the typed-Return helper. Mirrors the
+    /// E+5.5 Unit C step 1: combined storage-hint inference for let-decl
+    /// site. Reads `last_expr_numeric_type` (priority 1) then
+    /// `last_expr_type_info.storage_hint` (priority 2). Returns
+    /// `StorageHint::Unknown` when neither signal is set.
+    pub(in crate::compiler) fn let_decl_storage_hint(&self) -> crate::type_tracking::StorageHint {
+        use crate::type_tracking::StorageHint;
+        let from_numeric = self.last_expr_numeric_type_to_storage_hint();
+        if from_numeric != StorageHint::Unknown {
+            return from_numeric;
+        }
+        if let Some(info) = &self.last_expr_type_info {
+            return info.storage_hint;
+        }
+        StorageHint::Unknown
+    }
+
     /// priority order used by `infer_top_level_return_kind`. Returns
     /// `StorageHint::Unknown` when no signal is available — the helper
     /// then routes to the polymorphic legacy `ReturnValue`.
-    fn last_expr_numeric_type_to_storage_hint(&self) -> crate::type_tracking::StorageHint {
+    pub(in crate::compiler) fn last_expr_numeric_type_to_storage_hint(&self) -> crate::type_tracking::StorageHint {
         use crate::type_tracking::StorageHint;
         if let Some(nt) = self.last_expr_numeric_type {
             match nt {

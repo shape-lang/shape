@@ -99,10 +99,14 @@ impl BytecodeCompiler {
             DestructurePattern::Identifier(name, _) => {
                 // Simple case - store in local
                 let local_idx = self.declare_local(name)?;
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
+                // E+5.5 Unit C step 1: emit typed `StoreLocal<Kind>` for
+                // proven Int / Bool / F64 / sub-i64-width slots so the
+                // post-Unit-A native producer (PushConst Int / typed
+                // arithmetic result) round-trips through the slot
+                // without NaN-tag injection. Polymorphic fallback for
+                // unproven hints.
+                let hint = self.let_decl_storage_hint();
+                self.emit_store_local_for_hint(local_idx, hint);
                 // Track schema for typed merge optimization
                 if let Some(schema_id) = self.last_expr_schema {
                     self.type_tracker.set_local_type(

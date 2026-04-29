@@ -351,8 +351,11 @@ impl VirtualMachine {
     // `StringConcatTyped` convention: stack top = RHS.
 
     /// StringConcatInt: pop (string, i64 int), push `format!("{}{}", s, i)`.
+    /// E+5.5 Unit C step 1: native i64 input — matches post-Unit-B/A typed
+    /// Int producers (PushConst Int / typed Int arithmetic / typed
+    /// `LoadLocal<I64>`).
     fn op_string_concat_int(&mut self) -> Result<(), VMError> {
-        let i = self.pop_tagged_i64()?;
+        let i = self.pop_native_i64()?;
         let s_bits = self.pop_raw_u64()?;
         let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
             expected: "string",
@@ -388,8 +391,11 @@ impl VirtualMachine {
     /// where `b` renders as `"true"` / `"false"`. See R5.5 commit body
     /// for the divergence from the pre-R5.5 fallback (which produced
     /// garbage numeric tails for bool RHS).
+    /// E+5.5 Unit C step 1: native bool input — matches post-Unit-B/A
+    /// typed Bool producers (PushConst Bool, comparison results, typed
+    /// Bool LoadLocal).
     fn op_string_concat_bool(&mut self) -> Result<(), VMError> {
-        let b = self.pop_tagged_bool()?;
+        let b = self.pop_native_bool()?;
         let s_bits = self.pop_raw_u64()?;
         let s = raw_helpers::extract_str(s_bits).ok_or(VMError::TypeError {
             expected: "string",
