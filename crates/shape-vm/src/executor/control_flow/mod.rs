@@ -34,6 +34,17 @@ impl VirtualMachine {
             CallForeign => self.op_call_foreign(instruction)?,
             Return => self.op_return()?,
             ReturnValue => self.op_return_value()?,
+            ReturnValueI64 => self.op_return_value_i64()?,
+            ReturnValueU64 => self.op_return_value_u64()?,
+            ReturnValueF64 => self.op_return_value_f64()?,
+            ReturnValueI32 => self.op_return_value_i32()?,
+            ReturnValueU32 => self.op_return_value_u32()?,
+            ReturnValueI16 => self.op_return_value_i16()?,
+            ReturnValueU16 => self.op_return_value_u16()?,
+            ReturnValueI8 => self.op_return_value_i8()?,
+            ReturnValueU8 => self.op_return_value_u8()?,
+            ReturnValueBool => self.op_return_value_bool()?,
+            ReturnValuePtr => self.op_return_value_ptr()?,
             _ => unreachable!(
                 "exec_control_flow called with non-control-flow opcode: {:?}",
                 instruction.opcode

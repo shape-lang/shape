@@ -148,6 +148,17 @@ impl VirtualMachine {
                         | OpCode::CallFunctionIndirect
                         | OpCode::Return
                         | OpCode::ReturnValue
+                        | OpCode::ReturnValueI64
+                        | OpCode::ReturnValueU64
+                        | OpCode::ReturnValueF64
+                        | OpCode::ReturnValueI32
+                        | OpCode::ReturnValueU32
+                        | OpCode::ReturnValueI16
+                        | OpCode::ReturnValueU16
+                        | OpCode::ReturnValueI8
+                        | OpCode::ReturnValueU8
+                        | OpCode::ReturnValueBool
+                        | OpCode::ReturnValuePtr
                 );
                 if tt.should_capture(current_ip, self.instruction_count as u64, is_call_or_return) {
                     if let Ok(store) = tt.snapshot_store() {
@@ -267,6 +278,17 @@ impl VirtualMachine {
                         | OpCode::CallFunctionIndirect
                         | OpCode::Return
                         | OpCode::ReturnValue
+                        | OpCode::ReturnValueI64
+                        | OpCode::ReturnValueU64
+                        | OpCode::ReturnValueF64
+                        | OpCode::ReturnValueI32
+                        | OpCode::ReturnValueU32
+                        | OpCode::ReturnValueI16
+                        | OpCode::ReturnValueU16
+                        | OpCode::ReturnValueI8
+                        | OpCode::ReturnValueU8
+                        | OpCode::ReturnValueBool
+                        | OpCode::ReturnValuePtr
                 );
                 if tt.should_capture(ip, self.instruction_count as u64, is_call_or_return) {
                     if let Ok(store) = tt.snapshot_store() {
@@ -484,7 +506,10 @@ impl VirtualMachine {
 
             // Control flow
             Jump | JumpIfFalse | JumpIfTrue | JumpIfFalseTrusted | Call | CallValue
-            | CallClosure | CallFunctionIndirect | CallForeign | Return | ReturnValue => {
+            | CallClosure | CallFunctionIndirect | CallForeign | Return | ReturnValue
+            | ReturnValueI64 | ReturnValueU64 | ReturnValueF64 | ReturnValueI32
+            | ReturnValueU32 | ReturnValueI16 | ReturnValueU16 | ReturnValueI8
+            | ReturnValueU8 | ReturnValueBool | ReturnValuePtr => {
                 return self.exec_control_flow(instruction);
             }
 
