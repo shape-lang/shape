@@ -33,6 +33,7 @@ impl BytecodeCompiler {
                 shape_value::v2::function_type_registry::FunctionTypeRegistry::new(),
             function_type_ids: Vec::new(),
             emit_make_closure_heap_next: false,
+            get_prop_native_kinds: HashMap::new(),
             closure_row_schema: None,
             pending_closure_param_types: None,
             last_expr_type_info: None,

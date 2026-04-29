@@ -473,6 +473,7 @@ impl BytecodeCompiler {
                     Some(Operand::Const(prop_const)),
                 ));
                 self.emit(Instruction::simple(OpCode::GetProp));
+                self.record_get_prop_native_kind(field_type_info.as_ref());
             }
 
             let end_jump = self.emit_jump(OpCode::Jump, 0);
@@ -501,6 +502,7 @@ impl BytecodeCompiler {
                 Some(Operand::Const(prop_const)),
             ));
             self.emit(Instruction::simple(OpCode::GetProp));
+            self.record_get_prop_native_kind(field_type_info.as_ref());
         }
         // Propagate nested object schema for chained property access (e.g. cfg.server.host).
         // If the field type is Object(type_name), resolve its schema ID so subsequent

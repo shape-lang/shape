@@ -572,6 +572,18 @@ pub struct BytecodeCompiler {
     /// a closure literal) set this right before lowering the closure.
     pub(crate) emit_make_closure_heap_next: bool,
 
+    /// Wave E+5-cleanup task #108 side-channel: native-kind hint for
+    /// `GetProp` emit sites where the producer-flip in `op_get_prop`
+    /// pushes raw native bits (I64 / Timestamp / F64 / Bool field tags
+    /// against non-heap slots). Keyed by emitted-instruction index;
+    /// consumed by `last_emitted_native_kind`'s `GetProp` arm so the
+    /// host-boundary synthesizer re-tags raw bits per the recorded
+    /// kind. `GetProp` is `Instruction::simple` (no operand) so neither
+    /// operand-decode nor walk-back recovers the field tag — the
+    /// compiler must record the resolved kind at the emit site
+    /// (`compile_expr_property_access`).
+    pub(crate) get_prop_native_kinds: HashMap<usize, crate::type_tracking::StorageHint>,
+
     /// When compiling a DataTable closure method (e.g. dt.filter(row => ...)),
     /// this holds the (schema_id, type_name) to tag the closure's row parameter as RowView.
     pub(crate) closure_row_schema: Option<(u32, String)>,

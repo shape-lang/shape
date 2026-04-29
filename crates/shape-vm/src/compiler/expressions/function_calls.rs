@@ -51,6 +51,31 @@ fn slot_kind_to_type_annotation(
     })
 }
 
+/// Task #108 companion: rewrite a return-type annotation by prefixing
+/// any bare `Basic`/`Reference` names with the given namespace. Module-
+/// qualified callees (`m::mk` returns `P`) carry their return type in
+/// bare form even though the schema is registered as `m::P`; we use this
+/// only as a fallback when the bare-name schema lookup misses, so type
+/// info propagates through to a downstream `m::mk().x` property access
+/// and the GetProp emit site can record its native-kind hint. Returns
+/// `None` when the annotation already qualifies (`m::P`) or is shaped
+/// such that prefixing wouldn't help (`Object`, `Function`, `Tuple`, …).
+fn qualify_type_annotation_with_namespace(
+    ann: &shape_ast::ast::TypeAnnotation,
+    namespace: &str,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::TypeAnnotation;
+    match ann {
+        TypeAnnotation::Basic(name) if !name.contains("::") => {
+            Some(TypeAnnotation::Basic(format!("{}::{}", namespace, name)))
+        }
+        TypeAnnotation::Reference(name) if !name.as_str().contains("::") => Some(
+            TypeAnnotation::Reference(format!("{}::{}", namespace, name.as_str()).into()),
+        ),
+        _ => None,
+    }
+}
+
 /// Map a return type name string to a NumericType.
 fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
     if BuiltinTypes::is_integer_type_name(type_name) {
@@ -1025,9 +1050,23 @@ impl BytecodeCompiler {
                         .get(&call_name)
                         .and_then(|def| def.return_type.clone())
                 });
-            self.last_expr_type_info = return_type_annotation
+            // Module-qualified callees (`m::mk` returns `P`) carry their
+            // return-type annotation in bare form (`P`) even though the
+            // schema is registered as `m::P`. `type_info_from_annotation`
+            // looks up the bare name first; on miss, retry with the call
+            // name's namespace prefix so the schema lookup succeeds and
+            // downstream property access (`m::mk().x`) resolves the
+            // typed-field tag at the GetProp emit site (task #108
+            // companion to commit 0f15571's executor flip).
+            let direct = return_type_annotation
                 .as_ref()
                 .and_then(|ann| self.type_info_from_annotation(ann));
+            self.last_expr_type_info = direct.or_else(|| {
+                let ann = return_type_annotation.as_ref()?;
+                let namespace = call_name.rsplit_once("::").map(|(ns, _)| ns)?;
+                let qualified = qualify_type_annotation_with_namespace(ann, namespace)?;
+                self.type_info_from_annotation(&qualified)
+            });
             self.last_expr_schema = self
                 .last_expr_type_info
                 .as_ref()

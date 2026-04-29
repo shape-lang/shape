@@ -1250,7 +1250,23 @@ impl BytecodeCompiler {
             // `return_kind = Int64` for the host-boundary synthesizer.
             OpCode::DerefLoad => self.deref_load_native_kind(),
 
-            // Everything else (GetField, GetProp, NewTypedObject,
+            // ===== GetProp — side-channel lookup (task #108, sister of #92) =====
+            //
+            // `op_get_prop`'s producer-flip pushes raw native bits when
+            // it dispatches against a `HeapValue::TypedObject` whose
+            // matching schema field has tag I64 / Timestamp / F64 / Bool
+            // against a non-heap slot (mirrors `push_field_value` in
+            // `typed_object_ops.rs:90`). `GetProp` is emitted as
+            // `Instruction::simple` (no operand), so neither
+            // operand-decode nor a walk-back lookup can recover the
+            // field tag at host-boundary inspection time — the
+            // compiler instead records the resolved kind in
+            // `get_prop_native_kinds` at the emit site in
+            // `compile_expr_property_access`. This arm consults that
+            // side-channel by the index of the just-emitted GetProp.
+            OpCode::GetProp => self.get_prop_native_kind(),
+
+            // Everything else (GetField, NewTypedObject,
             // legacy `ReturnValue` (tagged), MakeArray, MakeMap, etc.)
             // is polymorphic / not-yet-flipped — return None.
             _ => None,
@@ -1483,6 +1499,50 @@ impl BytecodeCompiler {
             FIELD_TAG_F64 => Some(StorageHint::Float64),
             FIELD_TAG_BOOL => Some(StorageHint::Bool),
             _ => None,
+        }
+    }
+
+    /// Wave E+5-cleanup task #108: resolve the raw-native kind of the
+    /// just-emitted `GetProp` instruction by consulting the
+    /// `get_prop_native_kinds` side-channel populated at the GetProp
+    /// emit site in `compile_expr_property_access`. `GetProp` has no
+    /// operand (`Instruction::simple`) so neither operand-decode nor
+    /// walk-back recovers the field tag — the compiler must record
+    /// the resolved kind explicitly when its schema lookup yields a
+    /// native-scalar field type. Sites that don't record (untyped
+    /// receivers, heap fields, decimal, …) stay `None` here and the
+    /// host-boundary synthesizer falls through to passthrough, which
+    /// is correct because the executor's matching `op_get_prop` flip
+    /// also leaves those tagged.
+    fn get_prop_native_kind(&self) -> Option<StorageHint> {
+        let idx = self.program.instructions.len().checked_sub(1)?;
+        self.get_prop_native_kinds.get(&idx).copied()
+    }
+
+    /// Wave E+5-cleanup task #108: record the native-kind of a
+    /// just-emitted `GetProp` instruction in the side-channel that
+    /// `get_prop_native_kind` consults. Called from
+    /// `compile_expr_property_access`'s GetProp emit sites.
+    /// `field_type` is the schema's `FieldType` for the property; only
+    /// types whose runtime branch in `op_get_prop` pushes raw native
+    /// bits via `push_field_value` (I64 / Timestamp / F64 / Bool, plus
+    /// width-int U64-low-bit special case) are recorded. Heap-bearing
+    /// fields, decimals, and any other `FieldType` stay on the legacy
+    /// tagged-ValueWord transport per the matching executor flip in
+    /// commit `0f15571`.
+    pub(super) fn record_get_prop_native_kind(
+        &mut self,
+        field_type: Option<&shape_runtime::type_schema::FieldType>,
+    ) {
+        use shape_runtime::type_schema::FieldType;
+        let kind = match field_type {
+            Some(FieldType::I64) | Some(FieldType::Timestamp) => StorageHint::Int64,
+            Some(FieldType::F64) => StorageHint::Float64,
+            Some(FieldType::Bool) => StorageHint::Bool,
+            _ => return,
+        };
+        if let Some(idx) = self.program.instructions.len().checked_sub(1) {
+            self.get_prop_native_kinds.insert(idx, kind);
         }
     }
 
