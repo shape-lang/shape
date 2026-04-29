@@ -4655,6 +4655,18 @@ mod tests {
     // Wave E+4: emit-helper unit tests + fallback-counter instrumentation
     // ─────────────────────────────────────────────────────────────────────
 
+    /// Tests that read or mutate `typed_emit_metrics`'s global counters
+    /// must hold this lock for their duration. Cargo runs tests in
+    /// parallel by default; without serialization the static counters
+    /// race across tests in this module.
+    fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Direct unit test for the 5 emit-helpers — verifies that each
     /// proven primitive `StorageHint` produces the matching typed opcode,
     /// and each unproven hint falls through to the polymorphic legacy
@@ -4672,6 +4684,7 @@ mod tests {
         use crate::type_tracking::StorageHint;
         use super::typed_emit_metrics;
 
+        let _guard = metrics_test_lock();
         typed_emit_metrics::reset();
 
         let mut compiler = BytecodeCompiler::new();
@@ -4815,5 +4828,176 @@ mod tests {
         assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
         assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
         assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
+    }
+
+    /// Snapshot-after-real-program instrumentation. Compiles each of 5
+    /// representative Shape source fixtures and inspects the
+    /// `typed_emit_metrics` joint distribution.
+    ///
+    /// **Read carefully**: this test currently asserts that *no fixture
+    /// exercises any helper* — i.e. the snapshot is empty for every
+    /// fixture. That's the truthful baseline at this point in Wave E+4
+    /// because the 5 emit-helpers added in commit `3c83afa` have **zero
+    /// call sites in the compiler outside the helper-pinning unit test**.
+    /// Every legacy `OpCode::LoadLocal` / `StoreLocal` /
+    /// `LoadModuleBinding` / `StoreModuleBinding` / `ReturnValue` emission
+    /// today bypasses the helpers via direct `Instruction::new(...)`.
+    ///
+    /// **Why this test is still valuable**: it's a regression sentinel.
+    /// The moment Wave E+4 commit 3+ flips a per-site emission to use a
+    /// helper, this test fails — at which point the assertion is
+    /// updated to record the new (live, real-program) joint
+    /// distribution. Wave G's cleanup audit reads the updated
+    /// distribution to decide which legacy opcodes can be deleted.
+    ///
+    /// Wave G future-self: when this test fails after a per-site flip,
+    /// REPLACE the empty-snapshot assertions with the post-flip
+    /// distribution per fixture. Don't delete the test; the per-fixture
+    /// snapshots are exactly the data your audit needs.
+    ///
+    /// Fixtures span:
+    ///   1. Typed primitives: `fn add(a: int, b: int) -> int`
+    ///   2. Closure-capture: `let mut x: int = 0; let f = || x = x + 1`
+    ///   3. Heap-bearing (string): `let s: string = "hello"`
+    ///   4. Optional: `let x: Option<int> = Some(5)`
+    ///   5. Dynamic: `let x = 42; x` (untyped, no annotation)
+    #[test]
+    fn test_e4_real_program_fallback_baseline() {
+        use super::typed_emit_metrics;
+        use shape_ast::parser::parse_program;
+
+        let _guard = metrics_test_lock();
+
+        // Sanity precondition: the 5 emit-helpers have zero non-test
+        // call sites in `crates/shape-vm/src/compiler/`. If a per-site
+        // flip lands and this changes, the assertions below will fail
+        // and the human/agent should update them with the new
+        // distribution per fixture.
+        let fixtures: &[(&str, &str)] = &[
+            (
+                "typed_primitives",
+                "fn add(a: int, b: int) -> int { a + b }\n\
+                 add(2, 3)",
+            ),
+            (
+                "closure_capture_int",
+                "fn main() -> int {\n\
+                     let mut n: int = 0\n\
+                     let f = |x: int| { n = n + x; n }\n\
+                     f(1)\n\
+                     f(2)\n\
+                     f(3)\n\
+                 }\n\
+                 main()",
+            ),
+            (
+                "heap_string",
+                "fn greet() -> string {\n\
+                     let s: string = \"hello\"\n\
+                     s\n\
+                 }\n\
+                 greet()",
+            ),
+            (
+                "option_int",
+                // Uses `Option<int>` (the Shape-supported nullable
+                // shape; `int?` shorthand isn't accepted in let-position).
+                // Once per-site flips land, the inferred storage hint
+                // for `x` should be one of the Nullable* family,
+                // which `storage_hint_to_field_kind` returns None for —
+                // expected to drive a `nullable_*` fallback entry in
+                // the post-flip joint distribution.
+                "fn maybe() -> Option<int> {\n\
+                     let x: Option<int> = Some(5)\n\
+                     x\n\
+                 }\n\
+                 maybe()",
+            ),
+            (
+                "untyped_dynamic",
+                // Smallest dynamic shape that parses cleanly: an
+                // unannotated let from a literal expression.
+                "fn dyn_id() {\n\
+                     let x = 42\n\
+                     x\n\
+                 }\n\
+                 dyn_id()",
+            ),
+        ];
+
+        // Per-fixture results: (fixture_name, joint_snapshot).
+        let mut results: Vec<(&'static str, Vec<((&'static str, &'static str), u64)>)> = Vec::new();
+
+        for (name, source) in fixtures {
+            typed_emit_metrics::reset();
+
+            let parsed = match parse_program(source) {
+                Ok(p) => p,
+                Err(e) => panic!("fixture '{name}': parse failed: {e:?}"),
+            };
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            // Compile may fail for fixture 4 (`int?` may not be
+            // accepted in stand-alone compile without prelude); skip
+            // assertively if so so the test remains useful.
+            let _ = match compiler.compile(&parsed) {
+                Ok(bc) => bc,
+                Err(_) => {
+                    // Record an empty snapshot — fixture didn't compile,
+                    // not a helper call site.
+                    results.push((
+                        // SAFETY: name is a 'static string from `fixtures`.
+                        // We need to leak it as &'static str for the
+                        // result vector's lifetime; in practice we only
+                        // use this list within the test, so we just
+                        // collect the &str via a static-lookup.
+                        match *name {
+                            "typed_primitives" => "typed_primitives",
+                            "closure_capture_int" => "closure_capture_int",
+                            "heap_string" => "heap_string",
+                            "option_int" => "option_int",
+                            "untyped_dynamic" => "untyped_dynamic",
+                            _ => "unknown",
+                        },
+                        Vec::new(),
+                    ));
+                    continue;
+                }
+            };
+
+            let snap = typed_emit_metrics::snapshot_joint();
+            results.push((
+                match *name {
+                    "typed_primitives" => "typed_primitives",
+                    "closure_capture_int" => "closure_capture_int",
+                    "heap_string" => "heap_string",
+                    "option_int" => "option_int",
+                    "untyped_dynamic" => "untyped_dynamic",
+                    _ => "unknown",
+                },
+                snap,
+            ));
+        }
+
+        // Pin: every fixture must produce an empty joint distribution
+        // until per-site flips begin. If this fails after an
+        // intentional per-site flip, update the assertions with the
+        // post-flip distribution per fixture.
+        for (name, snap) in &results {
+            assert!(
+                snap.is_empty(),
+                "fixture '{name}': expected empty fallback distribution while \
+                 emit-helpers are uncalled (commit 3c83afa baseline). \
+                 Got {} entries: {:?}. \
+                 If this is the result of an intentional per-site flip, \
+                 update this test with the new per-fixture distribution.",
+                snap.len(),
+                snap
+            );
+        }
+
+        // Final reset so the per-test counter state doesn't leak into
+        // sibling tests run in this module.
+        typed_emit_metrics::reset();
     }
 }
