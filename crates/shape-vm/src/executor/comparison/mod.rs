@@ -102,28 +102,25 @@ impl VirtualMachine {
             // ValueWord. The slow path tolerates coercible operands
             // (matching the legacy `*_unchecked` behavior).
             // (Decimal comparisons remain on the heap path.)
+            // E+5.4: Int-family comparisons consume native i64 bits (post-E+5.3
+            // arithmetic produces native i64), and produce a native bool result
+            // (raw 0u64/1u64). The legacy `stack_top_both_i48` fast-path detector
+            // would always return false on native bits, so the dual path was
+            // collapsed: a single native pop is the contract.
             GtInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai > bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() > b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai > bi)?;
             }
             GtNumber => {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a > b)?;
+                    self.push_native_bool(a > b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() > b.as_f64_unchecked()
                     })?;
                 }
@@ -131,32 +128,24 @@ impl VirtualMachine {
             GtDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_tagged_bool(unsafe {
+                self.push_native_bool(unsafe {
                     a.as_decimal_unchecked() > b.as_decimal_unchecked()
                 })?;
             }
             LtInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai < bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() < b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai < bi)?;
             }
             LtNumber => {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a < b)?;
+                    self.push_native_bool(a < b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() < b.as_f64_unchecked()
                     })?;
                 }
@@ -164,32 +153,24 @@ impl VirtualMachine {
             LtDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_tagged_bool(unsafe {
+                self.push_native_bool(unsafe {
                     a.as_decimal_unchecked() < b.as_decimal_unchecked()
                 })?;
             }
             GteInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai >= bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() >= b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai >= bi)?;
             }
             GteNumber => {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a >= b)?;
+                    self.push_native_bool(a >= b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() >= b.as_f64_unchecked()
                     })?;
                 }
@@ -197,32 +178,24 @@ impl VirtualMachine {
             GteDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_tagged_bool(unsafe {
+                self.push_native_bool(unsafe {
                     a.as_decimal_unchecked() >= b.as_decimal_unchecked()
                 })?;
             }
             LteInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai <= bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() <= b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai <= bi)?;
             }
             LteNumber => {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a <= b)?;
+                    self.push_native_bool(a <= b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() <= b.as_f64_unchecked()
                     })?;
                 }
@@ -230,22 +203,14 @@ impl VirtualMachine {
             LteDecimal => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
-                self.push_tagged_bool(unsafe {
+                self.push_native_bool(unsafe {
                     a.as_decimal_unchecked() <= b.as_decimal_unchecked()
                 })?;
             }
             EqInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai == bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() == b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai == bi)?;
             }
             EqNumber => {
                 // NOTE: NaN != NaN per IEEE 754 — both fast and slow paths
@@ -253,38 +218,30 @@ impl VirtualMachine {
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a == b)?;
+                    self.push_native_bool(a == b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() == b.as_f64_unchecked()
                     })?;
                 }
             }
             NeqInt => {
-                if self.stack_top_both_i48() {
-                    let bi = self.pop_tagged_i64()?;
-                    let ai = self.pop_tagged_i64()?;
-                    self.push_tagged_bool(ai != bi)?;
-                } else {
-                    let b = self.pop_raw_u64()?;
-                    let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
-                        a.as_i64_unchecked() != b.as_i64_unchecked()
-                    })?;
-                }
+                let bi = self.pop_native_i64()?;
+                let ai = self.pop_native_i64()?;
+                self.push_native_bool(ai != bi)?;
             }
             NeqNumber => {
                 // NaN != NaN per IEEE 754 — preserved by direct f64 compare.
                 if self.stack_top_both_f64() {
                     let b = self.pop_raw_f64()?;
                     let a = self.pop_raw_f64()?;
-                    self.push_tagged_bool(a != b)?;
+                    self.push_native_bool(a != b)?;
                 } else {
                     let b = self.pop_raw_u64()?;
                     let a = self.pop_raw_u64()?;
-                    self.push_tagged_bool(unsafe {
+                    self.push_native_bool(unsafe {
                         a.as_f64_unchecked() != b.as_f64_unchecked()
                     })?;
                 }
@@ -312,7 +269,7 @@ impl VirtualMachine {
                         _ => false,
                     },
                 };
-                self.push_tagged_bool(eq)?;
+                self.push_native_bool(eq)?;
             }
             EqDecimal => {
                 let b = self.pop_raw_u64()?;
@@ -321,32 +278,32 @@ impl VirtualMachine {
                     (Some(ad), Some(bd)) => ad == bd,
                     _ => false,
                 };
-                self.push_tagged_bool(eq)?;
+                self.push_native_bool(eq)?;
             }
             // Stage 4.2: typed ordered comparison for strings (lexicographic).
             GtString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") > b.as_str().unwrap_or("");
-                self.push_tagged_bool(result)?;
+                self.push_native_bool(result)?;
             }
             LtString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") < b.as_str().unwrap_or("");
-                self.push_tagged_bool(result)?;
+                self.push_native_bool(result)?;
             }
             GteString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") >= b.as_str().unwrap_or("");
-                self.push_tagged_bool(result)?;
+                self.push_native_bool(result)?;
             }
             LteString => {
                 let b = self.pop_raw_u64()?;
                 let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") <= b.as_str().unwrap_or("");
-                self.push_tagged_bool(result)?;
+                self.push_native_bool(result)?;
             }
             // Stage 2.6.5.1: typed absence check. Pops one value, pushes a
             // bool that is true iff the value is the None or Unit sentinel.
@@ -364,7 +321,7 @@ impl VirtualMachine {
                 let is_absent = v.is_none() || v.is_unit();
                 // FR.3: real release (was no-op drop of Copy u64).
                 vw_drop(v);
-                self.push_tagged_bool(is_absent)?;
+                self.push_native_bool(is_absent)?;
             }
             // NOTE: Trusted comparison variants removed — consolidated into
             // the typed variants above (GtInt, LtInt, etc.).
@@ -409,52 +366,56 @@ mod tests {
     fn run_typed_cmp(vm: &mut VirtualMachine, opcode: OpCode) -> bool {
         let instr = Instruction { opcode, operand: None };
         vm.exec_typed_comparison(&instr).unwrap();
-        unsafe { vm.pop_raw_u64().unwrap().as_bool_unchecked() }
+        // E+5.4: comparison handlers now push native bool bits (0u64/1u64),
+        // not NaN-tagged ValueWord encoding — read via pop_native_bool.
+        vm.pop_native_bool().unwrap()
     }
 
     // ----- Raw Int comparison fast paths -----
 
+    // E+5.4: Int comparisons consume native i64 bits (post-E+5.3 contract);
+    // tests must seed the stack with `push_native_i64`, not the legacy tagged path.
     #[test]
     fn typed_int_eq_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_tagged_i64(42).unwrap();
-        vm.push_tagged_i64(42).unwrap();
+        vm.push_native_i64(42).unwrap();
+        vm.push_native_i64(42).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
     }
 
     #[test]
     fn typed_int_neq_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_tagged_i64(1).unwrap();
-        vm.push_tagged_i64(2).unwrap();
+        vm.push_native_i64(1).unwrap();
+        vm.push_native_i64(2).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::NeqInt));
     }
 
     #[test]
     fn typed_int_lt_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_tagged_i64(-5).unwrap();
-        vm.push_tagged_i64(3).unwrap();
+        vm.push_native_i64(-5).unwrap();
+        vm.push_native_i64(3).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LtInt));
     }
 
     #[test]
     fn typed_int_gt_uses_raw_fast_path() {
         let mut vm = make_vm();
-        vm.push_tagged_i64(7).unwrap();
-        vm.push_tagged_i64(3).unwrap();
+        vm.push_native_i64(7).unwrap();
+        vm.push_native_i64(3).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GtInt));
     }
 
     #[test]
     fn typed_int_gte_lte_boundary_equal() {
         let mut vm = make_vm();
-        vm.push_tagged_i64(10).unwrap();
-        vm.push_tagged_i64(10).unwrap();
+        vm.push_native_i64(10).unwrap();
+        vm.push_native_i64(10).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GteInt));
         let mut vm = make_vm();
-        vm.push_tagged_i64(10).unwrap();
-        vm.push_tagged_i64(10).unwrap();
+        vm.push_native_i64(10).unwrap();
+        vm.push_native_i64(10).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LteInt));
     }
 
@@ -543,18 +504,9 @@ mod tests {
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
-    // ----- Slow path: ensures vw fallback still works for mixed types -----
-
-    #[test]
-    fn typed_int_eq_slow_path_handles_legacy_vw() {
-        // Push via the legacy ValueWord path so the fast-path detector misses;
-        // the slow path (as_i64_unchecked) must still produce correct results.
-        let mut vm = make_vm();
-        vm.push_raw_u64(ValueWord::from_i64(100)).unwrap();
-        vm.push_raw_u64(ValueWord::from_i64(100)).unwrap();
-        assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
-    }
-
+    // E+5.4: Number comparison still has a tagged-vs-plain dual path
+    // (the producer side is not yet uniformly native for f64), so the
+    // legacy slow-path fallback still gets exercised.
     #[test]
     fn typed_number_eq_slow_path_handles_legacy_vw() {
         let mut vm = make_vm();
@@ -624,7 +576,8 @@ mod tests {
     fn run_is_null(vm: &mut VirtualMachine) -> bool {
         let instr = Instruction { opcode: OpCode::IsNull, operand: None };
         vm.exec_typed_comparison(&instr).unwrap();
-        unsafe { vm.pop_raw_u64().unwrap().as_bool_unchecked() }
+        // E+5.4: IsNull now pushes native bool — read via pop_native_bool.
+        vm.pop_native_bool().unwrap()
     }
 
     #[test]
