@@ -1315,6 +1315,18 @@ impl BytecodeCompiler {
         self.emit(Instruction::new(OpCode::MakeClosure, Some(operand)));
         // Closures don't produce TypedObjects
         self.last_expr_schema = None;
+        // A closure value is a heap-tagged Arc<HeapValue::ClosureRaw>, NOT
+        // a numeric type. Clear any numeric/type-info signal that leaked
+        // from the closure body's last evaluated expression so the
+        // surrounding `let inc = || { ... }` doesn't fall into the
+        // typed-I64/F64 emission path (`emit_store_local_for_hint` →
+        // `StoreLocalI64`). Routing closure bindings to the polymorphic
+        // legacy `StoreLocal`/`LoadLocal` is required because the typed
+        // local handlers don't perform Arc retain/release on their
+        // 8-byte slot, leading to a use-after-free of the closure block
+        // when the binding is loaded for a call (see #104 / #95).
+        self.last_expr_numeric_type = None;
+        self.last_expr_type_info = None;
         Ok(())
     }
 
