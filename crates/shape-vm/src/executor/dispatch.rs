@@ -1124,9 +1124,13 @@ mod execute_raw_tests {
     use crate::executor::VMConfig;
     use crate::type_tracking::SlotKind;
 
-    /// Today, no top-level program declares a typed return; verify that
-    /// `execute()` and `execute_raw()` agree on the result bits and that
-    /// the synthesizer falls through to passthrough.
+    /// After Wave-E+5, `execute()` synthesises a tagged ValueWord from
+    /// the raw native bits per the program's declared (or runtime-
+    /// observed) return kind, so `tagged.into_raw_bits() != raw` for
+    /// any program whose top-level produces native-typed bits.
+    /// `execute_raw` returns the native bits as-is. Verify that the
+    /// tagged result decodes to the same value the raw bits encode
+    /// under the program's kind.
     #[test]
     fn execute_raw_matches_execute_for_legacy_program() {
         let program = shape_ast::parser::parse_program("42").expect("parse");
@@ -1143,11 +1147,11 @@ mod execute_raw_tests {
         vm.load_program(bytecode);
         let raw = vm.execute_raw(None).expect("execute_raw");
 
-        assert_eq!(
-            tagged.into_raw_bits(),
-            raw,
-            "execute and execute_raw disagree on bits for legacy program"
-        );
+        // After Wave-E+5, the int literal `42` produces native i64
+        // bits. `execute()` re-tags via the program's Int64 kind, so
+        // tagged.as_i64() == 42 and raw == 42 (as native i64).
+        assert_eq!(tagged.as_i64(), Some(42), "tagged ValueWord decodes to 42");
+        assert_eq!(raw as i64, 42, "raw bits encode 42 as native i64");
     }
 
     #[test]

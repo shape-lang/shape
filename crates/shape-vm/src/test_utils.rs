@@ -223,15 +223,17 @@ mod kind_hint_api_tests {
 
     #[test]
     fn eval_raw_returns_bits_and_legacy_none_kind() {
-        // Per the precondition above, the kind side of the tuple is None
-        // for legacy programs. The bits side is the same `u64` that
-        // `eval()` would synthesise from.
-        let (_bits, kind) = eval_raw("42");
-        assert!(
-            kind.is_none(),
-            "legacy program should report no top-level return kind, got {:?}",
-            kind
+        // After Wave-E+5, `42` is recognised as a typed Int literal and
+        // the compiler stamps `top_level_frame.return_kind = Int64`.
+        // The `kind` side of the tuple is therefore `Some(Int64)`, and
+        // the raw bits are the native i64 representation of 42.
+        let (bits, kind) = eval_raw("42");
+        assert_eq!(
+            kind,
+            Some(SlotKind::Int64),
+            "Int literal at top-level should now stamp Int64 return kind",
         );
+        assert_eq!(bits as i64, 42, "raw bits decode to 42 as native i64");
     }
 
     #[test]
