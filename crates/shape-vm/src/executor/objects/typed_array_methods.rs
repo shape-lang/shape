@@ -1311,9 +1311,25 @@ pub(crate) fn handle_int_map(
         };
         result.push(ValueWord::from_raw_bits(mapped_bits));
     }
-    let all_int = result.iter().all(|nb| nb.as_i64().is_some());
-    if all_int {
-        let typed: Vec<i64> = result.iter().map(|nb| nb.as_i64().unwrap()).collect();
+    // Post-Wave-E+5/Unit B: typed-int closure returns push native i64
+    // bits, so `as_i64()` returns `None` for the bits we just collected.
+    // Detect untagged i48-range bits as native int too. Real f64 values
+    // (bits outside the i48 range) trip the native-i64 check and stay
+    // through the generic-array path.
+    let int_extract = |nb: &ValueWord| -> Option<i64> {
+        nb.as_i64().or_else(|| {
+            let bits = nb.raw_bits();
+            if !shape_value::tag_bits::is_tagged(bits) {
+                let v = bits as i64;
+                if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&v) {
+                    return Some(v);
+                }
+            }
+            None
+        })
+    };
+    let typed_opt: Option<Vec<i64>> = result.iter().map(int_extract).collect();
+    if let Some(typed) = typed_opt {
         Ok(ValueWord::from_int_array(Arc::new(typed.into())).into_raw_bits())
     } else {
         Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
@@ -1405,6 +1421,15 @@ pub(crate) fn handle_int_reduce(
         let elem_bits = v as u64;
         acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
     }
+    // Retag native i64 acc bits as a tagged i48 so the polymorphic
+    // ValueWord caller can decode via `as_i64()`. Already-tagged or
+    // out-of-range bits pass through.
+    if !shape_value::tag_bits::is_tagged(acc_bits) {
+        let as_i64 = acc_bits as i64;
+        if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
+            return Ok(ValueWord::from_i64(as_i64).into_raw_bits());
+        }
+    }
     Ok(acc_bits)
 }
 
@@ -1434,7 +1459,13 @@ pub(crate) fn handle_int_find(
             vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
         };
         if raw_helpers::is_truthy_raw(result_bits) {
-            return Ok(elem_bits);
+            // Return as a tagged i48 ValueWord so generic ValueWord
+            // consumers (`as_i64`, `format_nb`, vw_equals) decode the
+            // result correctly. `find` is a polymorphic-result method
+            // (Option<T>) — host-boundary synthesis falls through to
+            // passthrough for it, so the bits we return here are the
+            // bits the caller sees.
+            return Ok(ValueWord::from_i64(v).into_raw_bits());
         }
         vw_drop(result_bits); // FR.5
     }

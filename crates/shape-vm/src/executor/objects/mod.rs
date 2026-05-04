@@ -1400,25 +1400,82 @@ impl VirtualMachine {
             }
             "map" | "filter" | "reduce" | "fold" | "forEach" | "for_each" | "find"
             | "findIndex" | "find_index" | "some" | "every" | "any" | "all" => {
-                // Higher-order methods: materialize elements and fall back to generic array handler.
-                let mut elems: Vec<ValueWord> = Vec::with_capacity(view.len as usize);
-                for i in 0..view.len {
-                    elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
-                }
-                let legacy = ValueWord::from_array(shape_value::vmarray_from_vec(elems));
-                // Build a new SmallVec with the promoted receiver
+                // Higher-order methods: promote the v2 typed-array view to a
+                // legacy typed `Arc<TypedBuffer<T>>` and dispatch the
+                // matching `INT_ARRAY_METHODS` / `FLOAT_ARRAY_METHODS` /
+                // `BOOL_ARRAY_METHODS` handler. Those typed handlers pass
+                // *raw native* bits (i64, f64, u8) to the closure so its
+                // typed `LoadLocalI64` / `F64` / `Bool` reads land on the
+                // right scalar; routing through the generic
+                // `ARRAY_METHODS["some"]` etc. would require materialising
+                // tagged ValueWords first, which the post-Wave-E+5 typed
+                // closure body would then misinterpret as native bits.
+                use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+                use std::sync::Arc;
+
+                let (receiver_bits, registry): (ValueWord, &phf::Map<&'static str, _>) = match view.elem_type {
+                    v2::V2ElemType::I64 => {
+                        let mut buf: Vec<i64> = Vec::with_capacity(view.len as usize);
+                        unsafe {
+                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<i64>;
+                            for i in 0..view.len {
+                                buf.push(shape_value::v2::typed_array::TypedArray::<i64>::get_unchecked(arr, i));
+                            }
+                        }
+                        (ValueWord::from_int_array(Arc::new(TypedBuffer::from(buf))), &method_registry::INT_ARRAY_METHODS)
+                    }
+                    v2::V2ElemType::F64 => {
+                        let mut buf: shape_value::AlignedVec<f64> = shape_value::AlignedVec::with_capacity(view.len as usize);
+                        unsafe {
+                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<f64>;
+                            for i in 0..view.len {
+                                buf.push(shape_value::v2::typed_array::TypedArray::<f64>::get_unchecked(arr, i));
+                            }
+                        }
+                        let aligned = AlignedTypedBuffer::from(buf);
+                        (ValueWord::from_float_array(Arc::new(aligned)), &method_registry::FLOAT_ARRAY_METHODS)
+                    }
+                    v2::V2ElemType::Bool => {
+                        let mut buf: Vec<u8> = Vec::with_capacity(view.len as usize);
+                        unsafe {
+                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<u8>;
+                            for i in 0..view.len {
+                                buf.push(shape_value::v2::typed_array::TypedArray::<u8>::get_unchecked(arr, i));
+                            }
+                        }
+                        (ValueWord::from_bool_array(Arc::new(TypedBuffer::from(buf))), &method_registry::BOOL_ARRAY_METHODS)
+                    }
+                    v2::V2ElemType::I32 => {
+                        // No legacy `TypedBuffer<i32>` constructor — fall
+                        // back to generic Array which routes through
+                        // `ARRAY_METHODS`. Tagged-vs-native arg bits
+                        // remain a known gap for I32 receivers.
+                        let mut elems: Vec<ValueWord> = Vec::with_capacity(view.len as usize);
+                        for i in 0..view.len {
+                            elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
+                        }
+                        (ValueWord::from_array(shape_value::vmarray_from_vec(elems)), &method_registry::ARRAY_METHODS)
+                    }
+                };
+
                 let mut new_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(raw_args.len());
-                new_args.push(legacy.into_raw_bits());
+                new_args.push(receiver_bits.into_raw_bits());
                 // Clone the remaining args (bump refcounts)
                 for bits in &raw_args[1..] {
                     new_args.push(ValueWord::from_raw_bits(*bits).clone().into_raw_bits());
                 }
-                let handler = method_registry::ARRAY_METHODS.get(method).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Unknown method '{}' on v2 typed array",
-                        method
-                    ))
-                })?;
+                // Look up in the typed registry first; fall back to
+                // generic ARRAY_METHODS for methods not in the typed
+                // map (e.g. `any`/`all` only live in `ARRAY_METHODS`).
+                let handler = registry
+                    .get(method)
+                    .or_else(|| method_registry::ARRAY_METHODS.get(method))
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Unknown method '{}' on v2 typed array",
+                            method
+                        ))
+                    })?;
                 self.dispatch_method_handler(handler, new_args, None)?;
                 Ok(true)
             }
