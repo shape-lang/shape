@@ -132,8 +132,25 @@ impl VirtualMachine {
     /// Mutates the map in-place (or clones on write).
     fn op_map_set_str_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot_idx = Self::extract_local_slot(instruction)?;
-        let value_bits = self.pop_raw_u64()?;
+        let raw_value = self.pop_raw_u64()?;
         let key_bits = self.pop_raw_u64()?;
+        // Post-Wave-E+5/Unit B: int producers (`op_push_const Int`,
+        // `LoadLocalI64`, `AddInt`, …) push raw native i64 bits without
+        // the `TAG_INT` NaN-box. The HashMap stores `ValueWord` values
+        // and downstream readers (`MapGetStrI64`, `vw_equals`,
+        // `format_nb`, …) decode through the legacy tagged accessors,
+        // so re-tag native bits as a tagged i48 before insertion. Bits
+        // already in `TAG_INT` form pass through unchanged.
+        let value_bits = if !shape_value::tag_bits::is_tagged(raw_value) {
+            let as_i64 = raw_value as i64;
+            if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
+                ValueWord::from_i64(as_i64)
+            } else {
+                raw_value
+            }
+        } else {
+            raw_value
+        };
 
         let bp = self.current_locals_base();
         let slot = bp + slot_idx as usize;
@@ -237,7 +254,9 @@ impl VirtualMachine {
 
         if let Some(map_data) = raw_helpers::extract_hashmap_data(map_bits) {
             let len = map_data.keys.len();
-            self.push_raw_u64(ValueWord::from_i64(len as i64))?;
+            // Push raw native i64 to match the native transport advertised
+            // by `last_emitted_native_kind` for `MapLenTyped` (helpers.rs).
+            self.push_native_i64(len as i64)?;
             Ok(())
         } else {
             Err(VMError::TypeError {
@@ -279,7 +298,10 @@ impl VirtualMachine {
         let str_bits = self.stack[bp + slot_idx as usize];
 
         if let Some(s) = raw_helpers::extract_str(str_bits) {
-            self.push_raw_u64(ValueWord::from_i64(s.chars().count() as i64))?;
+            // Push raw native i64 to match the native transport advertised
+            // by `last_emitted_native_kind` for `StringLenTyped`
+            // (helpers.rs).
+            self.push_native_i64(s.chars().count() as i64)?;
             Ok(())
         } else {
             Err(VMError::TypeError {
@@ -413,6 +435,7 @@ mod tests {
         BytecodeProgram, Constant, Instruction, OpCode, Operand,
     };
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::type_tracking::{FrameDescriptor, SlotKind};
     use shape_value::{ValueWord, ValueWordExt};
     use shape_value::heap_value::{HashMapData, HeapValue};
     use std::collections::HashMap;
@@ -423,6 +446,17 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
+    }
+
+    /// Helper: build a program with a declared top-level `return_kind` and
+    /// run it. After Wave-E+5 the typed `MapLenTyped` / `StringLenTyped` /
+    /// related opcodes push raw native bits; the host-boundary
+    /// `synthesize_value_word_from_raw` decodes them per `return_kind`.
+    fn run_program_typed(mut program: BytecodeProgram, return_kind: SlotKind) -> ValueWord {
+        let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
+        frame.return_kind = return_kind;
+        program.top_level_frame = Some(frame);
+        run_program(program)
     }
 
     /// Create a HashMap ValueWord with given string->int entries.
@@ -573,7 +607,9 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        // MapLenTyped pushes raw native i64 bits; declare return_kind so
+        // the host-boundary synthesizer decodes them via `from_i64`.
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 
@@ -589,7 +625,9 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        // MapLenTyped pushes raw native i64 bits; declare return_kind so
+        // the host-boundary synthesizer decodes them via `from_i64`.
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 
@@ -631,7 +669,9 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        // StringLenTyped pushes raw native i64 bits; declare return_kind so
+        // the host-boundary synthesizer decodes them via `from_i64`.
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(5));
     }
 
@@ -646,7 +686,9 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        // StringLenTyped pushes raw native i64 bits; declare return_kind so
+        // the host-boundary synthesizer decodes them via `from_i64`.
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 
