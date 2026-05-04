@@ -508,6 +508,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::GteNumber),
         ],
         constants: vec![Constant::Number(5.0)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -524,6 +529,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::LteNumber),
         ],
         constants: vec![Constant::Number(3.0), Constant::Number(5.0)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -540,6 +550,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::EqNumber),
         ],
         constants: vec![Constant::Number(7.0)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -556,6 +571,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::NeqNumber),
         ],
         constants: vec![Constant::Number(5.0), Constant::Number(3.0)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -572,6 +592,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::EqInt),
         ],
         constants: vec![Constant::Int(42), Constant::Int(42)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -588,6 +613,11 @@ fn test_comparison_operators_complete() {
             Instruction::simple(OpCode::NeqNumber),
         ],
         constants: vec![Constant::Number(1.5), Constant::Number(2.5)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -610,6 +640,11 @@ fn test_logical_or_not() {
             Instruction::simple(OpCode::Or),
         ],
         constants: vec![Constant::Bool(false), Constant::Bool(true)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
@@ -625,6 +660,11 @@ fn test_logical_or_not() {
             Instruction::simple(OpCode::Not),
         ],
         constants: vec![Constant::Bool(false)],
+        top_level_frame: Some({
+            let mut f = crate::type_tracking::FrameDescriptor::new();
+            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f
+        }),
         ..Default::default()
     });
     assert_eq!(
