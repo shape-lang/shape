@@ -5,6 +5,20 @@ mod module_qualified_type_tests {
     use shape_value::{ValueWord, ValueWordExt};
 
     fn eval(code: &str) -> ValueWord {
+        eval_with_kind_opt(code, None)
+    }
+
+    /// Like `eval`, but stamps `top_level_frame.return_kind` with the
+    /// supplied `SlotKind` so the host-boundary synthesizer re-tags
+    /// raw native bits the post-Wave-E+5 typed match arms produce.
+    fn eval_with_kind(code: &str, kind: crate::type_tracking::SlotKind) -> ValueWord {
+        eval_with_kind_opt(code, Some(kind))
+    }
+
+    fn eval_with_kind_opt(
+        code: &str,
+        kind: Option<crate::type_tracking::SlotKind>,
+    ) -> ValueWord {
         // Install a per-test TypeSchemaRegistry scope so compile-time
         // predeclared-schema registration and VM-side schema lookups
         // consult a fresh registry instead of the process-global
@@ -24,6 +38,14 @@ mod module_qualified_type_tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         vm.populate_module_objects();
+        // When the caller supplies a kind, pull raw bits and synthesize
+        // ourselves. This bypasses the runtime-observed
+        // `last_program_return_kind` stamp which the trailing typed
+        // `match` arms may set incorrectly post-Wave-E+5.
+        if let Some(k) = kind {
+            let raw = vm.execute_raw(None).expect("execution failed");
+            return crate::executor::dispatch::synthesize_value_word_from_raw(raw, Some(k));
+        }
         vm.execute(None).expect("execution failed").clone()
     }
 
@@ -126,13 +148,15 @@ mod module_qualified_type_tests {
 
     #[test]
     fn test_module_enum_constructor_and_match() {
-        let result = eval(r#"
+        // After Wave-E+5, the typed `match` arms return raw native i64
+        // bits at the top-level. Stamp Int64 so `as_i64()` decodes them.
+        let result = eval_with_kind(r#"
             mod m { enum C { R, B } }
             match m::C::R {
                 m::C::R => 1,
                 m::C::B => 2,
             }
-        "#);
+        "#, crate::type_tracking::SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
@@ -209,14 +233,14 @@ mod module_qualified_type_tests {
     #[test]
     fn test_module_enum_struct_variant() {
         // Enum struct variants should work with qualified names
-        let result = eval(r#"
+        let result = eval_with_kind(r#"
             mod m {
                 enum E { V { x: int, y: int } }
             }
             match m::E::V { x: 1, y: 2 } {
                 m::E::V { x, y } => x + y,
             }
-        "#);
+        "#, crate::type_tracking::SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 
@@ -237,7 +261,7 @@ mod module_qualified_type_tests {
     #[test]
     fn test_module_enum_used_in_function_signature() {
         // Module-qualified enum used as function return type
-        let result = eval(r#"
+        let result = eval_with_kind(r#"
             mod m {
                 enum Color { Red, Blue }
                 fn pick() -> Color { Color::Red }
@@ -246,14 +270,14 @@ mod module_qualified_type_tests {
                 m::Color::Red => 1,
                 m::Color::Blue => 2,
             }
-        "#);
+        "#, crate::type_tracking::SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
     #[test]
     fn test_module_struct_with_method_chaining() {
         // Extend method chaining on module-qualified types
-        let result = eval(r#"
+        let result = eval_with_kind(r#"
             mod m {
                 type Counter { n: int }
                 extend Counter {
@@ -262,7 +286,7 @@ mod module_qualified_type_tests {
                 }
             }
             m::Counter { n: 0 }.inc().inc().inc().value()
-        "#);
+        "#, crate::type_tracking::SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 

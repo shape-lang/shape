@@ -348,6 +348,11 @@ mod promote_to_shared_tests {
     fn test_promote_to_shared_on_inline_is_noop() {
         // Inline int (i48) should pass through PromoteToShared unchanged —
         // no heap path, bits preserved exactly.
+        //
+        // After Wave-E+5, `Constant::Int` pushes raw native i64 bits.
+        // Stamp the program's `top_level_frame.return_kind = Int64` so
+        // the host boundary re-tags via `from_i64` and `as_i64()`
+        // returns Some(42).
         let mut program = BytecodeProgram::default();
         let c0 = program.add_constant(Constant::Int(42));
         program.instructions = vec![
@@ -355,6 +360,9 @@ mod promote_to_shared_tests {
             Instruction::simple(OpCode::PromoteToShared),
             Instruction::simple(OpCode::Halt),
         ];
+        let mut frame = crate::type_tracking::FrameDescriptor::new();
+        frame.return_kind = crate::type_tracking::SlotKind::Int64;
+        program.top_level_frame = Some(frame);
         let result = run_program(program);
         assert_eq!(
             result.as_i64(),
