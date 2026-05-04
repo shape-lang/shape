@@ -21,9 +21,19 @@ fn nb_equal(a: &ValueWord, b: &ValueWord) -> bool {
     a.vw_equals(b)
 }
 
-/// Check that a call result is a boolean true
+/// Check that a call result is a boolean true.
+///
+/// Post-Wave-E+5/Unit B, typed boolean producers (`EqInt`, `LtNumber`,
+/// `Not`, `LoadLocalBool`, `op_push_const Bool`, …) push raw native 0/1 bits
+/// — `as_bool()` only recognizes the legacy `TAG_BOOL` form and returns
+/// `None` for native bits, falsely signalling a non-boolean predicate.
+/// Detect the native form (0 or 1, untagged) up front; tagged bits keep the
+/// legacy decode path so heap-boxed bool variants stay supported.
 #[inline]
 fn is_bool_true_raw(bits: u64) -> Result<bool, VMError> {
+    if !shape_value::tag_bits::is_tagged(bits) && bits <= 1 {
+        return Ok(bits == 1);
+    }
     let vw = ManuallyDrop::new(ValueWord::from_raw_bits(bits));
     match vw.as_bool() {
         Some(b) => Ok(b),
