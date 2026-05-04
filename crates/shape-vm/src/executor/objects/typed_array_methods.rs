@@ -1300,7 +1300,9 @@ pub(crate) fn handle_int_map(
     };
     let mut result = Vec::with_capacity(arr_clone.len());
     for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let mapped_bits = if cb_arity >= 2 {
             let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
             vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
@@ -1335,7 +1337,9 @@ pub(crate) fn handle_int_filter(
     };
     let mut result = Vec::with_capacity(arr_clone.len());
     for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let keep_bits = if cb_arity >= 2 {
             let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
             vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
@@ -1365,7 +1369,9 @@ pub(crate) fn handle_int_for_each(
         arr.iter().copied().collect()
     };
     for &v in &arr_clone {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
         vw_drop(result_bits); // FR.5
     }
@@ -1394,7 +1400,9 @@ pub(crate) fn handle_int_reduce(
     };
     let mut acc_bits = args[2];
     for &v in &arr_clone {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
     }
     Ok(acc_bits)
@@ -1416,7 +1424,9 @@ pub(crate) fn handle_int_find(
         arr.iter().copied().collect()
     };
     for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let result_bits = if cb_arity >= 2 {
             let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
             vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
@@ -1447,7 +1457,9 @@ pub(crate) fn handle_int_some(
         arr.iter().copied().collect()
     };
     for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let result_bits = if cb_arity >= 2 {
             let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
             vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
@@ -1479,7 +1491,9 @@ pub(crate) fn handle_int_every(
         arr.iter().copied().collect()
     };
     for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
+        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
+        let elem_bits = v as u64;
         let result_bits = if cb_arity >= 2 {
             let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
             vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
