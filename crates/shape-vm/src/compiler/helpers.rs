@@ -1108,7 +1108,54 @@ impl BytecodeCompiler {
     /// and the program return falls through to `Unknown` (passthrough
     /// synthesis), preserving the pre-E+5 contract.
     pub(super) fn last_emitted_native_kind(&self) -> Option<StorageHint> {
-        let instr = self.program.instructions.last()?;
+        // Walk back past trailing stack-neutral teardown chatter so the
+        // gate inspects the actual producer of top-of-stack. The
+        // post-trailing-expression drop sequence emitted by
+        // `emit_drops_for_early_exit` and the block / top-level drop
+        // scope is a series of:
+        //
+        //   LoadLocal(slot)   ; push receiver
+        //   DropCall(...)     ; pop receiver, push 0
+        //   [DropLocal(slot)] ; pop, push 0 (rare; ownership-moves on)
+        //   [DropSharedLocal(slot)] ; same
+        //
+        // None of those touch top-of-stack. Walk past the `LoadLocal /
+        // LoadLocalTrusted → DropCall*` pair so the producer below is
+        // visible. `ReturnOwned` is a no-op for inline scalars
+        // (`op_promote_to_owned` early-returns when the tag isn't
+        // `TAG_HEAP`); walk past it for primitive-typed returns.
+        let instrs = &self.program.instructions;
+        let mut idx = instrs.len();
+        while idx > 0 {
+            let prev = &instrs[idx - 1];
+            match prev.opcode {
+                OpCode::DropCall
+                | OpCode::DropCallAsync
+                | OpCode::DropLocal
+                | OpCode::DropSharedLocal => {
+                    idx -= 1;
+                    if idx > 0
+                        && matches!(
+                            instrs[idx - 1].opcode,
+                            OpCode::LoadLocal | OpCode::LoadLocalTrusted
+                        )
+                    {
+                        // Step over the receiver-push that the DropCall
+                        // consumed. The pair is stack-neutral; the
+                        // producer we want sits before it.
+                        idx -= 1;
+                    }
+                }
+                OpCode::ReturnOwned => {
+                    idx -= 1;
+                }
+                _ => break,
+            }
+        }
+        if idx == 0 {
+            return None;
+        }
+        let instr = &instrs[idx - 1];
         match instr.opcode {
             // ===== Raw i64 producers (Wave E+5.3 + Unit B) =====
             // Single-path Int arithmetic / bitwise / negation. The dynamic
@@ -1285,7 +1332,7 @@ impl BytecodeCompiler {
             // `get_prop_native_kinds` at the emit site in
             // `compile_expr_property_access`. This arm consults that
             // side-channel by the index of the just-emitted GetProp.
-            OpCode::GetProp => self.get_prop_native_kind(),
+            OpCode::GetProp => self.get_prop_native_kind_at(idx - 1),
 
             // Everything else (GetField, NewTypedObject,
             // legacy `ReturnValue` (tagged), MakeArray, MakeMap, etc.)
@@ -1585,6 +1632,14 @@ impl BytecodeCompiler {
     /// also leaves those tagged.
     fn get_prop_native_kind(&self) -> Option<StorageHint> {
         let idx = self.program.instructions.len().checked_sub(1)?;
+        self.get_prop_native_kinds.get(&idx).copied()
+    }
+
+    /// Variant of [`Self::get_prop_native_kind`] that consults the side-
+    /// channel at a specific instruction index. Used by
+    /// [`Self::last_emitted_native_kind`] when its walk-back lands on a
+    /// `GetProp` that isn't the final instruction.
+    fn get_prop_native_kind_at(&self, idx: usize) -> Option<StorageHint> {
         self.get_prop_native_kinds.get(&idx).copied()
     }
 
