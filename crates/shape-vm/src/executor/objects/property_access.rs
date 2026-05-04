@@ -544,15 +544,38 @@ impl VirtualMachine {
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
-                    // Numeric index
-                    let idx_opt = key_nb
-                        .as_i64()
-                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    // Numeric index. Post-Wave-E+5/Unit B, `op_push_const` for
+                    // in-range Int literals pushes raw native i64 bits (no
+                    // tag), so `key_nb.as_i64()` (which checks for TAG_INT)
+                    // returns None and `as_f64()` reinterprets the native i64
+                    // as an f64 denormal (e.g. native bits `0x1` becomes
+                    // ~5e-324, which casts to 0). That made `arr[1]` and
+                    // `arr[2]` both decode as index 0. Detect untagged bits
+                    // first and treat them as native i64.
+                    let raw = key_nb.into_raw_bits();
+                    let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                        key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                    } else {
+                        Some(raw as i64)
+                    };
                     if let Some(idx) = idx_opt {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < arr.len() {
-                            return self.push_raw_u64(arr[actual as usize].clone());
+                            // The array's `Vec<ValueWord>` owns one share per
+                            // heap-tagged element. A bare `.clone()` (derive
+                            // bit-copy) hands out a pointer with NO refcount
+                            // bump, so when the array is later dropped (or
+                            // the consumer calls `drop_raw_bits` on the
+                            // popped bits) the underlying allocation is
+                            // freed while the stack still holds a dangling
+                            // pointer. Mirror the UnifiedArray path above by
+                            // routing through `clone_from_bits`, which
+                            // Arc-retains shared heap values and deep-clones
+                            // owned ones.
+                            let elem_bits = arr[actual as usize].into_raw_bits();
+                            let elem = unsafe { ValueWord::clone_from_bits(elem_bits) };
+                            return self.push_raw_u64(elem);
                         } else {
                             return self.push_raw_u64(ValueWord::none());
                         }
