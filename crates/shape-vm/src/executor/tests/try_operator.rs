@@ -198,7 +198,10 @@ fn test_try_unwrap_passes_through_plain_non_none_values() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::simple(OpCode::TryUnwrap),
     ];
-    let constants = vec![Constant::Int(7)];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits. Wrap
+    // via Constant::Value so TryUnwrap's pass-through preserves a
+    // tagged ValueWord that compares equal to `ValueWord::from_i64(7)`.
+    let constants = vec![Constant::Value(ValueWord::from_i64(7))];
 
     let result = execute_bytecode(instructions, constants).expect("execution should succeed");
     assert_eq!(result, ValueWord::from_i64(7));
@@ -507,11 +510,14 @@ let opt: Option<int> = None
 let val = opt as number
 val == None
 "#;
+    // After Wave-E+5, the trailing `==` may emit raw native bool bits
+    // at the top of stack. Read the raw bits and assert the boolean
+    // payload directly (`0u64` → false, `1u64` → true).
     let bytecode = compile_source(source).expect("compile should succeed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    let result = vm.execute(None).expect("execution should succeed").clone();
-    assert_eq!(result.as_bool(), Some(true), "None as number should remain None");
+    let raw = vm.execute_raw(None).expect("execution should succeed");
+    assert_eq!(raw, 1u64, "None as number should remain None");
 }
 
 #[test]
@@ -522,6 +528,10 @@ let opt: Option<bool> = Some(true)
 let val = opt as int
 val
 "#;
+    // After Wave-E+5, the trailing `val` (Option<int>) returns a tagged
+    // ValueWord (Option payloads are tagged), so `as_i64()` works only
+    // when the typed return path stamped the kind. Here the assertion
+    // stays dialing through `as_i64()` for the unwrapped int.
     let bytecode = compile_source(source).expect("compile should succeed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
@@ -570,7 +580,10 @@ fn test_uncaught_non_any_error_uses_value_formatting() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::simple(OpCode::Throw),
     ];
-    let constants = vec![Constant::Int(42)];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits. Throw
+    // formats the popped ValueWord; wrap via Constant::Value so the
+    // throw arrives tagged.
+    let constants = vec![Constant::Value(ValueWord::from_i64(42))];
 
     let err = execute_bytecode(instructions, constants).expect_err("execution should fail");
     let VMError::RuntimeError(message) = err else {
