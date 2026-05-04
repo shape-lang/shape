@@ -552,7 +552,16 @@ impl VirtualMachine {
         let value = rebox_native_bits(self.pop_raw_u64()?);
         let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_native_i64(i)
+        self.push_native_i64(i)?;
+        // Stamp Int64 only if the convert is the program's final
+        // operation (next IP is past the instruction stream / on a
+        // trailing Halt). Subsequent ops overwrite the stamp via
+        // their own logic, so we avoid leaving a stale Int64 stamp
+        // when the convert feeds into a typed downstream consumer.
+        self.maybe_stamp_program_return_kind_for_native_producer(
+            crate::type_tracking::SlotKind::Int64,
+        );
+        Ok(())
     }
 
     /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
@@ -561,7 +570,11 @@ impl VirtualMachine {
         let value = rebox_native_bits(self.pop_raw_u64()?);
         let n = Self::convert_to_f64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_f64(n)
+        self.push_raw_f64(n)?;
+        self.maybe_stamp_program_return_kind_for_native_producer(
+            crate::type_tracking::SlotKind::Float64,
+        );
+        Ok(())
     }
 
     /// ConvertToString: pop any value, convert to string, push result. Always succeeds.
@@ -581,7 +594,11 @@ impl VirtualMachine {
         let value = rebox_native_bits(self.pop_raw_u64()?);
         let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_native_bool(b)
+        self.push_native_bool(b)?;
+        self.maybe_stamp_program_return_kind_for_native_producer(
+            crate::type_tracking::SlotKind::Bool,
+        );
+        Ok(())
     }
 
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.

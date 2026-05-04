@@ -1275,6 +1275,42 @@ impl VirtualMachine {
         Ok(())
     }
 
+    /// Stamp `last_program_return_kind` only when the calling instruction
+    /// is the program's final operation — i.e. we're at the top-level
+    /// frame and the IP is past the last user instruction (a trailing
+    /// `Halt` is fine; `self.ip` was already incremented past the
+    /// current instruction at the dispatch site). Used by polymorphic
+    /// runtime handlers (`op_convert_to_int` / `_number` / `_bool` and
+    /// the higher-order array methods) that push raw native bits but
+    /// have no corresponding entry in the compiler's
+    /// `last_emitted_native_kind` list — without the stamp the host
+    /// boundary `synthesize_value_word_from_raw` would pass the bits
+    /// through unmodified and `as_i64` / `as_f64` / `as_bool` on the
+    /// result would return `None`.
+    #[inline]
+    pub(in crate::executor) fn maybe_stamp_program_return_kind_for_native_producer(
+        &mut self,
+        kind: crate::type_tracking::SlotKind,
+    ) {
+        if !self.call_stack.is_empty() {
+            return;
+        }
+        // `self.ip` has already been advanced past the current
+        // instruction. If only a trailing `Halt` (or nothing) remains,
+        // this is the program's final value-producing op.
+        let next_ip = self.ip;
+        let is_final = next_ip >= self.program.instructions.len()
+            || self
+                .program
+                .instructions
+                .get(next_ip)
+                .map(|i| i.opcode == crate::bytecode::OpCode::Halt)
+                .unwrap_or(true);
+        if is_final {
+            self.last_program_return_kind = Some(kind);
+        }
+    }
+
     pub(in crate::executor) fn op_return_value_i64(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
         self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Int64)
