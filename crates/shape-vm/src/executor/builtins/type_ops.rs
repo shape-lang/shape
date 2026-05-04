@@ -7,8 +7,39 @@ use crate::executor::VirtualMachine;
 use rust_decimal::prelude::ToPrimitive;
 use shape_ast::ast::TypeAnnotation;
 use shape_value::{ArgVec, HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
-use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, I48_MAX, I48_MIN, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use std::sync::Arc;
+
+/// Re-tag a raw stack-bit pattern that may be a native i64/bool result from a
+/// post-Wave-E+5 producer (`op_push_const` Int/Bool, typed arithmetic, typed
+/// loads). Convert helpers receive a `&ValueWord` whose accessors
+/// (`as_i64()`, `as_bool()`) only inspect the legacy tagged form, so untagged
+/// native bits silently fail the tagged check and fall through to
+/// `as_f64()` — which reinterprets a tiny native i64 as an f64 denormal.
+///
+/// Heuristic: if the bits are untagged AND fit in the i48 range, the producer
+/// almost certainly pushed a native i64 (op_push_const Int/Bool, typed
+/// arithmetic results), because real f64 values like 1.0 / 2.5 / 99.0 have
+/// bit patterns far outside [I48_MIN, I48_MAX]. Producers that push native
+/// f64 (op_push_const Number, AddNumber, etc.) yield bit patterns that fall
+/// outside that range. The one ambiguous case — bits == 0, which could be
+/// native i64 0, native bool false, or native f64 0.0 — round-trips to the
+/// same scalar value across all three interpretations, so converting it as
+/// i64 is correct for every downstream call.
+#[inline]
+fn rebox_native_bits(bits: u64) -> ValueWord {
+    if is_tagged(bits) {
+        return ValueWord::from_raw_bits(bits);
+    }
+    let as_i64 = bits as i64;
+    if (I48_MIN..=I48_MAX).contains(&as_i64) {
+        // Native i64 (or bool encoded as 0/1) — re-tag as a tagged i48.
+        ValueWord::from_i64(as_i64)
+    } else {
+        // Native f64 — re-box as a plain f64 ValueWord.
+        ValueWord::from_f64(f64::from_bits(bits))
+    }
+}
 
 const INTO_DISPATCH_TAG: &str = "__IntoDispatch";
 const TRY_INTO_DISPATCH_TAG: &str = "__TryIntoDispatch";
@@ -387,7 +418,7 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let (dispatch_kind, encoded_source, target_selector) =
             match Self::decode_convert_dispatch(&target) {
                 Ok(dispatch) => dispatch,
@@ -512,7 +543,7 @@ impl VirtualMachine {
     /// ConvertToInt: pop any value, convert to i64, push raw i64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_tagged_i64(i)
@@ -521,7 +552,7 @@ impl VirtualMachine {
     /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let n = Self::convert_to_f64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_f64(n)
@@ -533,7 +564,7 @@ impl VirtualMachine {
     /// still uses push_vw.
     #[inline]
     pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = self.convert_to_string_no_checks(&value);
         self.push_raw_u64(result)
     }
@@ -541,7 +572,7 @@ impl VirtualMachine {
     /// ConvertToBool: pop any value, convert to bool, push raw bool. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_tagged_bool(b)
@@ -550,7 +581,7 @@ impl VirtualMachine {
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = Self::convert_to_decimal_no_checks(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_u64(result)
@@ -559,7 +590,7 @@ impl VirtualMachine {
     /// ConvertToChar: pop value, convert to char, push result. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = Self::convert_to_char_no_checks(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_u64(result)
@@ -568,7 +599,7 @@ impl VirtualMachine {
     /// TryConvertToInt: pop value, try convert to int, push Result<int, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = match Self::convert_to_int_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
@@ -579,7 +610,7 @@ impl VirtualMachine {
     /// TryConvertToNumber: pop value, try convert to number, push Result<number, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = match Self::convert_to_number_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
@@ -590,7 +621,7 @@ impl VirtualMachine {
     /// TryConvertToString: pop value, try convert to string, push Result<string, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = ValueWord::from_ok(self.convert_to_string_no_checks(&value));
         self.push_raw_u64(result)
     }
@@ -598,7 +629,7 @@ impl VirtualMachine {
     /// TryConvertToBool: pop value, try convert to bool, push Result<bool, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = match Self::convert_to_bool_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
@@ -609,7 +640,7 @@ impl VirtualMachine {
     /// TryConvertToDecimal: pop value, try convert to decimal, push Result<decimal, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = match Self::convert_to_decimal_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
@@ -620,7 +651,7 @@ impl VirtualMachine {
     /// TryConvertToChar: pop value, try convert to char, push Result<char, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = self.pop_raw_u64()?;
+        let value = rebox_native_bits(self.pop_raw_u64()?);
         let result = match Self::convert_to_char_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
