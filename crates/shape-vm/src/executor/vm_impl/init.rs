@@ -39,6 +39,7 @@ impl VirtualMachine {
             last_error_file: None,
             last_uncaught_exception: None,
             module_init_done: false,
+            last_program_return_kind: None,
             output_buffer: None,
             module_registry: shape_runtime::module_exports::ModuleExportRegistry::new(),
             module_fn_table: Vec::new(),

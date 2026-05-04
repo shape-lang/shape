@@ -1256,57 +1256,78 @@ impl VirtualMachine {
     // return positions.
     // ─────────────────────────────────────────────────────────────────
 
+    /// Run `return_value_inner`, then if the pop landed at the top-level
+    /// (call stack now empty), stamp `last_program_return_kind` so the
+    /// host-boundary synthesizer knows how to re-tag the native bits.
+    /// Skip the stamp for nested returns — only the LAST typed return on
+    /// the path back to top-level should set the kind, and that's
+    /// exactly the one whose pop empties the call stack.
+    #[inline]
+    fn typed_return_with_kind(
+        &mut self,
+        return_value: u64,
+        kind: crate::type_tracking::SlotKind,
+    ) -> Result<(), VMError> {
+        self.return_value_inner(return_value)?;
+        if self.call_stack.is_empty() {
+            self.last_program_return_kind = Some(kind);
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn op_return_value_i64(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Int64)
     }
 
     pub(in crate::executor) fn op_return_value_u64(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::UInt64)
     }
 
     pub(in crate::executor) fn op_return_value_f64(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Float64)
     }
 
     pub(in crate::executor) fn op_return_value_i32(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Int32)
     }
 
     pub(in crate::executor) fn op_return_value_u32(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::UInt32)
     }
 
     pub(in crate::executor) fn op_return_value_i16(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Int16)
     }
 
     pub(in crate::executor) fn op_return_value_u16(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::UInt16)
     }
 
     pub(in crate::executor) fn op_return_value_i8(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Int8)
     }
 
     pub(in crate::executor) fn op_return_value_u8(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::UInt8)
     }
 
     pub(in crate::executor) fn op_return_value_bool(&mut self) -> Result<(), VMError> {
         let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        self.typed_return_with_kind(return_value, crate::type_tracking::SlotKind::Bool)
     }
 
     pub(in crate::executor) fn op_return_value_ptr(&mut self) -> Result<(), VMError> {
+        // Ptr returns are heap-tagged ValueWord bits — synthesizer
+        // passthrough is correct, no stamp needed.
         let return_value = self.pop_raw_u64()?;
         self.return_value_inner(return_value)
     }

@@ -32,8 +32,11 @@ impl VirtualMachine {
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
-        let return_kind = self.program_top_level_return_kind();
         let bits = self.execute_raw(ctx)?;
+        // Read the return kind AFTER execution so the runtime-observed
+        // `last_program_return_kind` (set by typed `op_return_value_<kind>`
+        // handlers landing at the top-level frame) is available.
+        let return_kind = self.program_top_level_return_kind();
         Ok(synthesize_value_word_from_raw(bits, return_kind))
     }
 
@@ -65,6 +68,15 @@ impl VirtualMachine {
     /// `ValueWord` directly.
     #[inline]
     fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
+        // Prefer the runtime-observed kind from the most-recent typed
+        // `op_return_value_<kind>` that landed at the top-level boundary
+        // (see `last_program_return_kind` doc on `VirtualMachine`). This
+        // covers the polymorphic `let g = make(); g(arg)` case where the
+        // compiler can't statically prove the kind but the closure body's
+        // typed `ReturnValueI64`/`F64`/`Bool` did push native bits.
+        if let Some(kind) = self.last_program_return_kind {
+            return Some(kind);
+        }
         let kind = self.program.top_level_frame.as_ref()?.return_kind;
         match kind {
             crate::type_tracking::SlotKind::Unknown => None,
