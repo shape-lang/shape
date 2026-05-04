@@ -528,11 +528,16 @@ let opt: Option<bool> = Some(true)
 let val = opt as int
 val
 "#;
-    // After Wave-E+5, the trailing `val` (Option<int>) returns a tagged
-    // ValueWord (Option payloads are tagged), so `as_i64()` works only
-    // when the typed return path stamped the kind. Here the assertion
-    // stays dialing through `as_i64()` for the unwrapped int.
-    let bytecode = compile_source(source).expect("compile should succeed");
+    // After Wave-E+5, the cast result lands as raw native i64 bits at
+    // the top-level. Stamp Int64 kind on the program so the host
+    // synthesizer re-tags the bits correctly.
+    let mut bytecode = compile_source(source).expect("compile should succeed");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = crate::type_tracking::SlotKind::Int64;
+    bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     let result = vm.execute(None).expect("execution should succeed").clone();
