@@ -50,6 +50,16 @@ impl BytecodeCompiler {
                 // Fall through to Dynamic `BitNot` — preserves pre-R5.1C
                 // emission byte-identically.
                 self.compile_unary_op(op)?;
+                // The dynamic `BitNot` opcode post-Wave-E+5.5 pushes raw
+                // native i64 bits (`exec_dyn_bit_unary`). When the operand
+                // was proven `int` at compile time, preserve the Int
+                // numeric hint so the top-level return-kind inference
+                // pairs this producer with the inferred Int kind.
+                if is_int {
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                }
                 return Ok(());
             }
             UnaryOp::Neg => {

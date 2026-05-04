@@ -1171,7 +1171,19 @@ impl BytecodeCompiler {
                     self.compile_binary_op(op)?;
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = None;
+                    // The dynamic bitwise opcodes (`BitAnd`, `BitOr`, ...)
+                    // post-Wave-E+5.5 push raw native i64 bits via
+                    // `exec_dyn_bit_binary` / `exec_dyn_bit_unary`. When both
+                    // operands were proven `int` at compile time (we just
+                    // didn't take the typed-emit path because the flag was
+                    // off), preserve the Int numeric hint so the top-level
+                    // return-kind inference can pair this producer with
+                    // the inferred Int kind.
+                    self.last_expr_numeric_type = if both_int {
+                        Some(NumericType::Int)
+                    } else {
+                        None
+                    };
                 }
             }
             _ => {
