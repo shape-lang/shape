@@ -1285,6 +1285,54 @@ impl BytecodeCompiler {
         // FunctionId(u16) — look up the compiled function body.
         let callee_idx = fid.0 as usize;
         let func = self.program.functions.get(callee_idx)?;
+
+        // Annotation fast-path. When the callee's `function_defs` entry has
+        // a primitive return annotation (`-> int` / `-> number` / `-> bool`
+        // / sub-int width), trust it. The body might still emit legacy
+        // `ReturnValue` (e.g. `fn apply(f: any, x: int) -> int { return
+        // f(x) }` where the inner CallValue's typed bits flow through the
+        // legacy ReturnValue handler unchanged), which the body scan below
+        // would disqualify as `None` — but the runtime stack contract is
+        // still raw native bits per the closure's typed `ReturnValueI64`.
+        // The type system already verified the annotation; the host-boundary
+        // synthesizer needs the same trust to re-tag the bits correctly.
+        //
+        // Foreign function defs (extern, FFI) are checked too.
+        let return_ann = self
+            .function_defs
+            .get(&func.name)
+            .and_then(|def| def.return_type.as_ref())
+            .or_else(|| {
+                self.foreign_function_defs
+                    .get(&func.name)
+                    .and_then(|def| def.return_type.as_ref())
+            });
+        if let Some(ann) = return_ann {
+            if let Some(name) = ann.as_type_name_str() {
+                if let Some(kind) = primitive_type_name_to_storage_hint(name).or_else(|| {
+                    self.type_aliases
+                        .get(name)
+                        .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
+                }) {
+                    if matches!(
+                        kind,
+                        StorageHint::Int64
+                            | StorageHint::UInt64
+                            | StorageHint::Int32
+                            | StorageHint::UInt32
+                            | StorageHint::Int16
+                            | StorageHint::UInt16
+                            | StorageHint::Int8
+                            | StorageHint::UInt8
+                            | StorageHint::Float64
+                            | StorageHint::Bool
+                    ) {
+                        return Some(kind);
+                    }
+                }
+            }
+        }
+
         let entry = func.entry_point;
         let end = entry.checked_add(func.body_length)?;
         if end > self.program.instructions.len() {
