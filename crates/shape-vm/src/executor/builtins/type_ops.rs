@@ -28,7 +28,18 @@ use std::sync::Arc;
 /// i64 is correct for every downstream call.
 #[inline]
 fn rebox_native_bits(bits: u64) -> ValueWord {
+    use shape_value::tag_bits::{get_payload, get_tag, TAG_REF};
     if is_tagged(bits) {
+        // Negative native i64 values (e.g. -42 = 0xFFFF_FFFF_FFFF_FFD6)
+        // have their top 13 bits all-1s, which collides with the
+        // NaN-tag prefix. Such bits decode as `get_tag == TAG_REF`
+        // with a 48-bit payload that far exceeds any plausible
+        // stack-slot index (real refs are bounded by `MAX_STACK_SIZE`
+        // ≈ 100K, well under `1 << 32`). Treat oversized "TAG_REF"
+        // patterns as native i64 sign-extensions.
+        if get_tag(bits) == TAG_REF && get_payload(bits) >= (1u64 << 32) {
+            return ValueWord::from_i64(bits as i64);
+        }
         return ValueWord::from_raw_bits(bits);
     }
     let as_i64 = bits as i64;
