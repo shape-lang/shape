@@ -10,7 +10,7 @@ use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::type_schema::field_types::FieldType;
 use shape_runtime::type_system::annotation_to_string;
 use shape_value::heap_value::HeapValue;
-use shape_value::tag_bits::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::tag_bits::{is_tagged, get_tag, I48_MAX, I48_MIN, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use shape_value::{TypedArrayData, TemporalData, RareHeapData, ConcurrencyData, TableViewData};
 use shape_value::{ValueWord, ValueWordExt};
 
@@ -80,6 +80,21 @@ impl<'a> ValueFormatter<'a> {
         // Fast path: inline types (no heap access needed)
         let bits = value.raw_bits();
         if !is_tagged(bits) {
+            // Post-Wave-E+5/Unit B, typed integer producers (`op_push_const
+            // Int`, `AddInt`, `LoadLocalI64`, …) push raw native i64 bits.
+            // Those bits collide with the f64 bit pattern of denormal
+            // sub-normals (e.g. native i64 `34` ≈ f64 `1.68e-322`), so a
+            // pure `as_f64()` fallback formats them as long denormal
+            // strings. Disambiguate by treating bits whose i64
+            // interpretation falls in the i48 range as native i64; real
+            // f64 values like `1.0` / `2.5` / `34.0` have bit patterns
+            // far outside that range. Native bool 0/1 also fits the i48
+            // path and round-trips correctly through `i64::to_string()`
+            // (the predicate path stays bool-specific via `as_bool`).
+            let as_i64 = bits as i64;
+            if (I48_MIN..=I48_MAX).contains(&as_i64) {
+                return as_i64.to_string();
+            }
             if let Some(n) = value.as_f64() {
                 return format_number(n);
             }

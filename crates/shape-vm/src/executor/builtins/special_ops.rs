@@ -1115,6 +1115,21 @@ fn decode_content_color(arg: &ValueWord) -> Result<Option<shape_value::content::
 }
 
 fn as_i64_arg(arg: &ValueWord, label: &str) -> Result<i64, VMError> {
+    // Post-Wave-E+5/Unit B, typed integer producers (`op_push_const Int`,
+    // `LoadLocalI64`, `AddInt`, …) push raw native i64 bits without the
+    // `TAG_INT` NaN-box, so `as_i64()` returns `None` and `as_number_coerce`
+    // reinterprets the same bits as a tiny denormal (e.g. native `1` ≈
+    // f64 `5e-324`, which truncates to `0`). Detect untagged bits whose
+    // i64 interpretation falls in the i48 range and treat them as native
+    // i64. Real f64 values like `1.0` / `2.5` have bit patterns far
+    // outside that range and continue through `as_number_coerce`.
+    let raw = arg.raw_bits();
+    if !shape_value::tag_bits::is_tagged(raw) {
+        let as_i64 = raw as i64;
+        if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
+            return Ok(as_i64);
+        }
+    }
     arg.as_i64()
         .or_else(|| arg.as_number_coerce().map(|n| n as i64))
         .ok_or_else(|| {
