@@ -956,7 +956,22 @@ pub unsafe fn write_capture_typed(ptr: *mut u8, layout: &ClosureLayout, idx: usi
                 let v = vw.as_number_coerce().unwrap_or(0.0);
                 std::ptr::write(field_ptr as *mut f64, v);
             }
-            FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
+            FieldKind::I64 | FieldKind::U64 => {
+                // Decode the input via `as_i64()` so a tagged-i48
+                // ValueWord round-trips to the native bits the typed
+                // capture slot is expected to hold (callers writing
+                // post-Wave-E+5 native bits are also handled because
+                // `as_i64()` falls back via `as_heap_ref` and the bits
+                // already carry the correct value either way; but
+                // serialize_to_nb-style helpers that produce
+                // `ValueWord::from_i64(123)` would otherwise leave
+                // tagged NaN-box bits in the slot, which
+                // `capture_as_value` would then interpret as a wildly
+                // wrong native i64).
+                let v = vw.as_i64().unwrap_or_else(|| bits as i64);
+                std::ptr::write(field_ptr as *mut u64, v as u64);
+            }
+            FieldKind::Ptr => {
                 std::ptr::write(field_ptr as *mut u64, bits);
             }
             FieldKind::I32 => {
