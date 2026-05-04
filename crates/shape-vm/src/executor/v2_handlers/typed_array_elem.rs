@@ -526,7 +526,15 @@ impl VirtualMachine {
             }
         })?;
 
-        self.push_raw_u64(ValueWord::from_i64(len as i64))
+        // Push raw native i64 bits to match the post-Wave-E+5 native
+        // transport advertised by `last_emitted_native_kind` for
+        // `ArrayLenTyped` (helpers.rs:1110). Downstream typed consumers
+        // (`AddInt`, `LtInt`, the host-boundary synthesizer with
+        // `return_kind = Int64`) pop via `pop_native_i64`, so a tagged
+        // `from_i64` push here would produce a tagged-i48 0xFFF9... bit
+        // pattern that consumers re-decode as raw i64, corrupting the
+        // result (observed as `Some(-1970324836974587)` for `len() == 5`).
+        self.push_native_i64(len as i64)
     }
 }
 

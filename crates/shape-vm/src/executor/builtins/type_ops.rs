@@ -540,13 +540,19 @@ impl VirtualMachine {
 
     // ===== Typed Conversion Opcodes (zero-dispatch, no operand) =====
 
-    /// ConvertToInt: pop any value, convert to i64, push raw i64. Panics on failure.
+    /// ConvertToInt: pop any value, convert to i64, push native i64. Panics on failure.
+    ///
+    /// Post-Wave-E+5/Unit B, downstream consumers (typed `LoadLocalI64`,
+    /// `AddInt`, etc.) read raw native bits — pushing the result via
+    /// `push_tagged_i64` would store NaN-boxed bits and the typed reader
+    /// would reinterpret them as a wildly wrong i64. Push native bits to
+    /// match the producer-flip contract.
     #[inline]
     pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
         let value = rebox_native_bits(self.pop_raw_u64()?);
         let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_tagged_i64(i)
+        self.push_native_i64(i)
     }
 
     /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
@@ -569,13 +575,13 @@ impl VirtualMachine {
         self.push_raw_u64(result)
     }
 
-    /// ConvertToBool: pop any value, convert to bool, push raw bool. Panics on failure.
+    /// ConvertToBool: pop any value, convert to bool, push native bool. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
         let value = rebox_native_bits(self.pop_raw_u64()?);
         let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_tagged_bool(b)
+        self.push_native_bool(b)
     }
 
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.

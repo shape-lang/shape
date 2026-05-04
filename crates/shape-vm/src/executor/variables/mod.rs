@@ -4092,13 +4092,31 @@ mod tests {
         BytecodeProgram, Constant, Instruction, NumericWidth, OpCode, Operand,
     };
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::type_tracking::{FrameDescriptor, SlotKind};
     use shape_value::{ValueWord, ValueWordExt};
 
     /// Helper: build a program, load it, execute, return the top-of-stack value.
+    ///
+    /// After Wave-E+5 producer-flip the `Halt`-on-raw-bits tests below need
+    /// a `top_level_frame.return_kind` so the host boundary synthesises a
+    /// tagged `ValueWord` that decodes via `as_i64()` / `as_bool()` /
+    /// `as_f64()`. Use `run_program_typed` for those; the legacy
+    /// `run_program` (kind-less) remains for tests whose stack-top is
+    /// already a tagged `ValueWord`.
     fn run_program(program: BytecodeProgram) -> ValueWord {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         vm.execute(None).unwrap().clone()
+    }
+
+    /// Helper: like `run_program`, but stamps the program's
+    /// `top_level_frame.return_kind` so raw native bits decode as the
+    /// requested `SlotKind`.
+    fn run_program_typed(mut program: BytecodeProgram, return_kind: SlotKind) -> ValueWord {
+        let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
+        frame.return_kind = return_kind;
+        program.top_level_frame = Some(frame);
+        run_program(program)
     }
 
     // ===== LoadLocalTrusted tests =====
@@ -4131,7 +4149,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4147,7 +4165,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Bool);
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -4163,7 +4181,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(-99));
     }
 
@@ -4183,7 +4201,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 2;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(20));
     }
 
@@ -4226,7 +4244,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(44));
     }
 
@@ -4245,7 +4263,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 
@@ -4264,7 +4282,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(123456789));
     }
 
@@ -4302,7 +4320,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(4464));
     }
 
@@ -4327,7 +4345,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(200));
     }
 
@@ -4399,7 +4417,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4433,7 +4451,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Bool);
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -4688,7 +4706,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4731,7 +4749,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 2;
-        let result = run_program(program);
+        let result = run_program_typed(program, SlotKind::Int64);
         assert_eq!(result.as_i64(), Some(11));
     }
 
@@ -4865,8 +4883,11 @@ mod tests {
         );
         vm.op_load_owned_mutable_capture(&instr).unwrap();
 
+        // After Wave-E+5, the OwnedMutable load handler pushes raw native
+        // i64 bits (the cell stores a native `i64`); decode the raw bits
+        // directly rather than via tagged `ValueWord::as_i64()`.
         let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(42));
+        assert_eq!(out as i64, 42);
 
         // SAFETY: `cell` came from `alloc_owned_mutable_i64` (which
         // wraps `Box::into_raw(Box::new(initial))`); we reclaim it via
@@ -4893,9 +4914,10 @@ mod tests {
             vec![Upvalue::new(cell as u64)],
         );
 
-        // Push new value 999 onto the stack and StoreOwnedMutableCapture.
-        vm.push_raw_u64(ValueWord::from_i64(999).into_raw_bits())
-            .unwrap();
+        // After Wave-E+5, the OwnedMutable store handler reads raw native
+        // i64 bits from the stack (not tagged ValueWord); push the native
+        // bits directly.
+        vm.push_raw_u64(999i64 as u64).unwrap();
         let instr = Instruction::new(
             OpCode::StoreOwnedMutableCapture,
             Some(Operand::Local(0)),
@@ -4938,24 +4960,19 @@ mod tests {
             Some(Operand::Local(0)),
         );
 
+        // After Wave-E+5, OwnedMutable load/store handlers exchange raw
+        // native i64 bits — push and pop them directly.
         // Load1 → 10
         vm.op_load_owned_mutable_capture(&load_instr).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(10)
-        );
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 10);
 
         // Store 55
-        vm.push_raw_u64(ValueWord::from_i64(55).into_raw_bits())
-            .unwrap();
+        vm.push_raw_u64(55i64 as u64).unwrap();
         vm.op_store_owned_mutable_capture(&store_instr).unwrap();
 
         // Load2 → 55
         vm.op_load_owned_mutable_capture(&load_instr).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(55)
-        );
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 55);
 
         // SAFETY: reclaim via Box<i64>::from_raw matching the alloc.
         unsafe {
@@ -5125,6 +5142,8 @@ mod tests {
         );
 
         // OwnedMutable slot 1: Load → 200, Store 250, Load → 250.
+        // After Wave-E+5, OwnedMutable handlers exchange raw native i64
+        // bits — push and pop them directly.
         let load_om = Instruction::new(
             OpCode::LoadOwnedMutableCapture,
             Some(Operand::Local(1)),
@@ -5134,18 +5153,11 @@ mod tests {
             Some(Operand::Local(1)),
         );
         vm.op_load_owned_mutable_capture(&load_om).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(200)
-        );
-        vm.push_raw_u64(ValueWord::from_i64(250).into_raw_bits())
-            .unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 200);
+        vm.push_raw_u64(250i64 as u64).unwrap();
         vm.op_store_owned_mutable_capture(&store_om).unwrap();
         vm.op_load_owned_mutable_capture(&load_om).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(250)
-        );
+        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 250);
 
         // Shared slot 2: Load → 300, Store 350, Load → 350.
         let load_sh = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(2)));

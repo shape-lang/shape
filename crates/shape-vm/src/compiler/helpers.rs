@@ -1149,7 +1149,18 @@ impl BytecodeCompiler {
             // push raw i64 (see arithmetic mod tests for these).
             | OpCode::ArrayLenTyped
             | OpCode::MapLenTyped
-            | OpCode::StringLenTyped => Some(StorageHint::Int64),
+            | OpCode::StringLenTyped
+            // v2 sized-integer (i32) arithmetic — post-Wave-E+5 the
+            // `exec_v2_sized_int` handler pushes raw native i64 bits
+            // (sign-extended from i32 result) via `push_native_i64`,
+            // matching the surrounding typed transport for `LoadLocalI32`
+            // / `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
+            // family above for the i32 variants.
+            | OpCode::AddI32
+            | OpCode::SubI32
+            | OpCode::MulI32
+            | OpCode::DivI32
+            | OpCode::ModI32 => Some(StorageHint::Int64),
 
             // ===== Raw f64 producers =====
             OpCode::AddNumber
@@ -1184,7 +1195,17 @@ impl BytecodeCompiler {
             | OpCode::IsNull
             | OpCode::Not
             | OpCode::LoadLocalBool
-            | OpCode::LoadModuleBindingBool => Some(StorageHint::Bool),
+            | OpCode::LoadModuleBindingBool
+            // v2 sized-integer (i32) comparisons — post-Wave-E+5 the
+            // `exec_v2_sized_int` handler pushes raw native bool bits
+            // (0u64 / 1u64) via `push_native_bool`. Mirrors the
+            // `EqInt`/`LtInt`/… family above for the i32 variants.
+            | OpCode::EqI32
+            | OpCode::NeqI32
+            | OpCode::LtI32
+            | OpCode::LteI32
+            | OpCode::GtI32
+            | OpCode::GteI32 => Some(StorageHint::Bool),
 
             // ===== PushConst — depends on the constant kind =====
             // In-range Int/UInt + Bool literals push raw native bits per

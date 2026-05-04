@@ -371,7 +371,26 @@ impl BytecodeCompiler {
             } else {
                 self.emit(Instruction::simple(opcode));
             }
-            self.last_expr_type_info = None;
+            // After a typed comparison, the result is a bool — record
+            // that in `last_expr_type_info` so the implicit-return path
+            // (`emit_return_value_with_ownership` →
+            // `last_expr_numeric_type_to_storage_hint`) routes to
+            // `ReturnValueBool`. Without this, the post-comparison
+            // `last_expr_*` state is `None`/`None`, the implicit return
+            // emits the legacy untyped `ReturnValue`, and `last_program_
+            // return_kind` stays `None` — so the host-boundary synthesizer
+            // falls back to passthrough on raw native 0u64/1u64 bits and
+            // `as_bool()` returns `None`.
+            if is_comparison {
+                self.last_expr_type_info = Some(
+                    crate::type_tracking::VariableTypeInfo::with_storage(
+                        "bool".to_string(),
+                        crate::type_tracking::StorageHint::Bool,
+                    ),
+                );
+            } else {
+                self.last_expr_type_info = None;
+            }
             self.last_expr_numeric_type = if is_comparison {
                 None
             } else {
@@ -478,7 +497,15 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(OpCode::Not));
             }
             self.last_expr_schema = None;
-            self.last_expr_type_info = None;
+            // Result is bool — record so the implicit-return path
+            // emits `ReturnValueBool` and the host-boundary synthesizer
+            // re-tags the raw native bool bits.
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::with_storage(
+                    "bool".to_string(),
+                    crate::type_tracking::StorageHint::Bool,
+                ),
+            );
             self.last_expr_numeric_type = None;
             return Ok(true);
         }
@@ -516,7 +543,15 @@ impl BytecodeCompiler {
             let final_op = if is_neq { OpCode::NeqNumber } else { opcode };
             self.emit(Instruction::simple(final_op));
             self.last_expr_schema = None;
-            self.last_expr_type_info = None;
+            // Result is bool — record so the implicit-return path
+            // emits `ReturnValueBool` and the host-boundary synthesizer
+            // re-tags the raw native bool bits.
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::with_storage(
+                    "bool".to_string(),
+                    crate::type_tracking::StorageHint::Bool,
+                ),
+            );
             self.last_expr_numeric_type = None;
             return Ok(true);
         }
