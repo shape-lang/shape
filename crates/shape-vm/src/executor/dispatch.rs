@@ -67,7 +67,7 @@ impl VirtualMachine {
     /// signalling that raw bits should be passed through as a
     /// `ValueWord` directly.
     #[inline]
-    fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
+    pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
         // Prefer the runtime-observed kind from the most-recent typed
         // `op_return_value_<kind>` that landed at the top-level boundary
         // (see `last_program_return_kind` doc on `VirtualMachine`). This

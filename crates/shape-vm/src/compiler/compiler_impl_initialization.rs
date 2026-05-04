@@ -637,6 +637,24 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Register the type for a previously-known module binding (e.g. from
+    /// a persisted REPL ExecutionContext). Wave E+5.5 host-boundary
+    /// extension to `register_known_bindings`: pairs the binding name
+    /// with the inferred type so subsequent expressions referencing the
+    /// binding (e.g. `a + b`) resolve through the strict-typing arithmetic
+    /// path. Without this, the next REPL command's `a + b` falls into
+    /// `unknown + unknown` and errors out under strict typing.
+    ///
+    /// Type names use the same canonical strings as `set_module_binding_type_info`
+    /// (`"int"`, `"number"`, `"bool"`, `"string"`, etc.) — typically
+    /// derived from the persisted `ValueWord`'s tag/heap kind via
+    /// `valueword_type_name_for_persistence`.
+    pub fn register_known_binding_type(&mut self, name: &str, type_name: &str) {
+        if let Some(&idx) = self.module_bindings.get(name) {
+            self.set_module_binding_type_info(idx, type_name);
+        }
+    }
+
     /// Create a new compiler with a data schema for column resolution.
     /// This enables optimized GetDataField/GetDataRow opcodes.
     pub fn with_schema(schema: crate::bytecode::DataFrameSchema) -> Self {

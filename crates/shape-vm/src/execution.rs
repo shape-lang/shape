@@ -32,6 +32,7 @@ impl BytecodeExecutor {
         module_binding_registry: &Arc<std::sync::RwLock<shape_runtime::ModuleBindingRegistry>>,
         module_binding_names: &[String],
     ) {
+        let storage_hints = vm.program.module_binding_storage_hints.clone();
         for (idx, name) in module_binding_names.iter().enumerate() {
             if name.is_empty() {
                 continue;
@@ -44,7 +45,11 @@ impl BytecodeExecutor {
                 {
                     continue;
                 }
-                vm.set_module_binding(idx, value);
+                let normalized = Self::normalize_persisted_for_slot(
+                    value,
+                    storage_hints.get(idx).copied(),
+                );
+                vm.set_module_binding(idx, normalized);
                 continue;
             }
 
@@ -55,7 +60,108 @@ impl BytecodeExecutor {
                 {
                     continue;
                 }
-                vm.set_module_binding(idx, value);
+                let normalized = Self::normalize_persisted_for_slot(
+                    value,
+                    storage_hints.get(idx).copied(),
+                );
+                vm.set_module_binding(idx, normalized);
+            }
+        }
+    }
+
+    /// Wave E+5.5 host-boundary load-side decode: when the binding's
+    /// declared `StorageHint` is a typed native primitive
+    /// (Int64/Float64/Bool/sub-int width) and the persisted bits are a
+    /// tagged ValueWord (the normal save path produced via
+    /// `save_module_bindings_to_context`'s `synthesize_value_word_from_raw`),
+    /// strip the tag and reconstruct the raw native bits. The typed
+    /// `LoadModuleBinding<Kind>` opcodes (`op_load_module_binding_i64`,
+    /// `_f64`, `_bool`, …) raw-transmute the slot's u64 directly onto
+    /// the stack with no tag-decode (`variables/mod.rs:3572`), so the
+    /// slot must hold raw native bits to feed the post-Wave-E+5 native
+    /// arithmetic path. Polymorphic / unknown slots pass through
+    /// unchanged.
+    fn normalize_persisted_for_slot(
+        value: ValueWord,
+        hint: Option<crate::type_tracking::StorageHint>,
+    ) -> ValueWord {
+        use crate::type_tracking::StorageHint;
+        let Some(hint) = hint else { return value };
+        match hint {
+            StorageHint::Int8
+            | StorageHint::UInt8
+            | StorageHint::Int16
+            | StorageHint::UInt16
+            | StorageHint::Int32
+            | StorageHint::UInt32
+            | StorageHint::Int64
+            | StorageHint::UInt64
+            | StorageHint::IntSize
+            | StorageHint::UIntSize => {
+                if let Some(i) = value.as_i64() {
+                    ValueWord::from_raw_bits(i as u64)
+                } else {
+                    value
+                }
+            }
+            StorageHint::Float64 => {
+                if let Some(f) = value.as_f64() {
+                    ValueWord::from_raw_bits(f.to_bits())
+                } else {
+                    value
+                }
+            }
+            StorageHint::Bool => {
+                if let Some(b) = value.as_bool() {
+                    ValueWord::from_raw_bits(b as u64)
+                } else {
+                    value
+                }
+            }
+            // Nullable widths, String, Dynamic, Unknown: keep tagged
+            // bits — the polymorphic LoadModuleBinding handler reads
+            // them as ValueWord and decodes via tag bits.
+            _ => value,
+        }
+    }
+
+    /// Wave E+5.5: propagate known-binding type info from a persistent
+    /// REPL `ExecutionContext` into the compiler's type tracker, so the
+    /// next REPL command's expressions referencing previously-defined
+    /// variables (e.g. `a + b` where `a, b` were `let a = 1; let b = 2`
+    /// in earlier cells) compile through the strict-typing arithmetic
+    /// path. Without this hop, the compiler sees `a` as a known binding
+    /// name with unknown type and `a + b` errors out as
+    /// `unknown + unknown` under strict typing.
+    ///
+    /// Type names use the canonical strings from
+    /// `ValueWord::type_name()` (`"int"`, `"number"`, `"bool"`,
+    /// `"string"`, etc.) — same vocabulary the compiler's
+    /// `set_module_binding_type_info` recognises via
+    /// `register_extension_module_schema` / type-tracker schema lookup.
+    fn register_known_binding_types(
+        compiler: &mut BytecodeCompiler,
+        names: &[String],
+        ctx: Option<&ExecutionContext>,
+    ) {
+        let Some(ctx) = ctx else { return };
+        for name in names {
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(Some(value)) = ctx.get_variable(name) {
+                let type_name = value.type_name();
+                // Skip unhelpful labels — Unknown/option/unit/function carry
+                // no useful info for the strict-typing arithmetic gate, and
+                // setting a `"function"` / `"unit"` type-info entry on a
+                // module binding can confuse downstream type lookups.
+                if matches!(
+                    type_name,
+                    "unknown" | "option" | "unit" | "function" | "module_function" | "reference"
+                ) {
+                    continue;
+                }
+                compiler.register_known_binding_type(name, type_name);
             }
         }
     }
@@ -67,12 +173,43 @@ impl BytecodeExecutor {
         module_binding_names: &[String],
     ) {
         let module_bindings = vm.module_binding_values();
+        let storage_hints = &vm.program.module_binding_storage_hints;
         for (idx, name) in module_binding_names.iter().enumerate() {
             if name.is_empty() {
                 continue;
             }
             if idx < module_bindings.len() {
-                let value = module_bindings[idx].clone();
+                // Wave E+5.5 host-boundary persistence: tag-normalize the
+                // module-binding bits before storing them in the
+                // ExecutionContext's variables map.
+                //
+                // After Wave E+5.5, module bindings can hold either raw
+                // native bits (StorageHint Int64/Float64/Bool — typed
+                // `StoreModuleBinding<Kind>` writes the producer's raw
+                // u64 directly) or tagged ValueWord bits (polymorphic
+                // `StoreModuleBinding`). The persistent context expects
+                // tagged ValueWord per its wire-conversion / display /
+                // type-name contract (`ValueWord::type_name()` walks
+                // tag bits, and a raw native i64 like `42u64` would
+                // alias TAG_HEAP and crash when the heap-pointer
+                // dereference is attempted). Re-tag native-kinded slots
+                // via `synthesize_value_word_from_raw`; passthrough
+                // others (already tagged or polymorphic Unknown).
+                let raw_value = module_bindings[idx].clone();
+                let kind = storage_hints
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(crate::type_tracking::StorageHint::Unknown);
+                let kind_opt = match kind {
+                    crate::type_tracking::StorageHint::Unknown
+                    | crate::type_tracking::StorageHint::Dynamic
+                    | crate::type_tracking::StorageHint::String => None,
+                    other => Some(other),
+                };
+                let value = crate::executor::dispatch::synthesize_value_word_from_raw(
+                    raw_value.into_raw_bits(),
+                    kind_opt,
+                );
                 // Use set_variable which creates or updates the variable
                 // Note: This preserves existing format hints since set_variable
                 // only updates the value, not the metadata
@@ -119,7 +256,23 @@ impl BytecodeExecutor {
             }
 
             match vm.execute_with_suspend(ctx.as_deref_mut()) {
-                Ok(VMExecutionResult::Completed(value)) => break value,
+                Ok(VMExecutionResult::Completed(value)) => {
+                    // Wave E+5.5 host-boundary synthesis: when the
+                    // top-level program ends in a typed native producer
+                    // (PushConst Int / typed arithmetic / typed Load* /
+                    // typed `op_return_value_<kind>`), the bits on top of
+                    // stack are RAW native (e.g. `42u64` for an int, not
+                    // tagged ValueWord 0xFFF8000_0000_002A). Re-tag them
+                    // here so REPL persistence / wire serialization /
+                    // host APIs see a properly-tagged ValueWord. Mirrors
+                    // the synthesis in `vm.execute()` (dispatch.rs:31).
+                    let return_kind = vm.program_top_level_return_kind();
+                    let raw_bits = value.into_raw_bits();
+                    break crate::executor::dispatch::synthesize_value_word_from_raw(
+                        raw_bits,
+                        return_kind,
+                    );
+                }
                 Ok(VMExecutionResult::Suspended {
                     future_id,
                     resume_ip,
@@ -416,6 +569,11 @@ impl BytecodeExecutor {
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
+        Self::register_known_binding_types(
+            &mut compiler,
+            &known_bindings,
+            runtime.persistent_context(),
+        );
 
         if !self.extensions.is_empty() {
             compiler.extension_registry = Some(Arc::new(self.extensions.clone()));
@@ -715,6 +873,11 @@ impl ProgramExecutor for BytecodeExecutor {
             let mut compiler = BytecodeCompiler::new();
             compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
+            Self::register_known_binding_types(
+                &mut compiler,
+                &known_bindings,
+                runtime.persistent_context(),
+            );
             if self.allow_internal_builtins {
                 compiler.allow_internal_builtins = true;
             }
