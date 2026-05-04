@@ -151,32 +151,50 @@ fn test_division() {
 /// This prevents silent corruption in financial calculations.
 #[test]
 fn test_integer_overflow_promotes_to_f64() {
-    // AddInt: i64::MAX + 1 should promote to f64
+    // AddInt: I48_MAX + 1 should promote to f64 (out of i48 inline range)
+    //
+    // Before Wave-E+5 the test pushed i64::MAX, but the producer-flip
+    // forces in-range i48 literals (I48_MAX = (1<<47)-1) for the typed
+    // pop_native_i64 consumer; out-of-range Constant::Int values now
+    // go through the heap-BigInt path which AddInt doesn't accept.
+    let i48_max = shape_value::tag_bits::I48_MAX;
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
         Instruction::simple(OpCode::AddInt),
     ];
-    let constants = vec![Constant::Int(i64::MAX), Constant::Int(1)];
+    let constants = vec![Constant::Int(i48_max), Constant::Int(1)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
+    // Overflow result is pushed via push_raw_f64; synthesise as Float64.
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Float64,
+    )
+    .unwrap();
     // Should be f64, NOT a wrapped negative integer
     let val = result.to_number().unwrap();
     assert!(val > 0.0, "Overflow must produce positive f64, got {val}");
-    assert_eq!(val, i64::MAX as f64 + 1.0);
+    assert_eq!(val, i48_max as f64 + 1.0);
 }
 
 #[test]
 fn test_integer_mul_overflow_promotes_to_f64() {
-    // MulInt: large * large should promote to f64
+    // MulInt: I48_MAX/2 * 3 should overflow i48 and promote to f64
+    let i48_max = shape_value::tag_bits::I48_MAX;
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
         Instruction::simple(OpCode::MulInt),
     ];
-    let constants = vec![Constant::Int(i64::MAX / 2), Constant::Int(3)];
+    let constants = vec![Constant::Int(i48_max / 2), Constant::Int(3)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Float64,
+    )
+    .unwrap();
     let val = result.to_number().unwrap();
     assert!(val > 0.0, "Overflow must produce positive f64, got {val}");
 }
@@ -206,13 +224,23 @@ fn test_integer_arithmetic_no_overflow_stays_int() {
     ];
     let constants = vec![Constant::Int(100), Constant::Int(200)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
+    // After Wave-E+5, AddInt success path pushes raw native i64 bits.
+    // Stamp Int64 so the host synthesizer re-tags the bits.
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int64,
+    )
+    .unwrap();
     // Should stay as integer (accessible as i64)
     assert_eq!(result.as_i64(), Some(300));
 }
 
 #[test]
 fn test_comparisons() {
+    // After Wave-E+5, GtNumber pushes raw native bool bits; stamp Bool
+    // so the host boundary decodes via `to_bool()`.
+    let bool_kind = crate::type_tracking::SlotKind::Bool;
     // Test: 5 > 3 = true
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
@@ -221,7 +249,7 @@ fn test_comparisons() {
     ];
     let constants = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(instructions, constants, bool_kind).unwrap();
     assert_eq!(result.to_bool(), Some(true));
 
     // Test: 3 > 5 = false
@@ -232,12 +260,14 @@ fn test_comparisons() {
     ];
     let constants2 = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
-    let result2 = execute_bytecode(instructions2, constants2).unwrap();
+    let result2 = execute_bytecode_typed(instructions2, constants2, bool_kind).unwrap();
     assert_eq!(result2.to_bool(), Some(false));
 }
 
 #[test]
 fn test_logical_and() {
+    // After Wave-E+5, And pushes raw native bool bits; stamp Bool.
+    let bool_kind = crate::type_tracking::SlotKind::Bool;
     // Test: true && true = true
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
@@ -246,7 +276,7 @@ fn test_logical_and() {
     ];
     let constants = vec![Constant::Bool(true)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(instructions, constants, bool_kind).unwrap();
     assert_eq!(result.to_bool(), Some(true));
 
     // Test: true && false = false
@@ -257,7 +287,7 @@ fn test_logical_and() {
     ];
     let constants2 = vec![Constant::Bool(true), Constant::Bool(false)];
 
-    let result2 = execute_bytecode(instructions2, constants2).unwrap();
+    let result2 = execute_bytecode_typed(instructions2, constants2, bool_kind).unwrap();
     assert_eq!(result2.to_bool(), Some(false));
 }
 
