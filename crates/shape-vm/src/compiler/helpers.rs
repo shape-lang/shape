@@ -1114,14 +1114,16 @@ impl BytecodeCompiler {
         // `emit_drops_for_early_exit` and the block / top-level drop
         // scope is a series of:
         //
-        //   LoadLocal(slot)   ; push receiver
-        //   DropCall(...)     ; pop receiver, push 0
-        //   [DropLocal(slot)] ; pop, push 0 (rare; ownership-moves on)
-        //   [DropSharedLocal(slot)] ; same
+        //   LoadLocal(slot)            ; push receiver
+        //   LoadModuleBinding(slot)    ; push receiver (module-binding form)
+        //   DropCall(...)              ; pop receiver, push 0
+        //   [DropLocal(slot)]          ; pop, push 0 (rare; ownership-moves on)
+        //   [DropSharedLocal(slot)]    ; same
         //
-        // None of those touch top-of-stack. Walk past the `LoadLocal /
-        // LoadLocalTrusted → DropCall*` pair so the producer below is
-        // visible. `ReturnOwned` is a no-op for inline scalars
+        // None of those touch the actual top-of-stack producer below.
+        // Walk past the `LoadLocal / LoadLocalTrusted / LoadModuleBinding
+        // → DropCall*` pair so the producer below is visible.
+        // `ReturnOwned` is a no-op for inline scalars
         // (`op_promote_to_owned` early-returns when the tag isn't
         // `TAG_HEAP`); walk past it for primitive-typed returns.
         let instrs = &self.program.instructions;
@@ -1137,7 +1139,9 @@ impl BytecodeCompiler {
                     if idx > 0
                         && matches!(
                             instrs[idx - 1].opcode,
-                            OpCode::LoadLocal | OpCode::LoadLocalTrusted
+                            OpCode::LoadLocal
+                                | OpCode::LoadLocalTrusted
+                                | OpCode::LoadModuleBinding
                         )
                     {
                         // Step over the receiver-push that the DropCall
@@ -1158,10 +1162,11 @@ impl BytecodeCompiler {
         let instr = &instrs[idx - 1];
         match instr.opcode {
             // ===== Raw i64 producers (Wave E+5.3 + Unit B) =====
-            // Single-path Int arithmetic / bitwise / negation. The dynamic
-            // `BitAnd` / `BitOr` / etc. opcodes are polymorphic
-            // (output-tagged) — only the typed `*Int` variants push raw
-            // native bits.
+            // Single-path Int arithmetic / bitwise / negation. Both the
+            // typed `*Int` variants and the dynamic `BitAnd` / `BitOr` /
+            // etc. variants now push raw native i64 bits per Wave E+5.5
+            // (`exec_dyn_bit_binary` / `exec_dyn_bit_unary` consume native
+            // i64 inputs and push native i64 outputs).
             OpCode::AddInt
             | OpCode::SubInt
             | OpCode::MulInt
@@ -1175,6 +1180,17 @@ impl BytecodeCompiler {
             | OpCode::BitShlInt
             | OpCode::BitShrInt
             | OpCode::BitNotInt
+            // Dynamic bitwise opcodes: post-Wave-E+5.5 these push native i64
+            // bits via `exec_dyn_bit_binary` / `exec_dyn_bit_unary`. The
+            // pre-flip claim that they were "output-tagged" is no longer
+            // true — they're now byte-identical to the typed `*Int`
+            // variants on stack, modulo type proof at compile time.
+            | OpCode::BitAnd
+            | OpCode::BitOr
+            | OpCode::BitXor
+            | OpCode::BitShl
+            | OpCode::BitShr
+            | OpCode::BitNot
             // Typed local / module-binding load (Wave E+3) — push raw i64.
             | OpCode::LoadLocalI64
             | OpCode::LoadLocalU64
@@ -1258,6 +1274,34 @@ impl BytecodeCompiler {
             // In-range Int/UInt + Bool literals push raw native bits per
             // Unit B; everything else pushes tagged ValueWord bits.
             OpCode::PushConst => self.push_const_native_kind(instr),
+
+            // ===== LoadLocalTrusted — depends on the slot's typed kind =====
+            // `op_load_local_trusted` reads the slot's raw bits directly
+            // (`variables/mod.rs:2520`). When the slot was populated by a
+            // typed `StoreLocal<Kind>` (E+3 `StoreLocalI64` / `F64` / `Bool`
+            // / sub-int widths), the bits are native — passthrough lookup
+            // through the local type tracker recovers the producer kind.
+            // Polymorphic / Unknown slots fall through to `None`.
+            OpCode::LoadLocalTrusted => self.load_local_trusted_native_kind(instr),
+
+            // ===== LoadModuleBinding — depends on the binding's typed kind =====
+            // The polymorphic `LoadModuleBinding` opcode pushes the slot's
+            // raw u64 unchanged (`op_load_module_binding`'s `binding_read_raw`
+            // → `push_raw_u64`). When the host pre-loaded the slot with raw
+            // native bits — Wave E+5.5's REPL-persistence load path
+            // (`load_module_bindings_from_context` →
+            // `normalize_persisted_for_slot` decodes a persisted tagged
+            // ValueWord int back to raw native i64 when the bytecode's
+            // declared `module_binding_storage_hints[idx]` is a typed
+            // primitive) — the polymorphic Load pushes those same raw
+            // native bits. The host boundary's
+            // `synthesize_value_word_from_raw` then re-tags them via the
+            // declared kind. This arm consults the binding's tracker entry
+            // (which `register_known_binding_type` populates for
+            // previously-persisted variables) so a top-level program
+            // ending in `let r = x; r` (where `x` is a persisted int)
+            // declares `return_kind = Int64`.
+            OpCode::LoadModuleBinding => self.load_module_binding_native_kind(instr),
 
             // ===== GetFieldTyped — depends on the field type tag =====
             // Post-Wave E+5 `push_field_value` (typed_object_ops.rs:90)
@@ -1519,6 +1563,84 @@ impl BytecodeCompiler {
             Constant::Bool(_) => Some(StorageHint::Bool),
             _ => None,
         }
+    }
+
+    /// Resolve the raw-native kind of a `LoadLocalTrusted` instruction
+    /// by consulting the slot's type-tracker entry. The trusted handler
+    /// reads raw bits directly (`variables/mod.rs:2520`) and pushes them
+    /// via `push_raw_u64`, so the on-stack representation matches the
+    /// kind that originally populated the slot — typically a typed
+    /// `StoreLocal<Kind>` from a Wave E+3 producer (PushConst Int /
+    /// typed arithmetic / typed Load*).
+    ///
+    /// Returns the matching hint when the slot's tracked kind is one of
+    /// the three native-kinded `StorageHint` variants (Int64 / Float64 /
+    /// Bool); `None` for sub-int widths whose nullable variants are
+    /// observable at the host boundary, or for polymorphic slots.
+    /// Resolve the raw-native kind of a polymorphic `LoadModuleBinding`
+    /// instruction by consulting the binding's type-tracker entry. The
+    /// polymorphic Load reads `module_bindings[idx]` raw u64; when the
+    /// persistence load path normalised the slot to raw native bits per
+    /// the declared `StorageHint` (Wave E+5.5
+    /// `normalize_persisted_for_slot` in execution.rs), the Load pushes
+    /// those same raw native bits and the host boundary's synthesis
+    /// re-tags them via the declared kind. Returns the matching
+    /// primitive hint (Int64/Float64/Bool); `None` for polymorphic /
+    /// nullable / heap-bearing kinds where the slot still holds tagged
+    /// ValueWord bits.
+    fn load_module_binding_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
+            return None;
+        };
+        match self.type_tracker.get_module_binding_storage_hint(*idx) {
+            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            _ => None,
+        }
+    }
+
+    fn load_local_trusted_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::Local(idx)) = &instr.operand else {
+            return None;
+        };
+        // Primary path: consult the slot's type-tracker entry. When the
+        // slot is still in scope (the typical case for typed-fn bodies
+        // and top-level lets), this returns the proven kind populated at
+        // emit time.
+        let hint = self.type_tracker.get_local_storage_hint(*idx);
+        if matches!(
+            hint,
+            StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
+        ) {
+            return Some(hint);
+        }
+        // Fallback: when this `LoadLocalTrusted` was emitted inside a
+        // `compile_expr_block` whose outer scope has already been popped
+        // by the time `infer_top_level_return_kind` runs (the type
+        // tracker scopes track-and-discard alongside `locals`), the slot
+        // lookup returns Unknown. The producer-flip contract for
+        // `LoadLocalTrusted` is "push the slot's raw bits" — and the
+        // proof that the bits ARE native-kinded came from the typed
+        // `StoreLocal<Kind>` emitted earlier in the same block. The
+        // compiler also propagates the slot's type up through
+        // `last_expr_numeric_type` / `last_expr_type_info`, which
+        // SURVIVE scope-pop. Use them to recover the kind here.
+        if let Some(nt) = self.last_expr_numeric_type {
+            return Some(match nt {
+                crate::type_tracking::NumericType::Number => StorageHint::Float64,
+                crate::type_tracking::NumericType::Int => StorageHint::Int64,
+                crate::type_tracking::NumericType::IntWidth(_) => StorageHint::Int64,
+                crate::type_tracking::NumericType::Decimal => return None,
+            });
+        }
+        if let Some(info) = &self.last_expr_type_info {
+            return match info.storage_hint {
+                kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => {
+                    Some(kind)
+                }
+                _ => None,
+            };
+        }
+        None
     }
 
     /// Resolve the raw-native kind of a `GetFieldTyped` instruction by
@@ -5941,27 +6063,60 @@ mod tests {
                 // `fn add(a: int, b: int) -> int { a + b }; add(2, 3)`
                 // — `add`'s last expr is `a+b` (AddInt), which sets
                 // `last_expr_numeric_type = Int`, so `emit_return_value_for_hint`
-                // routes to `ReturnValueI64` (no fallback).
-                "typed_primitives" => &[],
+                // routes to `ReturnValueI64` (no fallback at the return).
+                //
+                // The 2 `store_local`/`unknown` entries are the param
+                // destructure binding-store sites in `compile_function_body`
+                // (`functions.rs:1148`). Param `a, b: int` arrive on the
+                // stack via `LoadLocal idx` then go through
+                // `compile_destructure_pattern` → `emit_store_local_for_hint`
+                // — but `let_decl_storage_hint()` reads `last_expr_*`,
+                // which is unset at param-destructure time. The param's
+                // own `type_annotation` IS available (and the post-
+                // destructure code at `functions.rs:1171+` sets the
+                // type tracker), but it's not threaded into the
+                // destructure helper. Fixing that is a separate Wave G
+                // workitem; today's baseline records these as fallbacks.
+                "typed_primitives" => &[(("store_local", "unknown"), 2)],
                 // `fn main() -> int { ... f(3) }; main()` — the
                 // closure body's `n` read sets last_expr's storage_hint
                 // through `LoadOwnedMutableCaptureI64` paths; outer
                 // `main()` body's last expr is `f(3)` whose return-type
                 // isn't reachable on the function-call path that resets
                 // last_expr_* (see function_calls.rs:1006 analysis).
-                "closure_capture_int" => &[(("return_value", "unknown"), 1)],
+                //
+                // The 3 `store_local`/`unknown` entries cover: (1) the
+                // closure param `x: int` (same param-destructure gap as
+                // `typed_primitives`), (2) the outer `let mut n: int = 0`
+                // (whose initializer pushes a typed Int but the var has
+                // closure-capture promotion semantics), and (3) the
+                // closure-binding store for `let f = |x: int| { ... }`.
+                "closure_capture_int" => &[
+                    (("return_value", "unknown"), 1),
+                    (("store_local", "unknown"), 3),
+                ],
                 // `fn greet() -> string { let s: string = "hello"; s }; greet()`
                 // — `s` is a `String`-typed identifier; `String` maps to
                 // a `Ptr` `FieldKind` only via the conservative policy,
                 // and `storage_hint_to_field_kind` returns None for
                 // `String` so the helper records a `string`-labelled
                 // fallback. (Will resolve once the per-Ptr emit path
-                // pairs vw_clone/vw_drop.)
-                "heap_string" => &[(("return_value", "string"), 1)],
+                // pairs vw_clone/vw_drop.) The `store_local`/`string`
+                // is the `let s: string` binding, which records the
+                // string hint but takes the polymorphic fallback for
+                // the same per-Ptr-pending reason.
+                "heap_string" => &[
+                    (("return_value", "string"), 1),
+                    (("store_local", "string"), 1),
+                ],
                 // `fn maybe() -> Option<int> { ... }; maybe()` — `Option<int>`
                 // resolves to nullable_i64 today; the helper's policy
-                // routes `nullable_*` to fallback.
-                "option_int" => &[(("return_value", "unknown"), 1)],
+                // routes `nullable_*` to fallback. The `store_local`
+                // entry is the `let x: Option<int> = Some(5)` binding.
+                "option_int" => &[
+                    (("return_value", "unknown"), 1),
+                    (("store_local", "unknown"), 1),
+                ],
                 // `fn dyn_id() { let x = 42; x }; dyn_id()` — fn body
                 // proven int (typed return), but the outer `dyn_id()`
                 // call's result is not consumed; no fallback expected.
