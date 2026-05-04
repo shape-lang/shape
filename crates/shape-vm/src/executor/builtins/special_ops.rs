@@ -917,18 +917,9 @@ impl VirtualMachine {
             ));
         }
 
-        let schema_id = args[0]
-            .as_i64()
-            .ok_or_else(|| VMError::RuntimeError("schema_id must be int".to_string()))?
-            as u32;
-        let row_count = args[1]
-            .as_i64()
-            .ok_or_else(|| VMError::RuntimeError("row_count must be int".to_string()))?
-            as usize;
-        let field_count = args[2]
-            .as_i64()
-            .ok_or_else(|| VMError::RuntimeError("field_count must be int".to_string()))?
-            as usize;
+        let schema_id = as_i64_arg(&args[0], "schema_id")? as u32;
+        let row_count = as_i64_arg(&args[1], "row_count")? as usize;
+        let field_count = as_i64_arg(&args[2], "field_count")? as usize;
 
         let expected_vals = row_count * field_count;
         if args.len() != 3 + expected_vals {
