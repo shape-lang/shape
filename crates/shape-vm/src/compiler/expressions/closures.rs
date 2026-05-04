@@ -1923,6 +1923,85 @@ mod tests {
         false
     }
 
+    // Track A.1B + Wave E+5: the compiler emits a typed variant of
+    // `Load/StoreOwnedMutableCapture<Kind>` / `Load/StoreSharedCapture<Kind>`
+    // for every proven-type capture (e.g. `let mut n: int` → `*CaptureI64`).
+    // The generic `Load/StoreOwnedMutableCapture` / `Load/StoreSharedCapture`
+    // is emitted only for un-proven / polymorphic captures. These predicates
+    // accept either form so capture-routing assertion tests survive the
+    // ongoing typed-emission migration.
+    fn is_any_load_owned_mutable_capture(op: OC) -> bool {
+        matches!(
+            op,
+            OC::LoadOwnedMutableCapture
+                | OC::LoadOwnedMutableCaptureI64
+                | OC::LoadOwnedMutableCaptureU64
+                | OC::LoadOwnedMutableCaptureF64
+                | OC::LoadOwnedMutableCaptureI32
+                | OC::LoadOwnedMutableCaptureU32
+                | OC::LoadOwnedMutableCaptureI16
+                | OC::LoadOwnedMutableCaptureU16
+                | OC::LoadOwnedMutableCaptureI8
+                | OC::LoadOwnedMutableCaptureU8
+                | OC::LoadOwnedMutableCaptureBool
+                | OC::LoadOwnedMutableCapturePtr
+        )
+    }
+
+    fn is_any_store_owned_mutable_capture(op: OC) -> bool {
+        matches!(
+            op,
+            OC::StoreOwnedMutableCapture
+                | OC::StoreOwnedMutableCaptureI64
+                | OC::StoreOwnedMutableCaptureU64
+                | OC::StoreOwnedMutableCaptureF64
+                | OC::StoreOwnedMutableCaptureI32
+                | OC::StoreOwnedMutableCaptureU32
+                | OC::StoreOwnedMutableCaptureI16
+                | OC::StoreOwnedMutableCaptureU16
+                | OC::StoreOwnedMutableCaptureI8
+                | OC::StoreOwnedMutableCaptureU8
+                | OC::StoreOwnedMutableCaptureBool
+                | OC::StoreOwnedMutableCapturePtr
+        )
+    }
+
+    fn is_any_load_shared_capture(op: OC) -> bool {
+        matches!(
+            op,
+            OC::LoadSharedCapture
+                | OC::LoadSharedCaptureI64
+                | OC::LoadSharedCaptureU64
+                | OC::LoadSharedCaptureF64
+                | OC::LoadSharedCaptureI32
+                | OC::LoadSharedCaptureU32
+                | OC::LoadSharedCaptureI16
+                | OC::LoadSharedCaptureU16
+                | OC::LoadSharedCaptureI8
+                | OC::LoadSharedCaptureU8
+                | OC::LoadSharedCaptureBool
+                | OC::LoadSharedCapturePtr
+        )
+    }
+
+    fn is_any_store_shared_capture(op: OC) -> bool {
+        matches!(
+            op,
+            OC::StoreSharedCapture
+                | OC::StoreSharedCaptureI64
+                | OC::StoreSharedCaptureU64
+                | OC::StoreSharedCaptureF64
+                | OC::StoreSharedCaptureI32
+                | OC::StoreSharedCaptureU32
+                | OC::StoreSharedCaptureI16
+                | OC::StoreSharedCaptureU16
+                | OC::StoreSharedCaptureI8
+                | OC::StoreSharedCaptureU8
+                | OC::StoreSharedCaptureBool
+                | OC::StoreSharedCapturePtr
+        )
+    }
+
     #[test]
     fn test_phase_d_let_mut_non_escaping_emits_owned_mutable_capture_opcodes() {
         // Track A.1C.2b: `let mut` captures route through A.1B's
@@ -1946,12 +2025,12 @@ mod tests {
              main()",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::StoreOwnedMutableCapture),
-            "expected StoreOwnedMutableCapture in program"
+            any_opcode_in_program(&program, is_any_store_owned_mutable_capture),
+            "expected Store(OwnedMutableCapture | OwnedMutableCapture<Kind>) in program"
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::LoadOwnedMutableCapture),
-            "expected LoadOwnedMutableCapture in program"
+            any_opcode_in_program(&program, is_any_load_owned_mutable_capture),
+            "expected Load(OwnedMutableCapture | OwnedMutableCapture<Kind>) in program"
         );
     }
 
@@ -1971,9 +2050,9 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&program, |op| op
-            == OC::LoadSharedCapture
-            || op == OC::StoreSharedCapture));
+        assert!(any_opcode_in_program(&program, |op| {
+            is_any_load_shared_capture(op) || is_any_store_shared_capture(op)
+        }));
     }
 
     #[test]
@@ -2144,7 +2223,7 @@ mod tests {
             op == OC::StoreClosure || op == OC::LoadClosure
         });
         let has_shared_capture = any_opcode_in_program(&program, |op| {
-            op == OC::LoadSharedCapture || op == OC::StoreSharedCapture
+            is_any_load_shared_capture(op) || is_any_store_shared_capture(op)
         });
         assert!(
             has_legacy_closure || has_shared_capture,
@@ -2953,9 +3032,10 @@ mod tests {
             "expected AllocSharedModuleBinding for module-binding var capture"
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::LoadSharedCapture
-                || op == OC::StoreSharedCapture),
-            "expected Load/StoreSharedCapture in closure body for module-binding var capture"
+            any_opcode_in_program(&program, |op| {
+                is_any_load_shared_capture(op) || is_any_store_shared_capture(op)
+            }),
+            "expected Load/Store(SharedCapture | SharedCapture<Kind>) in closure body for module-binding var capture"
         );
     }
 
@@ -3111,8 +3191,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&int_prog, |op| op
-            == OC::StoreOwnedMutableCapture));
+        assert!(any_opcode_in_program(&int_prog, is_any_store_owned_mutable_capture));
 
         let f64_prog = compile_source(
             "fn main() -> number {\n\
@@ -3122,8 +3201,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&f64_prog, |op| op
-            == OC::StoreOwnedMutableCapture));
+        assert!(any_opcode_in_program(&f64_prog, is_any_store_owned_mutable_capture));
 
         let bool_prog = compile_source(
             "fn main() -> bool {\n\
@@ -3133,8 +3211,7 @@ mod tests {
              }\n\
              main()",
         );
-        assert!(any_opcode_in_program(&bool_prog, |op| op
-            == OC::StoreOwnedMutableCapture));
+        assert!(any_opcode_in_program(&bool_prog, is_any_store_owned_mutable_capture));
     }
 
     #[test]
@@ -3635,12 +3712,12 @@ mod tests {
              main()",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::StoreOwnedMutableCapture),
-            "expected StoreOwnedMutableCapture for let-mut write inside closure"
+            any_opcode_in_program(&program, is_any_store_owned_mutable_capture),
+            "expected Store(OwnedMutableCapture | OwnedMutableCapture<Kind>) for let-mut write inside closure"
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::LoadOwnedMutableCapture),
-            "expected LoadOwnedMutableCapture for let-mut read inside closure"
+            any_opcode_in_program(&program, is_any_load_owned_mutable_capture),
+            "expected Load(OwnedMutableCapture | OwnedMutableCapture<Kind>) for let-mut read inside closure"
         );
     }
 }

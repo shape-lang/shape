@@ -122,7 +122,38 @@ impl<'a> VmClosureHandle<'a> {
                 let bits = unsafe {
                     read_capture_as_value_bits(self.ptr as *const u8, self.layout, i)
                 };
-                ValueWord::from_raw_bits(bits)
+                // Post-Wave-E+5: `op_make_closure`'s Immutable arm writes
+                // raw native bits via `write_capture_typed` (the producer
+                // pushed `push_native_i64`/`push_raw_f64`/`push_native_bool`
+                // for proven-type captures). Wrapping the popped bits
+                // directly via `from_raw_bits` would treat e.g. native
+                // i64 = 10 as a tagged ValueWord and `as_i64()` would
+                // return None. Re-tag per `capture_inner_kind` using the
+                // same dispatch as `synthesize_value_word_from_raw` in
+                // shape-vm's executor/dispatch.rs.
+                use crate::v2::struct_layout::FieldKind;
+                match self.layout.capture_inner_kind(i) {
+                    FieldKind::I64
+                    | FieldKind::I32
+                    | FieldKind::U32
+                    | FieldKind::I16
+                    | FieldKind::U16
+                    | FieldKind::I8
+                    | FieldKind::U8 => ValueWord::from_i64(bits as i64),
+                    FieldKind::U64 => {
+                        if bits <= i64::MAX as u64 {
+                            ValueWord::from_i64(bits as i64)
+                        } else {
+                            ValueWord::from_native_u64(bits)
+                        }
+                    }
+                    FieldKind::F64 => ValueWord::from_f64(f64::from_bits(bits)),
+                    FieldKind::Bool => ValueWord::from_bool(bits != 0),
+                    // Heap-typed captures (Ptr) and any future kinds:
+                    // bits are already a tagged ValueWord (heap pointer
+                    // bits, NaN-box, etc.) — passthrough.
+                    FieldKind::Ptr => ValueWord::from_raw_bits(bits),
+                }
             }
             CaptureKind::OwnedMutable => {
                 let cell = unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) };
