@@ -805,90 +805,71 @@ impl VirtualMachine {
                                     // `capture_inner_kind` to reclaim
                                     // each typed box.
                                     //
-                                    // Wave-E ordering note: until the
-                                    // bytecode emitter is flipped to
-                                    // push native typed bytes for
-                                    // closure captures, the stack
-                                    // contract here is still
-                                    // ValueWord-encoded bits. We decode
-                                    // the inline scalar at this
-                                    // boundary using the same VW
-                                    // accessors `write_capture_typed`
-                                    // uses for Immutable captures
-                                    // (`as_i64`, `as_number_coerce`,
-                                    // `as_bool`), so a `let mut x = 42`
-                                    // closure capture stores native
-                                    // `i64` bytes 42, not the i48-tagged
-                                    // ValueWord pattern. The legacy
-                                    // `op_load_owned_mutable_capture` /
-                                    // `op_store_owned_mutable_capture`
-                                    // handlers re-encode at the legacy
-                                    // stack boundary on Load and decode
-                                    // on Store (symmetric round-trip).
-                                    // After Wave E flips the emitter to
-                                    // emit the typed
-                                    // `Load/StoreOwnedMutableCapture<Kind>`
-                                    // opcodes, both decode boundaries
-                                    // become dead code (Wave G cleanup).
+                                    // Post Wave E+5/Unit B: typed-scalar
+                                    // producers (`op_push_const` Int/Number/Bool,
+                                    // typed `Load/StoreLocal<Kind>`, typed
+                                    // arithmetic) push **native** bytes onto
+                                    // the stack — no ValueWord tag. Decode the
+                                    // popped 8-byte slot per-FieldKind using
+                                    // the same raw-bit pattern as the typed
+                                    // `op_store_shared_capture_<kind>`
+                                    // handlers in variables/mod.rs:1703+.
                                     //
-                                    // For `FieldKind::Ptr` the popped
-                                    // `*bits` already carries the heap
-                                    // refcount share verbatim (the
-                                    // stack slot's `pop_raw_u64` did
-                                    // NOT drop), so the box swallows
-                                    // that share — no retain/release
-                                    // pair at this site.
+                                    // For `FieldKind::Ptr` the popped `*bits`
+                                    // already carries the heap refcount share
+                                    // verbatim (the stack slot's `pop_raw_u64`
+                                    // did NOT drop), so the box swallows that
+                                    // share — no retain/release pair at this
+                                    // site.
                                     //
                                     // SAFETY: each `alloc_owned_mutable_<kind>`
                                     // returns `Box::into_raw(Box::new(...))`
-                                    // — a non-null pointer with the
-                                    // alignment of `T`. We cast to
-                                    // `u64` for storage in the Ptr
-                                    // slot at
-                                    // `layout.heap_capture_offset(i)`,
-                                    // which is 8-byte aligned and
-                                    // in-bounds per layout invariants.
+                                    // — a non-null pointer with the alignment
+                                    // of `T`. We cast to `u64` for storage in
+                                    // the Ptr slot at
+                                    // `layout.heap_capture_offset(i)`, which
+                                    // is 8-byte aligned and in-bounds per
+                                    // layout invariants.
                                     let inner = layout.capture_inner_kind(i);
-                                    let vw: ValueWord = *bits;
                                     let cell_ptr_bits: u64 = match inner {
                                         FieldKind::I64 => alloc_owned_mutable_i64(
-                                            vw.as_i64().unwrap_or(0),
+                                            *bits as i64,
                                         )
                                             as u64,
                                         FieldKind::F64 => alloc_owned_mutable_f64(
-                                            vw.as_number_coerce().unwrap_or(0.0),
+                                            f64::from_bits(*bits),
                                         )
                                             as u64,
                                         FieldKind::I32 => alloc_owned_mutable_i32(
-                                            vw.as_i64().unwrap_or(0) as i32,
+                                            *bits as i64 as i32,
                                         )
                                             as u64,
                                         FieldKind::I16 => alloc_owned_mutable_i16(
-                                            vw.as_i64().unwrap_or(0) as i16,
+                                            *bits as i64 as i16,
                                         )
                                             as u64,
                                         FieldKind::I8 => alloc_owned_mutable_i8(
-                                            vw.as_i64().unwrap_or(0) as i8,
+                                            *bits as i64 as i8,
                                         )
                                             as u64,
                                         FieldKind::U64 => alloc_owned_mutable_u64(
-                                            vw.as_u64_value().unwrap_or(0),
+                                            *bits,
                                         )
                                             as u64,
                                         FieldKind::U32 => alloc_owned_mutable_u32(
-                                            vw.as_i64().unwrap_or(0) as u32,
+                                            *bits as u32,
                                         )
                                             as u64,
                                         FieldKind::U16 => alloc_owned_mutable_u16(
-                                            vw.as_i64().unwrap_or(0) as u16,
+                                            *bits as u16,
                                         )
                                             as u64,
                                         FieldKind::U8 => alloc_owned_mutable_u8(
-                                            vw.as_i64().unwrap_or(0) as u8,
+                                            *bits as u8,
                                         )
                                             as u64,
                                         FieldKind::Bool => alloc_owned_mutable_bool(
-                                            vw.as_bool().unwrap_or(false),
+                                            *bits != 0,
                                         )
                                             as u64,
                                         FieldKind::Ptr => {
