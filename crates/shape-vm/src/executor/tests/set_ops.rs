@@ -37,9 +37,13 @@ fn test_set_has_existing() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1 arg
         Instruction::simple(OpCode::CallMethod),
     ];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but the
+    // Set methods expect tagged ValueWord args (as that's what they
+    // store internally). Wrap the int args via Constant::Value so the
+    // arg arrives at CallMethod as a tagged ValueWord.
     let constants = vec![
         Constant::Value(test_set()),
-        Constant::Int(2),
+        Constant::Value(ValueWord::from_i64(2)),
         Constant::String("has".to_string()),
         Constant::Number(1.0),
     ];
@@ -111,7 +115,7 @@ fn test_set_add_duplicate() {
     ];
     let constants = vec![
         Constant::Value(test_set()),
-        Constant::Int(2),
+        Constant::Value(ValueWord::from_i64(2)),
         Constant::String("add".to_string()),
         Constant::Number(1.0),
         Constant::String("size".to_string()),
@@ -138,7 +142,7 @@ fn test_set_delete() {
     ];
     let constants = vec![
         Constant::Value(test_set()),
-        Constant::Int(2),
+        Constant::Value(ValueWord::from_i64(2)),
         Constant::String("delete".to_string()),
         Constant::Number(1.0),
         Constant::String("size".to_string()),
@@ -362,7 +366,7 @@ fn test_set_intersection_has_correct_items() {
         Constant::Value(set_b),
         Constant::String("intersection".to_string()),
         Constant::Number(1.0),
-        Constant::Int(2),
+        Constant::Value(ValueWord::from_i64(2)),
         Constant::String("has".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
@@ -426,7 +430,7 @@ fn test_set_difference_has_correct_item() {
         Constant::Value(set_b),
         Constant::String("difference".to_string()),
         Constant::Number(1.0),
-        Constant::Int(1),
+        Constant::Value(ValueWord::from_i64(1)),
         Constant::String("has".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();

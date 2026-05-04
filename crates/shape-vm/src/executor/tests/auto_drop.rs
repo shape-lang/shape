@@ -95,7 +95,12 @@ fn test_auto_drop_on_early_return() {
         .any(|i| i.opcode == OpCode::DropCall);
     assert!(has_drop, "early return should emit DropCall");
 
-    let result = eval(
+    // After Wave-E+5, `return x` (where `x: int`) inside a function
+    // emits typed `ReturnValueI64`, the function call boundary pushes
+    // raw native i64 bits onto the top-level stack, and the host-side
+    // synthesizer stamps Int64 once the empty-call-stack predicate
+    // fires. Decode via `eval_typed_i64` to get the native value.
+    let result = crate::test_utils::eval_typed_i64(
         r#"
         function test_fn() {
             let x = 10
@@ -107,7 +112,7 @@ fn test_auto_drop_on_early_return() {
         test_fn()
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result, 10);
 }
 
 #[test]

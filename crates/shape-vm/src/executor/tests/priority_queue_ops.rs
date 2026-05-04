@@ -93,9 +93,12 @@ fn test_pq_push_new_min_then_peek() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(5))), // 0 args
         Instruction::simple(OpCode::CallMethod),
     ];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
+    // pq.push(value) expects a tagged ValueWord arg. Wrap via
+    // Constant::Value so the value arrives tagged.
     let constants = vec![
         Constant::Value(test_pq()),
-        Constant::Int(0),
+        Constant::Value(ValueWord::from_i64(0)),
         Constant::String("push".to_string()),
         Constant::Number(1.0),
         Constant::String("peek".to_string()),

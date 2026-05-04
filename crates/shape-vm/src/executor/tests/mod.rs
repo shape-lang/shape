@@ -63,6 +63,34 @@ fn execute_bytecode(
     vm.execute(None).map(|nb| nb.clone())
 }
 
+/// Helper to create and execute a bytecode program that declares a
+/// typed top-level return kind. After Wave-E+5 producer-flip, hand-built
+/// programs that bottom out in a typed result (e.g. CallMethod returning
+/// a native bool / native i64 / native f64, or AddInt / GtNumber / etc.
+/// pushing raw native bits) need this so the host boundary synthesises
+/// a tagged ValueWord that decodes via `as_i64()` / `as_bool()` /
+/// `as_f64()`.
+#[allow(dead_code)]
+fn execute_bytecode_typed(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    return_kind: crate::type_tracking::SlotKind,
+) -> Result<ValueWord, VMError> {
+    use crate::type_tracking::FrameDescriptor;
+    let mut frame = FrameDescriptor::new();
+    frame.return_kind = return_kind;
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        top_level_frame: Some(frame),
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None).map(|nb| nb.clone())
+}
+
 #[test]
 fn test_basic_arithmetic() {
     // Test: 2 + 3 = 5

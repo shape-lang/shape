@@ -185,10 +185,14 @@ fn test_channel_send_then_try_recv() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(6))), // 0 args
         Instruction::simple(OpCode::CallMethod),
     ];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
+    // the channel's send() expects a tagged ValueWord arg (it stores
+    // the value internally as ValueWord). Wrap the int via
+    // Constant::Value so the send() arg arrives tagged.
     let constants = vec![
         Constant::Value(sender),                  // 0
         Constant::Value(receiver),                // 1
-        Constant::Int(42),                        // 2
+        Constant::Value(ValueWord::from_i64(42)), // 2
         Constant::String("send".to_string()),     // 3
         Constant::String("try_recv".to_string()), // 4
         Constant::Number(1.0),                    // 5
@@ -275,8 +279,8 @@ fn test_channel_send_multiple_try_recv_order() {
     let constants = vec![
         Constant::Value(sender),                  // 0
         Constant::Value(receiver),                // 1
-        Constant::Int(10),                        // 2
-        Constant::Int(20),                        // 3
+        Constant::Value(ValueWord::from_i64(10)), // 2
+        Constant::Value(ValueWord::from_i64(20)), // 3
         Constant::String("send".to_string()),     // 4
         Constant::String("try_recv".to_string()), // 5
         Constant::Number(1.0),                    // 6

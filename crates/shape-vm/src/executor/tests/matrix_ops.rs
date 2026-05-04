@@ -730,10 +730,13 @@ fn test_matrix_row_ref_int_index() {
         Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
         Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
     ];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
+    // MakeIndexRef / SetIndexRef expect tagged ValueWord indices. Wrap
+    // the int indices via Constant::Value so they arrive tagged.
     let constants = vec![
         Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
-        Constant::Int(0),    // row 0
-        Constant::Int(1),    // col 1
+        Constant::Value(ValueWord::from_i64(0)),    // row 0
+        Constant::Value(ValueWord::from_i64(1)),    // col 1
         Constant::Number(42.0),
     ];
     let result = execute_bytecode_with_locals(instructions, constants, 2).unwrap();

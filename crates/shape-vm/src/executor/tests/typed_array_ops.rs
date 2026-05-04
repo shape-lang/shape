@@ -39,7 +39,15 @@ fn test_new_typed_array_ints() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 3
         Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(3))),
     ];
-    let constants = vec![Constant::Int(1), Constant::Int(2), Constant::Int(3)];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
+    // the dynamic NewTypedArray handler classifies elements via
+    // tagged-ValueWord introspection. Wrap via Constant::Value so each
+    // element arrives tagged.
+    let constants = vec![
+        Constant::Value(ValueWord::from_i64(1)),
+        Constant::Value(ValueWord::from_i64(2)),
+        Constant::Value(ValueWord::from_i64(3)),
+    ];
     let result = execute_bytecode(instructions, constants).unwrap();
     assert!(result.as_int_array().is_some());
     assert_eq!(result.as_int_array().unwrap().as_slice(), &[1, 2, 3]);
@@ -74,10 +82,14 @@ fn test_new_typed_array_bools() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
         Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(3))),
     ];
+    // After Wave-E+5, Constant::Bool pushes raw native bool bits, but
+    // the dynamic NewTypedArray handler classifies elements via
+    // tagged-ValueWord introspection. Wrap via Constant::Value so each
+    // element arrives tagged.
     let constants = vec![
-        Constant::Bool(true),
-        Constant::Bool(false),
-        Constant::Bool(true),
+        Constant::Value(ValueWord::from_bool(true)),
+        Constant::Value(ValueWord::from_bool(false)),
+        Constant::Value(ValueWord::from_bool(true)),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
     assert!(result.as_bool_array().is_some());

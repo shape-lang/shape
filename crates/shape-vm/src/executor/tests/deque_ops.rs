@@ -229,9 +229,12 @@ fn test_deque_get() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::simple(OpCode::CallMethod),
     ];
+    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
+    // deque.get(idx) expects a tagged ValueWord arg. Wrap via
+    // Constant::Value so the index arrives tagged.
     let constants = vec![
         Constant::Value(test_deque()),
-        Constant::Int(1),
+        Constant::Value(ValueWord::from_i64(1)),
         Constant::String("get".to_string()),
         Constant::Number(1.0),
     ];

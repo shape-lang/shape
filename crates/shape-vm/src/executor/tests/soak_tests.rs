@@ -3,7 +3,7 @@
 //! Run: `cargo test -p shape-vm soak_`
 
 use super::*;
-use super::test_utils::eval;
+use super::test_utils::{eval, eval_typed_i64};
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Expected sum of 0..n using the closed-form formula.
@@ -24,10 +24,11 @@ fn soak_trusted_int_add_100k() {
         }
         sum
     "#;
-    let result = eval(source);
+    // After Wave-E+5, the trailing int expression returns raw native i64
+    // bits at the top-level. Use the typed helper to decode them.
     assert_eq!(
-        result.as_i64(),
-        Some(expected_sum(100_000)),
+        eval_typed_i64(source),
+        expected_sum(100_000),
         "100K int addition soak failed"
     );
 }
@@ -44,10 +45,9 @@ fn soak_trusted_int_mul_sub_100k() {
         }
         sum
     "#;
-    let result = eval(source);
     assert_eq!(
-        result.as_i64(),
-        Some(expected_sum(100_000)),
+        eval_typed_i64(source),
+        expected_sum(100_000),
         "100K int mul/sub soak failed"
     );
 }
@@ -64,10 +64,9 @@ fn soak_trusted_int_div_100k() {
         }
         sum
     "#;
-    let result = eval(source);
     assert_eq!(
-        result.as_i64(),
-        Some(expected_sum(100_000)),
+        eval_typed_i64(source),
+        expected_sum(100_000),
         "100K int div soak failed"
     );
 }
@@ -140,8 +139,11 @@ fn soak_nested_loops_10k() {
         }
         total
     "#;
-    let result = eval(source);
-    assert_eq!(result.as_i64(), Some(990_000), "Nested loop soak failed");
+    assert_eq!(
+        eval_typed_i64(source),
+        990_000,
+        "Nested loop soak failed"
+    );
 }
 
 // ── Soak: function calls in loop ────────────────────────────────────
@@ -187,6 +189,9 @@ fn soak_comparison_loop_100k() {
         }
         count
     "#;
-    let result = eval(source);
-    assert_eq!(result.as_i64(), Some(50_000), "Comparison loop soak failed");
+    assert_eq!(
+        eval_typed_i64(source),
+        50_000,
+        "Comparison loop soak failed"
+    );
 }
