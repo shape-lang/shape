@@ -338,8 +338,33 @@ impl BytecodeCompiler {
     /// equivalent at the inner-function boundary — the encoded `<Kind>`
     /// is a static annotation for the JIT and downstream consumers.
     /// Unproven types fall back to polymorphic `ReturnValue`.
+    ///
+    /// Wave E+5.5 producer/return-kind contract gate (R2): typed
+    /// `ReturnValue<Kind>` handlers route raw native bits through unchanged
+    /// AND stamp `last_program_return_kind = Kind` on the VM when the pop
+    /// empties the top-level call stack (`typed_return_with_kind` in
+    /// `executor/control_flow/mod.rs`). If the actual producer pushed
+    /// tagged `ValueWord` bits — e.g. `CallMethod` for `.len()` on a plain
+    /// array (`last_expr_numeric_type = Int` from the method annotation
+    /// but the opcode itself is polymorphic), a monomorphized generic
+    /// call, or `LoadLocal` against a slot whose type tracker entry was
+    /// cleared — the host-boundary `synthesize_value_word_from_raw` would
+    /// then re-encode tagged bits as raw native (`from_i64(tagged_bits)`),
+    /// corrupting the program result with values like
+    /// `Some(-1970324836974587)` for an actual value of 5.
+    ///
+    /// Mirror the same producer-side gate `infer_top_level_return_kind`
+    /// applies (`helpers.rs:2429`): only emit `ReturnValueI64`/`F64`/`Bool`
+    /// when `last_emitted_native_kind()` confirms the just-emitted opcode
+    /// is on the raw-native-producer list. The width-aware check (Int8/
+    /// .../UInt64 hint accepted against `Int64` native kind) preserves the
+    /// sub-i64 typed-return path; Float64 / Bool require an exact match.
+    /// Otherwise fall back to polymorphic `ReturnValue`, which carries no
+    /// runtime kind stamp and lets the synthesizer pass tagged bits
+    /// through.
     pub(super) fn emit_return_value_with_ownership(&mut self) {
         use crate::bytecode::{Instruction, OpCode};
+        use crate::type_tracking::StorageHint;
         if matches!(
             self.current_function_return_ownership_mode(),
             Some(crate::mir::ReturnOwnershipMode::NewlyOwned)
@@ -347,7 +372,34 @@ impl BytecodeCompiler {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
         let hint = self.last_expr_numeric_type_to_storage_hint();
-        self.emit_return_value_for_hint(hint);
+        let gated_hint = if hint == StorageHint::Unknown {
+            hint
+        } else {
+            match self.last_emitted_native_kind() {
+                None => StorageHint::Unknown,
+                Some(native_kind) => {
+                    let is_int_family = matches!(
+                        hint,
+                        StorageHint::Int8
+                            | StorageHint::UInt8
+                            | StorageHint::Int16
+                            | StorageHint::UInt16
+                            | StorageHint::Int32
+                            | StorageHint::UInt32
+                            | StorageHint::Int64
+                            | StorageHint::UInt64
+                    );
+                    if is_int_family && native_kind == StorageHint::Int64 {
+                        hint
+                    } else if native_kind == hint {
+                        hint
+                    } else {
+                        StorageHint::Unknown
+                    }
+                }
+            }
+        };
+        self.emit_return_value_for_hint(gated_hint);
     }
 
     /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
