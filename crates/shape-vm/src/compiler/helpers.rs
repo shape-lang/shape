@@ -1223,7 +1223,26 @@ impl BytecodeCompiler {
             | OpCode::SubI32
             | OpCode::MulI32
             | OpCode::DivI32
-            | OpCode::ModI32 => Some(StorageHint::Int64),
+            | OpCode::ModI32
+            // Compact-typed (sub-i64 width-parameterised) arithmetic — post-
+            // Wave-E+5.5 the `compact_int_*` family in
+            // `executor/arithmetic/mod.rs:651` pops native i64 inputs and
+            // pushes raw native i64 bits via `push_native_i64`, matching the
+            // surrounding typed transport. `CmpTyped` returns a -1/0/1
+            // ordinal as native i64 (NOT a bool — see compact_int_cmp). The
+            // compact-int width truncation happens before push, so the bits
+            // round-trip cleanly through `synthesize_value_word_from_raw`'s
+            // sub-i64 sign-extend path when the gate accepts the producer.
+            | OpCode::AddTyped
+            | OpCode::SubTyped
+            | OpCode::MulTyped
+            | OpCode::DivTyped
+            | OpCode::ModTyped
+            | OpCode::CmpTyped
+            // CastWidth pops native i64, truncates per the declared width,
+            // and pushes native i64 bits — mirrors the producer side of the
+            // compact-int family.
+            | OpCode::CastWidth => Some(StorageHint::Int64),
 
             // ===== Raw f64 producers =====
             OpCode::AddNumber
