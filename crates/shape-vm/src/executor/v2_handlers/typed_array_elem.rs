@@ -671,11 +671,13 @@ mod tests {
         let instr = Instruction::new(OpCode::ArrayPushI64, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&instr).unwrap();
 
-        // Verify length is now 3.
+        // Verify length is now 3. `op_array_len_typed` pushes raw native i64
+        // bits per the post-Wave-E+5 contract, so decode the bits directly
+        // as an i64.
         let len_instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&len_instr).unwrap();
         let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(len).as_i64(), Some(3));
+        assert_eq!(len as i64, 3);
 
         // Verify element at index 2.
         vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
@@ -696,11 +698,11 @@ mod tests {
         let instr = Instruction::new(OpCode::ArrayPushF64, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&instr).unwrap();
 
-        // Verify length is 2.
+        // Verify length is 2. Native i64 bits — see `test_array_push_i64`.
         let len_instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&len_instr).unwrap();
         let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(len).as_i64(), Some(2));
+        assert_eq!(len as i64, 2);
 
         // Verify element at index 1.
         vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
@@ -719,8 +721,9 @@ mod tests {
 
         let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&instr).unwrap();
+        // `op_array_len_typed` pushes raw native i64 bits.
         let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(len).as_i64(), Some(5));
+        assert_eq!(len as i64, 5);
     }
 
     #[test]
@@ -731,7 +734,7 @@ mod tests {
         let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&instr).unwrap();
         let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(len).as_i64(), Some(2));
+        assert_eq!(len as i64, 2);
     }
 
     // ---- Out-of-bounds error handling ----
@@ -822,7 +825,9 @@ mod tests {
 
         let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
         vm.exec_typed_array_elem_ops(&instr).unwrap();
+        // `op_array_len_typed` pushes raw native i64 bits regardless of
+        // backing array kind (heap-boxed `HeapValue::Array` here).
         let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(len).as_i64(), Some(3));
+        assert_eq!(len as i64, 3);
     }
 }
