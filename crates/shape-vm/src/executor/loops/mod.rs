@@ -214,16 +214,45 @@ impl VirtualMachine {
         let iter = self.pop_raw_u64()?;
         let idx = decode_iter_idx(idx_bits)?;
         // v2 typed array fast path: read element through the stamped header.
+        //
+        // Wave E+5.5 producer-side flip: for primitive native kinds (I64,
+        // I32, F64, Bool) push raw native bits, matching the typed
+        // `LoadLocalI64`/`LoadLocalF64`/`LoadLocalBool` consumers emitted
+        // for for-loop variables whose `set_local_type_info` resolves to
+        // a native primitive (`compiler/loops.rs:411`). The legacy tagged
+        // `ValueWord::from_i64` push was observable as `pop_native_i64`
+        // reading a tagged-i48 bit pattern as a huge negative i64 — e.g.
+        // `MulInt(1, x)` returning ~-5e33 for `x=2` instead of 2.
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
         {
-            let result = if idx < 0 || idx as u32 >= view.len {
-                ValueWord::none()
-            } else {
-                crate::executor::v2_handlers::v2_array_detect::read_element(&view, idx as u32)
-                    .unwrap_or_else(ValueWord::none)
-            };
-            self.push_raw_u64(result)?;
+            use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
+            use shape_value::v2::typed_array::TypedArray;
+            if idx < 0 || idx as u32 >= view.len {
+                self.push_raw_u64(ValueWord::none())?;
+                return Ok(());
+            }
+            let i = idx as u32;
+            match view.elem_type {
+                V2ElemType::I64 => {
+                    let arr = view.ptr as *const TypedArray<i64>;
+                    self.push_native_i64(unsafe { TypedArray::<i64>::get_unchecked(arr, i) })?;
+                }
+                V2ElemType::I32 => {
+                    let arr = view.ptr as *const TypedArray<i32>;
+                    let val = unsafe { TypedArray::<i32>::get_unchecked(arr, i) };
+                    self.push_native_i64(val as i64)?;
+                }
+                V2ElemType::F64 => {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    self.push_raw_f64(unsafe { TypedArray::<f64>::get_unchecked(arr, i) })?;
+                }
+                V2ElemType::Bool => {
+                    let arr = view.ptr as *const TypedArray<u8>;
+                    let val = unsafe { TypedArray::<u8>::get_unchecked(arr, i) };
+                    self.push_native_bool(val != 0)?;
+                }
+            }
             return Ok(());
         }
         // Handle unified arrays (bit-47 tagged) for iteration.
@@ -256,34 +285,46 @@ impl VirtualMachine {
                 }
             }
             Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
+                // Wave E+5.5 producer-side flip: push raw native i64 bits
+                // (no tag), matching the typed `LoadLocalI64` consumer
+                // emitted for loop vars whose static element type is `int`.
                 if idx < 0 || idx as usize >= arr.len() {
-                    ValueWord::none()
+                    self.push_raw_u64(ValueWord::none())?;
                 } else {
-                    ValueWord::from_i64(arr[idx as usize])
+                    self.push_native_i64(arr[idx as usize])?;
                 }
+                return Ok(());
             }
             Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
+                // `ValueWord::from_f64` produces raw f64 bits with no
+                // NaN-tag (`value_word_ext.rs:463`), matching the typed
+                // `LoadLocalF64` raw-bit read. Use `push_raw_f64`.
                 if idx < 0 || idx as usize >= arr.len() {
-                    ValueWord::none()
+                    self.push_raw_u64(ValueWord::none())?;
                 } else {
-                    ValueWord::from_f64(arr[idx as usize])
+                    self.push_raw_f64(arr[idx as usize])?;
                 }
+                return Ok(());
             }
             Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) => {
                 let slice_len = *len as usize;
                 if idx < 0 || idx as usize >= slice_len {
-                    ValueWord::none()
+                    self.push_raw_u64(ValueWord::none())?;
                 } else {
                     let off = *offset as usize;
-                    ValueWord::from_f64(parent.data[off + idx as usize])
+                    self.push_raw_f64(parent.data[off + idx as usize])?;
                 }
+                return Ok(());
             }
             Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
+                // Native bool bits (0u64 / 1u64) per the typed-Bool
+                // `LoadLocalBool` raw-bit consumer contract.
                 if idx < 0 || idx as usize >= arr.len() {
-                    ValueWord::none()
+                    self.push_raw_u64(ValueWord::none())?;
                 } else {
-                    ValueWord::from_bool(arr[idx as usize] != 0)
+                    self.push_native_bool(arr[idx as usize] != 0)?;
                 }
+                return Ok(());
             }
             Some(HeapValue::String(s)) => {
                 if idx < 0 {
@@ -300,6 +341,10 @@ impl VirtualMachine {
                 end,
                 inclusive,
             }) => {
+                // Wave E+5.5 producer-side flip: Range iteration yields
+                // i64 elements; push raw native bits to match the typed
+                // `LoadLocalI64` consumer emitted for `for i in 0..n` loop
+                // vars (whose `iter_element_type_name` resolves to `int`).
                 let start_val = start
                     .as_ref()
                     .and_then(|s| s.as_number_coerce())
@@ -311,10 +356,11 @@ impl VirtualMachine {
                 let end_val = if *inclusive { end_val + 1 } else { end_val };
                 let count = end_val - start_val;
                 if count <= 0 || idx < 0 || idx >= count {
-                    ValueWord::none()
+                    self.push_raw_u64(ValueWord::none())?;
                 } else {
-                    ValueWord::from_i64(start_val + idx)
+                    self.push_native_i64(start_val + idx)?;
                 }
+                return Ok(());
             }
             Some(HeapValue::DataTable(dt)) => {
                 if idx < 0 || idx as usize >= dt.row_count() {
