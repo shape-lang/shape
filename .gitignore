@@ -19,3 +19,7 @@
 # Local env
 .env
 .env.*
+
+# Claude Code workspace state — agent worktrees and runtime locks
+.claude/worktrees/
+.claude/scheduled_tasks.lock
