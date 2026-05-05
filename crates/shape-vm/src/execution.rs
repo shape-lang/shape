@@ -1277,8 +1277,19 @@ checkpointed(41)
             crate::VMExecutionResult::Completed(v) => v,
             crate::VMExecutionResult::Suspended { .. } => panic!("unexpected suspension"),
         };
+        // Wave E+5.5: `execute_with_suspend` returns raw native bits in
+        // its `Completed` arm; the host boundary applies
+        // `synthesize_value_word_from_raw` per the program's typed
+        // return kind to recover a tagged ValueWord. Mirrors the same
+        // synthesis hop in `vm.execute()` (dispatch.rs:31) and
+        // `run_vm_loop`'s Completed arm (execution.rs:259).
+        let return_kind = vm.program_top_level_return_kind();
+        let synthesized = crate::executor::dispatch::synthesize_value_word_from_raw(
+            value.into_raw_bits(),
+            return_kind,
+        );
         assert_eq!(
-            value.as_i64(),
+            synthesized.as_i64(),
             Some(42),
             "direct VM resume should return 42"
         );

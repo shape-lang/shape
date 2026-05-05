@@ -2288,6 +2288,25 @@ impl BytecodeCompiler {
             return self.last_emitted_native_kind().unwrap_or(StorageHint::Unknown);
         }
 
+        // Wave E+5.5 cluster R5: top-level match expressions where every
+        // arm body is a literal int / bool / number have a uniform
+        // raw-native producer kind, but `last_emitted_native_kind` sees
+        // the no-match `Throw` trailer and returns `None` (the trailer
+        // is unreachable for an exhaustive match — the arms jump past
+        // it — but it's still emitted). Inspect each arm body's literal
+        // kind directly: when all match, the program has a typed
+        // top-level return that the host boundary should synthesize.
+        // Conservatively reject any non-literal arm body to avoid
+        // promoting polymorphic producers (e.g. `data.len()`,
+        // `f()` returning unknown type) — the failing case is
+        // `match x { _ => some_int_arm, _ => poly_call_arm }` where
+        // walking back past the throw would land at the int arm and
+        // wrongly promote to Int64 even though the matched arm could
+        // be the polymorphic one.
+        if let Expr::Match(match_expr, _) = expr {
+            return Self::match_arms_uniform_literal_kind(match_expr);
+        }
+
         let owned_qualified;
         let call_name: &str = match expr {
             Expr::FunctionCall { name, .. } => name.as_str(),
@@ -2386,6 +2405,73 @@ impl BytecodeCompiler {
         } else {
             StorageHint::Unknown
         }
+    }
+
+    /// Wave E+5.5 cluster R5: examine each arm of a top-level match
+    /// expression and return a uniform `StorageHint` if every arm body
+    /// is a literal whose native producer kind is the same. The
+    /// supported literal arms are integer (`Int(_)` / `TypedInt(_, w)`),
+    /// bool (`Bool(_)`), and number (`Number(_)`) — these compile to
+    /// `PushConst Int / Bool / Number` (the latter being a tagged f64,
+    /// not raw native f64 — see `push_const_native_kind`). When ANY arm
+    /// body is a non-literal (e.g. a method call, function call, binary
+    /// op chain), return `Unknown` to keep the host boundary on the
+    /// passthrough path — promoting to a typed kind would corrupt the
+    /// matched arm's stack-top bits if the runtime path resolves to a
+    /// polymorphic arm whose producer pushed tagged ValueWord bits.
+    fn match_arms_uniform_literal_kind(
+        match_expr: &shape_ast::ast::expr_helpers::MatchExpr,
+    ) -> StorageHint {
+        use shape_ast::ast::{Expr, literals::Literal};
+
+        let mut uniform: Option<StorageHint> = None;
+        for arm in &match_expr.arms {
+            // Only literal-direct bodies qualify. Block expressions,
+            // parenthesised expressions, and any other indirection
+            // disqualify — we do not want to walk through them and
+            // mis-classify a non-literal final expression.
+            let kind = match &*arm.body {
+                Expr::Literal(Literal::Int(i), _) => {
+                    if *i >= shape_value::tag_bits::I48_MIN
+                        && *i <= shape_value::tag_bits::I48_MAX
+                    {
+                        StorageHint::Int64
+                    } else {
+                        return StorageHint::Unknown;
+                    }
+                }
+                Expr::Literal(Literal::TypedInt(_, w), _) => {
+                    use shape_ast::IntWidth;
+                    match w {
+                        IntWidth::I8 => StorageHint::Int8,
+                        IntWidth::U8 => StorageHint::UInt8,
+                        IntWidth::I16 => StorageHint::Int16,
+                        IntWidth::U16 => StorageHint::UInt16,
+                        IntWidth::I32 => StorageHint::Int32,
+                        IntWidth::U32 => StorageHint::UInt32,
+                        IntWidth::U64 => StorageHint::UInt64,
+                    }
+                }
+                Expr::Literal(Literal::Bool(_), _) => StorageHint::Bool,
+                // Number literals compile to `PushConst Number` whose
+                // `push_const_native_kind` reports `Float64` — the
+                // host boundary's `synthesize_value_word_from_raw`
+                // accepts the raw `f64::to_bits()` payload and re-tags
+                // via `from_f64`.
+                Expr::Literal(Literal::Number(_), _) => StorageHint::Float64,
+                // Anything else (method call, function call, binary
+                // arithmetic, identifier, …) is rejected: we can't
+                // statically prove uniform stack discipline across
+                // arms, so return Unknown to keep passthrough.
+                _ => return StorageHint::Unknown,
+            };
+            match uniform {
+                None => uniform = Some(kind),
+                Some(prev) if prev == kind => {}
+                _ => return StorageHint::Unknown,
+            }
+        }
+        uniform.unwrap_or(StorageHint::Unknown)
     }
 
     pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {

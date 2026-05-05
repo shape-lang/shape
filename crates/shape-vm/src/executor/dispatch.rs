@@ -1056,6 +1056,22 @@ impl VirtualMachine {
 /// bits → `ValueWord` synthesis; we do not share the function only because
 /// `unmarshal_jit_result` is gated behind the `jit` feature today and
 /// shape-vm's host-side `execute()` must work without it.
+///
+/// **Pattern B defensive heap-pointer passthrough (Wave E+5.5 cluster
+/// R5)**: when `kind` declares Int64 / Bool / sub-int width and the
+/// bits are a `TAG_HEAP`-tagged ValueWord (heap pointer to a TypedObject
+/// / String / Array etc.), pass the bits through unchanged. This covers
+/// the polymorphic-body case where a function emits a typed
+/// `ReturnValue<Int64>` but a cross-arm path returns a heap-tagged
+/// value (e.g. the `Snapshot::Hash(id) => id` arm of the snapshot
+/// resume tests, which returns a heap-tagged string while the
+/// `Snapshot::Resumed => x + 1` arm returns native int). Without this
+/// guard, `from_i64(heap_ptr_bits as i64)` allocates a fresh BigInt
+/// heap value with the bit pattern as its int payload, corrupting the
+/// original heap reference. A real raw native i64 value with bits in
+/// `[0xFFF8_..._0000, 0xFFF8_FFFF_FFFF_FFFF]` (i.e. i64 in
+/// `[-2.25e15, -1.41e14]`) is the false-positive risk; that range is
+/// uncommon for the typed-int producers we currently emit.
 #[inline]
 pub(crate) fn synthesize_value_word_from_raw(
     bits: u64,
@@ -1065,6 +1081,36 @@ pub(crate) fn synthesize_value_word_from_raw(
     let Some(kind) = kind else {
         return ValueWord::from_raw_bits(bits);
     };
+    // Defensive: if the kind says Int / Bool / sub-int and the bits are
+    // a TAG_HEAP-tagged ValueWord (heap pointer pattern: top 16 bits =
+    // 0xFFF8, tag=0), pass through. Float64 / U64 / String / Dynamic
+    // are excluded because their raw transport bits can legitimately
+    // match this pattern (negative-NaN f64s, large u64, raw-bit
+    // string/dynamic passthrough already handled below).
+    if matches!(
+        kind,
+        SlotKind::Int8
+            | SlotKind::NullableInt8
+            | SlotKind::Int16
+            | SlotKind::NullableInt16
+            | SlotKind::Int32
+            | SlotKind::NullableInt32
+            | SlotKind::Int64
+            | SlotKind::NullableInt64
+            | SlotKind::IntSize
+            | SlotKind::NullableIntSize
+            | SlotKind::UInt8
+            | SlotKind::NullableUInt8
+            | SlotKind::UInt16
+            | SlotKind::NullableUInt16
+            | SlotKind::UInt32
+            | SlotKind::NullableUInt32
+            | SlotKind::Bool
+    ) && shape_value::tag_bits::is_tagged(bits)
+        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_HEAP
+    {
+        return ValueWord::from_raw_bits(bits);
+    }
     match kind {
         // Signed / sub-i64 ints all flow through the i48 inline path.
         SlotKind::Int8
