@@ -337,13 +337,20 @@ fn test_v2_new_typed_struct_sets_refcount_and_kind() {
 
 #[test]
 fn test_v2_add_i32() {
+    // AddI32 pushes raw native i64 bits (sign-extended i32). Stamp Int32
+    // so the host boundary decodes via `as_i64()`.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
         Instruction::simple(OpCode::AddI32),
     ];
     let constants = vec![Constant::Int(30), Constant::Int(12)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(42));
 }
 
@@ -355,7 +362,12 @@ fn test_v2_sub_i32() {
         Instruction::simple(OpCode::SubI32),
     ];
     let constants = vec![Constant::Int(50), Constant::Int(8)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(42));
 }
 
@@ -367,7 +379,12 @@ fn test_v2_mul_i32() {
         Instruction::simple(OpCode::MulI32),
     ];
     let constants = vec![Constant::Int(6), Constant::Int(7)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(42));
 }
 
@@ -379,7 +396,12 @@ fn test_v2_div_i32() {
         Instruction::simple(OpCode::DivI32),
     ];
     let constants = vec![Constant::Int(84), Constant::Int(2)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(42));
 }
 
@@ -391,7 +413,12 @@ fn test_v2_mod_i32() {
         Instruction::simple(OpCode::ModI32),
     ];
     let constants = vec![Constant::Int(47), Constant::Int(5)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(2));
 }
 
@@ -429,7 +456,12 @@ fn test_v2_i32_overflow_wraps() {
         Instruction::simple(OpCode::AddI32),
     ];
     let constants = vec![Constant::Int(i32::MAX as i64), Constant::Int(1)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(i32::MIN as i64));
 }
 
@@ -441,7 +473,12 @@ fn test_v2_i32_underflow_wraps() {
         Instruction::simple(OpCode::SubI32),
     ];
     let constants = vec![Constant::Int(i32::MIN as i64), Constant::Int(1)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Int32,
+    )
+    .unwrap();
     assert_eq!(result.as_i64(), Some(i32::MAX as i64));
 }
 
@@ -449,13 +486,20 @@ fn test_v2_i32_underflow_wraps() {
 
 #[test]
 fn test_v2_eq_i32_true() {
+    // EqI32/Neq/Lt/Gt/Lte/Gte push raw native bool bits. Stamp Bool so the
+    // host boundary decodes via `as_bool()`.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::simple(OpCode::EqI32),
     ];
     let constants = vec![Constant::Int(42)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -467,7 +511,12 @@ fn test_v2_eq_i32_false() {
         Instruction::simple(OpCode::EqI32),
     ];
     let constants = vec![Constant::Int(42), Constant::Int(43)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(false));
 }
 
@@ -479,7 +528,12 @@ fn test_v2_neq_i32() {
         Instruction::simple(OpCode::NeqI32),
     ];
     let constants = vec![Constant::Int(1), Constant::Int(2)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -491,7 +545,12 @@ fn test_v2_lt_i32() {
         Instruction::simple(OpCode::LtI32),
     ];
     let constants = vec![Constant::Int(5), Constant::Int(10)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -503,7 +562,12 @@ fn test_v2_gt_i32() {
         Instruction::simple(OpCode::GtI32),
     ];
     let constants = vec![Constant::Int(10), Constant::Int(5)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -515,7 +579,12 @@ fn test_v2_lte_i32_equal() {
         Instruction::simple(OpCode::LteI32),
     ];
     let constants = vec![Constant::Int(5)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -527,7 +596,12 @@ fn test_v2_gte_i32_equal() {
         Instruction::simple(OpCode::GteI32),
     ];
     let constants = vec![Constant::Int(5)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -539,6 +613,11 @@ fn test_v2_lt_i32_negative() {
         Instruction::simple(OpCode::LtI32),
     ];
     let constants = vec![Constant::Int(-5), Constant::Int(5)];
-    let result = execute_bytecode(instructions, constants).unwrap();
+    let result = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::SlotKind::Bool,
+    )
+    .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
