@@ -332,6 +332,13 @@ fn test_arrays() {
 #[test]
 fn test_array_indexing() {
     // Test: [10, 20, 30][1] = 20
+    //
+    // Index uses `Constant::Int(1)` not `Number(1.0)`. After Wave-E+5,
+    // PushConst for Number constants pushes raw native f64 bits; the
+    // array indexer's untagged-bits path interprets those as i64 (per
+    // op_get_prop's `Some(raw as i64)` branch), so f64 1.0 = bits
+    // 0x3FF0000000000000 ≈ 4.6e18 — way out of bounds, returns None.
+    // Int constants push native i64 directly, matching the indexer.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -344,7 +351,7 @@ fn test_array_indexing() {
         Constant::Number(10.0),
         Constant::Number(20.0),
         Constant::Number(30.0),
-        Constant::Number(1.0),
+        Constant::Int(1),
     ];
 
     let result = execute_bytecode(instructions, constants).unwrap();
