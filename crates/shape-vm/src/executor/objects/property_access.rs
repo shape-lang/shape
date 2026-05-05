@@ -345,9 +345,18 @@ impl VirtualMachine {
             }
             // Numeric index: read element at index, return None for OOB to
             // match the legacy v1 dynamic-array semantics.
-            let idx_opt = key_nb
-                .as_i64()
-                .or_else(|| key_nb.as_f64().map(|f| f as i64));
+            //
+            // Index decode mirrors the `HeapValue::Array`/`TypedArrayData`
+            // arms below: post-Wave-E+5/Unit B, in-range Int literals push
+            // raw native i64 bits via `op_push_const`, so detect untagged
+            // bits up front and treat them as native i64. Without this,
+            // native bits `0x2` decode as a denormal f64 → 0 → wrong elem.
+            let raw = key_nb.into_raw_bits();
+            let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+            } else {
+                Some(raw as i64)
+            };
             if let Some(idx) = idx_opt {
                 let len = view.len as i64;
                 let actual = if idx < 0 { len + idx } else { idx };
@@ -393,9 +402,14 @@ impl VirtualMachine {
                     }
                     return Err(VMError::UndefinedProperty(ks.to_string()));
                 }
-                let idx_opt = key_nb
-                    .as_i64()
-                    .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                // See `HeapValue::Array` arm below for native-i64 vs
+                // tagged-i48 index decode rationale.
+                let raw = key_nb.into_raw_bits();
+                let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                    key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                } else {
+                    Some(raw as i64)
+                };
                 if let Some(idx) = idx_opt {
                     let len = arr.len() as i64;
                     let actual = if idx < 0 { len + idx } else { idx };
@@ -582,7 +596,14 @@ impl VirtualMachine {
                     }
                 }
 
-                // IntArray: typed array indexing
+                // IntArray: typed array indexing.
+                // Index decode mirrors the `HeapValue::Array` arm above:
+                // post-Wave-E+5/Unit B, `op_push_const` for in-range Int
+                // literals pushes raw native i64 bits (no tag), so
+                // `as_i64()` (which checks for TAG_INT) returns None and
+                // `as_f64()` reinterprets native i64 as a tiny denormal
+                // (e.g. native bits `0x2` → ~1e-323 → 0). Detect untagged
+                // bits up front and treat them as native i64.
                 HeapValue::TypedArray(TypedArrayData::I64(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
@@ -590,9 +611,12 @@ impl VirtualMachine {
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
-                    let idx_opt = key_nb
-                        .as_i64()
-                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    let raw = key_nb.into_raw_bits();
+                    let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                        key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                    } else {
+                        Some(raw as i64)
+                    };
                     if let Some(idx) = idx_opt {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
@@ -604,7 +628,8 @@ impl VirtualMachine {
                     }
                 }
 
-                // FloatArray: typed array indexing
+                // FloatArray: typed array indexing. See `TypedArrayData::I64`
+                // arm above for the native-i64 vs tagged-i48 index decode.
                 HeapValue::TypedArray(TypedArrayData::F64(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
@@ -612,9 +637,12 @@ impl VirtualMachine {
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
-                    let idx_opt = key_nb
-                        .as_i64()
-                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    let raw = key_nb.into_raw_bits();
+                    let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                        key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                    } else {
+                        Some(raw as i64)
+                    };
                     if let Some(idx) = idx_opt {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
@@ -626,7 +654,8 @@ impl VirtualMachine {
                     }
                 }
 
-                // FloatArraySlice: zero-copy read-only view into matrix row
+                // FloatArraySlice: zero-copy read-only view into matrix row.
+                // See `TypedArrayData::I64` arm above for native-i64 index decode.
                 HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len }) => {
                     let slice_len = *len as usize;
                     let off = *offset as usize;
@@ -636,9 +665,12 @@ impl VirtualMachine {
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
-                    let idx_opt = key_nb
-                        .as_i64()
-                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    let raw = key_nb.into_raw_bits();
+                    let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                        key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                    } else {
+                        Some(raw as i64)
+                    };
                     if let Some(idx) = idx_opt {
                         let actual = if idx < 0 { slice_len as i64 + idx } else { idx };
                         if actual >= 0 && (actual as usize) < slice_len {
@@ -649,7 +681,8 @@ impl VirtualMachine {
                     }
                 }
 
-                // BoolArray: typed array indexing
+                // BoolArray: typed array indexing. See `TypedArrayData::I64`
+                // arm above for native-i64 index decode.
                 HeapValue::TypedArray(TypedArrayData::Bool(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
@@ -657,9 +690,12 @@ impl VirtualMachine {
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
-                    let idx_opt = key_nb
-                        .as_i64()
-                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    let raw = key_nb.into_raw_bits();
+                    let idx_opt = if shape_value::tag_bits::is_tagged(raw) {
+                        key_nb.as_i64().or_else(|| key_nb.as_f64().map(|f| f as i64))
+                    } else {
+                        Some(raw as i64)
+                    };
                     if let Some(idx) = idx_opt {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
