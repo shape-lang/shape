@@ -757,23 +757,6 @@ impl ShapeEngine {
     }
 
     /// Invoke one loaded module export via module namespace.
-    pub fn invoke_extension_module_nb(
-        &self,
-        module_name: &str,
-        function: &str,
-        args: &[shape_value::ValueWord],
-    ) -> Result<shape_value::ValueWord> {
-        if let Some(ctx) = self.runtime.persistent_context() {
-            ctx.invoke_extension_module_nb(module_name, function, args)
-        } else {
-            Err(shape_ast::error::ShapeError::RuntimeError {
-                message: "No runtime context available".to_string(),
-                location: None,
-            })
-        }
-    }
-
-    /// Invoke one loaded module export via module namespace.
     pub fn invoke_extension_module_wire(
         &self,
         module_name: &str,

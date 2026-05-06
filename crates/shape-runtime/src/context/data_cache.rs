@@ -254,17 +254,6 @@ impl super::ExecutionContext {
     }
 
     /// Invoke one loaded module export via module namespace.
-    pub fn invoke_extension_module_nb(
-        &self,
-        module_name: &str,
-        function: &str,
-        args: &[shape_value::ValueWord],
-    ) -> Result<shape_value::ValueWord> {
-        self.provider_registry
-            .invoke_extension_module_nb(module_name, function, args)
-    }
-
-    /// Invoke one loaded module export via module namespace.
     pub fn invoke_extension_module_wire(
         &self,
         module_name: &str,

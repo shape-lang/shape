@@ -8,11 +8,9 @@ use shape_abi_v1::{
     PluginError,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::{WireValue, render_any_error_plain};
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ArtifactPayload {
@@ -97,77 +95,6 @@ impl PluginModule {
         &self.schema
     }
 
-    /// Build a runtime `ModuleExports` wrapper for VM module dispatch.
-    pub fn to_module_exports(&self) -> crate::module_exports::ModuleExports {
-        use crate::module_exports::{ModuleExports, ModuleParam};
-        use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-
-        let mut module = ModuleExports::new(self.schema.module_name.clone());
-        module.description = format!("Plugin module exported by '{}'", self.name);
-
-        let invoker = Arc::new(ModuleInvoker {
-            name: self.name.clone(),
-            vtable: self.vtable,
-            instance: self.instance,
-        });
-
-        for function in &self.schema.functions {
-            let fn_name = function.name.clone();
-            let invoker_ref = Arc::clone(&invoker);
-
-            let params: Vec<ModuleParam> = function
-                .params
-                .iter()
-                .enumerate()
-                .map(|(idx, ty)| ModuleParam {
-                    name: format!("arg{}", idx),
-                    type_name: ty.clone(),
-                    required: true,
-                    description: String::new(),
-                    ..Default::default()
-                })
-                .collect();
-
-            // Plugin manifests carry a stringly-typed return name (e.g.
-            // "string", "Result<DataTable, string>", "MyExtType"). We
-            // surface that verbatim via ConcreteType::Named so the LSP and
-            // schema-string round-trip is preserved bit-for-bit. Body
-            // marshalling stays via TypedReturn::ValueWord pass-through —
-            // plugins build their own ValueWord results across the FFI
-            // boundary in invoke_nb, so there's no native Rust value to
-            // promote to a structured TypedReturn variant here.
-            let return_type_str = function
-                .return_type
-                .clone()
-                .unwrap_or_else(|| "any".to_string());
-            let return_type = ConcreteType::Named(return_type_str);
-
-            let fn_name_for_closure = fn_name.clone();
-            register_typed_function(
-                &mut module,
-                fn_name,
-                function.description.clone(),
-                params,
-                return_type,
-                move |args, _ctx| {
-                    invoker_ref
-                        .invoke_nb(&fn_name_for_closure, args)
-                        .map(TypedReturn::ValueWord)
-                },
-            );
-        }
-
-        for artifact in &self.schema.artifacts {
-            module.add_shape_artifact(
-                artifact.module_path.clone(),
-                artifact.source.clone(),
-                artifact.compiled.clone(),
-            );
-        }
-
-        module
-    }
-
     /// Invoke one module export with shape-wire arguments/results.
     pub fn invoke_wire(&self, function: &str, args: &[WireValue]) -> Result<WireValue> {
         let invoker = ModuleInvoker {
@@ -177,24 +104,6 @@ impl PluginModule {
         };
         invoker
             .invoke_wire(function, args)
-            .map_err(|message| ShapeError::RuntimeError {
-                message,
-                location: None,
-            })
-    }
-
-    /// Invoke one module export with ValueWord arguments/results.
-    ///
-    /// This is the primary host-side call path for runtime/LSP internals and
-    /// uses `shape-wire` payloads end-to-end.
-    pub fn invoke_nb(&self, function: &str, args: &[ValueWord]) -> Result<ValueWord> {
-        let invoker = ModuleInvoker {
-            name: self.name.clone(),
-            vtable: self.vtable,
-            instance: self.instance,
-        };
-        invoker
-            .invoke_nb(function, args)
             .map_err(|message| ShapeError::RuntimeError {
                 message,
                 location: None,
@@ -221,51 +130,6 @@ struct ModuleInvoker {
 }
 
 impl ModuleInvoker {
-    fn invoke_nb(
-        &self,
-        function: &str,
-        args: &[ValueWord],
-    ) -> std::result::Result<ValueWord, String> {
-        let ctx = crate::Context::new_empty();
-        let wire_args: Vec<WireValue> = args
-            .iter()
-            .map(|nb| crate::wire_conversion::nb_to_wire(nb, &ctx))
-            .collect();
-
-        let wire_bytes = rmp_serde::to_vec(&wire_args).map_err(|e| {
-            format!(
-                "Failed to serialize wire args for '{}.{}': {}",
-                self.name, function, e
-            )
-        })?;
-
-        match self
-            .invoke_with_args(function, &wire_bytes)
-            .map_err(|err| err.message)?
-        {
-            ModuleInvokePayload::Wire(bytes) => {
-                let payload = decode_payload_to_wire(&bytes).map_err(|e| {
-                    format!(
-                        "Failed to decode module result for '{}.{}': {}",
-                        self.name, function, e
-                    )
-                })?;
-                let normalized = normalize_invoke_result(payload, &self.name, function)?;
-                Ok(crate::wire_conversion::wire_to_nb(&normalized))
-            }
-            ModuleInvokePayload::TableArrowIpc(ipc_bytes) => {
-                let dt = crate::wire_conversion::datatable_from_ipc_bytes(&ipc_bytes, None, None)
-                    .map_err(|e| {
-                    format!(
-                        "Failed to decode table payload for '{}.{}': {}",
-                        self.name, function, e
-                    )
-                })?;
-                Ok(ValueWord::from_datatable(Arc::new(dt)))
-            }
-        }
-    }
-
     fn invoke_wire(
         &self,
         function: &str,
@@ -299,9 +163,7 @@ impl ModuleInvoker {
                         self.name, function, e
                     )
                 })?;
-                let nb = ValueWord::from_datatable(Arc::new(dt));
-                let ctx = crate::Context::new_empty();
-                Ok(crate::wire_conversion::nb_to_wire(&nb, &ctx))
+                Ok(crate::wire_conversion::datatable_to_wire(&dt))
             }
         }
     }

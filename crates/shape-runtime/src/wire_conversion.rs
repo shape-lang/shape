@@ -911,7 +911,7 @@ fn enum_to_wire(enum_value: &shape_value::EnumValue, ctx: &Context) -> WireValue
     WireValue::Object(obj)
 }
 
-fn datatable_to_wire(dt: &DataTable) -> WireValue {
+pub fn datatable_to_wire(dt: &DataTable) -> WireValue {
     datatable_to_wire_with_schema(dt, dt.schema_id())
 }
 
