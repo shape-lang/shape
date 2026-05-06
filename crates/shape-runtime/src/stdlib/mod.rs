@@ -21,7 +21,6 @@ pub mod helpers;
 pub mod http;
 pub mod json;
 pub mod msgpack_module;
-pub mod parallel;
 pub mod regex;
 pub mod runtime_policy;
 pub mod set_module;
@@ -49,7 +48,6 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         xml::create_xml_module(),
         compress::create_compress_module(),
         archive::create_archive_module(),
-        parallel::create_parallel_module(),
         unicode::create_unicode_module(),
         csv_module::create_csv_module(),
         msgpack_module::create_msgpack_module(),
