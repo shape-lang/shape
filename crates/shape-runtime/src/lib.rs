@@ -135,8 +135,6 @@ pub use progress::{
     LoadPhase, ProgressEvent, ProgressGranularity, ProgressHandle, ProgressRegistry,
 };
 pub use query_result::{AlertResult, QueryResult, QueryType};
-use shape_value::{ValueWord, ValueWordExt};
-pub use shape_value::ValueWord as Value;
 pub use stream_executor::{StreamEvent, StreamExecutor, StreamState};
 pub use sync_bridge::{
     SyncDataProvider, block_on_shared, get_runtime_handle, initialize_shared_runtime,
@@ -146,7 +144,7 @@ pub use type_schema::{
 };
 pub use window_executor::WindowExecutor;
 pub use wire_conversion::{
-    nb_extract_typed_value, nb_to_envelope, nb_to_wire, nb_typed_value_to_envelope, wire_to_nb,
+    slot_extract_content, slot_to_envelope, slot_to_wire, wire_to_slot,
 };
 
 use self::type_methods::TypeMethodRegistry;
