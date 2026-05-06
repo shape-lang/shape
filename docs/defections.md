@@ -170,6 +170,157 @@ JsonValue's runtime representation is decided. Estimate: 1 day of
 
 ---
 
+## 2026-05-06 — marshal-optional-args extension — register_typed_fn_N_full
+
+This is **not** a defection (no strict-typing compromise; no dispatch
+shape preserved). It is an **on-record marshal-API extension**:
+extends `register_typed_fn_N` with `_full` variants taking
+`ModuleParam` directly so per-param `required: bool` +
+`default_snippet: Option<String>` can flow through to the schema
+introspection layer and the compiler-side default-arg insertion
+path. Bodies stay typed — the compiler ensures all N typed args
+are present at call time before the marshal layer sees the call.
+
+**Discovered:** during cluster #2 (IoHandle marshal) execution. The
+existing `register_typed_fn_N` family in `crates/shape-runtime/src/marshal.rs:281-365`
+hardcodes `required: true` on every `ModuleParam` it constructs:
+
+```rust
+.map(|(name, ty)| crate::module_exports::ModuleParam {
+    name: (*name).to_string(),
+    type_name: (*ty).to_string(),
+    required: true,                     // hardcoded
+    ..Default::default()                 // default_snippet: None
+})
+```
+
+Migrating any stdlib function with optional trailing args to
+`register_typed_fn_N` produces a Shape-level signature regression —
+e.g., `io.open("/path")` (canonical I/O, mode default `"r"`) becomes
+a compile error because the migrated registration declares mode
+as required without a default.
+
+**Audit (across all current and pending stdlib clusters):** 17
+trailing-optional-arg sites identified workspace-wide:
+
+- stdlib_io (12): `io.open(mode?)`, `io.read(n?)`, `io.read_bytes(n?)`,
+  `io.mkdir(recursive?)`, 4× network/UDP `n?` (max bytes/buffer),
+  2× process spawn `args?` (Vec<string>), pipe-ops `handle?` (default stdin),
+  gzip `level?`.
+- stdlib/http.rs (2): optional `object` + `any` typed headers/body.
+- stdlib/json.rs (1): optional `bool` (likely pretty-print).
+- stdlib/csv_module.rs (2): optional `string` + `Array<string>` typed.
+
+All trailing-position. No mid-position optionals. No optional-of-optional.
+No varargs (the Vec<string> args param is a single optional-typed-array,
+not varargs).
+
+**Considered (option 1 — register_typed_fn_N_full):**
+
+```rust
+pub fn register_typed_fn_2_full<F, P0, P1>(
+    module: &mut ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [ModuleParam; 2],
+    return_type: ConcreteType,
+    body: F,
+) where ...
+```
+
+Body remains typed (`Fn(P0, P1, &ModuleContext) -> Result<TypedReturn, String>`);
+the dispatcher reads `arg_kinds` from FromSlot impls; the
+ModuleExports schema records each `ModuleParam` directly, including
+its `required` and `default_snippet`. The compiler-side default-arg
+insertion path (`crates/shape-vm/src/compiler/functions_foreign.rs:433`,
+`crates/shape-vm/src/compiler/statements.rs:540`) reads
+`default_value` and synthesizes the missing call-site arg before
+the marshal layer sees the call. So the body always receives N
+typed args; "optional" is purely a compile-time/schema concern.
+
+**Considered (option 2 — sentinel values inline, REJECTED):**
+
+Migrate optional args as required. Encode "absent" via a sentinel
+value (e.g. `-1` for "read all", `""` for "default mode"). Body
+checks the sentinel and applies the default at runtime.
+
+**Pattern recognized (option 2 rejection):** This is a textbook
+W-series shape applied at the marshal-API level. The "optional vs
+present" distinction is dynamic state stored in typed bits; the
+body decodes the sentinel at runtime to recover the intent. Same
+shape as `Convert<X>To<Y>` opcodes papering over kind-tracker gaps,
+just one layer higher. The Shape-level signature LIES about
+required-ness (compiler-side reads `required: true`) while runtime
+behavior reconstructs the optional via convention. Forbidden:
+identical pattern to "rename to a less suspicious name" from the
+CLAUDE.md forbidden list, applied to the marshal-API surface.
+
+**Considered (option 3 — defer with user-facing regression, REJECTED):**
+
+Migrate stdlib_io functions to required-only. Accept that
+`io.open("/path")` becomes a compile error (mode now required).
+Add a follow-up workstream `marshal-optional-args` to address.
+
+**Pattern recognized (option 3 rejection):** `io.open(path, mode?)`
+is canonical Shape I/O; its signature is part of Shape's public
+API. Breaking it isn't a deferred residual, it's a behavior change
+visible to every Shape user. Same precedent as the simulation
+deletion: the simulation engine had no live consumer (acceptable
+deletion); `io.open`'s optional `mode` has every Shape user as
+its consumer (unacceptable regression). Different size of consumer
+surface, different disposition.
+
+**Pattern recognized (general):** marshal-API extensions are real
+architectural work, not "small plumbing." This is the **seventh
+sub-cluster discovery in cluster surface analysis** during this
+work — joining: directory-adjacency cluster fallacy (×6 instances),
+the cluster #1 sibling re-trace, cluster #3 matrix.rs
+mis-classification, and now this. Pattern is structural: the
+strict-typing migration interacts with the codebase such that every
+cluster surface analysis surfaces a new architectural prerequisite.
+
+**Adopted standard pre-work for any cluster scope estimate:**
+
+- **Audit 1 (consumer-call-shape):** trace each consumer's actual
+  call shape, dispatch path, calling convention. Catches
+  directory-adjacency miscounts.
+- **Audit 2 (marshal-API):** verify marshal layer supports what
+  consumer bodies need. Catches missing infrastructure for
+  optional args, generic returns, async dispatch, etc.
+
+Predict scope only AFTER both audits. Predictions before audits
+have been wrong 7 of 7 times.
+
+**Alternative taken:** option 1 — extend `register_typed_fn_N`
+family with `_full` variants taking `[ModuleParam; N]` directly,
+allowing `required: false` + `default_snippet: Some("…")` to flow
+through to schema introspection and compiler-side default-arg
+insertion. Sync arity 0/1/2/3 + async arity 1/2/3 = 7 new variants,
+~30 LoC each.
+
+**Adjacent sub-cluster surfaced (additional finding, not blocking):**
+some optional args have types with NO FromSlot impl yet —
+`Vec<Arc<String>>` for process spawn `args?`, `object`/`any` for
+http headers/body, `Array<string>` for csv. These are separate
+FromSlot extensions (their own sub-clusters), NOT blocked by the
+optional-args extension itself. The optional-args extension
+unblocks the ~10-12 cases with known FromSlot types
+(int/bool/string/IoHandle); the rest wait on their own FromSlot
+impls. Logged here for traceability; no separate entry needed since
+each `Vec<T>`-typed FromSlot follows the cluster #3 option β
+precedent and the `Arc<HeapValue::*>`-typed FromSlot follows the
+cluster #2 option γ precedent.
+
+**Cost saved:** prevented the W-series defection at the marshal-API
+level (option 2's sentinel-value pattern). Prevented user-facing
+Shape signature regression on canonical I/O (`io.open`/`io.read`/etc).
+Acknowledged: ~30 LoC × 7 arities = ~210 LoC of additive marshal-API
+extension. Bounded scope; doesn't touch existing migrated callers
+(file.rs, regex.rs, crypto.rs, env.rs, unicode.rs, compress.rs,
+archive.rs all use the non-`_full` variants and stay unchanged).
+
+---
+
 ## 2026-05-06 — IoHandle marshal extension — deferred (stdlib_io cluster blocker)
 
 On-record deferral. The `stdlib_io` module (file_ops, network_ops,
