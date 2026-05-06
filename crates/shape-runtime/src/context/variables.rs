@@ -6,7 +6,6 @@ use shape_ast::ast::VarKind;
 use shape_ast::error::{Result, ShapeError};
 use shape_value::{ValueMap, ValueWord, ValueWordExt};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// A variable in the execution context
 #[derive(Debug, Clone)]
@@ -97,11 +96,6 @@ impl Variable {
 impl super::ExecutionContext {
     /// Set a variable value (for simple assignment without declaration)
     pub fn set_variable(&mut self, name: &str, value: ValueWord) -> Result<()> {
-        self.set_variable_nb(name, value)
-    }
-
-    /// Set a variable value from ValueWord (avoids ValueWord conversion)
-    pub fn set_variable_nb(&mut self, name: &str, value: ValueWord) -> Result<()> {
         // Search from innermost to outermost scope for existing variable
         for scope in self.variable_scopes.iter_mut().rev() {
             if let Some(variable) = scope.get_mut(name) {
@@ -125,16 +119,6 @@ impl super::ExecutionContext {
     /// Get a variable value as ValueWord
     pub fn get_variable(&self, name: &str) -> Result<Option<ValueWord>> {
         // Search from innermost to outermost scope
-        for scope in self.variable_scopes.iter().rev() {
-            if let Some(variable) = scope.get(name) {
-                return Ok(Some(variable.get_value()?.clone()));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Get a variable value as ValueWord (avoids ValueWord materialization)
-    pub fn get_variable_nb(&self, name: &str) -> Result<Option<ValueWord>> {
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
                 return Ok(Some(variable.get_value()?.clone()));
@@ -242,222 +226,13 @@ impl super::ExecutionContext {
         (None, None)
     }
 
-    /// Declare variables matching a pattern
-    pub fn declare_pattern(
-        &mut self,
-        pattern: &shape_ast::ast::DestructurePattern,
-        kind: shape_ast::ast::VarKind,
-        value: ValueWord,
-    ) -> Result<()> {
-        use shape_ast::ast::DestructurePattern;
-
-        match pattern {
-            DestructurePattern::Identifier(name, _) => {
-                self.declare_variable(name, kind, Some(value))
-            }
-            DestructurePattern::Array(patterns) => {
-                // Destructure array
-                if let Some(view) = value.as_any_array() {
-                    let arr = view.to_generic();
-                    let mut rest_index = None;
-                    for (i, pattern) in patterns.iter().enumerate() {
-                        if let DestructurePattern::Rest(inner) = pattern {
-                            rest_index = Some(i);
-                            let rest_values = if i <= arr.len() {
-                                arr[i..].to_vec()
-                            } else {
-                                Vec::new()
-                            };
-                            self.declare_pattern(
-                                inner,
-                                kind,
-                                ValueWord::from_array(shape_value::vmarray_from_vec(rest_values)),
-                            )?;
-                            break;
-                        } else {
-                            let val = arr.get(i).map(|nb| nb.clone()).unwrap_or(ValueWord::none());
-                            self.declare_pattern(pattern, kind, val)?;
-                        }
-                    }
-
-                    if rest_index.is_none() && patterns.len() > arr.len() {
-                        for pattern in &patterns[arr.len()..] {
-                            self.declare_pattern(pattern, kind, ValueWord::none())?;
-                        }
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot destructure non-array value as array".to_string(),
-                        location: None,
-                    })
-                }
-            }
-            DestructurePattern::Object(fields) => {
-                // Destructure object
-                if let Some(obj) = crate::type_schema::typed_object_to_hashmap(&value) {
-                    for field in fields {
-                        if field.key == "..." {
-                            // Handle rest pattern in object
-                            if let DestructurePattern::Rest(rest_pattern) = &field.pattern {
-                                if let DestructurePattern::Identifier(rest_name, _) =
-                                    rest_pattern.as_ref()
-                                {
-                                    // Collect remaining fields
-                                    let rest_pairs: Vec<(&str, ValueWord)> = obj
-                                        .iter()
-                                        .filter(|(k, _)| {
-                                            !fields.iter().any(|f| f.key == **k && f.key != "...")
-                                        })
-                                        .map(|(k, v)| (k.as_str(), v.clone()))
-                                        .collect();
-                                    let rest_val =
-                                        crate::type_schema::typed_object_from_pairs(&rest_pairs);
-                                    self.declare_variable(rest_name, kind, Some(rest_val))?;
-                                }
-                            }
-                        } else {
-                            let val = obj.get(&field.key).cloned().unwrap_or(ValueWord::none());
-                            self.declare_pattern(&field.pattern, kind, val)?;
-                        }
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot destructure non-object value as object".to_string(),
-                        location: None,
-                    })
-                }
-            }
-            DestructurePattern::Rest(_) => {
-                // Rest patterns should be handled in array/object context
-                Err(ShapeError::RuntimeError {
-                    message: "Rest pattern cannot be used at top level".to_string(),
-                    location: None,
-                })
-            }
-            DestructurePattern::Decomposition(bindings) => {
-                // Decomposition extracts component types from an intersection object
-                if crate::type_schema::typed_object_to_hashmap(&value).is_some() {
-                    for binding in bindings {
-                        self.declare_variable(&binding.name, kind, Some(value.clone()))?;
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot decompose non-object value".to_string(),
-                        location: None,
-                    })
-                }
-            }
-        }
-    }
-
-    /// Set variables matching a pattern (for assignments)
-    pub fn set_pattern(
-        &mut self,
-        pattern: &shape_ast::ast::DestructurePattern,
-        value: ValueWord,
-    ) -> Result<()> {
-        use shape_ast::ast::DestructurePattern;
-
-        match pattern {
-            DestructurePattern::Identifier(name, _) => self.set_variable(name, value),
-            DestructurePattern::Array(patterns) => {
-                // Destructure array
-                if let Some(view) = value.as_any_array() {
-                    let arr = view.to_generic();
-                    let mut rest_index = None;
-                    for (i, pattern) in patterns.iter().enumerate() {
-                        if let DestructurePattern::Rest(inner) = pattern {
-                            rest_index = Some(i);
-                            let rest_values = if i <= arr.len() {
-                                arr[i..].to_vec()
-                            } else {
-                                Vec::new()
-                            };
-                            self.set_pattern(inner, ValueWord::from_array(shape_value::vmarray_from_vec(rest_values)))?;
-                            break;
-                        } else {
-                            let val = arr.get(i).map(|nb| nb.clone()).unwrap_or(ValueWord::none());
-                            self.set_pattern(pattern, val)?;
-                        }
-                    }
-
-                    if rest_index.is_none() && patterns.len() > arr.len() {
-                        for pattern in &patterns[arr.len()..] {
-                            self.set_pattern(pattern, ValueWord::none())?;
-                        }
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot destructure non-array value as array".to_string(),
-                        location: None,
-                    })
-                }
-            }
-            DestructurePattern::Object(fields) => {
-                // Destructure object
-                if let Some(obj) = crate::type_schema::typed_object_to_hashmap(&value) {
-                    for field in fields {
-                        if field.key == "..." {
-                            // Handle rest pattern in object
-                            if let DestructurePattern::Rest(rest_pattern) = &field.pattern {
-                                if let DestructurePattern::Identifier(rest_name, _) =
-                                    rest_pattern.as_ref()
-                                {
-                                    // Collect remaining fields
-                                    let rest_pairs: Vec<(&str, ValueWord)> = obj
-                                        .iter()
-                                        .filter(|(k, _)| {
-                                            !fields.iter().any(|f| f.key == **k && f.key != "...")
-                                        })
-                                        .map(|(k, v)| (k.as_str(), v.clone()))
-                                        .collect();
-                                    let rest_val =
-                                        crate::type_schema::typed_object_from_pairs(&rest_pairs);
-                                    self.set_variable(rest_name, rest_val)?;
-                                }
-                            }
-                        } else {
-                            let val = obj.get(&field.key).cloned().unwrap_or(ValueWord::none());
-                            self.set_pattern(&field.pattern, val)?;
-                        }
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot destructure non-object value as object".to_string(),
-                        location: None,
-                    })
-                }
-            }
-            DestructurePattern::Rest(_) => {
-                // Rest patterns should be handled in array/object context
-                Err(ShapeError::RuntimeError {
-                    message: "Rest pattern cannot be used at top level".to_string(),
-                    location: None,
-                })
-            }
-            DestructurePattern::Decomposition(bindings) => {
-                // Decomposition sets variables by extracting component types
-                if crate::type_schema::typed_object_to_hashmap(&value).is_some() {
-                    for binding in bindings {
-                        // For now, set each binding to the full object
-                        // Full implementation requires TypeSchema lookup
-                        self.set_variable(&binding.name, value.clone())?;
-                    }
-                    Ok(())
-                } else {
-                    Err(ShapeError::RuntimeError {
-                        message: "Cannot decompose non-object value".to_string(),
-                        location: None,
-                    })
-                }
-            }
-        }
-    }
+    // declare_pattern / set_pattern removed by the strict-typing
+    // bulldozer (see docs/defections.md 2026-05-06: AST-evaluation
+    // runtime executors deletion). Both methods recursively decoded
+    // ValueWord via as_any_array / typed_object_to_hashmap and were
+    // only reachable from the four deleted executors and the deleted
+    // lib.rs query-exec stub. They will be rebuilt against typed slot
+    // storage by the ast-walking-interpreter-strict-rebuild workstream.
 
     /// Get all variable names currently in scope
     pub fn get_all_variable_names(&self) -> Vec<String> {

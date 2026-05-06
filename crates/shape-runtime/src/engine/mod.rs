@@ -33,9 +33,13 @@ use shape_wire::WireValue;
 
 /// Trait for evaluating individual expressions and statement blocks.
 ///
-/// This is used by StreamExecutor, WindowExecutor, and JoinExecutor
-/// to evaluate expressions without needing full program compilation.
-/// shape-vm implements this for BytecodeExecutor.
+/// shape-vm implements this for BytecodeExecutor. The previous AST-walking
+/// executor consumers (StreamExecutor, WindowExecutor, JoinExecutor) were
+/// deleted by the strict-typing bulldozer (see `docs/defections.md`
+/// 2026-05-06: AST-evaluation runtime executors deletion). The
+/// `ast-walking-interpreter-strict-rebuild` workstream will reintroduce
+/// streaming/windowed/joined analytics on top of compiled bytecode + typed
+/// VM slots.
 pub trait ExpressionEvaluator: Send + Sync {
     /// Evaluate a slice of statements and return the result.
     fn eval_statements(

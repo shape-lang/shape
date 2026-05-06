@@ -48,7 +48,6 @@ pub mod fuzzy;
 pub mod fuzzy_property;
 pub mod hashing;
 pub mod intrinsics;
-pub mod join_executor;
 pub mod json_value;
 pub mod marshal;
 pub mod leakage;
@@ -66,7 +65,6 @@ pub mod output_adapter;
 pub mod package_bundle;
 pub mod package_lock;
 pub mod pattern_library;
-pub mod pattern_state_machine;
 pub mod plugins;
 pub mod progress;
 pub mod project;
@@ -95,7 +93,6 @@ pub mod stdlib;
 pub mod stdlib_io;
 pub mod stdlib_metadata;
 pub mod stdlib_time;
-pub mod stream_executor;
 pub mod sync_bridge;
 pub mod time_window;
 pub mod timeframe_utils;
@@ -104,7 +101,6 @@ pub mod type_methods;
 pub mod type_schema;
 pub mod type_system;
 pub mod visitor;
-pub mod window_executor;
 pub mod window_manager;
 pub mod wire_conversion;
 
@@ -127,7 +123,6 @@ pub use extensions_config::{
 };
 pub use hashing::{HashDigest, combine_hashes, hash_bytes, hash_file, hash_string};
 pub use intrinsics::{IntrinsicFn, IntrinsicsRegistry};
-pub use join_executor::JoinExecutor;
 pub use leakage::{LeakageDetector, LeakageReport, LeakageSeverity, LeakageType, LeakageWarning};
 pub use module_bindings::ModuleBindingRegistry;
 pub use module_exports::{
@@ -138,21 +133,19 @@ pub use progress::{
     LoadPhase, ProgressEvent, ProgressGranularity, ProgressHandle, ProgressRegistry,
 };
 pub use query_result::{AlertResult, QueryResult, QueryType};
-pub use stream_executor::{StreamEvent, StreamExecutor, StreamState};
 pub use sync_bridge::{
     SyncDataProvider, block_on_shared, get_runtime_handle, initialize_shared_runtime,
 };
 pub use type_schema::{
     FieldDef, FieldType, SchemaId, TypeSchema, TypeSchemaBuilder, TypeSchemaRegistry,
 };
-pub use window_executor::WindowExecutor;
 pub use wire_conversion::{
     slot_extract_content, slot_to_envelope, slot_to_wire, wire_to_slot,
 };
 
 use self::type_methods::TypeMethodRegistry;
 pub use error::{Result, ShapeError, SourceLocation};
-use shape_ast::ast::{Program, Query};
+use shape_ast::ast::Program;
 pub use shape_ast::error;
 use shape_wire::WireValue;
 use std::any::Any;
@@ -681,168 +674,32 @@ impl Runtime {
         Ok(())
     }
 
+    /// Execute a query item against a data frame.
+    ///
+    /// In the strict-typed runtime the AST-walking query evaluator has been
+    /// removed (see `docs/defections.md` 2026-05-06: AST-evaluation runtime
+    /// executors deletion). The replacement is "compile to bytecode, execute
+    /// in VM", which is the responsibility of the rebuild workstream
+    /// `ast-walking-interpreter-strict-rebuild`. Until that lands this entry
+    /// point returns an empty `QueryResult` so existing callers keep linking.
     pub fn execute_query(
         &mut self,
         query: &shape_ast::ast::Item,
         data: &DataFrame,
     ) -> Result<QueryResult> {
-        let mut persistent_ctx = self.persistent_context.take();
-        let result = if let Some(ref mut ctx) = persistent_ctx {
-            ctx.update_data(data);
-            self.execute_query_with_context(query, ctx)
-        } else {
-            let mut ctx = context::ExecutionContext::new_with_registry(
-                data,
-                self.type_method_registry.clone(),
-            );
-            self.execute_query_with_context(query, &mut ctx)
-        };
-        self.persistent_context = persistent_ctx;
-        result
-    }
-
-    fn execute_query_with_context(
-        &mut self,
-        query: &shape_ast::ast::Item,
-        ctx: &mut context::ExecutionContext,
-    ) -> Result<QueryResult> {
-        let id = ctx.get_current_id().unwrap_or_default();
-        let timeframe = ctx
-            .get_current_timeframe()
+        let _ = (query, data);
+        let id = self
+            .persistent_context
+            .as_ref()
+            .and_then(|ctx| ctx.get_current_id().ok())
+            .unwrap_or_default();
+        let timeframe = self
+            .persistent_context
+            .as_ref()
+            .and_then(|ctx| ctx.get_current_timeframe().ok())
             .map(|t| t.to_string())
             .unwrap_or_default();
-
-        match query {
-            shape_ast::ast::Item::Query(q, _) => match q {
-                Query::Backtest(_) => Err(ShapeError::RuntimeError {
-                    message: "Backtesting not supported in core runtime.".to_string(),
-                    location: None,
-                }),
-                Query::Alert(_alert_query) => {
-                    let alert_id = format!("alert_{}", chrono::Utc::now().timestamp_micros());
-                    Ok(
-                        QueryResult::new(QueryType::Alert, id, timeframe).with_alert(AlertResult {
-                            id: alert_id,
-                            active: false,
-                            message: "Alert triggered".to_string(),
-                            level: "info".to_string(),
-                            timestamp: chrono::Utc::now(),
-                        }),
-                    )
-                }
-                Query::With(with_query) => {
-                    for cte in &with_query.ctes {
-                        let cte_result = self.execute_query_with_context(
-                            &shape_ast::ast::Item::Query(
-                                (*cte.query).clone(),
-                                shape_ast::ast::Span::DUMMY,
-                            ),
-                            ctx,
-                        )?;
-                        let value = cte_result.value.unwrap_or(ValueWord::none());
-                        ctx.set_variable_nb(&cte.name, value)?;
-                    }
-                    self.execute_query_with_context(
-                        &shape_ast::ast::Item::Query(
-                            (*with_query.query).clone(),
-                            shape_ast::ast::Span::DUMMY,
-                        ),
-                        ctx,
-                    )
-                }
-            },
-            shape_ast::ast::Item::Expression(_, _) => {
-                Ok(QueryResult::new(QueryType::Value, id, timeframe).with_value(ValueWord::none()))
-            }
-            shape_ast::ast::Item::VariableDecl(var_decl, _) => {
-                ctx.declare_pattern(&var_decl.pattern, var_decl.kind, ValueWord::none())?;
-                Ok(QueryResult::new(QueryType::Value, id, timeframe).with_value(ValueWord::none()))
-            }
-            shape_ast::ast::Item::Assignment(assignment, _) => {
-                ctx.set_pattern(&assignment.pattern, ValueWord::none())?;
-                Ok(QueryResult::new(QueryType::Value, id, timeframe).with_value(ValueWord::none()))
-            }
-            shape_ast::ast::Item::Statement(_, _) => {
-                Ok(QueryResult::new(QueryType::Value, id, timeframe).with_value(ValueWord::none()))
-            }
-            _ => Err(ShapeError::RuntimeError {
-                message: format!("Unsupported item for query execution: {:?}", query),
-                location: None,
-            }),
-        }
-    }
-
-    pub fn execute_without_data(&mut self, item: &shape_ast::ast::Item) -> Result<QueryResult> {
-        let mut persistent_ctx = self.persistent_context.take();
-
-        let result = if let Some(ref mut ctx) = persistent_ctx {
-            match item {
-                shape_ast::ast::Item::Expression(_, _) => {
-                    Ok(
-                        QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                            .with_value(ValueWord::none()),
-                    )
-                }
-                shape_ast::ast::Item::Statement(_, _) => {
-                    Ok(
-                        QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                            .with_value(ValueWord::none()),
-                    )
-                }
-                shape_ast::ast::Item::VariableDecl(var_decl, _) => {
-                    ctx.declare_pattern(&var_decl.pattern, var_decl.kind, ValueWord::none())?;
-                    Ok(
-                        QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                            .with_value(ValueWord::none()),
-                    )
-                }
-                shape_ast::ast::Item::Assignment(assignment, _) => {
-                    ctx.set_pattern(&assignment.pattern, ValueWord::none())?;
-                    Ok(
-                        QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                            .with_value(ValueWord::none()),
-                    )
-                }
-                shape_ast::ast::Item::TypeAlias(_, _) => {
-                    self.process_program_items(
-                        &Program {
-                            items: vec![item.clone()],
-                            docs: shape_ast::ast::ProgramDocs::default(),
-                        },
-                        ctx,
-                        None,
-                    )?;
-                    Ok(
-                        QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                            .with_value(ValueWord::none()),
-                    )
-                }
-                _ => Err(ShapeError::RuntimeError {
-                    message: format!("Operation requires context: {:?}", item),
-                    location: None,
-                }),
-            }
-        } else {
-            let mut ctx = context::ExecutionContext::new_empty_with_registry(
-                self.type_method_registry.clone(),
-            );
-            self.process_program_items(
-                &Program {
-                    items: vec![item.clone()],
-                    docs: shape_ast::ast::ProgramDocs::default(),
-                },
-                &mut ctx,
-                None,
-            )?;
-            persistent_ctx = Some(ctx);
-            Ok(
-                QueryResult::new(QueryType::Value, "".to_string(), "".to_string())
-                    .with_value(ValueWord::none()),
-            )
-        };
-
-        self.persistent_context = persistent_ctx;
-        result
+        Ok(QueryResult::new(QueryType::Value, id, timeframe))
     }
 
     /// Format a value using Shape format definitions from stdlib
@@ -850,10 +707,10 @@ impl Runtime {
     /// Currently a placeholder until VM-based format execution is implemented.
     pub fn format_value(
         &mut self,
-        _value: Value,
+        _value: WireValue,
         type_name: &str,
         format_name: Option<&str>,
-        _param_overrides: std::collections::HashMap<String, Value>,
+        _param_overrides: std::collections::HashMap<String, WireValue>,
     ) -> Result<String> {
         if let Some(name) = format_name {
             Ok(format!("<formatted {} as {}>", type_name, name))

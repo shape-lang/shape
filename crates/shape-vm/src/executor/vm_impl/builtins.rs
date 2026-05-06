@@ -494,7 +494,12 @@ impl VirtualMachine {
                     ));
                 }
 
-                // Window functions - these delegate to the runtime WindowExecutor
+                // Window functions evaluated inline against ValueWord args.
+                // The previous "delegate to runtime WindowExecutor" routing
+                // never actually fired — it was dead code; the runtime
+                // executor was deleted by the strict-typing bulldozer
+                // (see shape/docs/defections.md 2026-05-06: AST-evaluation
+                // runtime executors deletion).
                 // In VM mode, window functions are evaluated differently than in JIT
                 b @ (BuiltinFunction::WindowRowNumber
                 | BuiltinFunction::WindowRank
