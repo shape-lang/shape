@@ -179,8 +179,9 @@ Adding a new AST variant (Expr, Statement, Item) requires updating **~8+ files**
 Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler/JIT performance numbers. Benchmarks measure the compiler — the compiler does not get to rewrite the benchmarks. Adding type annotations, restructuring code, or inserting hints to help the JIT is forbidden. If the JIT needs hints to perform well, fix the compiler, not the benchmark.
 
 ### Type System Rules
-- **NO runtime coercion**: Types must be fully determined at compile time. Never emit `IntToNumber`/`NumberToInt` coercion opcodes to "fix" type mismatches. If the type can't be proven, fall back to generic opcodes.
-- **Typed opcodes require compile-time proof**: `MulNumber`, `AddInt`, `EqInt`, etc. require the compiler to PROVE both operands have the declared type. Don't lie about types to get typed opcodes.
+- **NO runtime coercion**: Types must be fully determined at compile time. Never emit `IntToNumber`/`NumberToInt` coercion opcodes to "fix" type mismatches.
+- **NO dynamic fallback**: If the type can't be proven, it is a compile error. There is no generic-opcode fallback path. See "Forbidden Patterns" below.
+- **Typed opcodes require compile-time proof**: `MulNumber`, `AddInt`, `EqInt`, etc. require the compiler to PROVE both operands have the declared type via `prove_native_kind()`. Don't lie about types to get typed opcodes.
 - **`int` and `number` are separate**: They don't unify. Use `2.0` (not `2`) when a `number` is needed in tests.
 - **No `any` type**: Unannotated positions use `Type::Variable(TypeVar::fresh())` for inference. If inference fails, it's a compile error — no escape hatch.
 - **Bidirectional closure inference**: Method calls infer closure param types from generic method signatures (e.g. `arr.filter(|x| ...)` infers x's type from the array element type)
@@ -203,6 +204,63 @@ Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler
 
 ### Linter Hook
 A linter hook modifies `module_resolution.rs` after edits — it changes the return type of `append_imported_module_items` back to `Result<HashSet<String>>` and adds `Ok(...)`. Work WITH the `Result` return type, don't fight it.
+
+## Forbidden Patterns
+
+This codebase has a multi-session history of plans targeting "delete `ValueWord` and the dynamic dispatch path" that walked back during execution. The walk-back is always the same shape: the dynamic fallback is kept "for one edge case", renamed to sound legitimate, and becomes permanent. The W-series (W1–W4 with α/δ follow-ups, 9 commits) is the most recent example.
+
+The strict-typing plan (`~/.claude/plans/stop-native-vs-tagged-tax.md`) deletes the dynamic path entirely. The patterns below are **forbidden** in compiler/runtime work. If you encounter one in code or in your own reasoning, refuse it and surface to the user.
+
+### Forbidden code
+
+- **`ValueWord` at runtime.** Deleted. Do not reintroduce as a "shim", "bridge", "compatibility layer", or "serialization helper". Snapshot/wire uses per-slot kind metadata.
+- **Generic opcodes** (`Add`, `Sub`, `Lt`, etc. without kind suffix). Deleted. Only typed variants exist.
+- **Runtime tag-decode hops.** Specifically forbidden: `synthesize_value_word_from_raw`, `is_tagged()` in handlers, `last_program_return_kind` runtime stamp, `normalize_persisted_for_slot`, per-`FieldKind` capture decode.
+- **`Convert<X>To<Y>` opcodes** added to paper over a kind-tracker gap. The W4-δ `ConvertBoolToString` opcode is the canonical example of what not to do — the bool source's kind was statically knowable; the right fix was extending the compiler's kind tracker.
+- **`SlotKind::Dynamic` / `SlotKind::Unknown`** in compiled bytecode. Deleted from the enum.
+- **`exec_*_dynamic_fallback`** handlers. Deleted.
+- **Feature flags** around dynamic dispatch. The path doesn't exist; nothing to gate.
+
+### Forbidden rationalizations
+
+If you find yourself or another agent saying any of these, stop:
+
+- "Just a small fallback for this one edge case."
+- "Keep `ValueWord` but only for serialization."
+- "Mark this as a follow-up for a later phase."
+- "Soft-fail counter for now, harden later."
+- "Document it as out-of-scope."
+- "Add a feature flag we can toggle."
+- "Rename to a less suspicious name."
+- "Add a new opcode for this specific conversion."
+- "Just one decode at the boundary."
+
+### Renames to refuse on sight
+
+These are specific phrases past sessions used to dress up dynamic dispatch and make it sound like engineering. None are acceptable:
+
+- "ValueBits shim"
+- "FFI-boundary bridge"
+- "boundary translation"
+- "host-boundary normalization"
+- "decode hop"
+- "tag normalization"
+- "compatibility layer"
+- "dynamic-fallback retained by design"
+- "documented FFI-boundary helper"
+- "class-(a)/(b) cases"
+
+### Why this matters
+
+The `v2-nanbox-removal-plan.md` Step 6 ("delete `ValueWord`") was quietly downgraded mid-execution to "ValueBits shim retained as documented FFI-boundary bridge". That single rename converted a one-time deletion into permanent maintenance debt: 2,650-line `ValueWord` module preserved, plus 9 W-series commits of decode bridges, plus 4 deferred v2-raw-heap aliasing tests, plus 23 ignored shape-jit tests, plus ~48 shape-test failures in the same bug class. Estimated cost of the rename: 4–6 weeks of cumulative cleanup. Don't repeat it.
+
+If you encounter a case that genuinely seems to need dynamic dispatch, surface it to the user. Don't rationalize. Log considered-but-rejected compromises in `docs/defections.md`.
+
+### Mechanical enforcement
+
+- `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
+- `just check-no-dynamic` recipe greps for forbidden symbols on every CI run and pre-commit. Build fails on hit.
+- Sentinel test `crates/shape-vm/src/executor/tests/no_dynamic.rs` asserts forbidden symbols are absent.
 
 ### Known Constraints
 - **TypeVar loss in `Type::to_annotation()`**: `BuiltinTypes::function()` preserves `Type::Variable` correctly (regression test in `constraints.rs:1193`). The lossy step is `Type::Function`'s `to_annotation()` in `core.rs:218`: unresolved param/return vars are converted to `"unknown"`, losing type variable identity.
