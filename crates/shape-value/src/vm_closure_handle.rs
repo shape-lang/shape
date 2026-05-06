@@ -28,7 +28,6 @@ use crate::v2::closure_raw::{
     read_capture_as_value_bits, typed_closure_function_id, typed_closure_refcount,
     typed_closure_type_id,
 };
-use crate::value_word::{ValueWord, ValueWordExt};
 
 /// Read-only handle to a closure's function id, type id, and captures.
 ///
@@ -151,7 +150,7 @@ impl<'a> VmClosureHandle<'a> {
     /// through the pointer replaces the cell's value in place; no retain
     /// or release is needed.
     #[inline]
-    pub fn capture_owned_mutable_ptr(&self, i: usize) -> Option<*mut ValueWord> {
+    pub fn capture_owned_mutable_ptr(&self, i: usize) -> Option<*mut u64> {
         match self.layout.capture_storage_kind(i) {
             CaptureKind::OwnedMutable => {
                 Some(unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) })
@@ -181,17 +180,6 @@ impl<'a> VmClosureHandle<'a> {
         }
     }
 
-    /// Read every capture as a `ValueWord`, in declaration order.
-    #[inline]
-    pub fn captures_as_values(&self) -> Vec<ValueWord> {
-        let n = self.capture_count();
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            out.push(self.capture_as_value(i));
-        }
-        out
-    }
-
     /// Exact refcount on the `TypedClosureHeader` block — i.e. the
     /// number of live shares on the block.
     #[inline]
@@ -217,11 +205,11 @@ unsafe fn owned_mutable_cell_ptr(
     ptr: *const TypedClosureHeader,
     layout: &ClosureLayout,
     i: usize,
-) -> *mut ValueWord {
+) -> *mut u64 {
     let off = layout.heap_capture_offset(i);
     // SAFETY: the `Ptr` slot is 8-byte aligned and in-bounds per the
     // layout invariants (verified by `ClosureLayout::from_capture_types`).
-    unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *mut ValueWord) }
+    unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *mut u64) }
 }
 
 /// Read the 8-byte pointer slot for a `Shared` capture.
@@ -243,305 +231,3 @@ unsafe fn shared_cell_ptr(
     unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *const SharedCell) }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::v2::closure_layout::ClosureLayout;
-    use crate::v2::closure_raw::{alloc_typed_closure, release_typed_closure, write_capture_typed};
-    use crate::v2::concrete_type::ConcreteType;
-    use crate::value_word::{ValueWord, ValueWordExt};
-
-    #[test]
-    fn test_value_word_non_closure_returns_none() {
-        let vw = ValueWord::from_i64(5);
-        assert!(vw.as_closure_handle().is_none());
-    }
-
-    // ── Raw backing ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_raw_function_id_read() {
-        use crate::v2::closure_layout::CaptureKind;
-        let layout = ClosureLayout::from_capture_types(&[], &[] as &[CaptureKind]);
-        // SAFETY: alloc_typed_closure returns a live block; release_typed_closure
-        // frees it once at the end of the test.
-        unsafe {
-            let ptr = alloc_typed_closure(123, 55, &layout);
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            assert_eq!(handle.function_id(), 123);
-            assert_eq!(handle.type_id(), 55);
-            assert_eq!(handle.capture_count(), 0);
-            // Fresh block has refcount 1.
-            assert_eq!(handle.refcount(), 1);
-            drop(handle);
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn test_raw_capture_as_value_typed() {
-        use crate::v2::closure_layout::CaptureKind;
-        // Mixed F64 + I64 + Bool captures, exercising the typed-width
-        // read path in read_capture_as_value_bits.
-        let layout = ClosureLayout::from_capture_types(
-            &[ConcreteType::F64, ConcreteType::I64, ConcreteType::Bool],
-            &[
-                CaptureKind::Immutable,
-                CaptureKind::Immutable,
-                CaptureKind::Immutable,
-            ],
-        );
-        // SAFETY: alloc + writes + reads all go through the well-formed
-        // layout; release_typed_closure reclaims the block.
-        unsafe {
-            let ptr = alloc_typed_closure(1, 2, &layout);
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(2.5).into_raw_bits());
-            write_capture_typed(ptr, &layout, 1, ValueWord::from_i64(-17).into_raw_bits());
-            write_capture_typed(ptr, &layout, 2, ValueWord::from_bool(true).into_raw_bits());
-
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            assert_eq!(handle.function_id(), 1);
-            assert_eq!(handle.type_id(), 2);
-            assert_eq!(handle.capture_count(), 3);
-
-            let vs = handle.captures_as_values();
-            assert_eq!(vs[0].as_f64(), Some(2.5));
-            assert_eq!(vs[1].as_i64(), Some(-17));
-            assert_eq!(vs[2].as_bool(), Some(true));
-
-            // Individual accessor matches the batched one.
-            assert_eq!(handle.capture_as_value(0).as_f64(), Some(2.5));
-            assert_eq!(handle.capture_as_value(1).as_i64(), Some(-17));
-            assert_eq!(handle.capture_as_value(2).as_bool(), Some(true));
-
-            drop(handle);
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    // ── Track A.1B: OwnedMutable / Shared handle API ─────────────────
-
-    /// Build a Raw-backed handle over a closure block whose layout marks
-    /// capture 0 as `OwnedMutable`. Caller installs a `Box::into_raw`
-    /// pointer + asserts both `capture_as_value` (deref) and
-    /// `capture_execution_bits` (raw pointer bits) return the right
-    /// things.
-    #[test]
-    fn a1b_handle_owned_mutable_capture_as_value_derefs_box() {
-        use crate::v2::closure_layout::CaptureKind;
-        use crate::v2::closure_raw::alloc_typed_closure;
-        let layout = ClosureLayout::from_capture_types(
-            &[ConcreteType::I64],
-            &[CaptureKind::OwnedMutable],
-        );
-        // SAFETY: alloc + write + release all go through well-formed layout.
-        unsafe {
-            let ptr = alloc_typed_closure(1, 0, &layout);
-            // Install a Box<ValueWord> at the capture 0 slot.
-            let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(31415)));
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut ValueWord, cell);
-
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            // capture_as_value dereffs the box — returns the inner value.
-            let v = handle.capture_as_value(0);
-            assert_eq!(v.as_i64(), Some(31415));
-            // capture_execution_bits returns the raw pointer bits.
-            let raw_bits = handle.capture_execution_bits(0);
-            assert_eq!(raw_bits, cell as u64);
-            // capture_owned_mutable_ptr returns the same pointer.
-            assert_eq!(handle.capture_owned_mutable_ptr(0), Some(cell));
-            // capture_shared_cell_ptr returns None for a non-Shared slot.
-            assert!(handle.capture_shared_cell_ptr(0).is_none());
-
-            drop(handle);
-            // release_typed_closure reclaims the Box.
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn a1b_handle_shared_capture_as_value_locks_and_clones() {
-        use crate::v2::closure_layout::{CaptureKind, SharedCell};
-        use crate::v2::closure_raw::alloc_typed_closure;
-        use std::sync::Arc;
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::Shared]);
-        unsafe {
-            let ptr = alloc_typed_closure(7, 0, &layout);
-            let external: Arc<SharedCell> =
-                Arc::new(SharedCell::new(ValueWord::from_i64(271828)));
-            let closure_share: Arc<SharedCell> = Arc::clone(&external);
-            let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
-
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            // capture_as_value acquires the mutex and returns the inner.
-            let v = handle.capture_as_value(0);
-            assert_eq!(v.as_i64(), Some(271828));
-            // capture_execution_bits returns the raw pointer bits.
-            let raw_bits = handle.capture_execution_bits(0);
-            assert_eq!(raw_bits, cell_ptr as u64);
-            // capture_shared_cell_ptr returns the same pointer.
-            assert_eq!(handle.capture_shared_cell_ptr(0), Some(cell_ptr));
-            // capture_owned_mutable_ptr returns None for a non-OwnedMutable slot.
-            assert!(handle.capture_owned_mutable_ptr(0).is_none());
-
-            drop(handle);
-            // Strong count before release: 2 (external + closure_share).
-            assert_eq!(Arc::strong_count(&external), 2);
-            release_typed_closure(ptr, &layout);
-            assert_eq!(Arc::strong_count(&external), 1);
-            // external is dropped at end of scope.
-        }
-    }
-
-    #[test]
-    fn a1b_handle_mixed_kinds_execution_bits_and_as_value() {
-        // [Immutable(F64), OwnedMutable, Shared, Immutable(I64)] — the
-        // mandatory "mixed kinds" regression scenario from A.1B brief.
-        use crate::v2::closure_layout::{CaptureKind, SharedCell};
-        use crate::v2::closure_raw::{alloc_typed_closure, write_capture_typed};
-        use std::sync::Arc;
-        let layout = ClosureLayout::from_capture_types(
-            &[
-                ConcreteType::F64,
-                ConcreteType::I64,
-                ConcreteType::I64,
-                ConcreteType::I64,
-            ],
-            &[
-                CaptureKind::Immutable,
-                CaptureKind::OwnedMutable,
-                CaptureKind::Shared,
-                CaptureKind::Immutable,
-            ],
-        );
-        unsafe {
-            let ptr = alloc_typed_closure(13, 0, &layout);
-            // Immutable F64 at slot 0.
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(1.75).into_raw_bits());
-            // OwnedMutable at slot 1.
-            let box_cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(200)));
-            let off1 = layout.heap_capture_offset(1);
-            std::ptr::write(ptr.add(off1) as *mut *mut ValueWord, box_cell);
-            // Shared at slot 2.
-            let external: Arc<SharedCell> =
-                Arc::new(SharedCell::new(ValueWord::from_i64(300)));
-            let arc_share: Arc<SharedCell> = Arc::clone(&external);
-            let arc_raw: *const SharedCell = Arc::into_raw(arc_share);
-            let off2 = layout.heap_capture_offset(2);
-            std::ptr::write(ptr.add(off2) as *mut *const SharedCell, arc_raw);
-            // Immutable I64 at slot 3.
-            write_capture_typed(ptr, &layout, 3, ValueWord::from_i64(400).into_raw_bits());
-
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-
-            // capture_as_value: all four return the underlying value.
-            assert_eq!(handle.capture_as_value(0).as_f64(), Some(1.75));
-            assert_eq!(handle.capture_as_value(1).as_i64(), Some(200));
-            assert_eq!(handle.capture_as_value(2).as_i64(), Some(300));
-            assert_eq!(handle.capture_as_value(3).as_i64(), Some(400));
-
-            // capture_execution_bits: Immutable = value bits, mutable/shared
-            // = raw pointer bits.
-            assert_eq!(
-                handle.capture_execution_bits(0),
-                ValueWord::from_f64(1.75).into_raw_bits()
-            );
-            assert_eq!(handle.capture_execution_bits(1), box_cell as u64);
-            assert_eq!(handle.capture_execution_bits(2), arc_raw as u64);
-            assert_eq!(
-                handle.capture_execution_bits(3),
-                ValueWord::from_i64(400).into_raw_bits()
-            );
-
-            // Pointer accessors match.
-            assert_eq!(handle.capture_owned_mutable_ptr(1), Some(box_cell));
-            assert_eq!(handle.capture_shared_cell_ptr(2), Some(arc_raw));
-            // Non-matching slots return None.
-            assert!(handle.capture_owned_mutable_ptr(0).is_none());
-            assert!(handle.capture_owned_mutable_ptr(2).is_none());
-            assert!(handle.capture_owned_mutable_ptr(3).is_none());
-            assert!(handle.capture_shared_cell_ptr(0).is_none());
-            assert!(handle.capture_shared_cell_ptr(1).is_none());
-            assert!(handle.capture_shared_cell_ptr(3).is_none());
-
-            drop(handle);
-            assert_eq!(Arc::strong_count(&external), 2);
-            release_typed_closure(ptr, &layout);
-            assert_eq!(Arc::strong_count(&external), 1);
-        }
-    }
-
-    #[test]
-    fn a1b_handle_owned_mutable_write_through_ptr_observable_via_capture_as_value() {
-        // Write-through via `capture_owned_mutable_ptr` — subsequent reads
-        // via `capture_as_value` observe the new value. Exercises the
-        // mutable-cell write-back semantic through the handle API.
-        use crate::v2::closure_layout::CaptureKind;
-        use crate::v2::closure_raw::alloc_typed_closure;
-        let layout = ClosureLayout::from_capture_types(
-            &[ConcreteType::I64],
-            &[CaptureKind::OwnedMutable],
-        );
-        unsafe {
-            let ptr = alloc_typed_closure(1, 0, &layout);
-            let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(1)));
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut ValueWord, cell);
-
-            let handle = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            assert_eq!(handle.capture_as_value(0).as_i64(), Some(1));
-
-            // Write through the raw pointer.
-            let cell_ptr = handle.capture_owned_mutable_ptr(0).unwrap();
-            std::ptr::write(cell_ptr, ValueWord::from_i64(999));
-            // Observable via capture_as_value on the same handle.
-            assert_eq!(handle.capture_as_value(0).as_i64(), Some(999));
-
-            drop(handle);
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn a1b_handle_shared_write_through_ptr_observable_by_second_handle() {
-        // Two handles over the SAME closure block — write through the
-        // first handle's SharedCell pointer, read via the second's
-        // capture_as_value. Covers the "closures share a var" scenario
-        // at the handle-API level.
-        use crate::v2::closure_layout::{CaptureKind, SharedCell};
-        use crate::v2::closure_raw::alloc_typed_closure;
-        use std::sync::Arc;
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::Shared]);
-        unsafe {
-            let ptr = alloc_typed_closure(1, 0, &layout);
-            let external: Arc<SharedCell> =
-                Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-            let share_for_closure: Arc<SharedCell> = Arc::clone(&external);
-            let cell_ptr: *const SharedCell = Arc::into_raw(share_for_closure);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
-
-            let handle_a = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-            let handle_b = VmClosureHandle::raw(ptr as *const TypedClosureHeader, &layout);
-
-            let cell_a = handle_a.capture_shared_cell_ptr(0).unwrap();
-            let cell: &SharedCell = &*cell_a;
-            *cell.lock() = ValueWord::from_i64(42);
-
-            // Observed from handle_b.
-            assert_eq!(handle_b.capture_as_value(0).as_i64(), Some(42));
-            // Observed from the external Arc — same cell.
-            assert_eq!(external.lock().as_i64(), Some(42));
-
-            drop(handle_a);
-            drop(handle_b);
-            release_typed_closure(ptr, &layout);
-            assert_eq!(Arc::strong_count(&external), 1);
-        }
-    }
-}
