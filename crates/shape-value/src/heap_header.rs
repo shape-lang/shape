@@ -157,7 +157,7 @@ impl std::fmt::Debug for HeapHeader {
 impl HeapKind {
     /// The last (highest-numbered) variant in HeapKind.
     /// IMPORTANT: Update this when adding new HeapKind variants.
-    pub const MAX_VARIANT: Self = HeapKind::FloatArraySlice;
+    pub const MAX_VARIANT: Self = HeapKind::Char;
 
     /// Convert a u16 discriminant to a HeapKind, returning None if out of range.
     #[inline]
@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn test_new_header() {
-        let h = HeapHeader::new(HeapKind::Array as u16);
+        let h = HeapHeader::new(HeapKind::TypedObject as u16);
         assert_eq!(h.refcount(), 1);
-        assert_eq!(h.kind, HeapKind::Array as u16);
+        assert_eq!(h.kind, HeapKind::TypedObject as u16);
         assert_eq!(h.flags, 0);
         assert_eq!(h._pad, 0);
     }
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_release_returns_true_on_last_drop() {
-        let h = HeapHeader::new(HeapKind::Array as u16);
+        let h = HeapHeader::new(HeapKind::TypedObject as u16);
         // refcount starts at 1; single release should return true
         assert!(h.release());
     }
@@ -277,24 +277,19 @@ mod tests {
     #[test]
     fn test_heap_kind_roundtrip() {
         assert_eq!(HeapKind::from_u16(0), Some(HeapKind::String));
-        assert_eq!(HeapKind::from_u16(1), Some(HeapKind::Array));
-        assert_eq!(HeapKind::from_u16(2), Some(HeapKind::TypedObject));
+        assert_eq!(HeapKind::from_u16(1), Some(HeapKind::TypedObject));
+        assert_eq!(HeapKind::from_u16(2), Some(HeapKind::Closure));
         assert_eq!(
-            HeapKind::from_u16(HeapKind::F32Array as u16),
-            Some(HeapKind::F32Array)
+            HeapKind::from_u16(HeapKind::DataTable as u16),
+            Some(HeapKind::DataTable)
         );
-        // Variants added after F32Array must also round-trip
         assert_eq!(
-            HeapKind::from_u16(HeapKind::Set as u16),
-            Some(HeapKind::Set)
+            HeapKind::from_u16(HeapKind::TypedArray as u16),
+            Some(HeapKind::TypedArray)
         );
         assert_eq!(
             HeapKind::from_u16(HeapKind::Char as u16),
             Some(HeapKind::Char)
-        );
-        assert_eq!(
-            HeapKind::from_u16(HeapKind::ProjectedRef as u16),
-            Some(HeapKind::ProjectedRef)
         );
         // One past the last variant must return None
         assert_eq!(
@@ -308,12 +303,12 @@ mod tests {
     fn test_heap_kind_from_u8() {
         assert_eq!(HeapKind::from_u8(0), Some(HeapKind::String));
         assert_eq!(
-            HeapKind::from_u8(HeapKind::F32Array as u8),
-            Some(HeapKind::F32Array)
+            HeapKind::from_u8(HeapKind::TypedArray as u8),
+            Some(HeapKind::TypedArray)
         );
         assert_eq!(
-            HeapKind::from_u8(HeapKind::ProjectedRef as u8),
-            Some(HeapKind::ProjectedRef)
+            HeapKind::from_u8(HeapKind::Char as u8),
+            Some(HeapKind::Char)
         );
         assert_eq!(HeapKind::from_u8(200), None);
     }
@@ -337,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_flags() {
-        let mut h = HeapHeader::new(HeapKind::Array as u16);
+        let mut h = HeapHeader::new(HeapKind::TypedObject as u16);
         assert!(!h.has_flag(FLAG_MARKED));
         assert!(!h.has_flag(FLAG_PINNED));
 

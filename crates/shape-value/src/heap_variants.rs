@@ -38,90 +38,39 @@ macro_rules! define_heap_types {
     () => {
         /// Discriminator for HeapValue variants, usable without full pattern match.
         ///
-        /// The discriminant order is ABI-stable. New variants MUST be appended
-        /// at the end. Variants marked "(removed)" no longer have a matching
-        /// `HeapValue` arm — the ordinal is reserved.
+        /// One variant per surviving `HeapValue` arm — no dead variants
+        /// expressible. Trimmed in Phase 2b alongside the
+        /// `NativeKind::Ptr(HeapKind)` extension; see
+        /// `docs/defections.md` 2026-05-06 (HeapKind trim +
+        /// NativeKind::Ptr extension) for the audit findings and rejected
+        /// alternatives.
+        ///
+        /// The previous 77-variant surface (with `(removed)` /
+        /// `(deprecated)` annotations) preserved ordinals "for ABI
+        /// stability"; the bulldozer deleted the `tags.rs`
+        /// ordinal-stability test that made that contract load-bearing,
+        /// so the dead variants no longer had a justification to
+        /// remain in the source.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[repr(u8)]
         pub enum HeapKind {
-            String,             // 0
-            Array,              // 1  (removed — heterogeneous-element array; use TypedArray)
-            TypedObject,        // 2
-            Closure,            // 3
-            Decimal,            // 4
-            BigInt,             // 5
-            HostClosure,        // 6  (removed — dynamic FFI; awaiting monomorphized signature)
-            DataTable,          // 7
-            TypedTable,         // 8  (deprecated — use TableView)
-            RowView,            // 9  (deprecated — use TableView)
-            ColumnRef,          // 10 (deprecated — use TableView)
-            IndexedTable,       // 11 (deprecated — use TableView)
-            Range,              // 12 (removed — dynamic Range payload; awaiting monomorphized Range<T>)
-            Enum,               // 13 (removed — heterogeneous payload; awaiting per-variant TypedStruct)
-            Some,               // 14 (removed — dynamic Option payload; awaiting monomorphized Option<T>)
-            Ok,                 // 15 (removed — dynamic Result payload; awaiting monomorphized Result<T,E>)
-            Err,                // 16 (removed — dynamic Result payload; awaiting monomorphized Result<T,E>)
-            Future,             // 17
-            TaskGroup,          // 18
-            TraitObject,        // 19 (removed — dynamic value payload; awaiting typed redesign)
-            ExprProxy,          // 20 (deprecated — use Rare)
-            FilterExpr,         // 21 (deprecated — use Rare)
-            Time,               // 22 (deprecated — use Temporal)
-            Duration,           // 23 (deprecated — use Temporal)
-            TimeSpan,           // 24 (deprecated — use Temporal)
-            Timeframe,          // 25 (deprecated — use Temporal)
-            TimeReference,      // 26 (deprecated — use Temporal)
-            DateTimeExpr,       // 27 (deprecated — use Temporal)
-            DataDateTimeRef,    // 28 (deprecated — use Temporal)
-            TypeAnnotation,     // 29 (deprecated — use Rare)
-            TypeAnnotatedValue, // 30 (deprecated — use Rare)
-            PrintResult,        // 31 (deprecated — use Rare)
-            SimulationCall,     // 32 (deprecated — use Rare)
-            FunctionRef,        // 33 (removed — dynamic closure payload)
-            DataReference,      // 34 (deprecated — use Rare)
-            Number,             // 35
-            Bool,               // 36
-            None,               // 37
-            Unit,               // 38
-            Function,           // 39
-            ModuleFunction,     // 40
-            HashMap,            // 41 (removed — heterogeneous-keyed; awaiting monomorphized typed buckets)
-            Content,            // 42
-            Instant,            // 43
-            IoHandle,           // 44
-            SharedCell,         // 45 (deprecated — retired in Track A.1C.3)
-            NativeScalar,       // 46
-            NativeView,         // 47
-            IntArray,           // 48 (deprecated — use TypedArray)
-            FloatArray,         // 49 (deprecated — use TypedArray)
-            BoolArray,          // 50 (deprecated — use TypedArray)
-            Matrix,             // 51 (deprecated — use TypedArray)
-            Iterator,           // 52 (removed — dynamic capture/source; awaiting typed iterator design)
-            Generator,          // 53 (removed — dynamic state)
-            Mutex,              // 54 (deprecated — use Concurrency)
-            Atomic,             // 55 (deprecated — use Concurrency)
-            Lazy,               // 56 (deprecated — use Concurrency)
-            I8Array,            // 57 (deprecated — use TypedArray)
-            I16Array,           // 58 (deprecated — use TypedArray)
-            I32Array,           // 59 (deprecated — use TypedArray)
-            U8Array,            // 60 (deprecated — use TypedArray)
-            U16Array,           // 61 (deprecated — use TypedArray)
-            U32Array,           // 62 (deprecated — use TypedArray)
-            U64Array,           // 63 (deprecated — use TypedArray)
-            F32Array,           // 64 (deprecated — use TypedArray)
-            Set,                // 65 (removed — heterogeneous-element)
-            Deque,              // 66 (removed — heterogeneous-element)
-            PriorityQueue,      // 67 (removed — heterogeneous-element)
-            Channel,            // 68 (deprecated — use Concurrency)
-            Char,               // 69
-            ProjectedRef,       // 70 (removed — dynamic index)
-            FloatArraySlice,    // 71 (deprecated — use TypedArray)
-            // ===== New consolidated ordinals =====
-            TypedArray,         // 72
-            Temporal,           // 73
-            Rare,               // 74 (removed — held ValueWord-bearing TypeAnnotatedValue)
-            Concurrency,        // 75 (removed — Mutex/Lazy/Channel held ValueWord)
-            TableView,          // 76
+            String,        // 0
+            TypedObject,   // 1
+            Closure,       // 2  (matches HeapValue::ClosureRaw via the Closure ordinal)
+            Decimal,       // 3
+            BigInt,        // 4
+            DataTable,     // 5
+            Future,        // 6
+            TaskGroup,     // 7
+            TypedArray,    // 8
+            Temporal,      // 9
+            TableView,     // 10
+            Content,       // 11
+            Instant,       // 12
+            IoHandle,      // 13
+            NativeScalar,  // 14
+            NativeView,    // 15
+            Char,          // 16
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
