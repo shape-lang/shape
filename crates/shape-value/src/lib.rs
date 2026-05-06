@@ -14,14 +14,10 @@
 
 // Re-export core types
 pub mod aligned_vec;
-pub mod array_view;
-pub mod closure;
 pub mod content;
 pub mod context;
 pub mod datatable;
-pub mod enums;
 pub mod external_value;
-pub mod extraction;
 pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;
@@ -35,36 +31,22 @@ pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
 pub mod typed_buffer;
-pub mod unified_array;
-pub mod unified_matrix;
-pub mod unified_string;
-pub mod unified_wrapper;
 pub mod v2;
 pub mod value;
 pub mod vm_closure_handle;
 
 pub use aligned_vec::AlignedVec;
-pub use closure::Closure;
 pub use content::{
     BorderStyle, ChartChannel, ChartSeries, ChartSpec, ChartType, Color, ContentNode, ContentTable,
     NamedColor, Style, StyledSpan, StyledText,
 };
-pub use context::{ErrorLocation, LocatedVMError, VMContext, VMError};
+pub use context::{ErrorLocation, LocatedVMError, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};
-pub use enums::{EnumPayload, EnumValue};
-pub use external_value::{
-    ExternalValue, NoSchemaLookup, SchemaLookup, external_to_nb, nb_to_external,
-};
-pub use extraction::{
-    nb_to_display_string, require_arc_string, require_array, require_bool, require_datatable,
-    require_f64, require_int, require_number, require_string, require_typed_object,
-};
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar};
-pub use array_view::{ArrayView, ArrayViewMut};
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
@@ -76,11 +58,6 @@ pub use shape_graph_current::{
 };
 pub use slot::ValueSlot;
 pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-pub use value::{
-    FilterLiteral, FilterNode, FilterOp, HostCallable, PrintResult, PrintSpan, Upvalue, VMArray,
-    VMArrayBuf, VMARRAY_INLINE_CAP, VTable, VTableEntry, vmarray_from_nanboxed,
-    vmarray_from_value_words, vmarray_from_vec,
-};
 pub use vm_closure_handle::VmClosureHandle;
 
 // v2 runtime re-exports

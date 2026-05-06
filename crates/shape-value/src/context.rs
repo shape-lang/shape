@@ -1,16 +1,9 @@
-//! VM execution context and error types
-
-use super::ValueWord;
-
-/// VM execution context passed to module functions
-pub struct VMContext<'vm> {
-    /// Reference to the VM's stack
-    pub stack: &'vm mut Vec<ValueWord>,
-    /// Reference to local variables
-    pub locals: &'vm mut Vec<ValueWord>,
-    /// Reference to global variables
-    pub globals: &'vm mut Vec<ValueWord>,
-}
+//! VM execution error types and source-location data.
+//!
+//! `VMContext` (the host-callable boundary that previously held mutable refs
+//! to the VM's `Vec<ValueWord>` stack/locals/globals) was deleted with the
+//! strict-typing bulldozer — host-callable signatures move to typed
+//! contracts. Error types and `ErrorLocation` continue unchanged.
 
 /// Source location for error reporting
 #[derive(Debug, Clone, PartialEq, Default)]
