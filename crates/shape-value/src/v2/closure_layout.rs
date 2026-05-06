@@ -102,7 +102,7 @@ pub struct SharedCell {
     /// Padding to align `value` to offset 8. Not read.
     _pad: [u8; 7],
     /// Value payload. Read/written only while the lock is held.
-    pub value: std::cell::UnsafeCell<crate::ValueWord>,
+    pub value: std::cell::UnsafeCell<u64>,
 }
 
 // SAFETY: SharedCell provides interior mutability guarded by its own
@@ -153,7 +153,7 @@ pub const SHARED_CELL_UNLOCKED: u8 = 0;
 impl SharedCell {
     /// Construct a new unlocked cell holding `value`.
     #[inline]
-    pub fn new(value: crate::ValueWord) -> Self {
+    pub fn new(value: u64) -> Self {
         Self {
             state: std::sync::atomic::AtomicU8::new(SHARED_CELL_UNLOCKED),
             _pad: [0; 7],
@@ -248,9 +248,9 @@ pub struct SharedCellGuard<'a> {
 }
 
 impl<'a> std::ops::Deref for SharedCellGuard<'a> {
-    type Target = crate::ValueWord;
+    type Target = u64;
     #[inline]
-    fn deref(&self) -> &crate::ValueWord {
+    fn deref(&self) -> &u64 {
         // SAFETY: holding the guard implies the lock is held, so we
         // have exclusive access to the UnsafeCell payload.
         unsafe { &*self.cell.value.get() }
@@ -259,7 +259,7 @@ impl<'a> std::ops::Deref for SharedCellGuard<'a> {
 
 impl<'a> std::ops::DerefMut for SharedCellGuard<'a> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut crate::ValueWord {
+    fn deref_mut(&mut self) -> &mut u64 {
         // SAFETY: see `deref`.
         unsafe { &mut *self.cell.value.get() }
     }
