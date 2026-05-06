@@ -35,20 +35,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Typed return value from a native module function.
+/// Strictly-typed leaf value returned by a native function body.
 ///
-/// Each variant maps deterministically to a `ValueWord` representation via
-/// [`TypedReturn::into_value_word`]. The function body produces a
-/// `TypedReturn` directly; marshalling happens at the registry boundary.
-///
-/// Phase 4b covers static-typed return shapes only. Phase 4c grows the
-/// enum to cover sum-typed shapes (`Result<T,E>`, `Option<T>`) and the
-/// `Opaque` heap-handle variant used by arrow/wire (DataTable) — see
-/// [`TypedReturn::Ok`], [`TypedReturn::Err`], [`TypedReturn::Some`],
-/// [`TypedReturn::None`], [`TypedReturn::DataTable`],
-/// [`TypedReturn::ArrayObjectPairs`].
+/// Two-tier split (`docs/defections.md` 2026-05-06): the leaf variants
+/// live here, and the wrapper variants (`Ok`/`Err`/`Some`, `ObjectPairs`,
+/// etc.) on [`TypedReturn`] take `ConcreteReturn` rather than a recursive
+/// `Box<TypedReturn>`. The Rust type system enforces that no
+/// `TypedReturn::Ok(TypedReturn::Ok(...))` and (post-Phase-2a) no
+/// `TypedReturn::Ok(TypedReturn::ValueWord(...))`-shaped patterns are
+/// constructible — the forbidden state is unrepresentable, not just
+/// unreachable. Mirrors the `ProofGap` discipline.
 #[derive(Debug, Clone)]
-pub enum TypedReturn {
+pub enum ConcreteReturn {
     /// 64-bit signed integer.
     I64(i64),
     /// 64-bit floating-point number (the `number` type in Shape).
@@ -72,39 +70,54 @@ pub enum TypedReturn {
     Bytes(Vec<u8>),
     /// HashMap with string keys and string values.
     HashMapStringString(Vec<(String, String)>),
-    /// Object built from string→TypedReturn pairs, materialized as a
-    /// `HashMap` ValueWord (same shape as `from_hashmap_pairs`). Used by
-    /// e.g. `crypto.ed25519_generate_keypair` and the legacy `archive`
-    /// entry shape. Insertion order is preserved.
-    ObjectPairs(Vec<(String, TypedReturn)>),
-    /// Anonymous typed object — looked up via
-    /// [`crate::type_schema::typed_object_from_pairs`] using the field
-    /// names as the schema discriminator. Panics at marshal time if no
-    /// matching predeclared schema is registered (matches the existing
-    /// helper's contract). Used by `time.benchmark` whose return shape is
-    /// `{ elapsed_ms, iterations, avg_ms }`.
-    TypedObject(Vec<(String, TypedReturn)>),
-    /// `Ok(payload)` — `Result<T,E>` success constructor. The payload type
-    /// follows the function's declared `Result<T,…>` shape; mismatched
-    /// payload variants are a registration-time bug.
-    Ok(Box<TypedReturn>),
-    /// `Err(payload)` — `Result<T,E>` error constructor. For functions
-    /// declared `Result<T, string>`, `payload` is `TypedReturn::String(…)`.
-    Err(Box<TypedReturn>),
-    /// `Some(payload)` — `Option<T>` present constructor.
-    Some(Box<TypedReturn>),
-    /// `None` — `Option<T>` absent constructor.
-    None,
     /// `DataTable` heap handle — opaque columnar table from
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
     DataTable(Arc<DataTable>),
-    /// Array of typed object pairs. Each element is a
-    /// `Vec<(String, TypedReturn)>` (same shape as
-    /// `TypedReturn::ObjectPairs`), materialized via the runtime
-    /// marshal layer. Used by xml/regex/csv where the function returns
-    /// `Array<{...}>`.
-    ArrayObjectPairs(Vec<Vec<(String, TypedReturn)>>),
+}
+
+/// Typed return value from a native module function.
+///
+/// Two-tier with [`ConcreteReturn`]: every wrapper variant
+/// (`Ok`/`Err`/`Some`/`ObjectPairs`/etc.) takes a `ConcreteReturn` payload.
+/// Nesting `TypedReturn` inside `TypedReturn` is unrepresentable, which
+/// also makes the long-deleted `TypedReturn::ValueWord` escape hatch
+/// unreachable from any container variant.
+///
+/// The Phase 2b kind-threaded marshal layer projects each variant
+/// directly into a typed VM slot using the function's registered
+/// [`ConcreteType`] return descriptor.
+#[derive(Debug, Clone)]
+pub enum TypedReturn {
+    /// Direct leaf-typed return.
+    Concrete(ConcreteReturn),
+    /// Object built from string→leaf pairs, materialized as a
+    /// `HashMap`-shaped TypedObject. Insertion order preserved.
+    ObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// Anonymous typed object — looked up via
+    /// [`crate::type_schema::typed_object_from_pairs`] using the field
+    /// names as the schema discriminator. Panics at marshal time if no
+    /// matching predeclared schema is registered. Used by
+    /// `time.benchmark` whose return shape is
+    /// `{ elapsed_ms, iterations, avg_ms }`.
+    TypedObject(Vec<(String, ConcreteReturn)>),
+    /// `Ok(payload)` — `Result<T,E>` success constructor.
+    Ok(ConcreteReturn),
+    /// `Err(payload)` — `Result<T,E>` error constructor.
+    Err(ConcreteReturn),
+    /// `Some(payload)` — `Option<T>` present constructor.
+    Some(ConcreteReturn),
+    /// `None` — `Option<T>` absent constructor.
+    None,
+    /// Array of typed-object rows. Used by xml/regex/csv where the
+    /// function returns `Array<{...}>`.
+    ArrayObjectPairs(Vec<Vec<(String, ConcreteReturn)>>),
+}
+
+impl From<ConcreteReturn> for TypedReturn {
+    fn from(c: ConcreteReturn) -> Self {
+        TypedReturn::Concrete(c)
+    }
 }
 
 // `TypedReturn::into_value_word()` is removed. The strict-typed marshal
