@@ -216,23 +216,33 @@ impl ConcreteType {
 
 /// One typed-return native module function entry.
 ///
-/// Stores the typed body alongside the declared return type and parameter
-/// types. The legacy `ModuleFn` wrapper is built at registration time from
-/// these — see [`register_typed_function`].
+/// Stores the typed body alongside the declared return type, parameter
+/// types, and the per-arg [`shape_value::NativeKind`] table that the
+/// dispatcher uses to read each slot's bits. Built only by the typed
+/// `register_typed_fn_N` helpers in [`crate::marshal`] — those helpers
+/// derive `arg_kinds` from each parameter's `FromSlot::NATIVE_KIND`
+/// associated constant, so the kinds cannot drift from the body's
+/// actual Rust signature.
 #[derive(Clone)]
 pub struct TypedModuleFunction {
-    /// The typed function body. Receives the raw `&[ValueWord]` arg slice
-    /// and the existing `ModuleContext`; returns a `TypedReturn`.
+    /// The typed function body. Receives a raw `&[u64]` slot-bits slice
+    /// (the dispatcher has guaranteed each slot's kind matches
+    /// [`Self::arg_kinds`]) plus the `ModuleContext`; returns a
+    /// `TypedReturn`.
     pub invoke: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
             + Send
             + Sync,
     >,
     /// Declared return type (used for LSP and consistency checks).
     pub return_type: ConcreteType,
     /// Parameter type names (mirrors `ModuleParam::type_name` for LSP
-    /// hover/completions). Phase 4c will tighten these to a typed enum.
+    /// hover/completions).
     pub arg_types: Vec<String>,
+    /// Per-arg `NativeKind` derived from `FromSlot::NATIVE_KIND` at
+    /// registration. The dispatcher uses this to decode each slot's
+    /// bits with the correct kind. Length matches `arg_types`.
+    pub arg_kinds: Vec<shape_value::NativeKind>,
 }
 
 /// One typed-return native module *async* function entry.
@@ -245,10 +255,11 @@ pub struct TypedModuleFunction {
 #[derive(Clone)]
 pub struct TypedModuleAsyncFunction {
     /// The typed async function body. Owns its arg vec to satisfy
-    /// `'static` future bounds.
+    /// `'static` future bounds. Receives raw `Vec<u64>` slot bits
+    /// whose kinds match `Self::arg_kinds`.
     pub invoke: Arc<
         dyn Fn(
-                Vec<ValueWord>,
+                Vec<u64>,
             ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
@@ -257,6 +268,8 @@ pub struct TypedModuleAsyncFunction {
     pub return_type: ConcreteType,
     /// Parameter type names (mirrors `ModuleParam::type_name`).
     pub arg_types: Vec<String>,
+    /// Per-arg `NativeKind`. See [`TypedModuleFunction::arg_kinds`].
+    pub arg_kinds: Vec<shape_value::NativeKind>,
 }
 
 /// Per-module registry of typed exports.
@@ -306,130 +319,12 @@ impl TypedModuleExports {
     }
 }
 
-/// Register a typed-return function on a `ModuleExports`.
-///
-/// Adds:
-/// 1. A `TypedModuleFunction` entry to the typed registry on the module
-///    (created lazily via `ModuleExports::typed_exports_mut`).
-/// 2. A `ModuleFunction` schema (description + params + return type
-///    string from `ConcreteType::shape_type_name`) on
-///    `ModuleExports::schemas`, plus a default-Public visibility entry.
-///
-/// Phase 4c.4: the legacy `ModuleFn` auto-wrap was deleted. The VM's
-/// runtime dispatch path goes through `typed_exports.functions` directly
-/// via `ModuleFnEntry::Typed` — no `ValueWord` round-trip in the body.
-/// Tests that previously invoked through `module.get_export(name)` use
-/// `module.invoke_export(name, ...)` instead.
-pub fn register_typed_function<F>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    description: impl Into<String>,
-    params: Vec<ModuleParam>,
-    return_type: ConcreteType,
-    body: F,
-) where
-    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-        + Send
-        + Sync
-        + 'static,
-{
-    let name = name.into();
-    let body_arc: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
-    > = Arc::new(body);
-
-    let arg_types = params.iter().map(|p| p.type_name.clone()).collect();
-    let return_type_str = return_type.shape_type_name();
-
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: description.into(),
-            params,
-            return_type: Some(return_type_str),
-        },
-    );
-
-    module.typed_exports_mut().functions.insert(
-        name,
-        TypedModuleFunction {
-            invoke: body_arc,
-            return_type,
-            arg_types,
-        },
-    );
-}
-
-/// Register a typed-return *async* function on a `ModuleExports`.
-///
-/// Mirrors [`register_typed_function`] but installs an entry in
-/// `typed_exports.async_functions`. The async body returns
-/// `Result<TypedReturn, String>` and the boundary marshalling
-/// (`TypedReturn` → `ValueWord`) happens after the future resolves.
-///
-/// Phase 4c.4: the legacy `AsyncModuleFn` auto-wrap was deleted. The VM
-/// dispatches through `typed_exports.async_functions` directly via
-/// `ModuleFnEntry::TypedAsync`.
-///
-/// Note: async functions don't get a `ModuleContext` (the context borrows
-/// from the VM and can't cross await points). Permission checks must be
-/// performed before the await — typically by inspecting the args and
-/// short-circuiting in the body. The HTTP module relies on a
-/// host-supplied `NetConnect` permission gate around the dispatch site.
-pub fn register_typed_async_function<F, Fut>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    description: impl Into<String>,
-    params: Vec<ModuleParam>,
-    return_type: ConcreteType,
-    body: F,
-) where
-    F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
-{
-    let name = name.into();
-    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
-    let return_type_str = return_type.shape_type_name();
-
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: description.into(),
-            params,
-            return_type: Some(return_type_str),
-        },
-    );
-
-    // Typed-registry entry — sibling to the sync `functions` map.
-    // The typed body is wrapped to box+pin its future so all async
-    // exports share a uniform `Pin<Box<dyn Future<...>>>` invocation
-    // shape regardless of the concrete `Fut` type.
-    let typed_invoke: Arc<
-        dyn Fn(
-                Vec<ValueWord>,
-            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-            + Send
-            + Sync,
-    > = Arc::new(move |args: Vec<ValueWord>| {
-        let fut = body(args);
-        Box::pin(fut)
-            as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-    });
-
-    module
-        .typed_exports_mut()
-        .async_functions
-        .insert(
-            name,
-            TypedModuleAsyncFunction {
-                invoke: typed_invoke,
-                return_type,
-                arg_types,
-            },
-        );
-}
+// `register_typed_function` and `register_typed_async_function` (the
+// polymorphic-arg legacy registration helpers that took
+// `Fn(&[ValueWord], ..)` bodies) are deleted. Use the per-arity helpers
+// in [`crate::marshal`] instead — they enforce typed args via
+// `FromSlot` at the type-system level. Stdlib modules will be migrated
+// module-by-module in Phase 2c.
 
 // `register_test_function` / `_with_schema` / `register_test_async_function`
 // were thin wrappers that fed a `Fn(&[ValueWord]) -> Result<ValueWord, ..>`

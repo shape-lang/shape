@@ -50,6 +50,7 @@ pub mod hashing;
 pub mod intrinsics;
 pub mod join_executor;
 pub mod json_value;
+pub mod marshal;
 pub mod leakage;
 pub mod lookahead_guard;
 pub mod metadata;
