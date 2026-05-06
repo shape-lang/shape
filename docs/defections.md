@@ -229,26 +229,95 @@ answer is to make `HeapValue::IoHandle` payload directly `Arc<IoHandleData>`
 (single Arc, accessed via `&Arc::clone(&payload)` from the heap value).
 That's a `HeapValue` shape change, not just a marshal extension.
 
-**Architectural decision needed (next session):** pick α/β/γ. The
-choice ripples across all 48 stdlib_io functions; once committed the
-function bodies all rewrite to the chosen shape, so doing it half-
-blind risks 48-site re-touch.
+**Architectural decision (this session):** pick **option γ —
+Arc<IoHandleData> separate-Arc, with `HeapValue::IoHandle` payload
+changed from `Box<IoHandleData>` to `Arc<IoHandleData>` (single Arc,
+not double-Arc as the original entry framed it).** The "double-Arc
+perf regression" framing in the original entry was wrong — it
+counted `Box<IoHandleData>` clone cost (alloc + memcpy + atomic
+inside the inner Arc<Mutex<...>>) the same as `Arc<IoHandleData>`
+clone (one atomic). Switching the variant payload from Box to Arc
+is actually a small **perf improvement** for HeapValue cloning,
+not a regression.
 
-**Alternative taken:** defer the entire stdlib_io cluster (48 functions
-+ 7 visible mod.rs errors + body rewrites in file_ops/network_ops/
-path_ops/process_ops/async_file_ops). The cluster lands as one
-coherent migration when the IoHandle FromSlot signature is decided.
+**Why option γ over α and β:**
 
-**Consumer count blocked:** 7 errors visible in `stdlib_io/mod.rs`
-plus 3 in `file_ops.rs`, 2 in `async_file_ops.rs`. Body-side ValueWord
-references in network_ops/path_ops/process_ops not yet visible
-(masked by import gate). Total cluster: ~48 functions, ~12 visible
-errors, plus body rewrites.
+- **α (Arc<HeapValue> + body unwrap)** would mirror cluster #3
+  option β's pattern-match-on-mismatch shape, but every body declares
+  `arc: Arc<HeapValue>` and unwraps via match. The body's parameter
+  type is opaque — readers see "this body takes a heap pointer,
+  then reaches into HeapValue::IoHandle" rather than "this body
+  takes an IoHandle." The α-shape "as_io_handle() helper on
+  HeapValue" rationalization that compresses the unwrap boilerplate
+  is rejected: it would hide the typed correspondence between the
+  body's parameter type and the actual payload. Same pattern as
+  cluster #3's rejection of "preserve dead infrastructure under
+  typed shape" — different layer, same defection-attractor risk.
+- **β (FromSlotRef<'a>)** is a real architectural addition — a
+  parallel trait family (`FromSlotRef<'a>`, `register_typed_fn_N_ref`
+  parallel helpers) that will proliferate (DataTable wants this
+  eventually, then Content, then everything). The lifetime
+  plumbing is non-trivial and the trait-family-grows risk is real.
+  Avoid.
+- **γ (Arc<IoHandleData>)** mirrors the existing `Arc<DataTable>`
+  precedent at `marshal.rs:193` exactly. Single source of truth
+  at the FromSlot pattern level. Self-documenting body
+  (`fn open(handle: Arc<IoHandleData>)` states what the body
+  needs). Same consistency-check residual as α and β at the
+  `match HeapValue::IoHandle(...) => …, _ => panic!()` layer.
 
-**Cost saved:** prevented committing to one of α/β/γ without the
-consumer perf data that the JIT cascade will surface. Estimate: 2-3
-days of "audit IoHandle hot path under chosen FromSlot signature"
-follow-up avoided.
+The HeapValue payload shape change (`Box<IoHandleData>` →
+`Arc<IoHandleData>`) is a small structural edit at
+`heap_variants.rs` macro + `heap_value.rs` Clone impl. Consumer-side
+breakage is bounded to pattern-match sites that destructure
+`HeapValue::IoHandle(box_or_arc)` — auditable in one grep.
+
+**Alternative taken:** option γ. `Arc<IoHandleData>` FromSlot/ToSlot
+impls in `marshal.rs` mirror the `Arc<DataTable>` shape exactly.
+Bodies declare `Arc<IoHandleData>` and call methods on it directly
+via `Arc::deref` (e.g. `handle.is_open()`, `handle.close()`,
+`handle.resource.lock()`).
+
+**Consumer count blocked (post-2026-05-06 cluster identity re-trace,
+sixth instance of the directory-adjacency cluster fallacy):** the
+original "48 stdlib_io functions" framing conflated cluster #2
+(IoHandle marshal) with the path-only mass migration that lives
+in the same `stdlib_io/` directory. Tracing each function via grep
+`as_io_handle / from_io_handle / IoHandleData`:
+
+| File | Total `pub fn` | IoHandle-touching | Cluster identity |
+|------|----------------|-------------------|------------------|
+| `file_ops.rs` | 17 | ~8 (open, read, read_to_string, read_bytes, write, close, flush, read_gzip, write_gzip) | cluster #2 |
+| `network_ops.rs` | 9 | ~9 (TCP/UDP/handle ops) | cluster #2 |
+| `process_ops.rs` | 12 | ~10 (spawn/kill/wait/etc) | cluster #2 |
+| `path_ops.rs` | 5 | **0** | NOT cluster #2 — stdlib_io path-mass cluster |
+| `async_file_ops.rs` | 5 | **0** | NOT cluster #2 — stdlib_io path-mass cluster (async variant) |
+| `mod.rs` | (registration) | (handle wiring) | cluster #2 |
+
+**Real cluster #2 surface: ~27-30 IoHandle-touching functions**, not 48.
+The other ~18 stdlib_io functions are path-only (`Arc<String>`
+input, no IoHandle) and migrate mechanically with `register_typed_fn_N`
+or `register_typed_async_fn_N` — they're a separate cluster
+("stdlib_io path-mass") that's already fully unblocked, just sitting
+alongside the IoHandle-blocked work in the same crate directory.
+
+**Watchlist crystallization (sixth instance, now confirmed
+baseline):** "directory-adjacency cluster fallacy." When a deferral
+entry frames a cluster by directory or file name (e.g. "the
+stdlib_io cluster", "the parser cluster"), verify each file's
+actual call shape (which calling convention, which dispatch path,
+which marshal extension it depends on) before assigning to the
+cluster. **File / directory adjacency is not cluster identity.**
+Six prior instances in this work, all systematic miscounts. Adopted
+as a binding pre-cluster-execution check.
+
+**Cost saved:** prevented committing to option α's "as_io_handle()
+helper on HeapValue" shape (which would have hidden the typed
+correspondence between body parameter and payload — same
+defection-attractor pattern as the cluster #3 dead-infrastructure
+rejection). Prevented option β's FromSlotRef<'a> trait-family
+expansion that would have proliferated across DataTable / Content /
+Arc<String> consumers.
 
 ---
 
