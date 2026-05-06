@@ -339,19 +339,10 @@ impl BytecodeCompiler {
     /// is a static annotation for the JIT and downstream consumers.
     /// Unproven types fall back to polymorphic `ReturnValue`.
     ///
-    /// Wave E+5.5 producer/return-kind contract gate (R2): typed
-    /// `ReturnValue<Kind>` handlers route raw native bits through unchanged
-    /// AND stamp `last_program_return_kind = Kind` on the VM when the pop
-    /// empties the top-level call stack (`typed_return_with_kind` in
-    /// `executor/control_flow/mod.rs`). If the actual producer pushed
-    /// tagged `ValueWord` bits — e.g. `CallMethod` for `.len()` on a plain
-    /// array (`last_expr_numeric_type = Int` from the method annotation
-    /// but the opcode itself is polymorphic), a monomorphized generic
-    /// call, or `LoadLocal` against a slot whose type tracker entry was
-    /// cleared — the host-boundary `synthesize_value_word_from_raw` would
-    /// then re-encode tagged bits as raw native (`from_i64(tagged_bits)`),
-    /// corrupting the program result with values like
-    /// `Some(-1970324836974587)` for an actual value of 5.
+    /// Strictly-typed contract: typed `ReturnValue<Kind>` handlers route
+    /// raw native bits through unchanged. The host-boundary return kind
+    /// comes from the compile-time `top_level_frame.return_kind` set by
+    /// `prove_native_kind` — no runtime stamping.
     ///
     /// Mirror the same producer-side gate `infer_top_level_return_kind`
     /// applies (`helpers.rs:2429`): only emit `ReturnValueI64`/`F64`/`Bool`

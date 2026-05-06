@@ -488,7 +488,6 @@ impl VirtualMachine {
         self.last_error_line = None;
         self.last_error_file = None;
         self.last_uncaught_exception = None;
-        self.last_program_return_kind = None;
     }
 
     /// Reset stack only (for reusing compiled program across iterations)
@@ -509,7 +508,6 @@ impl VirtualMachine {
         self.last_error_line = None;
         self.last_error_file = None;
         self.last_uncaught_exception = None;
-        self.last_program_return_kind = None;
     }
 
     /// Minimal reset for hot loops - only clears essential state

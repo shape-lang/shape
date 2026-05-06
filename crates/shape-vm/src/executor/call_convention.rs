@@ -583,20 +583,6 @@ impl VirtualMachine {
             return Err(VMError::InvalidCall);
         }
 
-        // Preserve `last_program_return_kind` across the closure call.
-        // `typed_return_with_kind` stamps the kind when the call_stack
-        // becomes empty — true even for closures invoked by runtime
-        // method handlers (e.g. `handle_int_find` calling its
-        // predicate). When the handler then synthesises its own
-        // result (e.g. `Ok(ValueWord::none().into_raw_bits())`), the
-        // host-boundary `synthesize_value_word_from_raw` would
-        // re-encode those bits using the closure's stamped kind and
-        // produce a corrupt ValueWord. Snapshot the kind before
-        // reentering the executor and restore it afterwards so only
-        // the program's own outermost typed return reaches the
-        // synthesizer.
-        let saved_return_kind = self.last_program_return_kind;
-
         let tag = get_tag(callee_bits);
         match tag {
             TAG_FUNCTION => {
@@ -614,7 +600,6 @@ impl VirtualMachine {
                     })
                     .collect();
                 let result_nb = self.invoke_module_fn_id(func_id, &args_vec)?;
-                self.last_program_return_kind = saved_return_kind;
                 return Ok(result_nb.into_raw_bits());
             }
             TAG_HEAP => {
@@ -625,7 +610,6 @@ impl VirtualMachine {
                 } else if let Some(result) =
                     raw_helpers::try_call_host_closure(callee_bits, args)
                 {
-                    self.last_program_return_kind = saved_return_kind;
                     return result;
                 } else {
                     return Err(VMError::InvalidCall);
@@ -635,9 +619,7 @@ impl VirtualMachine {
         }
 
         self.execute_until_call_depth(target_depth, ctx)?;
-        let result = self.pop_raw_u64();
-        self.last_program_return_kind = saved_return_kind;
-        result
+        self.pop_raw_u64()
     }
 
     /// Set up a function call frame from raw u64 args.

@@ -286,22 +286,6 @@ pub struct VirtualMachine {
     /// are initialized before calling the target function.
     module_init_done: bool,
 
-    /// Runtime-observed return kind from the most-recent typed
-    /// `op_return_value_<kind>` handler that returned to the top-level
-    /// frame (i.e. when the call stack became empty after the pop).
-    ///
-    /// The static `top_level_frame.return_kind` covers the cases where the
-    /// compiler can prove the program's final-expression kind at compile
-    /// time (e.g. direct `Call` to a function with a primitive return
-    /// annotation). This runtime field covers the polymorphic cases where
-    /// the compiler can't statically prove the kind — most importantly
-    /// `let g = make(); g(arg)` where `make() -> any` returns a closure
-    /// whose body uses `ReturnValueI64`/`F64`/`Bool`. The closure's typed
-    /// return handler runs inside `g(arg)`, lands the native bits at the
-    /// top-level boundary, and records the kind here so
-    /// `synthesize_value_word_from_raw` re-tags them correctly.
-    pub(crate) last_program_return_kind: Option<crate::type_tracking::SlotKind>,
-
     /// Output capture buffer for testing
     /// When Some, print output is captured here instead of going to stdout
     output_buffer: Option<Vec<String>>,

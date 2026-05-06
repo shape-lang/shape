@@ -33,9 +33,6 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
         let bits = self.execute_raw(ctx)?;
-        // Read the return kind AFTER execution so the runtime-observed
-        // `last_program_return_kind` (set by typed `op_return_value_<kind>`
-        // handlers landing at the top-level frame) is available.
         let return_kind = self.program_top_level_return_kind();
         Ok(synthesize_value_word_from_raw(bits, return_kind))
     }
@@ -63,20 +60,12 @@ impl VirtualMachine {
     ///
     /// Returns `Some(kind)` when `top_level_frame.return_kind` is set to a
     /// concrete `SlotKind` (i.e. the compiler proved a return type for the
-    /// top-level program). Returns `None` for the legacy / unproven case,
-    /// signalling that raw bits should be passed through as a
-    /// `ValueWord` directly.
+    /// top-level program). Returns `None` when no concrete kind is set —
+    /// after the strict-typing bulldozer, `None` should be reachable only
+    /// during Phase 2 reconstruction; once `prove_native_kind` is on, every
+    /// program has a proved return kind at compile time.
     #[inline]
     pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
-        // Prefer the runtime-observed kind from the most-recent typed
-        // `op_return_value_<kind>` that landed at the top-level boundary
-        // (see `last_program_return_kind` doc on `VirtualMachine`). This
-        // covers the polymorphic `let g = make(); g(arg)` case where the
-        // compiler can't statically prove the kind but the closure body's
-        // typed `ReturnValueI64`/`F64`/`Bool` did push native bits.
-        if let Some(kind) = self.last_program_return_kind {
-            return Some(kind);
-        }
         let kind = self.program.top_level_frame.as_ref()?.return_kind;
         match kind {
             crate::type_tracking::SlotKind::Unknown => None,

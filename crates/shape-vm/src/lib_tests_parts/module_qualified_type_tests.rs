@@ -39,9 +39,7 @@ mod module_qualified_type_tests {
         vm.load_program(bytecode);
         vm.populate_module_objects();
         // When the caller supplies a kind, pull raw bits and synthesize
-        // ourselves. This bypasses the runtime-observed
-        // `last_program_return_kind` stamp which the trailing typed
-        // `match` arms may set incorrectly post-Wave-E+5.
+        // ourselves rather than rely on the program's own declared kind.
         if let Some(k) = kind {
             let raw = vm.execute_raw(None).expect("execution failed");
             return crate::executor::dispatch::synthesize_value_word_from_raw(raw, Some(k));
