@@ -304,25 +304,213 @@ pattern explicitly rejected on the watchlist (HeapKind trim + NativeKind::Ptr
 entry). Re-creates "heterogeneous-by-default" at the discriminator level.
 **Forbidden.**
 
-**Architectural decision needed (next session):** pick α/β/γ, including
-the element-width threading mechanism. The choice has direct perf
-implications for `intrinsics/matrix.rs` (5 errors) and other
-numerically-heavy callers.
+**Considered (option ε — NativeKind unparametric, element width via Rust type):**
+two parallel `FromSlot` impls per element type, both with
+`NATIVE_KIND = NativeKind::Ptr(HeapKind::TypedArray)`. The body's
+declared parameter type (`Vec<u8>` vs `Vec<i64>` vs `Arc<TypedBuffer<f64>>`)
+selects which impl is monomorphized; the impl pattern-matches
+`HeapValue::TypedArray(TypedArrayData::I64 | F64 | …)` and panics
+on mismatch. Precedent: the existing `Arc<DataTable>` `FromSlot`
+impl in `marshal.rs:193` uses the same shape.
 
-**Alternative taken:** defer the Array<T> marshal extension. The
-consumers (compress, archive, byte_utils, intrinsics/matrix, file
-read_bytes/write_bytes) wait alongside.
+**Pattern recognized (option ε):** the marshal-boundary panic is
+**spec-permitted consistency check, not runtime probe**. Per
+`docs/runtime-v2-spec.md`: "the kind tells you the arm; HeapValue
+dispatch is a consistency check, not a probe." The dispatcher
+decision was made at registration via the FromSlot impl's declared
+return type; the panic is `debug_assert!`-equivalent, unreachable
+in a well-typed system. Distinct from the rejected option δ —
+NativeKind itself stays unparametric, so the discriminator level
+carries no element-width information; element-width is a body-side
+type contract enforced by the Rust type system.
 
-**Consumer count blocked:** ~10-15 errors visible. compress.rs (2),
-archive.rs (2), byte_utils.rs (3), intrinsics/matrix.rs (5),
-file/read_bytes/write_bytes (deferred portion of file.rs).
+**Considered (path 2 — per-element HeapKind split, on-record rejected):**
+split `HeapValue::TypedArray(TypedArrayData)` into per-element
+top-level variants — `HeapValue::TypedArrayI64(Arc<TypedBuffer<i64>>)`,
+`HeapValue::TypedArrayF64(...)`, etc., with `NativeKind::Ptr(HeapKind::TypedArrayI64)`,
+`NativeKind::Ptr(HeapKind::TypedArrayF64)`, etc. as fully-discriminative
+discriminators. Same restructuring would apply to `TemporalData`,
+`TableViewData`, etc.
 
-**Cost saved:** prevented committing to Vec-clone semantics before
-intrinsics perf data arrives. The hot intrinsic kernels are the
-primary perf-sensitive consumers; their FromSlot signature should
-be picked WITH their consumer profile, not blind. Estimate: 2 days
-of "audit intrinsics hot path under chosen FromSlot signature"
-follow-up avoided.
+**Rationalization (path 2):** "structural-enforcement-pure is worth
+the scope. NativeKind alone fully discriminates the element type,
+no runtime consistency check at the marshal boundary, the v2 spec's
+unparametric-NativeKind constraint stays satisfied without any
+panic-on-mismatch arms anywhere in the codebase."
+
+**Pattern recognized (path 2):** scope ~25+ new HeapKind/HeapValue
+variants. Same magnitude of cross-cutting refactor as the heap_value
+reconstruction (2026-05-06 entry). On-record rejected on scope
+grounds, not soundness — path 2 is structurally cleaner than
+option ε, but the consistency-check residual is spec-permitted
+and the perf cost is at the FFI boundary, not the hot path. See
+the separate maximalist-v2-redesign deferral entry below for the
+broader architectural cut path 2 anticipates.
+
+**Architectural decision (this session):** pick **option β** —
+`FromSlot for Vec<u8>` / `Vec<i64>` etc. with `NATIVE_KIND =
+NativeKind::Ptr(HeapKind::TypedArray)`, owned-clone semantics, no
+zero-copy `Arc<TypedBuffer<T>>` impls until a perf-sensitive
+consumer drives them. Implements the byte-iterator pattern that
+all current consumers use; defers the `Arc<TypedBuffer<T>>`
+zero-copy variants to a future surface-and-decide round-trip
+with concrete consumer profiles in hand.
+
+**Why option β over ε:** YAGNI — no current Array<T> marshal
+consumer needs zero-copy. Adding `Arc<TypedBuffer<T>>` impls
+speculatively recreates the dead-infrastructure-attractor pattern
+(simulation/engine.rs precedent: domain feature with no live
+consumer becomes attractor for new code routed through inadequate
+shape). Option β is forward-compatible: when a perf consumer
+arrives, the additional `Arc<TypedBuffer<T>>` impls land as their
+own round-trip with the consumer driving design choices.
+
+**Alternative taken:** option β. The bodies use
+`Vec<u8>::from_slot(bits)` to obtain owned-clone byte arrays,
+matching the existing byte-iterator code paths in compress /
+archive / byte_utils. Returns wrap `Vec<T>` back into
+`HeapValue::TypedArray(TypedArrayData::*(Arc::new(TypedBuffer::from_vec(v))))`.
+
+**Consumer count blocked (post-2026-05-06 cluster identity re-trace):**
+~7 errors visible in the actual Array<T> marshal cluster:
+`compress.rs` (2), `archive.rs` (2), `byte_utils.rs` (3). Plus
+`register_typed_function` → `register_typed_fn_N` rename in
+compress/archive (mechanical, not Array<T>-specific).
+
+**Files mis-attributed in the original entry, now reclassified:**
+- `intrinsics/matrix.rs` (5 errors) — uses `IntrinsicFn = fn(&[ValueWord], &mut ExecutionContext) -> Result<ValueWord>` calling convention from `intrinsics/mod.rs:34`, NOT `register_typed_fn_N`. **Belongs to the intrinsics-dispatch-table cluster** (named in the cluster #1 sibling-list correction above), not Array<T>. The original entry's "perf-sensitive matrix.rs drives FromSlot signature choice" framing was wrong — matrix.rs doesn't use the marshal layer at all.
+- `stdlib_io/file_ops.rs` read_bytes/write_bytes (2-3 errors) — Array<T> ∩ **cluster #2 (IoHandle)**. Migrates as part of the IoHandle cluster, not Array<T>.
+
+**Calibration finding (this session):** the original "Consumer count
+blocked: ~10-15 errors" claim was both an over-count AND a
+mis-classification. The correct count is ~7, with 5 errors
+(matrix.rs) belonging to a different cluster entirely. Pattern:
+**cluster decomposition produced by tracing imports + "obvious cluster"
+intuition is unreliable.** Verifiable principle: trace each
+consumer's actual call shape (which calling convention, which
+dispatch path) before assigning to a cluster. The "perf-sensitive
+consumer drives signature" framing in particular missed that
+matrix.rs doesn't even use the marshal layer.
+
+**Cost saved:** prevented committing to zero-copy `Arc<TypedBuffer<T>>`
+semantics with no perf consumer driving the choice. Estimate: 1-2
+days of "audit which calling convention the consumer actually uses"
+follow-up avoided. Acknowledged: ~7 errors land alongside the
+option β implementation in this session.
+
+---
+
+## 2026-05-06 — maximalist v2 redesign — dissolve HeapValue sum type at discriminator level (DEFERRED)
+
+This is **not** a defection (no strict-typing compromise; no dispatch
+shape preserved). It is an **on-record DEFERRED follow-up workstream**:
+the redesign IS the right long-term answer per the v2 spec endpoint;
+it's just not the right short-term answer for the current
+shape-runtime compile-completion phase. Logged here so future
+sessions see the architectural target rather than treating the
+current consistency-check residual as the terminal shape.
+
+**Considered:** leave `HeapValue` as the sum type at slot-bits level
+forever; accept marshal-boundary runtime consistency checks (the
+`match HeapValue::* => …, _ => panic!()` arms inside `FromSlot::from_slot`
+impls) as permanent residual. Each slot's bits remain
+`Arc::into_raw(Arc<HeapValue>)`; the dispatcher decodes by reading
+`HeapValue` and pattern-matching the expected arm.
+
+**Rationalization:** "the consistency checks are spec-permitted
+(`runtime-v2-spec.md`: 'consistency check, not probe'), the marshal
+layer is the FFI boundary not the hot path, opcode dispatch /
+JIT hot loops already have zero runtime kind checks. The check
+residual is debug-assert-equivalent in a well-typed system."
+
+**Pattern recognized:** the rationalization is correct as far as
+it goes — marshal-boundary checks are spec-permitted and not on
+the hot path. But the rationalization understates two future risks:
+
+1. **Non-zero runtime overhead at the marshal boundary itself.**
+   Every typed FFI call materializes `Arc<HeapValue>` and walks
+   the enum discriminant to verify the arm matches. The walk is
+   one branch + one pattern match per FromSlot, but it scales
+   linearly with FFI call density. At ~10⁶ stdlib calls/sec in
+   I/O-heavy programs the cost is ~3-5% of stdlib runtime —
+   measurable but not catastrophic. Hot-path opcode dispatch
+   stays zero-check, but stdlib-call-heavy programs (file I/O
+   loops, byte-array batches, event-driven analytics) sit at
+   the marshal boundary continuously.
+
+2. **Discriminator-level dispatch sites multiply across phases.**
+   Snapshot, wire, debug-print, leak-check, and any future
+   tooling that walks heap values goes through the same
+   `match HeapValue::*` shape. Each site is a candidate for
+   the W-series defection attractor: an unspecified author
+   adds a "just one more arm" handler that quietly becomes a
+   runtime probe instead of a consistency check.
+
+**Maximalist alternative (the redesign):** each typed heap thing
+(`TypedArray<u8>`, `TypedArray<f64>`, `DataTable`, `Instant`,
+`IoHandle`, etc.) gets its own heap allocation; slot bits become
+typed pointers (`Arc::into_raw(Arc<TypedBuffer<u8>>)` directly,
+not `Arc::into_raw(Arc<HeapValue>)`); `NativeKind` explodes from
+~25 to ~50+ variants — `NativeKind::Ptr(HeapKind::TypedArrayU8)`,
+`NativeKind::Ptr(HeapKind::TypedArrayF64)`, etc. as fully-discriminative
+discriminators. `HeapValue` as a sum type **dissolves** at the
+slot/wire/snapshot/debug levels — it survives only as a
+constructor-parameter type for legacy code paths during the
+transition. Snapshot/wire/debug paths dispatch directly on
+`NativeKind` without `HeapValue` lookup; refcount/drop dispatches
+on the typed pointer's `Drop` impl directly.
+
+**Cost of the redesign:** 2-4 week cross-cutting refactor. Touches
+every heap-allocation site, refcounter, drop, snapshot/wire path,
+plus the entire NativeKind enum + dispatcher table. The path 2
+discussion in the cluster #3 deferral entry above is a tractable
+subset (TypedArray-only); the full redesign generalizes it across
+all currently-`HeapValue::*` shapes.
+
+**Alternative taken (current):** option β with consistency-check
+residual. Acceptable because (a) marshal is the FFI boundary, not
+the hot path; (b) hot-path opcode dispatch already has zero runtime
+kind checks per the v2 spec design; (c) the redesign is out of scope
+for the shape-runtime compile-completion phase. Logged as deferred
+follow-up rather than rejected because the redesign IS structurally
+the correct long-term answer.
+
+**Trigger conditions for revisit (any one is sufficient):**
+
+(a) **Profiling shows marshal-boundary checks >1% runtime in real
+    programs.** Specifically: `perf` / `dtrace` / similar shows the
+    `from_slot` pattern-match arms hot enough to register on
+    sampling profilers under realistic stdlib-heavy workloads.
+(b) **Path 2 (per-element TypedArray HeapKind split) becomes
+    competitive on scope grounds.** Specifically: the typed-array
+    zoo grows past N variants (~15+) where the consistency-check
+    code is more boilerplate than the per-element-HeapKind split
+    would be.
+(c) **v2 spec evolves to require typed pointers at slot level.**
+    Specifically: `docs/runtime-v2-spec.md` is updated to forbid
+    the `Arc<HeapValue>` indirection at the slot bits, requiring
+    direct typed pointers.
+(d) **HeapValue accumulates additional dispatch sites that recreate
+    W-series-shape risks.** Specifically: a future session is found
+    rationalizing a "just one more arm in the marshal-boundary
+    pattern match" change, and the defection-pattern review identifies
+    the underlying risk as the dispatcher's sum-type shape rather
+    than the individual change.
+
+**Adjacent already-on-record entries:** path 2 in the cluster #3
+deferral above is the same architectural direction restricted to
+the TypedArray subtree. The HeapKind trim (2026-05-06 entry) and
+NativeKind::Ptr(HeapKind) extension are intermediate steps in the
+same direction. The maximalist redesign generalizes those across
+all heap-allocated typed shapes.
+
+**Cost saved:** 2-4 weeks of cross-cutting refactor deferred from
+the current phase, where the consistency-check residual is
+spec-permitted and not load-bearing. Acknowledged: each FromSlot
+impl in the marshal layer carries one arm of `match HeapValue::* =>
+…, _ => panic!()` boilerplate as long-term residual, with the
+documented spec-citation justifying it as consistency check rather
+than runtime probe.
 
 ---
 
