@@ -23,7 +23,6 @@ pub mod json;
 pub mod msgpack_module;
 pub mod regex;
 pub mod runtime_policy;
-pub mod set_module;
 pub mod toml_module;
 pub mod unicode;
 pub mod virtual_fs;
@@ -51,7 +50,6 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         unicode::create_unicode_module(),
         csv_module::create_csv_module(),
         msgpack_module::create_msgpack_module(),
-        set_module::create_set_module(),
         file::create_file_module(),
         arrow_module::create_arrow_module(),
         crate::stdlib_time::create_time_module(),
