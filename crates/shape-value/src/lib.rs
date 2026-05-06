@@ -17,7 +17,6 @@ pub mod aligned_vec;
 pub mod content;
 pub mod context;
 pub mod datatable;
-pub mod external_value;
 pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;
