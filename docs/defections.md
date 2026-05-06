@@ -1387,4 +1387,228 @@ remediation across the next year.
 
 ---
 
+## 2026-05-06 — Calibration finding #10 — stale-import count is not a cleanup-leverage proxy
+
+This is **not** a defection. On-record calibration finding from Phase 2d
+sub-cluster 1 (network_ops) follow-up audit, in service of the
+predict-before-measure discipline.
+
+**Considered (the bad heuristic):** if shape-runtime --lib has N errors
+and ~M of them are "unresolved import shape_value::ValueWord /
+ValueWordExt / ArgVec / value_word_drop / vw_clone / vmarray_from_vec
+/ register_typed_function / ..." stale-symbol imports, then a fast
+cleanup pass removing those imports should drop ~M errors and is a
+high-leverage low-decision-cost workstream.
+
+**Rationalization:** "imports are mechanical; just delete the unused
+ones." Phase 2c handover predicted -9 to -12 for cluster #2 group 1
+finish (network_ops migration) by extrapolating from file_ops's -15
+result — but file_ops's drop came from deleting 1040 lines of
+`wrap_legacy` bridging in `stdlib_io/mod.rs`, not from migrating bodies.
+The stale-import view treated the remaining 96 errors as further
+cleanup work of the same shape.
+
+**Pattern recognized:** the W-series ValueWord removal was *deep*, not
+boundary-only. Virtually every file with a stale ValueWord-family
+import also USES that symbol structurally — in struct fields
+(`closure.rs:39 pub value: ValueWord`), function signatures
+(`type_methods.rs:69 fn get_value_type_name(value: &ValueWord)`),
+return types (`plugins/data_source/providers.rs:256 -> Result<ValueWord>`),
+enum variants (`module_loader/mod.rs:84 Value(ValueWord)`), or trait
+methods (`plugins/data_source/mod.rs:153 -> Result<ValueWord>`).
+Stale-import count predicts **architectural-cluster-membership**, not
+cleanup work.
+
+**Audit numbers:** of 47 error-bearing files, **0 (zero) were pure
+stale-import cleanup candidates.** Predicted 5-10 (10-20%); measured 0
+(0%). >100% miss in the predicted A category. Every error file is a
+body-level structural dependency on a deleted symbol.
+
+**Alternative taken:** stale-import count is now treated as a *cluster-
+identity signal*, not a cleanup-leverage signal. The discipline:
+before predicting that "the rest is cleanup," **audit each file's body
+usage of the imported symbol**. If the body uses the symbol in a
+signature/struct/variant, the file is blocked on the architectural
+cluster that owns that symbol's replacement, not on cleanup. Bake
+this into pre-cluster-execution work alongside Audit 1 + Audit 2.
+
+**Cost saved:** prevented allocating a full session to "rapid stale-
+import cleanup" that would have produced ~0 error drop and surfaced
+the same architectural decisions one file at a time, in worse order.
+The right next sub-cluster (B1 JsonValue, ~30 errors) was identified
+by the audit instead.
+
+---
+
+## 2026-05-06 — Calibration finding #11 — scattered-cleanup buckets can be coherent multi-decision clusters
+
+This is **not** a defection. On-record calibration finding from the
+same Phase 2d audit. Companion to finding #10.
+
+**Considered (the bad framing):** when cluster decomposition produces
+a "misc cleanup" or "foundation cleanup" residual after the named
+clusters are accounted for, treat the residual as miscellaneous —
+files that need touch-ups but don't share architectural shape.
+
+**Rationalization:** the named clusters (cluster #1 type_schema,
+cluster #2 IoHandle, cluster #3 Array<T>, cluster #4 Option<T>,
+cluster #5 JsonValue, intrinsics-dispatch-table) absorb the
+"architecturally interesting" work; the rest is cleanup.
+
+**Pattern recognized:** absence-of-naming is not absence-of-coherence.
+The audit revealed a **23-file / ~38-error / 5-7-decision cluster**
+that had been treated as foundation-cleanup spread across files.
+Cross-cuts: closure capture storage (closure.rs), module-loader value
+variants (module_loader/mod.rs), plugin-ABI return shape
+(plugins/data_source/{mod,providers}.rs), event-queue payloads
+(event_queue.rs), context dynamic values (context/{mod,variables}.rs,
+const_eval.rs, annotation_context.rs), content builders/methods
+(content_methods.rs, content_builders.rs), output adaptation
+(output_adapter.rs), schema cache (schema_cache.rs), data-cache
+serialization (data/cache.rs, data/load_query.rs, snapshot.rs
+removed-fn references), module-export core (module_exports.rs,
+module_bindings.rs), engine entry (engine/mod.rs), window manager
+(window_manager.rs), type-introspection (type_methods.rs),
+multiple-testing helpers (multiple_testing.rs), stdlib_time core
+(stdlib_time.rs).
+
+Each subsystem has its own architectural sub-decision: how to store
+or marshal dynamic values without ValueWord. Closure captures need a
+typed-slot storage decision. Module loader needs a typed-value enum.
+Plugin ABI needs a typed return shape. Event payloads need typed
+slots. None of these are "cleanup" — they're undone architectural
+decisions clustered by *the runtime subsystem they live in*, which
+the prior framings missed because none of the deferred clusters
+(#1-#5 + intrinsics-dispatch) own the bridging surface.
+
+**Combined insight (with finding #10):** architectural surface
+analysis must precede ANY "cleanup" framing. Ten-plus calibration
+findings in this work, all in the same direction: when analysis says
+"the rest is mechanical/cleanup," treat that as a hypothesis
+requiring consumer-body audit. Default expectation: **"this is
+undone architectural decisions, not cleanup."**
+
+**Alternative taken:** name the cluster on record as **B4 core-
+foundation ValueWord-removal cluster**, with explicit sub-decision
+shape (next entry). Document that the work decomposes across multiple
+sessions with each sub-decision its own surface-decide-execute round
+trip. Stop treating it as cleanup.
+
+**Cost saved:** prevented a future session from picking up the
+foundation work as a "misc errors, work through them" task — which
+would have produced inconsistent per-subsystem decisions and
+W-series-style scattered rationalizations. The cluster name lets
+sub-decisions land coherently with watchlist discipline applied at
+each step.
+
+---
+
+## 2026-05-06 — B4 core-foundation ValueWord-removal — named on-record cluster
+
+On-record cluster naming. This is the largest single bucket in the
+shape-runtime --lib error surface (audited 2026-05-06, Phase 2d sub-
+cluster 1 follow-up): **~23 files, ~38 errors, ~5-7 sub-decisions**.
+
+The cluster was previously implicit in the Phase 2a "shape-runtime
+Phase-2 reconstruction: TypedReturn ValueWord hatches deleted" entry
+and in Phase 2b's "stdlib mass migration ~80 errors mechanical"
+miscalibration. Findings #10 + #11 give it explicit shape.
+
+**Files in cluster (audit-grounded list):**
+
+Foundation (core dynamic-value APIs):
+- `closure.rs` — `Upvalue::Mutable(ValueWord)` storage shape (struct field)
+- `module_loader/mod.rs` — `LoadedItem::Value(ValueWord)` enum variant
+- `module_exports.rs` — core registry types still take `&[ValueWord]`
+- `module_bindings.rs` — module-binding value carriers
+- `event_queue.rs` — async event payload slots
+- `context/{mod, variables}.rs` — dynamic context variable storage
+- `const_eval.rs` — compile-time evaluation value model
+- `annotation_context.rs` — annotation-evaluation value model
+- `content_methods.rs` / `content_builders.rs` — content-block typed builders
+- `output_adapter.rs` — print/output formatter
+- `schema_cache.rs` — schema-cache value coercions
+- `type_methods.rs` — type-introspection helpers (ValueWord ref API)
+
+Cross-boundary (plugin/serialization/extension):
+- `plugins/data_source/{mod, providers}.rs` — plugin ABI return shape
+- `data/{cache, load_query}.rs` — data-cache serialize/deserialize
+- `snapshot.rs` — snapshot serialize/deserialize references (warning
+  only after #10 audit; included for completeness because adjacent
+  decisions touch it)
+
+Stdlib helpers (foundation-shaped, not parser-shaped):
+- `stdlib_time.rs` — time module core (NOT in B1 JsonValue cluster)
+- `multiple_testing.rs` — testing helpers
+- `engine/mod.rs` — top-level engine entry
+- `window_manager.rs` — window-manager value model
+- `type_schema/registry.rs` — `shape_value::external_value::SchemaLookup` trait
+  impl (1 error, distinct from `type_schema/mod.rs` which is cluster #1)
+
+**Sub-decision shape (5-7 architectural decisions, each its own round-trip):**
+
+1. **closure-captures** — `Upvalue::Mutable(ValueWord)` replacement.
+   Options: typed slot per upvalue (per-NativeKind monomorphization);
+   `HeapKind::Upvalue` with content header; or split into typed +
+   dynamic-fallback paths. The dynamic-fallback option is the W-series
+   defection-attractor — refuse on sight.
+2. **module-loader-value** — `LoadedItem::Value(ValueWord)` replacement.
+   Options: typed-value enum (`LoadedItem::Int(i64)`, `Float(f64)`, ...);
+   `Arc<HeapValue>`-pointer; or restrict module-load values to a
+   monomorphized shape.
+3. **plugin-ABI-return** — `Result<shape_value::ValueWord>` in
+   `plugins/data_source/{mod, providers}.rs`. Stable C ABI surface
+   per shape-abi-v1, so this likely interlocks with plugin-ABI
+   versioning. May warrant its own defection entry as an ABI break.
+4. **event-payload** — `event_queue.rs` async-event slot storage.
+   Options: typed event variants per producer; HeapKind::Event with
+   schema; `Arc<HeapValue>` payload.
+5. **snapshot-serialization** — replacement for deleted
+   `nanboxed_to_serializable`/`serializable_to_nanboxed` per-slot-
+   kind pair. The CLAUDE.md known-constraint comment notes "kind-
+   threaded" replacement is intended; this sub-decision is the
+   detail. data/{cache, load_query}.rs depend on this.
+6. **content-builders-and-methods** — `content_builders.rs` /
+   `content_methods.rs` — content-block construction at compile time.
+   These build TypedObjects but use ValueWord intermediates;
+   replacement is straightforward typed-builder surface.
+7. **module-exports-core** — `module_exports.rs` registry types that
+   still surface `&[ValueWord]`. The `register_test_function*`
+   helpers (per `typed_module_exports.rs` doc comments) wrap legacy
+   bodies into typed-passthrough; the question is whether to keep
+   that legacy seam or close it.
+
+**Watchlist (binding for all 5-7 sub-decisions):**
+
+- Forbidden: re-introducing ValueWord under any rename
+  (`SlotValue`/`DynamicValue`/`AnyValue`/etc.)
+- Forbidden: parametric NativeKind variants for the cluster's payloads
+- Forbidden: "split into typed + dynamic-fallback paths" — that is
+  the W-series shape, just at a different layer
+- Forbidden: sentinel values inline at any decision boundary
+
+**Pacing expectation:** each sub-decision is its own surface-decide-
+execute round trip. ~1 sub-decision per session is the conservative
+estimate given Phase 2c/2d pacing (architectural cluster work is
+decision-heavy, not code-heavy). Cluster total: 5-7 sessions to land
+all sub-decisions.
+
+**Sequencing within the cluster (suggestion, not binding):**
+
+- Closure-captures and module-loader-value are smallest and most
+  central; land first.
+- Snapshot-serialization is largest scope (cross-cuts data caching);
+  may want its own decomposition pass before any code change.
+- Plugin-ABI-return likely needs to interlock with shape-abi-v1
+  versioning policy and could be a separate ABI workstream.
+
+**Cost saved (anticipatory):** the named cluster prevents per-file
+cleanup commits from making inconsistent sub-decisions. Estimate:
+2-4 weeks of "this file does X, this other file does Y, now we have
+two ValueWord-replacement shapes" reconciliation work avoided across
+the 5-7 sub-decisions, by forcing each to be a single surfaced choice
+applied uniformly.
+
+---
+
 (Add new entries above this line. Newest first.)
