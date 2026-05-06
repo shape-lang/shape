@@ -9,6 +9,18 @@
 //!
 //! `equals()`, `structural_eq()`, and `Display` remain hand-written because
 //! they have complex per-variant logic (e.g. cross-type numeric comparison).
+//!
+//! Strict-typing bulldozer (Phase 2): every variant whose payload depended on
+//! the deleted `ValueWord` (the v1 dynamic-tag word) has been removed from
+//! `HeapValue`, along with the supporting `*Data` structs. The `HeapKind`
+//! discriminator preserves its ordinal numbering for ABI stability — gone
+//! variants now appear only in `HeapKind` (reserved). Heterogeneous-element
+//! collections (`HashMap`, `Set`, `Deque`, `PriorityQueue`), dynamic
+//! single-value wrappers (`Some`/`Ok`/`Err`/`Range`/`TraitObject`/
+//! `FunctionRef`), and dynamic capture/control-flow holders (`Iterator`,
+//! `Generator`, `Concurrency`, `Rare`, `Enum`, `Array`, `HostClosure`,
+//! `ProjectedRef`) are awaiting monomorphized typed replacements per
+//! `docs/runtime-v2-spec.md`.
 
 /// All HeapValue variant data lives here as a single source of truth.
 ///
@@ -26,31 +38,32 @@ macro_rules! define_heap_types {
     () => {
         /// Discriminator for HeapValue variants, usable without full pattern match.
         ///
-        /// The discriminant order is ABI-stable (checked by tests in tags.rs).
-        /// New variants MUST be appended at the end.
+        /// The discriminant order is ABI-stable. New variants MUST be appended
+        /// at the end. Variants marked "(removed)" no longer have a matching
+        /// `HeapValue` arm — the ordinal is reserved.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[repr(u8)]
         pub enum HeapKind {
             String,             // 0
-            Array,              // 1
+            Array,              // 1  (removed — heterogeneous-element array; use TypedArray)
             TypedObject,        // 2
             Closure,            // 3
             Decimal,            // 4
             BigInt,             // 5
-            HostClosure,        // 6
+            HostClosure,        // 6  (removed — dynamic FFI; awaiting monomorphized signature)
             DataTable,          // 7
             TypedTable,         // 8  (deprecated — use TableView)
             RowView,            // 9  (deprecated — use TableView)
             ColumnRef,          // 10 (deprecated — use TableView)
             IndexedTable,       // 11 (deprecated — use TableView)
-            Range,              // 12
-            Enum,               // 13
-            Some,               // 14
-            Ok,                 // 15
-            Err,                // 16
+            Range,              // 12 (removed — dynamic Range payload; awaiting monomorphized Range<T>)
+            Enum,               // 13 (removed — heterogeneous payload; awaiting per-variant TypedStruct)
+            Some,               // 14 (removed — dynamic Option payload; awaiting monomorphized Option<T>)
+            Ok,                 // 15 (removed — dynamic Result payload; awaiting monomorphized Result<T,E>)
+            Err,                // 16 (removed — dynamic Result payload; awaiting monomorphized Result<T,E>)
             Future,             // 17
             TaskGroup,          // 18
-            TraitObject,        // 19
+            TraitObject,        // 19 (removed — dynamic value payload; awaiting typed redesign)
             ExprProxy,          // 20 (deprecated — use Rare)
             FilterExpr,         // 21 (deprecated — use Rare)
             Time,               // 22 (deprecated — use Temporal)
@@ -64,7 +77,7 @@ macro_rules! define_heap_types {
             TypeAnnotatedValue, // 30 (deprecated — use Rare)
             PrintResult,        // 31 (deprecated — use Rare)
             SimulationCall,     // 32 (deprecated — use Rare)
-            FunctionRef,        // 33
+            FunctionRef,        // 33 (removed — dynamic closure payload)
             DataReference,      // 34 (deprecated — use Rare)
             Number,             // 35
             Bool,               // 36
@@ -72,19 +85,19 @@ macro_rules! define_heap_types {
             Unit,               // 38
             Function,           // 39
             ModuleFunction,     // 40
-            HashMap,            // 41
+            HashMap,            // 41 (removed — heterogeneous-keyed; awaiting monomorphized typed buckets)
             Content,            // 42
             Instant,            // 43
             IoHandle,           // 44
-            SharedCell,         // 45 (deprecated — retired in Track A.1C.3; ordinal reserved for ABI stability)
+            SharedCell,         // 45 (deprecated — retired in Track A.1C.3)
             NativeScalar,       // 46
             NativeView,         // 47
             IntArray,           // 48 (deprecated — use TypedArray)
             FloatArray,         // 49 (deprecated — use TypedArray)
             BoolArray,          // 50 (deprecated — use TypedArray)
             Matrix,             // 51 (deprecated — use TypedArray)
-            Iterator,           // 52
-            Generator,          // 53
+            Iterator,           // 52 (removed — dynamic capture/source; awaiting typed iterator design)
+            Generator,          // 53 (removed — dynamic state)
             Mutex,              // 54 (deprecated — use Concurrency)
             Atomic,             // 55 (deprecated — use Concurrency)
             Lazy,               // 56 (deprecated — use Concurrency)
@@ -96,126 +109,69 @@ macro_rules! define_heap_types {
             U32Array,           // 62 (deprecated — use TypedArray)
             U64Array,           // 63 (deprecated — use TypedArray)
             F32Array,           // 64 (deprecated — use TypedArray)
-            Set,                // 65
-            Deque,              // 66
-            PriorityQueue,      // 67
+            Set,                // 65 (removed — heterogeneous-element)
+            Deque,              // 66 (removed — heterogeneous-element)
+            PriorityQueue,      // 67 (removed — heterogeneous-element)
             Channel,            // 68 (deprecated — use Concurrency)
             Char,               // 69
-            ProjectedRef,       // 70
+            ProjectedRef,       // 70 (removed — dynamic index)
             FloatArraySlice,    // 71 (deprecated — use TypedArray)
             // ===== New consolidated ordinals =====
             TypedArray,         // 72
             Temporal,           // 73
-            Rare,               // 74
-            Concurrency,        // 75
+            Rare,               // 74 (removed — held ValueWord-bearing TypeAnnotatedValue)
+            Concurrency,        // 75 (removed — Mutex/Lazy/Channel held ValueWord)
             TableView,          // 76
         }
 
-        /// Compact heap-allocated value for ValueWord TAG_HEAP.
+        /// Compact heap-allocated value. Strict-typed variants only — every
+        /// payload is either a typed primitive (`i64`, `char`, `f64` via
+        /// `TypedArray`), a typed structure (`TypedObject` slots, typed FFI
+        /// pointers, typed temporal data), or a typed handle.
         ///
-        /// Every type that cannot be inlined in ValueWord has a dedicated variant here.
-        /// Inline ValueWord types (f64, i48, bool, None, Unit, Function, ModuleFunction)
-        /// are never stored in HeapValue.
-        ///
-        /// `Clone` / `Drop` are implemented manually (not `#[derive]`) in
-        /// `heap_value.rs` so the `Some` / `Ok` / `Err` variants, which hold
-        /// `Box<ValueWord>` bits that may carry a heap tag, can pair
-        /// `vw_clone` with `vw_drop`. All other variants delegate to their
-        /// inner type's own `Clone` / `Drop` exactly as the auto-derive
-        /// would have.
+        /// Variants whose payloads depended on the deleted `ValueWord`
+        /// dynamic word were removed in the strict-typing Phase-2 bulldozer.
+        /// See the corresponding `HeapKind` ordinals (annotated "(removed)")
+        /// for the migration target.
         #[derive(Debug)]
         pub enum HeapValue {
-            // ===== Tuple variants =====
+            // ===== Typed primitives =====
             String(std::sync::Arc<String>),
-            Array($crate::value::VMArray),
             Decimal(rust_decimal::Decimal),
             BigInt(i64),
-            HostClosure($crate::value::HostCallable),
+            Future(u64),
+            Char(char),
+            // ===== Typed handles / data stores =====
             DataTable(std::sync::Arc<$crate::datatable::DataTable>),
-            HashMap(Box<$crate::heap_value::HashMapData>),
-            Set(Box<$crate::heap_value::SetData>),
-            Deque(Box<$crate::heap_value::DequeData>),
-            PriorityQueue(Box<$crate::heap_value::PriorityQueueData>),
             Content(Box<$crate::content::ContentNode>),
             Instant(Box<std::time::Instant>),
             IoHandle(Box<$crate::heap_value::IoHandleData>),
-            Enum(Box<$crate::enums::EnumValue>),
-            Some(Box<$crate::value_word::ValueWord>),
-            Ok(Box<$crate::value_word::ValueWord>),
-            Err(Box<$crate::value_word::ValueWord>),
-            Future(u64),
-            // NOTE: Number(f64), Bool(bool), Function(u16), ModuleFunction(usize) — REMOVED.
-            // These were shadow variants duplicating inline ValueWord tags.
-            // HeapKind ordinals 35-40 are reserved (ABI stability).
             NativeScalar($crate::heap_value::NativeScalar),
             NativeView(Box<$crate::heap_value::NativeViewData>),
-            Iterator(Box<$crate::heap_value::IteratorState>),
-            Generator(Box<$crate::heap_value::GeneratorState>),
-            Char(char),
-            ProjectedRef(Box<$crate::heap_value::ProjectedRefData>),
             // ===== Struct variants =====
+            /// Object value with schema-defined typed slots.
             TypedObject {
                 schema_id: u64,
                 slots: Box<[$crate::slot::ValueSlot]>,
                 heap_mask: u64,
             },
-            // NOTE: the former `Closure { function_id, upvalues }` variant
-            // was retired in Track A.5. All four producer sites (VM
-            // `op_make_closure`, trait-object vtable dispatch, snapshot
-            // replay, cross-node remote builtins) migrated to the
-            // `ClosureRaw` pipeline via Tracks A.1C.3 / A.2A / A.3 / A.4.
-            // The `HeapKind::Closure` ordinal (in the discriminator enum
-            // above) is preserved for ABI stability and now refers to
-            // `ClosureRaw`.
             /// Track A.5 — the canonical closure representation.
             ///
-            /// Raw `TypedClosureHeader`-backed closure. Captures live in
-            /// a typed C-laid-out block allocated by
-            /// `closure_raw::alloc_typed_closure` and owned by the
-            /// embedded [`OwnedClosureBlock`]. Cloning / dropping this
-            /// variant manages the block's refcount in lockstep with the
-            /// enclosing `Arc<HeapValue>` so the existing dispatch
-            /// plumbing (`TAG_HEAP → as_heap_ref → …`) keeps working
-            /// unchanged; readers go through `VmClosureHandle` for the
-            /// stable read API.
-            ///
-            /// There is no legacy fallback — every closure that reaches
-            /// the heap path is backed by a `TypedClosureHeader` block.
+            /// Raw `TypedClosureHeader`-backed closure. Captures live in a
+            /// typed C-laid-out block allocated by
+            /// `closure_raw::alloc_typed_closure` and owned by the embedded
+            /// [`OwnedClosureBlock`]. Cloning / dropping this variant
+            /// manages the block's refcount in lockstep with the enclosing
+            /// `Arc<HeapValue>`. Readers go through `VmClosureHandle` for
+            /// the stable read API. There is no legacy fallback.
             ClosureRaw($crate::v2::closure_raw::OwnedClosureBlock),
-            Range {
-                start: Option<Box<$crate::value_word::ValueWord>>,
-                end: Option<Box<$crate::value_word::ValueWord>>,
-                inclusive: bool,
-            },
             TaskGroup {
                 kind: u8,
                 task_ids: Vec<u64>,
             },
-            TraitObject {
-                value: Box<$crate::value_word::ValueWord>,
-                vtable: std::sync::Arc<$crate::value::VTable>,
-            },
-            FunctionRef {
-                name: String,
-                closure: Option<Box<$crate::value_word::ValueWord>>,
-            },
-            // NOTE: The former `SharedCell` variant was retired in Track
-            // A.1C.3. The outer-scope shared-cell machinery for closure
-            // capture now lives in `v2::closure_layout::SharedCell`
-            // (`Arc<parking_lot::Mutex<ValueWord>>`) and is addressed
-            // via raw pointer bits in `module_bindings` / local stack
-            // slots, not via a `HeapValue` tag. `HeapKind::SharedCell`
-            // (ordinal 45) is reserved — existing serialised data with
-            // this discriminant must come from pre-A.1C.3 byte streams
-            // and is not supported.
-            // NOTE: None and Unit unit variants — REMOVED.
-            // These were shadow variants duplicating inline ValueWord tags.
-            // HeapKind ordinals 37-38 are reserved (ABI stability).
             // ===== Consolidated wrapper variants =====
             TypedArray($crate::heap_value::TypedArrayData),
             Temporal($crate::heap_value::TemporalData),
-            Rare($crate::heap_value::RareHeapData),
-            Concurrency($crate::heap_value::ConcurrencyData),
             TableView($crate::heap_value::TableViewData),
         }
 
@@ -224,43 +180,22 @@ macro_rules! define_heap_types {
             #[inline]
             pub fn kind(&self) -> HeapKind {
                 match self {
-                    // Tuple
                     HeapValue::String(..) => HeapKind::String,
-                    HeapValue::Array(..) => HeapKind::Array,
                     HeapValue::Decimal(..) => HeapKind::Decimal,
                     HeapValue::BigInt(..) => HeapKind::BigInt,
-                    HeapValue::HostClosure(..) => HeapKind::HostClosure,
+                    HeapValue::Future(..) => HeapKind::Future,
+                    HeapValue::Char(..) => HeapKind::Char,
                     HeapValue::DataTable(..) => HeapKind::DataTable,
-                    HeapValue::HashMap(..) => HeapKind::HashMap,
-                    HeapValue::Set(..) => HeapKind::Set,
-                    HeapValue::Deque(..) => HeapKind::Deque,
-                    HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
                     HeapValue::Content(..) => HeapKind::Content,
                     HeapValue::Instant(..) => HeapKind::Instant,
                     HeapValue::IoHandle(..) => HeapKind::IoHandle,
                     HeapValue::NativeScalar(..) => HeapKind::NativeScalar,
                     HeapValue::NativeView(..) => HeapKind::NativeView,
-                    HeapValue::Iterator(..) => HeapKind::Iterator,
-                    HeapValue::Generator(..) => HeapKind::Generator,
-                    HeapValue::Char(..) => HeapKind::Char,
-                    HeapValue::ProjectedRef(..) => HeapKind::ProjectedRef,
-                    HeapValue::Enum(..) => HeapKind::Enum,
-                    HeapValue::Some(..) => HeapKind::Some,
-                    HeapValue::Ok(..) => HeapKind::Ok,
-                    HeapValue::Err(..) => HeapKind::Err,
-                    HeapValue::Future(..) => HeapKind::Future,
-                    // Struct
                     HeapValue::TypedObject { .. } => HeapKind::TypedObject,
                     HeapValue::ClosureRaw(..) => HeapKind::Closure,
-                    HeapValue::Range { .. } => HeapKind::Range,
                     HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
-                    HeapValue::TraitObject { .. } => HeapKind::TraitObject,
-                    HeapValue::FunctionRef { .. } => HeapKind::FunctionRef,
-                    // Consolidated
                     HeapValue::TypedArray(..) => HeapKind::TypedArray,
                     HeapValue::Temporal(..) => HeapKind::Temporal,
-                    HeapValue::Rare(..) => HeapKind::Rare,
-                    HeapValue::Concurrency(..) => HeapKind::Concurrency,
                     HeapValue::TableView(..) => HeapKind::TableView,
                 }
             }
@@ -270,41 +205,21 @@ macro_rules! define_heap_types {
             pub fn is_truthy(&self) -> bool {
                 match self {
                     HeapValue::String(_v) => !_v.is_empty(),
-                    HeapValue::Array(_v) => !_v.is_empty(),
                     HeapValue::Decimal(_v) => !_v.is_zero(),
                     HeapValue::BigInt(_v) => *_v != 0,
-                    HeapValue::HostClosure(_) => true,
+                    HeapValue::Future(_) => true,
+                    HeapValue::Char(_) => true,
                     HeapValue::DataTable(_v) => _v.row_count() > 0,
-                    HeapValue::HashMap(_v) => !_v.keys.is_empty(),
-                    HeapValue::Set(_v) => !_v.items.is_empty(),
-                    HeapValue::Deque(_v) => !_v.items.is_empty(),
-                    HeapValue::PriorityQueue(_v) => !_v.items.is_empty(),
                     HeapValue::Content(_) => true,
                     HeapValue::Instant(_) => true,
                     HeapValue::IoHandle(_v) => _v.is_open(),
                     HeapValue::NativeScalar(_v) => _v.is_truthy(),
                     HeapValue::NativeView(_v) => _v.ptr != 0,
-                    HeapValue::Iterator(_v) => !_v.done,
-                    HeapValue::Generator(_v) => _v.state != u16::MAX,
-                    HeapValue::Char(_) => true,
-                    HeapValue::ProjectedRef(_) => true,
-                    HeapValue::Enum(_) => true,
-                    HeapValue::Some(_) => true,
-                    HeapValue::Ok(_) => true,
-                    HeapValue::Err(_) => false,
-                    HeapValue::Future(_) => true,
-                    // Struct
                     HeapValue::TypedObject { slots, .. } => !slots.is_empty(),
                     HeapValue::ClosureRaw(..) => true,
-                    HeapValue::Range { .. } => true,
                     HeapValue::TaskGroup { .. } => true,
-                    HeapValue::TraitObject { value, .. } => value.is_truthy(),
-                    HeapValue::FunctionRef { .. } => true,
-                    // Consolidated — delegate to inner enum
                     HeapValue::TypedArray(ta) => ta.is_truthy(),
                     HeapValue::Temporal(td) => td.is_truthy(),
-                    HeapValue::Rare(rd) => rd.is_truthy(),
-                    HeapValue::Concurrency(cd) => cd.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
                 }
             }
@@ -314,15 +229,11 @@ macro_rules! define_heap_types {
             pub fn type_name(&self) -> &'static str {
                 match self {
                     HeapValue::String(_) => "string",
-                    HeapValue::Array(_) => "array",
                     HeapValue::Decimal(_) => "decimal",
                     HeapValue::BigInt(_) => "int",
-                    HeapValue::HostClosure(_) => "host_closure",
+                    HeapValue::Future(_) => "future",
+                    HeapValue::Char(_) => "char",
                     HeapValue::DataTable(_) => "datatable",
-                    HeapValue::HashMap(_) => "hashmap",
-                    HeapValue::Set(_) => "set",
-                    HeapValue::Deque(_) => "deque",
-                    HeapValue::PriorityQueue(_) => "priority_queue",
                     HeapValue::Content(_) => "content",
                     HeapValue::Instant(_) => "instant",
                     HeapValue::IoHandle(_) => "io_handle",
@@ -334,27 +245,11 @@ macro_rules! define_heap_types {
                             "cview"
                         }
                     }
-                    HeapValue::Iterator(_) => "iterator",
-                    HeapValue::Generator(_) => "generator",
-                    HeapValue::Char(_) => "char",
-                    HeapValue::ProjectedRef(_) => "reference",
-                    HeapValue::Enum(_) => "enum",
-                    HeapValue::Some(_) => "option",
-                    HeapValue::Ok(_) => "result",
-                    HeapValue::Err(_) => "result",
-                    HeapValue::Future(_) => "future",
-                    // Struct
                     HeapValue::TypedObject { .. } => "object",
                     HeapValue::ClosureRaw(..) => "closure",
-                    HeapValue::Range { .. } => "range",
                     HeapValue::TaskGroup { .. } => "task_group",
-                    HeapValue::TraitObject { .. } => "trait_object",
-                    HeapValue::FunctionRef { .. } => "function",
-                    // Consolidated — delegate to inner enum
                     HeapValue::TypedArray(ta) => ta.type_name(),
                     HeapValue::Temporal(td) => td.type_name(),
-                    HeapValue::Rare(rd) => rd.type_name(),
-                    HeapValue::Concurrency(cd) => cd.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
                 }
             }

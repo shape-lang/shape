@@ -1,25 +1,31 @@
-//! Compact heap-allocated value types for ValueWord TAG_HEAP.
+//! Heap-allocated value types reachable through `HeapValue`.
 //!
-//! `HeapValue` is the heap backing store for ValueWord. Every type that cannot
-//! be stored inline in the ValueWord 8-byte encoding gets a dedicated HeapValue variant.
+//! After the strict-typing Phase-2 bulldozer (option C — heterogeneous
+//! collections / dynamic single-value wrappers excised), `HeapValue` carries
+//! only typed payloads:
 //!
-//! The enum definition, `HeapKind` discriminant, `kind()`, `is_truthy()`, and
-//! `type_name()` are all generated from the single source of truth in
-//! `define_heap_types!` (see `heap_variants.rs`).
+//! - typed primitives (string, decimal, bigint, char, future-id),
+//! - typed handles (datatable, content, instant, io-handle, native scalars),
+//! - typed object slots (`TypedObject` with `Box<[ValueSlot]>`),
+//! - the typed-closure-raw block (`ClosureRaw`),
+//! - typed array buckets (`TypedArrayData`),
+//! - typed temporal data (`TemporalData`),
+//! - typed table views (`TableViewData`).
 //!
-//! `equals()` and `structural_eq()` remain hand-written because they have
-//! complex per-variant logic (e.g. cross-type numeric comparison).
+//! Variants that previously held `ValueWord` (the deleted dynamic word) —
+//! `Some`/`Ok`/`Err`/`Range`/`TraitObject`/`FunctionRef`,
+//! `HashMap`/`Set`/`Deque`/`PriorityQueue`, `Iterator`/`Generator`/
+//! `ProjectedRef`, `Concurrency` (Mutex/Atomic/Lazy/Channel), `Rare`,
+//! `Enum`, `Array` (heterogeneous-element), `HostClosure` — were removed
+//! together with their `*Data` structs. The corresponding `HeapKind`
+//! ordinals are preserved (annotated "(removed)" in `heap_variants.rs`)
+//! and await monomorphized typed replacements per `docs/runtime-v2-spec.md`.
 
 use crate::aligned_vec::AlignedVec;
-use crate::value_word::{ValueWord, ValueWordExt};
-use crate::value_word_drop::{vw_clone, vw_drop, vw_drop_slice};
-use chrono::{DateTime, FixedOffset};
-use shape_ast::data::Timeframe;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-// ── Collection type data structures ─────────────────────────────────────────
+// ── Matrix storage (used by TypedArrayData::Matrix and FloatSlice) ──────────
 
 /// Flat, SIMD-aligned matrix storage (row-major order).
 #[derive(Debug, Clone)]
@@ -78,550 +84,9 @@ impl MatrixData {
     }
 }
 
-/// Lazy iterator state — supports chained transforms without materializing intermediates.
-///
-/// Wave 4 WC.4: `source` is a `ValueWord` bit pattern and `transforms`
-/// is a chain of per-transform closures; each of those slots can
-/// carry a heap tag. Manual `Clone` / `Drop` keep the refcount
-/// bookkeeping paired with `vw_clone` / `vw_drop`.
-#[derive(Debug)]
-pub struct IteratorState {
-    pub source: ValueWord,
-    pub position: usize,
-    pub transforms: Vec<IteratorTransform>,
-    pub done: bool,
-}
+// ── NativeScalar — width-preserving native ABI scalars ──────────────────────
 
-impl Clone for IteratorState {
-    fn clone(&self) -> Self {
-        IteratorState {
-            source: vw_clone(self.source),
-            position: self.position,
-            transforms: self.transforms.clone(),
-            done: self.done,
-        }
-    }
-}
-
-impl Drop for IteratorState {
-    fn drop(&mut self) {
-        vw_drop(self.source);
-    }
-}
-
-/// A lazy transform in an iterator chain.
-///
-/// Wave 4 WC.4: `Map` / `Filter` / `FlatMap` each hold a closure
-/// `ValueWord` whose heap tag must be refcount-paired via manual
-/// `Clone` / `Drop`. `Take` / `Skip` carry only scalar `usize`
-/// counts and are no-ops for heap bookkeeping.
-#[derive(Debug)]
-pub enum IteratorTransform {
-    Map(ValueWord),
-    Filter(ValueWord),
-    Take(usize),
-    Skip(usize),
-    FlatMap(ValueWord),
-}
-
-impl Clone for IteratorTransform {
-    fn clone(&self) -> Self {
-        match self {
-            IteratorTransform::Map(b) => IteratorTransform::Map(vw_clone(*b)),
-            IteratorTransform::Filter(b) => IteratorTransform::Filter(vw_clone(*b)),
-            IteratorTransform::Take(n) => IteratorTransform::Take(*n),
-            IteratorTransform::Skip(n) => IteratorTransform::Skip(*n),
-            IteratorTransform::FlatMap(b) => IteratorTransform::FlatMap(vw_clone(*b)),
-        }
-    }
-}
-
-impl Drop for IteratorTransform {
-    fn drop(&mut self) {
-        match self {
-            IteratorTransform::Map(b)
-            | IteratorTransform::Filter(b)
-            | IteratorTransform::FlatMap(b) => vw_drop(*b),
-            IteratorTransform::Take(_) | IteratorTransform::Skip(_) => {}
-        }
-    }
-}
-
-/// Generator function state machine.
-///
-/// Wave 4 WC.4: `locals` and `result` carry `ValueWord` bits that
-/// may be heap-tagged. Manual `Clone` / `Drop` refcount-pair them.
-#[derive(Debug)]
-pub struct GeneratorState {
-    pub function_id: u16,
-    pub state: u16,
-    pub locals: Box<[ValueWord]>,
-    pub result: Option<Box<ValueWord>>,
-}
-
-impl Clone for GeneratorState {
-    fn clone(&self) -> Self {
-        let locals: Vec<ValueWord> = self.locals.iter().map(|&b| vw_clone(b)).collect();
-        let result = self
-            .result
-            .as_deref()
-            .map(|&b| Box::new(vw_clone(b)));
-        GeneratorState {
-            function_id: self.function_id,
-            state: self.state,
-            locals: locals.into_boxed_slice(),
-            result,
-        }
-    }
-}
-
-impl Drop for GeneratorState {
-    fn drop(&mut self) {
-        vw_drop_slice(&self.locals);
-        if let Some(b) = &self.result {
-            vw_drop(**b);
-        }
-    }
-}
-
-/// Data for SimulationCall variant (boxed to keep HeapValue small).
-///
-/// Wave 4 WD.4: `params` is a `ValueMap` so heap-tagged argument values
-/// release their refs when the call record drops. `ValueMap`'s custom
-/// `Clone` keeps `derive(Clone)` correct on this type.
-#[derive(Debug, Clone)]
-pub struct SimulationCallData {
-    pub name: String,
-    pub params: crate::value_word_drop::ValueMap,
-}
-
-/// Data for DataReference variant (boxed to keep HeapValue small).
-#[derive(Debug, Clone)]
-pub struct DataReferenceData {
-    pub datetime: DateTime<FixedOffset>,
-    pub id: String,
-    pub timeframe: Timeframe,
-}
-
-/// A projection applied to a base reference.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefProjection {
-    TypedField {
-        type_id: u16,
-        field_idx: u16,
-        field_type_tag: u16,
-    },
-    /// Index projection: `&arr[i]` — the index is stored as a NaN-boxed value
-    /// so it can be an int or string key at runtime.
-    Index {
-        index: ValueWord,
-    },
-    /// Matrix row projection: `&mut m[i]` — borrow-based row projection for
-    /// write-through mutation. The `row_index` identifies which row of the
-    /// matrix is borrowed. Reads through this ref return a `FloatArraySlice`;
-    /// writes via `SetIndexRef` do COW `Arc::make_mut` on the `MatrixData`
-    /// and update `matrix.data[row_index * cols + col_index]` in place.
-    MatrixRow {
-        row_index: u32,
-    },
-}
-
-/// Heap-backed projected reference data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectedRefData {
-    pub base: ValueWord,
-    pub projection: RefProjection,
-}
-
-/// Data for HashMap variant (boxed to keep HeapValue small).
-///
-/// Uses bucket chaining (`HashMap<u64, Vec<usize>>`) so that hash collisions
-/// are handled correctly — each bucket stores all indices whose key hashes
-/// to the same u64.
-///
-/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `keys` and
-/// `values` vectors via `vw_drop_slice`. `Clone` mirrors that via
-/// `vw_clone` per element so refcounts stay paired with drops.
-#[derive(Debug)]
-pub struct HashMapData {
-    pub keys: Vec<ValueWord>,
-    pub values: Vec<ValueWord>,
-    pub index: HashMap<u64, Vec<usize>>,
-    /// Optional shape (hidden class) for O(1) index-based access.
-    /// None means "dictionary mode" (fallback to hash-based lookup).
-    pub shape_id: Option<crate::shape_graph::ShapeId>,
-}
-
-impl Clone for HashMapData {
-    fn clone(&self) -> Self {
-        // Per-element `vw_clone` bumps refcounts for shared heap values
-        // and deep-clones owned heap values so the new vectors become
-        // independent logical owners of their entries.
-        let keys = self.keys.iter().map(|&b| vw_clone(b)).collect();
-        let values = self.values.iter().map(|&b| vw_clone(b)).collect();
-        HashMapData {
-            keys,
-            values,
-            index: self.index.clone(),
-            shape_id: self.shape_id,
-        }
-    }
-}
-
-impl Drop for HashMapData {
-    fn drop(&mut self) {
-        vw_drop_slice(&self.keys);
-        vw_drop_slice(&self.values);
-    }
-}
-
-impl HashMapData {
-    /// Look up the index of `key` in this HashMap, returning `Some(idx)` if found.
-    #[inline]
-    pub fn find_key(&self, key: &ValueWord) -> Option<usize> {
-        let hash = key.vw_hash();
-        let bucket = self.index.get(&hash)?;
-        bucket
-            .iter()
-            .copied()
-            .find(|&idx| self.keys[idx].vw_equals(key))
-    }
-
-    /// Build a bucketed index from the keys vector.
-    pub fn rebuild_index(keys: &[ValueWord]) -> HashMap<u64, Vec<usize>> {
-        let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (i, k) in keys.iter().enumerate() {
-            index.entry(k.vw_hash()).or_default().push(i);
-        }
-        index
-    }
-
-    /// Compute a ShapeId for this HashMap if all keys are strings and count <= 64.
-    ///
-    /// Returns `None` (dictionary mode) if any key is non-string or there are
-    /// more than 64 properties.
-    pub fn compute_shape(keys: &[ValueWord]) -> Option<crate::shape_graph::ShapeId> {
-        if keys.is_empty() || keys.len() > 64 {
-            return None;
-        }
-        let mut key_hashes = Vec::with_capacity(keys.len());
-        for k in keys {
-            if let Some(s) = k.as_str() {
-                key_hashes.push(crate::shape_graph::hash_property_name(s));
-            } else {
-                return None; // Non-string key → dictionary mode
-            }
-        }
-        crate::shape_graph::shape_for_hashmap_keys(&key_hashes)
-    }
-
-    /// Look up a string property using the shape for O(1) index-based access.
-    ///
-    /// Returns the value at the shape-determined index, or `None` if this
-    /// HashMap has no shape or the property isn't in the shape.
-    #[inline]
-    pub fn shape_get(&self, property: &str) -> Option<&ValueWord> {
-        let shape_id = self.shape_id?;
-        let prop_hash = crate::shape_graph::hash_property_name(property);
-        let idx = crate::shape_graph::shape_property_index(shape_id, prop_hash)?;
-        self.values.get(idx)
-    }
-}
-
-/// Data for Set variant (boxed to keep HeapValue small).
-///
-/// Uses bucket chaining for collision-safe O(1) membership tests.
-///
-/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
-/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
-/// per element.
-#[derive(Debug)]
-pub struct SetData {
-    pub items: Vec<ValueWord>,
-    pub index: HashMap<u64, Vec<usize>>,
-}
-
-impl Clone for SetData {
-    fn clone(&self) -> Self {
-        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
-        SetData {
-            items,
-            index: self.index.clone(),
-        }
-    }
-}
-
-impl Drop for SetData {
-    fn drop(&mut self) {
-        vw_drop_slice(&self.items);
-    }
-}
-
-impl SetData {
-    /// Check if the set contains the given item.
-    #[inline]
-    pub fn contains(&self, item: &ValueWord) -> bool {
-        let hash = item.vw_hash();
-        if let Some(bucket) = self.index.get(&hash) {
-            bucket.iter().any(|&idx| self.items[idx].vw_equals(item))
-        } else {
-            false
-        }
-    }
-
-    /// Add an item to the set. Returns true if the item was newly inserted.
-    pub fn insert(&mut self, item: ValueWord) -> bool {
-        if self.contains(&item) {
-            return false;
-        }
-        let hash = item.vw_hash();
-        let idx = self.items.len();
-        self.items.push(item);
-        self.index.entry(hash).or_default().push(idx);
-        true
-    }
-
-    /// Remove an item from the set. Returns true if the item was present.
-    pub fn remove(&mut self, item: &ValueWord) -> bool {
-        let hash = item.vw_hash();
-        if let Some(bucket) = self.index.get(&hash) {
-            if let Some(&idx) = bucket.iter().find(|&&idx| self.items[idx].vw_equals(item)) {
-                self.items.swap_remove(idx);
-                self.rebuild_index_from_items();
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Build a bucketed index from the items vector.
-    pub fn rebuild_index(items: &[ValueWord]) -> HashMap<u64, Vec<usize>> {
-        let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (i, k) in items.iter().enumerate() {
-            index.entry(k.vw_hash()).or_default().push(i);
-        }
-        index
-    }
-
-    fn rebuild_index_from_items(&mut self) {
-        self.index = Self::rebuild_index(&self.items);
-    }
-
-    /// Create from items, deduplicating.
-    pub fn from_items(items: Vec<ValueWord>) -> Self {
-        let mut set = SetData {
-            items: Vec::with_capacity(items.len()),
-            index: HashMap::new(),
-        };
-        for item in items {
-            set.insert(item);
-        }
-        set
-    }
-
-    /// Move the inner `items` vector out, leaving an empty one behind.
-    /// Used when transferring ownership of heap refs into a new
-    /// container (e.g. constructing a fresh `Set` value word).
-    /// `self`'s Drop becomes a no-op on the items vector after this.
-    #[inline]
-    pub fn take_items(&mut self) -> Vec<ValueWord> {
-        self.index.clear();
-        std::mem::take(&mut self.items)
-    }
-}
-
-/// Data for PriorityQueue variant — binary min-heap.
-///
-/// Items are ordered by their numeric value (via `as_number_coerce()`).
-/// For non-numeric items, insertion order is preserved as a FIFO fallback.
-///
-/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
-/// vector via `vw_drop_slice`; `Clone` mirrors that via `vw_clone`
-/// per element.
-#[derive(Debug)]
-pub struct PriorityQueueData {
-    pub items: Vec<ValueWord>,
-}
-
-impl Clone for PriorityQueueData {
-    fn clone(&self) -> Self {
-        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
-        PriorityQueueData { items }
-    }
-}
-
-impl Drop for PriorityQueueData {
-    fn drop(&mut self) {
-        vw_drop_slice(&self.items);
-    }
-}
-
-impl PriorityQueueData {
-    pub fn new() -> Self {
-        PriorityQueueData { items: Vec::new() }
-    }
-
-    pub fn from_items(items: Vec<ValueWord>) -> Self {
-        let mut pq = PriorityQueueData { items };
-        pq.heapify();
-        pq
-    }
-
-    /// Compare two ValueWords for heap ordering (min-heap).
-    /// Returns Ordering::Less if a should be higher priority (closer to root).
-    #[inline]
-    fn cmp_items(a: &ValueWord, b: &ValueWord) -> std::cmp::Ordering {
-        match (a.as_number_coerce(), b.as_number_coerce()) {
-            (Some(fa), Some(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => {
-                // Fall back to string comparison
-                let sa = format!("{}", a);
-                let sb = format!("{}", b);
-                sa.cmp(&sb)
-            }
-        }
-    }
-
-    /// Push an item and sift up to maintain heap invariant.
-    pub fn push(&mut self, item: ValueWord) {
-        self.items.push(item);
-        self.sift_up(self.items.len() - 1);
-    }
-
-    /// Pop the minimum item (root) and restore heap invariant.
-    pub fn pop(&mut self) -> Option<ValueWord> {
-        if self.items.is_empty() {
-            return None;
-        }
-        let last = self.items.len() - 1;
-        self.items.swap(0, last);
-        let result = self.items.pop();
-        if !self.items.is_empty() {
-            self.sift_down(0);
-        }
-        result
-    }
-
-    /// Peek at the minimum item without removing.
-    pub fn peek(&self) -> Option<&ValueWord> {
-        self.items.first()
-    }
-
-    fn sift_up(&mut self, mut idx: usize) {
-        while idx > 0 {
-            let parent = (idx - 1) / 2;
-            if Self::cmp_items(&self.items[idx], &self.items[parent]) == std::cmp::Ordering::Less {
-                self.items.swap(idx, parent);
-                idx = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn sift_down(&mut self, mut idx: usize) {
-        let len = self.items.len();
-        loop {
-            let left = 2 * idx + 1;
-            let right = 2 * idx + 2;
-            let mut smallest = idx;
-
-            if left < len
-                && Self::cmp_items(&self.items[left], &self.items[smallest])
-                    == std::cmp::Ordering::Less
-            {
-                smallest = left;
-            }
-            if right < len
-                && Self::cmp_items(&self.items[right], &self.items[smallest])
-                    == std::cmp::Ordering::Less
-            {
-                smallest = right;
-            }
-
-            if smallest != idx {
-                self.items.swap(idx, smallest);
-                idx = smallest;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn heapify(&mut self) {
-        if self.items.len() <= 1 {
-            return;
-        }
-        for i in (0..self.items.len() / 2).rev() {
-            self.sift_down(i);
-        }
-    }
-
-    /// Move the inner `items` vector out, leaving an empty one behind.
-    /// Used when transferring ownership of heap refs into a new
-    /// container. `self`'s Drop becomes a no-op on the items vector
-    /// after this.
-    #[inline]
-    pub fn take_items(&mut self) -> Vec<ValueWord> {
-        std::mem::take(&mut self.items)
-    }
-}
-
-/// Data for Deque variant — double-ended queue backed by VecDeque.
-///
-/// Wave 4 WC.1: `Drop` releases every heap-ref held by the `items`
-/// VecDeque via `vw_drop` per element; `Clone` mirrors that via
-/// `vw_clone` per element.
-#[derive(Debug)]
-pub struct DequeData {
-    pub items: std::collections::VecDeque<ValueWord>,
-}
-
-impl DequeData {
-    pub fn new() -> Self {
-        DequeData {
-            items: std::collections::VecDeque::new(),
-        }
-    }
-
-    pub fn from_items(items: Vec<ValueWord>) -> Self {
-        DequeData {
-            items: items.into(),
-        }
-    }
-
-    /// Move the inner `items` VecDeque out, leaving an empty one
-    /// behind. The returned deque takes ownership of the heap-refs;
-    /// `self`'s Drop becomes a no-op since the VecDeque is empty.
-    ///
-    /// Use this when transferring `items` into a new owner
-    /// (e.g. constructing a fresh `DequeData` or value wrapper) —
-    /// ownership of each element's heap ref transfers with the move,
-    /// so no refcount adjustments are needed.
-    #[inline]
-    pub fn take_items(&mut self) -> std::collections::VecDeque<ValueWord> {
-        std::mem::take(&mut self.items)
-    }
-}
-
-impl Clone for DequeData {
-    fn clone(&self) -> Self {
-        let items = self.items.iter().map(|&b| vw_clone(b)).collect();
-        DequeData { items }
-    }
-}
-
-impl Drop for DequeData {
-    fn drop(&mut self) {
-        for &b in self.items.iter() {
-            vw_drop(b);
-        }
-    }
-}
-
-/// Width-aware native scalar for C interop.
+/// Native ABI-width scalars used by C ABI / `extern C fn` boundaries.
 ///
 /// These values preserve their ABI width across VM boundaries so C wrappers
 /// can avoid lossy `i64` normalization.
@@ -770,6 +235,8 @@ impl std::fmt::Display for NativeScalar {
     }
 }
 
+// ── Native type layouts (used by C ABI native views) ─────────────────────────
+
 /// Field layout metadata for `type C` structs.
 #[derive(Debug, Clone)]
 pub struct NativeLayoutField {
@@ -804,6 +271,8 @@ pub struct NativeViewData {
     pub layout: Arc<NativeTypeLayout>,
     pub mutable: bool,
 }
+
+// ── I/O handles ──────────────────────────────────────────────────────────────
 
 /// I/O handle kind discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -986,153 +455,7 @@ impl IoHandleData {
     }
 }
 
-// ── Concurrency primitive data structures ────────────────────────────────────
-
-/// Interior-mutable concurrent wrapper. Only type (besides Atomic/Lazy) with
-/// interior mutability — `&Mutex<T>` can mutate the inner value via `lock()`.
-#[derive(Debug, Clone)]
-pub struct MutexData {
-    pub inner: Arc<std::sync::Mutex<ValueWord>>,
-}
-
-impl MutexData {
-    pub fn new(value: ValueWord) -> Self {
-        Self {
-            inner: Arc::new(std::sync::Mutex::new(value)),
-        }
-    }
-}
-
-/// Atomic integer for lock-free concurrent access.
-/// Only supports integer values (load/store/compare_exchange).
-#[derive(Debug, Clone)]
-pub struct AtomicData {
-    pub inner: Arc<std::sync::atomic::AtomicI64>,
-}
-
-impl AtomicData {
-    pub fn new(value: i64) -> Self {
-        Self {
-            inner: Arc::new(std::sync::atomic::AtomicI64::new(value)),
-        }
-    }
-}
-
-/// Lazy-initialized value — compute once, cache forever.
-/// The initializer closure runs at most once; subsequent accesses return the cached result.
-#[derive(Debug, Clone)]
-pub struct LazyData {
-    /// Closure that produces the value (None after initialization).
-    pub initializer: Arc<std::sync::Mutex<Option<ValueWord>>>,
-    /// Cached result (None until first access).
-    pub value: Arc<std::sync::Mutex<Option<ValueWord>>>,
-}
-
-impl LazyData {
-    pub fn new(initializer: ValueWord) -> Self {
-        Self {
-            initializer: Arc::new(std::sync::Mutex::new(Some(initializer))),
-            value: Arc::new(std::sync::Mutex::new(None)),
-        }
-    }
-
-    /// Check if the value has been initialized.
-    pub fn is_initialized(&self) -> bool {
-        self.value.lock().map(|g| g.is_some()).unwrap_or(false)
-    }
-}
-
-/// MPSC channel endpoint (sender or receiver).
-///
-/// A `Channel()` call creates a sender/receiver pair. Both share the same
-/// underlying `mpsc::channel`. The sender can be cloned (multi-producer),
-/// while the receiver is wrapped in a Mutex for shared access.
-///
-/// Wave 4 WC.5: the channel's buffered payload is `ValueWord` bits that
-/// may carry a heap tag. Rust's default `Drop` for `mpsc::Receiver` would
-/// release each buffered message as a bare `u64`, leaking the
-/// underlying Arc / owned-box refcounts. On `Drop`, `ChannelData`
-/// detects the final-owner case on the receiver side (strong count of
-/// the `Arc<Mutex<_>>` reaches 1) and drains any remaining buffered
-/// messages through `vw_drop`. The sender side holds no buffered
-/// values, so its drop stays a no-op beyond the normal Arc release.
-#[derive(Debug, Clone)]
-pub enum ChannelData {
-    Sender {
-        tx: Arc<std::sync::mpsc::Sender<ValueWord>>,
-        closed: Arc<std::sync::atomic::AtomicBool>,
-    },
-    Receiver {
-        rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ValueWord>>>,
-        closed: Arc<std::sync::atomic::AtomicBool>,
-    },
-}
-
-impl Drop for ChannelData {
-    fn drop(&mut self) {
-        if let ChannelData::Receiver { rx, .. } = self {
-            // Only the final owner needs to drain; non-final owners
-            // just relinquish a reference and let the eventual final
-            // owner handle the buffered messages. Checking
-            // `strong_count == 1` here is a best-effort shortcut —
-            // if a concurrent `Arc::clone` races us, we may skip the
-            // drain and the other owner will run the Drop path
-            // instead. The `try_lock` + `try_recv` loop is harmless
-            // either way (on failure we simply leak the buffered
-            // values, matching the pre-WC.5 behavior).
-            if Arc::strong_count(rx) == 1 {
-                if let Ok(guard) = rx.try_lock() {
-                    while let Ok(bits) = guard.try_recv() {
-                        vw_drop(bits);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl ChannelData {
-    /// Create a new sender/receiver pair.
-    pub fn new_pair() -> (Self, Self) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        (
-            ChannelData::Sender {
-                tx: Arc::new(tx),
-                closed: closed.clone(),
-            },
-            ChannelData::Receiver {
-                rx: Arc::new(std::sync::Mutex::new(rx)),
-                closed,
-            },
-        )
-    }
-
-    /// Check if the channel is closed.
-    pub fn is_closed(&self) -> bool {
-        match self {
-            ChannelData::Sender { closed, .. } | ChannelData::Receiver { closed, .. } => {
-                closed.load(std::sync::atomic::Ordering::Relaxed)
-            }
-        }
-    }
-
-    /// Close the channel.
-    pub fn close(&self) {
-        match self {
-            ChannelData::Sender { closed, .. } | ChannelData::Receiver { closed, .. } => {
-                closed.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// Whether this is the sender end.
-    pub fn is_sender(&self) -> bool {
-        matches!(self, ChannelData::Sender { .. })
-    }
-}
-
-// ── Wrapper enums for HeapValue variant consolidation ──────────────────────
+// ── TypedArray buckets ──────────────────────────────────────────────────────
 
 /// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
 /// I8Array..F32Array, and FloatArraySlice into a single HeapValue variant.
@@ -1150,7 +473,11 @@ pub enum TypedArrayData {
     U32(Arc<crate::typed_buffer::TypedBuffer<u32>>),
     U64(Arc<crate::typed_buffer::TypedBuffer<u64>>),
     F32(Arc<crate::typed_buffer::TypedBuffer<f32>>),
-    FloatSlice { parent: Arc<MatrixData>, offset: u32, len: u32 },
+    FloatSlice {
+        parent: Arc<MatrixData>,
+        offset: u32,
+        len: u32,
+    },
 }
 
 impl TypedArrayData {
@@ -1199,7 +526,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::I64(a) => {
                 write!(f, "Vec<int>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1207,7 +536,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::F64(a) => {
                 write!(f, "Vec<number>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     if *v == v.trunc() && v.abs() < 1e15 {
                         write!(f, "{}", *v as i64)?;
                     } else {
@@ -1219,7 +550,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::Bool(a) => {
                 write!(f, "Vec<bool>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", *v != 0)?;
                 }
                 write!(f, "]")
@@ -1230,7 +563,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::I8(a) => {
                 write!(f, "Vec<i8>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1238,7 +573,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::I16(a) => {
                 write!(f, "Vec<i16>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1246,7 +583,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::I32(a) => {
                 write!(f, "Vec<i32>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1254,7 +593,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::U8(a) => {
                 write!(f, "Vec<u8>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1262,7 +603,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::U16(a) => {
                 write!(f, "Vec<u16>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1270,7 +613,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::U32(a) => {
                 write!(f, "Vec<u32>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1278,7 +623,9 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::U64(a) => {
                 write!(f, "Vec<u64>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
@@ -1286,16 +633,24 @@ impl fmt::Display for TypedArrayData {
             TypedArrayData::F32(a) => {
                 write!(f, "Vec<f32>[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
             }
-            TypedArrayData::FloatSlice { parent, offset, len } => {
+            TypedArrayData::FloatSlice {
+                parent,
+                offset,
+                len,
+            } => {
                 let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
                 write!(f, "Vec<number>[")?;
                 for (i, v) in slice.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     if *v == v.trunc() && v.abs() < 1e15 {
                         write!(f, "{}", *v as i64)?;
                     } else {
@@ -1307,6 +662,8 @@ impl fmt::Display for TypedArrayData {
         }
     }
 }
+
+// ── Temporal data ───────────────────────────────────────────────────────────
 
 /// Temporal data — consolidates Time, Duration, TimeSpan, Timeframe,
 /// TimeReference, DateTimeExpr, and DataDateTimeRef.
@@ -1355,110 +712,30 @@ impl fmt::Display for TemporalData {
     }
 }
 
-/// Rare heap data — consolidates ExprProxy, FilterExpr, SimulationCall,
-/// PrintResult, TypeAnnotation, TypeAnnotatedValue, and DataReference.
-#[derive(Debug, Clone)]
-pub enum RareHeapData {
-    ExprProxy(Arc<String>),
-    FilterExpr(Arc<crate::value::FilterNode>),
-    SimulationCall(Box<SimulationCallData>),
-    PrintResult(Box<crate::value::PrintResult>),
-    TypeAnnotation(Box<shape_ast::ast::TypeAnnotation>),
-    TypeAnnotatedValue { type_name: String, value: Box<crate::value_word::ValueWord> },
-    DataReference(Box<DataReferenceData>),
-}
-
-impl RareHeapData {
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            RareHeapData::ExprProxy(_) => "expr_proxy",
-            RareHeapData::FilterExpr(_) => "filter_expr",
-            RareHeapData::SimulationCall(_) => "simulation_call",
-            RareHeapData::PrintResult(_) => "print_result",
-            RareHeapData::TypeAnnotation(_) => "type_annotation",
-            RareHeapData::TypeAnnotatedValue { value, .. } => value.type_name(),
-            RareHeapData::DataReference(_) => "data_reference",
-        }
-    }
-
-    #[inline]
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            RareHeapData::TypeAnnotatedValue { value, .. } => value.is_truthy(),
-            _ => true,
-        }
-    }
-}
-
-impl fmt::Display for RareHeapData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RareHeapData::ExprProxy(name) => write!(f, "<expr:{}>", name),
-            RareHeapData::FilterExpr(_) => write!(f, "<filter_expr>"),
-            RareHeapData::SimulationCall(data) => write!(f, "<simulation:{}>", data.name),
-            RareHeapData::PrintResult(_) => write!(f, "<print_result>"),
-            RareHeapData::TypeAnnotation(_) => write!(f, "<type_annotation>"),
-            RareHeapData::TypeAnnotatedValue { type_name, value } => write!(f, "{}({})", type_name, value),
-            RareHeapData::DataReference(data) => write!(f, "<data:{}>", data.id),
-        }
-    }
-}
-
-/// Concurrency primitives — consolidates Mutex, Atomic, Lazy, and Channel.
-#[derive(Debug, Clone)]
-pub enum ConcurrencyData {
-    Mutex(Box<MutexData>),
-    Atomic(Box<AtomicData>),
-    Lazy(Box<LazyData>),
-    Channel(Box<ChannelData>),
-}
-
-impl ConcurrencyData {
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            ConcurrencyData::Mutex(_) => "mutex",
-            ConcurrencyData::Atomic(_) => "atomic",
-            ConcurrencyData::Lazy(_) => "lazy",
-            ConcurrencyData::Channel(_) => "channel",
-        }
-    }
-
-    #[inline]
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            ConcurrencyData::Mutex(_) => true,
-            ConcurrencyData::Atomic(a) => a.inner.load(std::sync::atomic::Ordering::Relaxed) != 0,
-            ConcurrencyData::Lazy(l) => l.is_initialized(),
-            ConcurrencyData::Channel(c) => !c.is_closed(),
-        }
-    }
-}
-
-impl fmt::Display for ConcurrencyData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConcurrencyData::Mutex(_) => write!(f, "<mutex>"),
-            ConcurrencyData::Atomic(a) => write!(f, "<atomic:{}>", a.inner.load(std::sync::atomic::Ordering::Relaxed)),
-            ConcurrencyData::Lazy(l) => {
-                let initialized = l.value.lock().map(|g| g.is_some()).unwrap_or(false);
-                if initialized { write!(f, "<lazy:initialized>") } else { write!(f, "<lazy:pending>") }
-            }
-            ConcurrencyData::Channel(c) => {
-                if c.is_sender() { write!(f, "<channel:sender>") } else { write!(f, "<channel:receiver>") }
-            }
-        }
-    }
-}
+// ── Table view data ─────────────────────────────────────────────────────────
 
 /// Table view data — consolidates TypedTable, RowView, ColumnRef, and IndexedTable.
 #[derive(Debug, Clone)]
 pub enum TableViewData {
-    TypedTable { schema_id: u64, table: Arc<crate::datatable::DataTable> },
-    RowView { schema_id: u64, table: Arc<crate::datatable::DataTable>, row_idx: usize },
-    ColumnRef { schema_id: u64, table: Arc<crate::datatable::DataTable>, col_id: u32 },
-    IndexedTable { schema_id: u64, table: Arc<crate::datatable::DataTable>, index_col: u32 },
+    TypedTable {
+        schema_id: u64,
+        table: Arc<crate::datatable::DataTable>,
+    },
+    RowView {
+        schema_id: u64,
+        table: Arc<crate::datatable::DataTable>,
+        row_idx: usize,
+    },
+    ColumnRef {
+        schema_id: u64,
+        table: Arc<crate::datatable::DataTable>,
+        col_id: u32,
+    },
+    IndexedTable {
+        schema_id: u64,
+        table: Arc<crate::datatable::DataTable>,
+        index_col: u32,
+    },
 }
 
 impl TableViewData {
@@ -1486,10 +763,20 @@ impl TableViewData {
 impl fmt::Display for TableViewData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TableViewData::TypedTable { table, .. } => write!(f, "<typed_table:{}x{}>", table.row_count(), table.column_count()),
+            TableViewData::TypedTable { table, .. } => write!(
+                f,
+                "<typed_table:{}x{}>",
+                table.row_count(),
+                table.column_count()
+            ),
             TableViewData::RowView { row_idx, .. } => write!(f, "<row:{}>", row_idx),
             TableViewData::ColumnRef { col_id, .. } => write!(f, "<column:{}>", col_id),
-            TableViewData::IndexedTable { table, .. } => write!(f, "<indexed_table:{}x{}>", table.row_count(), table.column_count()),
+            TableViewData::IndexedTable { table, .. } => write!(
+                f,
+                "<indexed_table:{}x{}>",
+                table.row_count(),
+                table.column_count()
+            ),
         }
     }
 }
@@ -1499,53 +786,27 @@ impl fmt::Display for TableViewData {
 // All generated from the single source of truth in define_heap_types!().
 crate::define_heap_types!();
 
-// ── Manual Clone / Drop for HeapValue (Wave 4 WC.3) ─────────────────────────
+// ── Manual Clone for HeapValue ──────────────────────────────────────────────
 //
-// Why this is manual, not `#[derive(Clone)]` + no Drop:
-//
-// The `Some(Box<ValueWord>)` / `Ok(Box<ValueWord>)` / `Err(Box<ValueWord>)`
-// variants hold a NaN-boxed `u64` inside a `Box`. A derived `Clone` would
-// copy the `u64` bits into a fresh `Box` **without calling `vw_clone`**,
-// so any heap tag encoded in the bits would be unreachable from the refcount
-// pipeline. Likewise, an automatic `Drop` of `Box<ValueWord>` would free
-// only the Box allocation and leak the underlying Arc / owned box.
-//
-// This impl pairs the two: `Clone` routes the inner bits through
-// `vw_clone` (shared-heap refcount bump / owned-heap deep clone) and `Drop`
-// routes them through `vw_drop`. Every other variant delegates to its
-// inner type's own `Clone` / `Drop` exactly as the auto-derive would
-// have generated.
+// All surviving variants own fields whose `Clone` already reclaims-and-clones
+// the resource (Arc refcount bump, Box deep-clone, struct field clone). With
+// the strict-typed bulldozer's deletion of every `ValueWord`-bearing variant,
+// there is no longer any `vw_clone` / `vw_drop` bookkeeping to pair, so this
+// impl is purely mechanical delegation.
 impl Clone for HeapValue {
     fn clone(&self) -> Self {
         match self {
-            // Tuple variants
             HeapValue::String(v) => HeapValue::String(v.clone()),
-            HeapValue::Array(v) => HeapValue::Array(v.clone()),
             HeapValue::Decimal(v) => HeapValue::Decimal(*v),
             HeapValue::BigInt(v) => HeapValue::BigInt(*v),
-            HeapValue::HostClosure(v) => HeapValue::HostClosure(v.clone()),
+            HeapValue::Future(v) => HeapValue::Future(*v),
+            HeapValue::Char(v) => HeapValue::Char(*v),
             HeapValue::DataTable(v) => HeapValue::DataTable(v.clone()),
-            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
-            HeapValue::Set(v) => HeapValue::Set(v.clone()),
-            HeapValue::Deque(v) => HeapValue::Deque(v.clone()),
-            HeapValue::PriorityQueue(v) => HeapValue::PriorityQueue(v.clone()),
             HeapValue::Content(v) => HeapValue::Content(v.clone()),
             HeapValue::Instant(v) => HeapValue::Instant(v.clone()),
             HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
-            HeapValue::Enum(v) => HeapValue::Enum(v.clone()),
-            // The three ValueWord-bearing variants route through vw_clone
-            // so heap refcounts stay paired with the matching Drop below.
-            HeapValue::Some(inner) => HeapValue::Some(Box::new(vw_clone(**inner))),
-            HeapValue::Ok(inner) => HeapValue::Ok(Box::new(vw_clone(**inner))),
-            HeapValue::Err(inner) => HeapValue::Err(Box::new(vw_clone(**inner))),
-            HeapValue::Future(v) => HeapValue::Future(*v),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
             HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
-            HeapValue::Iterator(v) => HeapValue::Iterator(v.clone()),
-            HeapValue::Generator(v) => HeapValue::Generator(v.clone()),
-            HeapValue::Char(v) => HeapValue::Char(*v),
-            HeapValue::ProjectedRef(v) => HeapValue::ProjectedRef(v.clone()),
-            // Struct variants
             HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -1556,69 +817,13 @@ impl Clone for HeapValue {
                 heap_mask: *heap_mask,
             },
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
-            HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            } => HeapValue::Range {
-                // `start` / `end` carry `Box<ValueWord>` bits; route each
-                // through `vw_clone` so heap-tagged endpoints stay
-                // refcount-paired with the matching Drop below.
-                start: start.as_deref().map(|&b| Box::new(vw_clone(b))),
-                end: end.as_deref().map(|&b| Box::new(vw_clone(b))),
-                inclusive: *inclusive,
-            },
             HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
                 kind: *kind,
                 task_ids: task_ids.clone(),
             },
-            HeapValue::TraitObject { value, vtable } => HeapValue::TraitObject {
-                // `value` is a `Box<ValueWord>` holding NaN-boxed bits.
-                value: Box::new(vw_clone(**value)),
-                vtable: vtable.clone(),
-            },
-            HeapValue::FunctionRef { name, closure } => HeapValue::FunctionRef {
-                name: name.clone(),
-                closure: closure.as_deref().map(|&b| Box::new(vw_clone(b))),
-            },
             HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
             HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
-            HeapValue::Rare(v) => HeapValue::Rare(v.clone()),
-            HeapValue::Concurrency(v) => HeapValue::Concurrency(v.clone()),
             HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
-        }
-    }
-}
-
-impl Drop for HeapValue {
-    fn drop(&mut self) {
-        // Only the variants that hold raw `ValueWord` (u64) bits inside
-        // a `Box` / `Option<Box>` need the vw_drop hop; every other
-        // variant owns fields whose `Drop` already reclaims the
-        // resource (Arc refcount, Box allocation, etc.).
-        //
-        // Rust runs this impl first, then auto-drops the enum's fields;
-        // `vw_drop` decrements the heap refcount, and the surrounding
-        // `Box<ValueWord>` is then freed by the default drop glue.
-        match self {
-            HeapValue::Some(inner) | HeapValue::Ok(inner) | HeapValue::Err(inner) => {
-                vw_drop(**inner)
-            }
-            HeapValue::Range { start, end, .. } => {
-                if let Some(b) = start {
-                    vw_drop(**b);
-                }
-                if let Some(b) = end {
-                    vw_drop(**b);
-                }
-            }
-            HeapValue::TraitObject { value, .. } => vw_drop(**value),
-            HeapValue::FunctionRef { closure, .. } => {
-                if let Some(b) = closure {
-                    vw_drop(**b);
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -1686,16 +891,6 @@ impl fmt::Display for HeapValue {
         match self {
             HeapValue::Char(c) => write!(f, "{}", c),
             HeapValue::String(s) => write!(f, "{}", s),
-            HeapValue::Array(arr) => {
-                write!(f, "[")?;
-                for (i, elem) in arr.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", elem)?;
-                }
-                write!(f, "]")
-            }
             HeapValue::TypedObject { .. } => write!(f, "{{...}}"),
             HeapValue::ClosureRaw(owned) => {
                 // SAFETY: OwnedClosureBlock's invariant guarantees the
@@ -1707,111 +902,21 @@ impl fmt::Display for HeapValue {
             }
             HeapValue::Decimal(d) => write!(f, "{}", d),
             HeapValue::BigInt(i) => write!(f, "{}", i),
-            HeapValue::HostClosure(_) => write!(f, "<host_closure>"),
             HeapValue::DataTable(dt) => {
                 write!(f, "<datatable:{}x{}>", dt.row_count(), dt.column_count())
             }
             HeapValue::TableView(tv) => write!(f, "{}", tv),
-            HeapValue::HashMap(d) => {
-                write!(f, "HashMap{{")?;
-                for (i, (k, v)) in d.keys.iter().zip(d.values.iter()).enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", k, v)?;
-                }
-                write!(f, "}}")
-            }
-            HeapValue::Set(d) => {
-                write!(f, "Set{{")?;
-                for (i, item) in d.items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "}}")
-            }
-            HeapValue::Deque(d) => {
-                write!(f, "Deque[")?;
-                for (i, item) in d.items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::PriorityQueue(d) => {
-                write!(f, "PriorityQueue[")?;
-                for (i, item) in d.items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "]")
-            }
             HeapValue::Content(node) => write!(f, "{}", node),
             HeapValue::Instant(t) => write!(f, "<instant:{:?}>", t.elapsed()),
             HeapValue::IoHandle(data) => {
                 let status = if data.is_open() { "open" } else { "closed" };
                 write!(f, "<io_handle:{}:{}>", data.path, status)
             }
-            HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            } => {
-                if let Some(s) = start {
-                    write!(f, "{}", s)?;
-                }
-                write!(f, "{}", if *inclusive { "..=" } else { ".." })?;
-                if let Some(e) = end {
-                    write!(f, "{}", e)?;
-                }
-                fmt::Result::Ok(())
-            }
-            HeapValue::Enum(e) => {
-                write!(f, "{}", e.variant)?;
-                match &e.payload {
-                    crate::enums::EnumPayload::Unit => Ok(()),
-                    crate::enums::EnumPayload::Tuple(values) => {
-                        write!(f, "(")?;
-                        for (i, v) in values.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, ", ")?;
-                            }
-                            write!(f, "{}", v)?;
-                        }
-                        write!(f, ")")
-                    }
-                    crate::enums::EnumPayload::Struct(fields) => {
-                        let mut pairs: Vec<_> = fields.iter().collect();
-                        pairs.sort_by_key(|(k, _)| (*k).clone());
-                        write!(f, " {{ ")?;
-                        for (i, (k, v)) in pairs.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, ", ")?;
-                            }
-                            write!(f, "{}: {}", k, v)?;
-                        }
-                        write!(f, " }}")
-                    }
-                }
-            }
-            HeapValue::Some(v) => write!(f, "some({})", v),
-            HeapValue::Ok(v) => write!(f, "ok({})", v),
-            HeapValue::Err(v) => write!(f, "err({})", v),
             HeapValue::Future(id) => write!(f, "<future:{}>", id),
             HeapValue::TaskGroup { task_ids, .. } => {
                 write!(f, "<task_group:{}>", task_ids.len())
             }
-            HeapValue::TraitObject { value, .. } => write!(f, "{}", value),
             HeapValue::Temporal(td) => write!(f, "{}", td),
-            HeapValue::Rare(rd) => write!(f, "{}", rd),
-            HeapValue::FunctionRef { name, .. } => write!(f, "<fn:{}>", name),
-            HeapValue::ProjectedRef(_) => write!(f, "&ref"),
             HeapValue::NativeScalar(v) => write!(f, "{v}"),
             HeapValue::NativeView(v) => write!(
                 f,
@@ -1821,18 +926,6 @@ impl fmt::Display for HeapValue {
                 v.ptr
             ),
             HeapValue::TypedArray(ta) => write!(f, "{}", ta),
-            HeapValue::Iterator(it) => {
-                write!(
-                    f,
-                    "<iterator:pos={},transforms={}>",
-                    it.position,
-                    it.transforms.len()
-                )
-            }
-            HeapValue::Generator(g) => {
-                write!(f, "<generator:state={}>", g.state)
-            }
-            HeapValue::Concurrency(cd) => write!(f, "{}", cd),
         }
     }
 }
@@ -1849,13 +942,6 @@ impl HeapValue {
     pub fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>> {
         match self {
             HeapValue::ClosureRaw(owned) => {
-                // Track A.5: the `ClosureRaw` variant is the only closure
-                // representation remaining. Constructing a
-                // `VmClosureHandle::raw` here keeps the migrated call
-                // sites unchanged. The borrow `'_` on the handle is tied
-                // to the borrow of `self`, which covers the
-                // `OwnedClosureBlock`'s live-pointer invariant.
-                //
                 // SAFETY: `OwnedClosureBlock::from_raw` upholds that
                 // `as_header_ptr()` points to a live `TypedClosureHeader`
                 // whose layout matches `owned.layout()`; both remain valid
@@ -1873,9 +959,6 @@ impl HeapValue {
     }
 
     /// Structural equality comparison for HeapValue.
-    ///
-    /// Used by ValueWord::PartialEq when two heap-tagged values have different
-    /// Arc pointers but may contain equal data.
     pub fn structural_eq(&self, other: &HeapValue) -> bool {
         match (self, other) {
             (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
@@ -1887,30 +970,12 @@ impl HeapValue {
                 let cs = c.encode_utf8(&mut buf);
                 cs == s.as_str()
             }
-            (HeapValue::Array(a), HeapValue::Array(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
-            }
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
-            (HeapValue::Some(a), HeapValue::Some(b)) => a == b,
-            (HeapValue::Ok(a), HeapValue::Ok(b)) => a == b,
-            (HeapValue::Err(a), HeapValue::Err(b)) => a == b,
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::Concurrency(ConcurrencyData::Mutex(a)), HeapValue::Concurrency(ConcurrencyData::Mutex(b))) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Concurrency(ConcurrencyData::Atomic(a)), HeapValue::Concurrency(ConcurrencyData::Atomic(b))) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Concurrency(ConcurrencyData::Lazy(a)), HeapValue::Concurrency(ConcurrencyData::Lazy(b))) => Arc::ptr_eq(&a.value, &b.value),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Rare(RareHeapData::ExprProxy(a)), HeapValue::Rare(RareHeapData::ExprProxy(b))) => a == b,
             (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
-            (HeapValue::HashMap(d1), HeapValue::HashMap(d2)) => {
-                d1.keys.len() == d2.keys.len()
-                    && d1.keys.iter().zip(d2.keys.iter()).all(|(a, b)| a == b)
-                    && d1.values.iter().zip(d2.values.iter()).all(|(a, b)| a == b)
-            }
-            (HeapValue::Set(s1), HeapValue::Set(s2)) => {
-                s1.items.len() == s2.items.len() && s1.items.iter().all(|item| s2.contains(item))
-            }
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
@@ -1955,9 +1020,6 @@ impl HeapValue {
                 let cs = c.encode_utf8(&mut buf);
                 cs == s.as_str()
             }
-            (HeapValue::Array(a), HeapValue::Array(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.vw_equals(y))
-            }
             (
                 HeapValue::TypedObject {
                     schema_id: s1,
@@ -1974,25 +1036,18 @@ impl HeapValue {
                     return false;
                 }
                 for i in 0..sl1.len() {
-                    let is_heap = (hm1 & (1u64 << i)) != 0;
-                    if is_heap {
-                        // Deep compare heap values (strings, arrays, objects, etc.)
-                        let a_nb = sl1[i].as_heap_nb();
-                        let b_nb = sl2[i].as_heap_nb();
-                        if !a_nb.vw_equals(&b_nb) {
-                            return false;
-                        }
-                    } else {
-                        // Raw bit compare for primitives (f64, i64, bool)
-                        if sl1[i].raw() != sl2[i].raw() {
-                            return false;
-                        }
+                    // Both heap-mask and primitive-mask: compare raw bits
+                    // for primitives. For heap slots, raw-bit equality is
+                    // also conservatively correct since `ValueSlot` heap
+                    // payloads are typed pointers — pointer-equality
+                    // implies value-equality for shared Arc'd payloads.
+                    if sl1[i].raw() != sl2[i].raw() {
+                        return false;
                     }
                 }
                 true
             }
-            // Track A.5: only the `ClosureRaw` variant survives; compare
-            // by function_id as before.
+            // Track A.5: the canonical closure variant compares by function id.
             (HeapValue::ClosureRaw(a), HeapValue::ClosureRaw(b)) => {
                 // SAFETY: both blocks are live per OwnedClosureBlock invariant.
                 let fa = unsafe { crate::v2::closure_raw::typed_closure_function_id(a.as_ptr()) };
@@ -2020,49 +1075,16 @@ impl HeapValue {
                 HeapValue::TableView(TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 }),
                 HeapValue::TableView(TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 }),
             ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
-            (HeapValue::HashMap(d1), HeapValue::HashMap(d2)) => {
-                d1.keys.len() == d2.keys.len()
-                    && d1
-                        .keys
-                        .iter()
-                        .zip(d2.keys.iter())
-                        .all(|(a, b)| a.vw_equals(b))
-                    && d1
-                        .values
-                        .iter()
-                        .zip(d2.values.iter())
-                        .all(|(a, b)| a.vw_equals(b))
-            }
-            (HeapValue::Set(s1), HeapValue::Set(s2)) => {
-                s1.items.len() == s2.items.len() && s1.items.iter().all(|item| s2.contains(item))
-            }
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::Concurrency(ConcurrencyData::Mutex(a)), HeapValue::Concurrency(ConcurrencyData::Mutex(b))) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Concurrency(ConcurrencyData::Atomic(a)), HeapValue::Concurrency(ConcurrencyData::Atomic(b))) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Concurrency(ConcurrencyData::Lazy(a)), HeapValue::Concurrency(ConcurrencyData::Lazy(b))) => Arc::ptr_eq(&a.value, &b.value),
-            (HeapValue::Range { .. }, HeapValue::Range { .. }) => false,
-            (HeapValue::Enum(a), HeapValue::Enum(b)) => {
-                a.enum_name == b.enum_name && a.variant == b.variant
-            }
-            (HeapValue::Some(a), HeapValue::Some(b)) => a.vw_equals(b),
-            (HeapValue::Ok(a), HeapValue::Ok(b)) => a.vw_equals(b),
-            (HeapValue::Err(a), HeapValue::Err(b)) => a.vw_equals(b),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
             (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
             (HeapValue::Temporal(TemporalData::Duration(a)), HeapValue::Temporal(TemporalData::Duration(b))) => a == b,
             (HeapValue::Temporal(TemporalData::TimeSpan(a)), HeapValue::Temporal(TemporalData::TimeSpan(b))) => a == b,
             (HeapValue::Temporal(TemporalData::Timeframe(a)), HeapValue::Temporal(TemporalData::Timeframe(b))) => a == b,
-            (HeapValue::FunctionRef { name: n1, .. }, HeapValue::FunctionRef { name: n2, .. }) => {
-                n1 == n2
-            }
-            (HeapValue::ProjectedRef(a), HeapValue::ProjectedRef(b)) => a == b,
-            (HeapValue::Rare(RareHeapData::DataReference(a)), HeapValue::Rare(RareHeapData::DataReference(b))) => {
-                a.datetime == b.datetime && a.id == b.id && a.timeframe == b.timeframe
-            }
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
@@ -2105,22 +1127,12 @@ impl HeapValue {
 mod closure_variant_regression {
     //! N2 — pin Track A.5's deletion of the legacy `HeapValue::Closure`
     //! variant. The `HeapKind::Closure` ordinal is preserved for ABI
-    //! stability and must continue to map to the `ClosureRaw` pipeline
-    //! (closure/snapshot replay, trait-object dispatch, remote builtins
-    //! all depend on this invariant).
-    //!
-    //! If someone re-introduces a `Closure { .. }` payload variant, the
-    //! Rust compiler catches most misuse via exhaustive match — but a
-    //! doc-test or fixture could compile without surfacing the bifurcation.
-    //! This test pins the ordinal and type-name convention.
+    //! stability and must continue to map to the `ClosureRaw` pipeline.
     use super::*;
 
     #[test]
     fn heap_kind_closure_ordinal_stable() {
         // HeapKind::Closure = 3 per the ordinal table in heap_variants.rs.
-        // Reintroducing HeapValue::Closure as a new variant would append
-        // at the end and either change ordinals or duplicate "closure"
-        // type names — both regressions. See Track A.5 / v2-closure §14.7.
         assert_eq!(HeapKind::Closure as u8, 3);
     }
 }

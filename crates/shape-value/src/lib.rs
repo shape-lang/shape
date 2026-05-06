@@ -60,11 +60,7 @@ pub use extraction::{
     require_f64, require_int, require_number, require_string, require_typed_object,
 };
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
-pub use heap_value::{
-    ChannelData, ConcurrencyData, DataReferenceData, DequeData, HashMapData, HeapKind, HeapValue,
-    PriorityQueueData, ProjectedRefData, RareHeapData, RefProjection, SetData, SimulationCallData,
-    TableViewData, TemporalData, TypedArrayData,
-};
+pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar};
