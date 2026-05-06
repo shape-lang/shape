@@ -69,61 +69,12 @@ impl BytecodeExecutor {
         }
     }
 
-    /// Wave E+5.5 host-boundary load-side decode: when the binding's
-    /// declared `StorageHint` is a typed native primitive
-    /// (Int64/Float64/Bool/sub-int width) and the persisted bits are a
-    /// tagged ValueWord (the normal save path produced via
-    /// `save_module_bindings_to_context`'s `synthesize_value_word_from_raw`),
-    /// strip the tag and reconstruct the raw native bits. The typed
-    /// `LoadModuleBinding<Kind>` opcodes (`op_load_module_binding_i64`,
-    /// `_f64`, `_bool`, …) raw-transmute the slot's u64 directly onto
-    /// the stack with no tag-decode (`variables/mod.rs:3572`), so the
-    /// slot must hold raw native bits to feed the post-Wave-E+5 native
-    /// arithmetic path. Polymorphic / unknown slots pass through
-    /// unchanged.
-    fn normalize_persisted_for_slot(
-        value: ValueWord,
-        hint: Option<crate::type_tracking::StorageHint>,
-    ) -> ValueWord {
-        use crate::type_tracking::StorageHint;
-        let Some(hint) = hint else { return value };
-        match hint {
-            StorageHint::Int8
-            | StorageHint::UInt8
-            | StorageHint::Int16
-            | StorageHint::UInt16
-            | StorageHint::Int32
-            | StorageHint::UInt32
-            | StorageHint::Int64
-            | StorageHint::UInt64
-            | StorageHint::IntSize
-            | StorageHint::UIntSize => {
-                if let Some(i) = value.as_i64() {
-                    ValueWord::from_raw_bits(i as u64)
-                } else {
-                    value
-                }
-            }
-            StorageHint::Float64 => {
-                if let Some(f) = value.as_f64() {
-                    ValueWord::from_raw_bits(f.to_bits())
-                } else {
-                    value
-                }
-            }
-            StorageHint::Bool => {
-                if let Some(b) = value.as_bool() {
-                    ValueWord::from_raw_bits(b as u64)
-                } else {
-                    value
-                }
-            }
-            // Nullable widths, String, Dynamic, Unknown: keep tagged
-            // bits — the polymorphic LoadModuleBinding handler reads
-            // them as ValueWord and decodes via tag bits.
-            _ => value,
-        }
-    }
+    // Pattern D bridge `normalize_persisted_for_slot` deleted by the
+    // strict-typing bulldozer. REPL persistence must store raw native
+    // bits per the binding's compile-time-proved kind; no runtime
+    // tag-decode at the load boundary. Phase 2 rewires
+    // save_module_bindings_to_context / restore to use per-slot kind
+    // metadata directly.
 
     /// Wave E+5.5: propagate known-binding type info from a persistent
     /// REPL `ExecutionContext` into the compiler's type tracker, so the

@@ -10,47 +10,10 @@ use shape_value::{ArgVec, HeapKind, VMError, ValueWord, ValueWordExt, heap_value
 use shape_value::tag_bits::{is_tagged, get_tag, I48_MAX, I48_MIN, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use std::sync::Arc;
 
-/// Re-tag a raw stack-bit pattern that may be a native i64/bool result from a
-/// post-Wave-E+5 producer (`op_push_const` Int/Bool, typed arithmetic, typed
-/// loads). Convert helpers receive a `&ValueWord` whose accessors
-/// (`as_i64()`, `as_bool()`) only inspect the legacy tagged form, so untagged
-/// native bits silently fail the tagged check and fall through to
-/// `as_f64()` — which reinterprets a tiny native i64 as an f64 denormal.
-///
-/// Heuristic: if the bits are untagged AND fit in the i48 range, the producer
-/// almost certainly pushed a native i64 (op_push_const Int/Bool, typed
-/// arithmetic results), because real f64 values like 1.0 / 2.5 / 99.0 have
-/// bit patterns far outside [I48_MIN, I48_MAX]. Producers that push native
-/// f64 (op_push_const Number, AddNumber, etc.) yield bit patterns that fall
-/// outside that range. The one ambiguous case — bits == 0, which could be
-/// native i64 0, native bool false, or native f64 0.0 — round-trips to the
-/// same scalar value across all three interpretations, so converting it as
-/// i64 is correct for every downstream call.
-#[inline]
-fn rebox_native_bits(bits: u64) -> ValueWord {
-    use shape_value::tag_bits::{get_payload, get_tag, TAG_REF};
-    if is_tagged(bits) {
-        // Negative native i64 values (e.g. -42 = 0xFFFF_FFFF_FFFF_FFD6)
-        // have their top 13 bits all-1s, which collides with the
-        // NaN-tag prefix. Such bits decode as `get_tag == TAG_REF`
-        // with a 48-bit payload that far exceeds any plausible
-        // stack-slot index (real refs are bounded by `MAX_STACK_SIZE`
-        // ≈ 100K, well under `1 << 32`). Treat oversized "TAG_REF"
-        // patterns as native i64 sign-extensions.
-        if get_tag(bits) == TAG_REF && get_payload(bits) >= (1u64 << 32) {
-            return ValueWord::from_i64(bits as i64);
-        }
-        return ValueWord::from_raw_bits(bits);
-    }
-    let as_i64 = bits as i64;
-    if (I48_MIN..=I48_MAX).contains(&as_i64) {
-        // Native i64 (or bool encoded as 0/1) — re-tag as a tagged i48.
-        ValueWord::from_i64(as_i64)
-    } else {
-        // Native f64 — re-box as a plain f64 ValueWord.
-        ValueWord::from_f64(f64::from_bits(bits))
-    }
-}
+// Pattern B bridge `rebox_native_bits` deleted by the strict-typing
+// bulldozer. Convert handlers must receive typed values, not heuristic
+// rebox of untagged bits. Phase 2 rewrites the convert callers to use
+// per-slot kind metadata.
 
 const INTO_DISPATCH_TAG: &str = "__IntoDispatch";
 const TRY_INTO_DISPATCH_TAG: &str = "__TryIntoDispatch";

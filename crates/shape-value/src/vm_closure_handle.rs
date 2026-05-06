@@ -86,102 +86,11 @@ impl<'a> VmClosureHandle<'a> {
         self.layout.capture_count()
     }
 
-    /// Read capture `i` as a `ValueWord`.
-    ///
-    /// The capture's typed native width is read and widened to a
-    /// `ValueWord` bit pattern via [`read_capture_as_value_bits`].
-    ///
-    /// # Track A.1B — CaptureKind dispatch
-    ///
-    /// When the layout marks capture `i` as
-    /// [`CaptureKind::OwnedMutable`], the slot stores `*mut ValueWord` —
-    /// this method dereferences the box and returns the inner value.
-    /// When the layout marks it [`CaptureKind::Shared`], the slot stores
-    /// `*const SharedCell` (an `Arc<parking_lot::Mutex<ValueWord>>`) —
-    /// this method acquires the mutex only to read the inner bits, then
-    /// drops the guard before returning.
-    ///
-    /// This widening is correct for debug/print/equality/wire paths that
-    /// want the *current value* of a mutable-cell capture. Execution-path
-    /// readers (the A.1B MIR opcodes) go through
-    /// [`Self::capture_owned_mutable_ptr`] /
-    /// [`Self::capture_shared_cell_ptr`] so writes propagate to the
-    /// underlying cell.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i >= self.capture_count()`.
-    #[inline]
-    pub fn capture_as_value(&self, i: usize) -> ValueWord {
-        match self.layout.capture_storage_kind(i) {
-            CaptureKind::Immutable => {
-                // SAFETY: the Raw constructor guarantees `ptr` +
-                // `layout` match and that the block is live.
-                // `i < capture_count` is upheld by the caller
-                // (panics on overflow at the layout accessor).
-                let bits = unsafe {
-                    read_capture_as_value_bits(self.ptr as *const u8, self.layout, i)
-                };
-                // Post-Wave-E+5: `op_make_closure`'s Immutable arm writes
-                // raw native bits via `write_capture_typed` (the producer
-                // pushed `push_native_i64`/`push_raw_f64`/`push_native_bool`
-                // for proven-type captures). Wrapping the popped bits
-                // directly via `from_raw_bits` would treat e.g. native
-                // i64 = 10 as a tagged ValueWord and `as_i64()` would
-                // return None. Re-tag per `capture_inner_kind` using the
-                // same dispatch as `synthesize_value_word_from_raw` in
-                // shape-vm's executor/dispatch.rs.
-                use crate::v2::struct_layout::FieldKind;
-                match self.layout.capture_inner_kind(i) {
-                    FieldKind::I64
-                    | FieldKind::I32
-                    | FieldKind::U32
-                    | FieldKind::I16
-                    | FieldKind::U16
-                    | FieldKind::I8
-                    | FieldKind::U8 => ValueWord::from_i64(bits as i64),
-                    FieldKind::U64 => {
-                        if bits <= i64::MAX as u64 {
-                            ValueWord::from_i64(bits as i64)
-                        } else {
-                            ValueWord::from_native_u64(bits)
-                        }
-                    }
-                    FieldKind::F64 => ValueWord::from_f64(f64::from_bits(bits)),
-                    FieldKind::Bool => ValueWord::from_bool(bits != 0),
-                    // Heap-typed captures (Ptr) and any future kinds:
-                    // bits are already a tagged ValueWord (heap pointer
-                    // bits, NaN-box, etc.) — passthrough.
-                    FieldKind::Ptr => ValueWord::from_raw_bits(bits),
-                }
-            }
-            CaptureKind::OwnedMutable => {
-                let cell = unsafe { owned_mutable_cell_ptr(self.ptr, self.layout, i) };
-                // SAFETY: `cell` is a live `*mut ValueWord` from
-                // `Box::into_raw` (see A.1B `op_make_closure`).
-                // Reading 8 bytes is in-bounds and aligned. The
-                // box is not mutated concurrently — OwnedMutable
-                // has no sharing semantics.
-                unsafe { std::ptr::read(cell) }
-            }
-            CaptureKind::Shared => {
-                let cell_ptr = unsafe { shared_cell_ptr(self.ptr, self.layout, i) };
-                // SAFETY: `cell_ptr` is a live `*const SharedCell`
-                // from `Arc::into_raw`. Reborrowing it for the
-                // duration of the lock is safe because the
-                // closure's block holds the strong-count share
-                // and is alive for the lifetime of this handle.
-                // The mutex is held only for the clone.
-                unsafe {
-                    let cell: &SharedCell = &*cell_ptr;
-                    let guard = cell.lock();
-                    let bits = *guard;
-                    drop(guard);
-                    bits
-                }
-            }
-        }
-    }
+    // Pattern C bridge `capture_as_value` deleted by the strict-typing
+    // bulldozer. Closure capture readers must use the typed-kind APIs
+    // (capture_raw_bits + per-kind decode at compile-time-known sites,
+    // or capture_owned_mutable_ptr / capture_shared_cell_ptr for cell
+    // captures). No runtime per-FieldKind decode at the read boundary.
 
     /// Track A.1B: raw 8-byte bits for capture `i` **as stored in the
     /// closure's slot**, without running SharedCell or OwnedMutable
