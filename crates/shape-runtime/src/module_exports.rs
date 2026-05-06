@@ -528,24 +528,10 @@ impl ModuleExports {
             || self.typed_exports.async_functions.contains_key(name)
     }
 
-    /// Invoke a sync export by name through the typed registry, marshalling
-    /// the resulting `TypedReturn` to a `ValueWord` at the boundary.
-    ///
-    /// Returns `None` if the export doesn't exist (or is async). Used by
-    /// stdlib-internal tests that previously did
-    /// `module.get_export(name).unwrap()(&args, &ctx)` — the typed
-    /// migration removes the legacy `ModuleFn` accessor in favor of this
-    /// dispatch helper.
-    pub fn invoke_export(
-        &self,
-        name: &str,
-        args: &[ValueWord],
-        ctx: &ModuleContext,
-    ) -> Option<Result<ValueWord, String>> {
-        let typed = self.typed_exports.functions.get(name)?;
-        let typed_result = (typed.invoke)(args, ctx);
-        Some(typed_result.map(|t| t.into_value_word()))
-    }
+    // `invoke_export` removed alongside `TypedReturn::into_value_word()`.
+    // The replacement is the Phase 2b kind-threaded marshal layer that
+    // projects `TypedReturn` directly into a typed slot without round-
+    // tripping through a synthesized runtime value.
 
     /// Check if a function is async.
     pub fn is_async(&self, name: &str) -> bool {
