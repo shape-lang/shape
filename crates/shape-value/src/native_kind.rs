@@ -15,16 +15,19 @@
 //! removed them per the strict-typed plan. Every slot has a proven kind at compile
 //! time or it's a compile error. There is no fallback variant.
 
+use crate::heap_value::HeapKind;
 use serde::{Deserialize, Serialize};
 
 /// Storage discriminator for a single 8-byte typed slot.
 ///
 /// Each variant identifies which native type the slot's `u64` raw bits
 /// represent, including width and nullability for integers and float.
-/// Boolean and string have no width variants. Heap-pointer slots (arrays,
-/// objects, etc.) are represented at this layer via the `String` variant
-/// (the only heap shape that crosses the marshal boundary today —
-/// future heap-shape variants will be added as the marshal layer extends).
+/// Boolean has no width variant. `String` is special-cased as the most
+/// common heap shape (an `Arc<String>` raw pointer); all other heap-
+/// allocated shapes use `Ptr(HeapKind)` carrying the surviving
+/// `HeapValue` discriminant. The kind tells the marshal/wire/snapshot
+/// layer which `HeapValue` arm the bits decode to without probing the
+/// bits themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NativeKind {
     /// Plain f64 value (direct float operations)
@@ -76,6 +79,22 @@ pub enum NativeKind {
     Bool,
     /// String reference (Arc<String> raw pointer)
     String,
+    /// Heap pointer (`Arc<HeapValue>` raw pointer) whose `HeapValue`
+    /// discriminant is `kind`. The marshal/wire/snapshot layer dispatches
+    /// on `kind` to project the slot to its typed shape — it does not
+    /// probe the heap object's self-reported discriminant in production
+    /// (`(*hv).kind() == kind` is a debug-only sanity check).
+    ///
+    /// Watchlist (`docs/defections.md` 2026-05-06 — HeapKind trim +
+    /// Ptr extension): do NOT add parametric `NativeKind::Result(..)`,
+    /// `NativeKind::Option(..)`, or `NativeKind::JsonValue` variants
+    /// when stdlib mass migration hits those returns. The strict-typed
+    /// answer is `HeapKind::TypedObject` plus a per-instantiation
+    /// schema_id from the function's registered `ConcreteType`. Adding
+    /// parametric NativeKind variants re-creates heterogeneous-by-default
+    /// sum types at the discriminator level — the same defection
+    /// pattern as the rejected `enum SlotValue { Int, Float, Bool, Heap }`.
+    Ptr(HeapKind),
     // NativeKind::Dynamic and NativeKind::Unknown deleted by the strict-typing
     // bulldozer (commit 128cb8a). There is no dynamic-typed slot. Every slot
     // has a proven NativeKind at compile time or it's a compile error.

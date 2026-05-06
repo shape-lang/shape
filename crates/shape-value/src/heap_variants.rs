@@ -51,7 +51,7 @@ macro_rules! define_heap_types {
         /// ordinal-stability test that made that contract load-bearing,
         /// so the dead variants no longer had a justification to
         /// remain in the source.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
         #[repr(u8)]
         pub enum HeapKind {
             String,        // 0

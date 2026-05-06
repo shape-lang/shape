@@ -176,6 +176,59 @@ impl ToSlot for Arc<String> {
     }
 }
 
+// ──────────────────── heap-pointer FromSlot/ToSlot ────────────────────
+//
+// Heap-allocated stdlib returns and slot reads project through
+// `Arc<HeapValue>`. The slot bits are an `Arc<HeapValue>` raw pointer;
+// the kind (`NativeKind::Ptr(HeapKind::*)`) tells the dispatcher which
+// `HeapValue` arm decodes the bits without probing the object's
+// self-reported discriminant.
+//
+// Body-side helpers below construct typed return values from the inner
+// Rust types (`Arc<DataTable>`, `Arc<Instant>`, etc.) by wrapping in
+// `HeapValue::*` then `Arc::new`. Reading goes the other way: cast bits
+// to `*const HeapValue`, pattern-match the expected arm.
+
+/// Read the inner `Arc<DataTable>` from a `NativeKind::Ptr(HeapKind::DataTable)` slot.
+impl FromSlot for Arc<shape_value::DataTable>
+where
+    Self: Sized,
+{
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::DataTable);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::DataTable) pins the bits to
+        // an Arc<HeapValue> with the DataTable variant. We clone the
+        // inner Arc<DataTable> without consuming the slot's strong ref.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::DataTable(arc_dt) => Arc::clone(arc_dt),
+                other => panic!(
+                    "FromSlot<Arc<DataTable>>: slot bits decoded to HeapValue::{:?}, \
+                     not DataTable. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Write an `Arc<DataTable>` into a heap slot by wrapping in
+/// `HeapValue::DataTable` and producing the raw `Arc<HeapValue>` pointer.
+impl ToSlot for Arc<shape_value::DataTable> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::DataTable);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let hv = Arc::new(shape_value::HeapValue::DataTable(self));
+        Arc::into_raw(hv) as u64
+    }
+}
+
 // ─────────────────────── per-arity register helpers ───────────────────────
 
 /// Body type stored in the typed registry: takes raw `&[u64]` slots and
