@@ -1,13 +1,10 @@
 //! TypedScalar: type-preserving scalar boundary contract for VM↔JIT exchange.
 //!
-//! When scalar values cross the VM/JIT boundary, their type identity (int vs float)
-//! must be preserved. `TypedScalar` carries an explicit `ScalarKind` discriminator
-//! alongside the raw payload bits, eliminating the ambiguity between NaN-boxed I48
-//! integers and plain f64 numbers.
+//! When scalar values cross the VM/JIT boundary, their type identity (int vs
+//! float) must be preserved. `TypedScalar` carries an explicit `ScalarKind`
+//! discriminator alongside the raw payload bits.
 
 use crate::slot::ValueSlot;
-use crate::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
-use crate::value_word::{ValueWord, ValueWordExt};
 
 /// Scalar type discriminator.
 ///
@@ -307,84 +304,6 @@ impl TypedScalar {
 // (where NumericWidth is defined) since shape-value cannot depend on shape-vm.
 
 // ============================================================================
-// ValueWord <-> TypedScalar conversions
-// ============================================================================
-
-/// Extension: scalar conversion methods for ValueWord.
-pub trait ValueWordScalarExt {
-    fn to_typed_scalar(&self) -> Option<TypedScalar>;
-    fn from_typed_scalar(ts: TypedScalar) -> ValueWord;
-}
-impl ValueWordScalarExt for u64 {
-    /// Convert this ValueWord to a TypedScalar, preserving type identity.
-    ///
-    /// Returns `None` for heap-allocated values (strings, arrays, objects, etc.)
-    /// which are not representable as scalars.
-    #[inline]
-    fn to_typed_scalar(&self) -> Option<TypedScalar> {
-        let bits = self.raw_bits();
-        if !is_tagged(bits) {
-            return Some(TypedScalar {
-                kind: ScalarKind::F64,
-                payload_lo: bits,
-                payload_hi: 0,
-            });
-        }
-        match get_tag(bits) {
-            TAG_INT => {
-                let i = unsafe { self.as_i64_unchecked() };
-                Some(TypedScalar::i64(i))
-            }
-            TAG_BOOL => {
-                let b = unsafe { self.as_bool_unchecked() };
-                Some(TypedScalar::bool(b))
-            }
-            TAG_NONE => Some(TypedScalar::none()),
-            TAG_UNIT => Some(TypedScalar::unit()),
-            TAG_HEAP | TAG_FUNCTION | TAG_MODULE_FN | TAG_REF => Option::None,
-            _ => Option::None,
-        }
-    }
-
-    /// Create a ValueWord from a TypedScalar.
-    ///
-    /// Integer kinds are stored as I48 (clamped to the 48-bit range; values
-    /// outside [-2^47, 2^47-1] are heap-boxed as BigInt via `from_i64`).
-    /// Float kinds are stored as plain f64. Bool/None/Unit use their direct
-    /// ValueWord constructors.
-    #[inline]
-    fn from_typed_scalar(ts: TypedScalar) -> ValueWord {
-        match ts.kind {
-            ScalarKind::I64 => ValueWord::from_i64(ts.payload_lo as i64),
-            ScalarKind::I8 | ScalarKind::I16 | ScalarKind::I32 => {
-                // Sign-extend to i64, then use from_i64
-                ValueWord::from_i64(ts.payload_lo as i64)
-            }
-            ScalarKind::U8 | ScalarKind::U16 | ScalarKind::U32 => {
-                // Unsigned sub-64: always fits in i64
-                ValueWord::from_i64(ts.payload_lo as i64)
-            }
-            ScalarKind::U64 => {
-                if ts.payload_lo <= i64::MAX as u64 {
-                    ValueWord::from_i64(ts.payload_lo as i64)
-                } else {
-                    ValueWord::from_native_u64(ts.payload_lo)
-                }
-            }
-            ScalarKind::I128 | ScalarKind::U128 => {
-                // Truncate to i64 (best effort for 128-bit)
-                ValueWord::from_i64(ts.payload_lo as i64)
-            }
-            ScalarKind::F64 => ValueWord::from_f64(f64::from_bits(ts.payload_lo)),
-            ScalarKind::F32 => ValueWord::from_f64(f64::from_bits(ts.payload_lo)),
-            ScalarKind::Bool => ValueWord::from_bool(ts.payload_lo != 0),
-            ScalarKind::None => ValueWord::none(),
-            ScalarKind::Unit => ValueWord::unit(),
-        }
-    }
-}
-
-// ============================================================================
 // ValueSlot <- TypedScalar conversion
 // ============================================================================
 
@@ -422,134 +341,6 @@ impl ValueSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tags::{I48_MAX, I48_MIN};
-
-    #[test]
-    fn round_trip_i64() {
-        let vw = ValueWord::from_i64(42);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::I64);
-        assert_eq!(ts.payload_lo, 42u64);
-        assert_eq!(ts.payload_hi, 0);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_negative_i64() {
-        let vw = ValueWord::from_i64(-99);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::I64);
-        assert_eq!(ts.payload_lo as i64, -99);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_i48_max() {
-        let vw = ValueWord::from_i64(I48_MAX);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::I64);
-        assert_eq!(ts.payload_lo as i64, I48_MAX);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_i48_min() {
-        let vw = ValueWord::from_i64(I48_MIN);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::I64);
-        assert_eq!(ts.payload_lo as i64, I48_MIN);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_f64() {
-        let vw = ValueWord::from_f64(3.14);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::F64);
-        assert_eq!(f64::from_bits(ts.payload_lo), 3.14);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_f64_nan() {
-        let vw = ValueWord::from_f64(f64::NAN);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::F64);
-        assert!(f64::from_bits(ts.payload_lo).is_nan());
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        // Both should be canonical NaN
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_f64_infinity() {
-        let vw = ValueWord::from_f64(f64::INFINITY);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::F64);
-        assert_eq!(f64::from_bits(ts.payload_lo), f64::INFINITY);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_f64_neg_zero() {
-        let vw = ValueWord::from_f64(-0.0);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::F64);
-        // -0.0 has specific bit pattern (sign bit set)
-        assert_eq!(ts.payload_lo, (-0.0f64).to_bits());
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_bool_true() {
-        let vw = ValueWord::from_bool(true);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::Bool);
-        assert_eq!(ts.payload_lo, 1);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_bool_false() {
-        let vw = ValueWord::from_bool(false);
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::Bool);
-        assert_eq!(ts.payload_lo, 0);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_none() {
-        let vw = ValueWord::none();
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::None);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn round_trip_unit() {
-        let vw = ValueWord::unit();
-        let ts = vw.to_typed_scalar().unwrap();
-        assert_eq!(ts.kind, ScalarKind::Unit);
-        let vw2 = ValueWord::from_typed_scalar(ts);
-        assert_eq!(vw.raw_bits(), vw2.raw_bits());
-    }
-
-    #[test]
-    fn heap_value_returns_none() {
-        let vw = ValueWord::from_string(std::sync::Arc::new("hello".to_string()));
-        assert!(vw.to_typed_scalar().is_none());
-    }
 
     #[test]
     fn typed_scalar_convenience_constructors() {
