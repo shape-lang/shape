@@ -62,6 +62,33 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-06 — type_schema-cluster cross-crate migration — deferred to shape-vm cascade boundary
+
+This is **not** a defection (no strict-typing compromise; no dispatch shape preserved). It is an **on-record deferral**: the migration is correctly typed, but the cluster's coherent migration unit straddles the shape-runtime / shape-vm boundary, and doing half of it from inside shape-runtime risks re-doing the work when the other half's consumer needs surface.
+
+**Considered:** complete the type_schema-cluster migration in shape-runtime in this session. The four `type_schema::mod.rs` functions (`typed_object_from_pairs`, `typed_object_from_nb_pairs`, `typed_object_to_hashmap`, `typed_object_to_hashmap_nb`) need their `&[(&str, ValueWord)]` / `ValueWord` signatures updated to the strict-typed `&[(&str, ValueSlot)]` / `u64` raw-heap-pointer shape. The body simplification is mechanical (drop the `nb_to_slot` ValueWord-tag-decode dispatch; ValueSlot is already the slot). The signature update would propagate to:
+
+- shape-runtime cluster: `schema_cache.rs`, `const_eval.rs`, `intrinsics/fft.rs`, `simulation/engine.rs`, `stdlib_io/network_ops.rs`, `multi_table/functions.rs`
+- shape-vm consumers (~25 sites): `executor/objects/{indexed_table_methods, datatable_methods/*, object_creation}.rs`, `executor/state_builtins/{introspection, core}.rs`, `executor/printing.rs`, `executor/builtins/special_ops.rs`, `executor/vm_impl/schemas.rs`, `compiler/{comptime, comptime_target}.rs`
+
+**Rationalization:** "The migration is mechanical and the strict-typed shape is clear. Doing it now keeps the shape-runtime --lib count moving toward 0 and lands a coherent strict-typed type_schema before shape-vm session even starts."
+
+**Pattern recognized:** the rationalization is correct that the migration is mechanical. The risk is signature-redo: shape-runtime can only see its own consumer's needs, not the 25 shape-vm consumer sites. Picking signatures for `typed_object_from_*` based on shape-runtime's needs alone risks discovering during shape-vm cascade that shape-vm's `executor/objects/datatable_methods/common.rs:303 typed_object_to_hashmap_nb_vm` (the VM-aware variant) wants a different shape — at which point either (a) the shape-runtime signatures get redone, with a forced re-touch of all six shape-runtime consumer sites, or (b) shape-vm builds an adapter layer reproducing what we already deleted. Both outcomes waste the migration work.
+
+The cluster is **one coherent migration unit** spanning two crates because the helpers' contract is "construct/destructure heap-allocated TypedObject by name-keyed slot pairs" and shape-vm is the heaviest consumer. Migrating half forces signature decisions in a half-blind state.
+
+**Alternative taken:** defer the entire type_schema-cluster (the four `type_schema::mod.rs` functions + their shape-runtime sibling consumers + their shape-vm consumers) to the shape-vm cascade boundary. The cluster lands as one coherent migration when shape-vm session starts, with full consumer context visible.
+
+**Acknowledged immediate cost:** shape-runtime --lib does not reach 0 errors in this session. ~14 errors remain (the four type_schema functions' broken signatures + the sibling shape-runtime consumers' tag-decode patterns that would have been cleaned up in lockstep). The session-end summary commit revises the success criterion to "stdlib mass migration + misc cleanup complete; type_schema-cluster as documented next-session entry point."
+
+**Watchlist distinction:** "skip" / "defer" are watchlist phrases for renamed-dynamic-dispatch retention. This is **not** that pattern. The deferred functions keep their current `ValueWord`-broken state (won't compile against deleted ValueWord type — by design, makes the migration boundary visible), not a renamed dispatch shim. No escape hatch is retained. No `RawBits`-style wrapper is introduced. The cluster simply doesn't compile until both halves migrate together. A reader running `cargo check -p shape-runtime --lib` sees the deferred work as `error[E0432]: unresolved imports shape_value::ValueWord` — exactly the kind of "make the absence visible" honest deletion that the bulldozer entries (set_module / parallel / plugin) used.
+
+**Next-session entry point:** the type_schema-cluster migration is the **first** work of the next session, not buried in generic shape-vm cascade. The 4 shape-runtime helpers + 25 shape-vm consumer sites are one coherent migration unit. The cascade handover doc for the next session should call this out explicitly.
+
+**Cost saved:** prevented signature-redo from picking shape-runtime-only-blind signatures and discovering shape-vm consumer-side mismatches during the next session. Estimate: 1-2 days of "audit consumer needs and re-touch shape-runtime signatures" follow-up avoided. Acknowledged: ~14 errors deferred from this session's drop target.
+
+---
+
 ## 2026-05-06 — AST-evaluation runtime executors deletion — no live consumer in strict-typed compile
 
 **Considered (option A, typed-slot rewrite):** rewrite `crates/shape-runtime/src/window_executor.rs`, `stream_executor.rs`, `join_executor.rs`, `pattern_state_machine.rs`, the `ExecutionContext::variable_scopes` machinery (`context/variables.rs`'s `set_variable_nb` / `declare_pattern` / `set_pattern` and recursive destructure), and the lib.rs query-exec body to thread `(u64 bits, NativeKind kind)` typed slots instead of `ValueWord`. Replace `Variable.value: ValueWord` with `Variable.value: TypedSlot { bits: u64, kind: NativeKind }`; dispatch pattern-destructure on kind. Approximate scope: ~2,000 LoC rewrite across four executor files + ~150 LoC across context/variables.rs + the lib.rs stub bodies.
