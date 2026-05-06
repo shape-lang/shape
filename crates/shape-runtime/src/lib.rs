@@ -86,7 +86,10 @@ pub mod simd_rolling;
 pub mod simd_statistics;
 pub mod simulation;
 pub mod snapshot;
-pub mod state_diff;
+// state_diff.rs was deleted in Phase 2b — its 1486 LoC of ValueWord-typed
+// value-diff/patch logic depends on the deleted ValueWord type and tag_bits.
+// The replacement (kind-threaded slot diff/patch) is part of the strict-typed
+// snapshot rebuild that follows Phase 2b's wire/snapshot foundation.
 pub mod statistics;
 pub mod stdlib;
 pub mod stdlib_io;
