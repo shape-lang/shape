@@ -450,3 +450,182 @@ fn install(
         },
     );
 }
+
+// ─────────────────────── async per-arity register helpers ───────────────────────
+//
+// Async typed registration mirrors the sync `register_typed_fn_N` family
+// with two structural differences enforced by the existing
+// `TypedModuleAsyncFunction` shape (see `typed_module_exports.rs`):
+//
+// 1. **No `&ModuleContext`.** `ModuleContext` borrows from the VM and
+//    cannot cross await points. Permission gating must happen
+//    synchronously upstream of the dispatch site, not inside the async
+//    body. (This matches the pre-bulldozer convention used by
+//    `stdlib_io::async_file_ops` and `stdlib::http`.)
+// 2. **Body returns `Future + Send + 'static`.** The wrapper boxes and
+//    pins the future so the synchronous dispatch path can block on it.
+//
+// No new architectural decisions — the `TypedModuleAsyncFunction`
+// struct is the contract; these helpers are the per-arity adapters.
+
+type TypedAsyncInvoke = Arc<
+    dyn Fn(
+            Vec<u64>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Register a 1-arg async native function. Body returns a `Future`; the
+/// dispatcher blocks on it at the call boundary.
+pub fn register_typed_async_fn_1<F, Fut, P0>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_name: impl Into<String>,
+    param_type_name: impl Into<String>,
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 1 {
+            let err = MarshalError::ArgCount {
+                expected: 1,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let body = body.clone();
+        Box::pin(async move { body(p0).await })
+    });
+    let params = vec![crate::module_exports::ModuleParam {
+        name: param_name.into(),
+        type_name: param_type_name.into(),
+        required: true,
+        ..Default::default()
+    }];
+    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+}
+
+/// Register a 2-arg async native function.
+pub fn register_typed_async_fn_2<F, Fut, P0, P1>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 2],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0, P1) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 2 {
+            let err = MarshalError::ArgCount {
+                expected: 2,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let body = body.clone();
+        Box::pin(async move { body(p0, p1).await })
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+}
+
+/// Register a 3-arg async native function.
+pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 3],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0, P1, P2) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 3 {
+            let err = MarshalError::ArgCount {
+                expected: 3,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let body = body.clone();
+        Box::pin(async move { body(p0, p1, p2).await })
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+}
+
+fn install_async(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: Vec<crate::module_exports::ModuleParam>,
+    return_type: crate::typed_module_exports::ConcreteType,
+    arg_kinds: Vec<NativeKind>,
+    invoke: TypedAsyncInvoke,
+) {
+    use crate::module_exports::ModuleFunction;
+    use crate::typed_module_exports::TypedModuleAsyncFunction;
+
+    let name = name.into();
+    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
+    let return_type_str = return_type.shape_type_name();
+    module.add_schema_only(
+        name.clone(),
+        ModuleFunction {
+            description: description.into(),
+            params,
+            return_type: Some(return_type_str),
+        },
+    );
+    module.typed_exports_mut().async_functions.insert(
+        name,
+        TypedModuleAsyncFunction {
+            invoke,
+            return_type,
+            arg_types,
+            arg_kinds,
+        },
+    );
+}
