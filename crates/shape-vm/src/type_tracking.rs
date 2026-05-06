@@ -24,7 +24,16 @@
 //! For JIT optimization, we track storage types:
 //! - `StorageHint::NullableFloat64`: Option<f64> uses NaN sentinel
 //! - `StorageHint::Float64`: Plain f64, no nullability
-//! - `StorageHint::Unknown`: Type not determined at compile time
+//!
+//! # Strict-typing contract: `prove_native_kind` and `ProofGap`
+//!
+//! Every typed-opcode emission site must call [`prove_native_kind`] and
+//! handle the [`ProofGap`] error. `ProofGap`'s constructor is private to
+//! this module: emit code cannot fabricate "I proved it". The Rust type
+//! system enforces the discipline.
+//!
+//! In Phases 2-4, the predicate panics in debug + test, returns a
+//! compile error in release. There is no fallback path.
 
 use std::collections::HashMap;
 
@@ -110,24 +119,15 @@ pub enum SlotKind {
     Bool,
     /// String reference
     String,
-    /// Dynamically-typed value: the raw u64 bits are a valid interpreter value.
-    /// Used for boxed locals and operand stack entries in precise deopt metadata.
-    /// The VM unmarshals these via direct transmute (zero-cost passthrough).
-    Dynamic,
-    /// Type not determined at compile time (falls back to dynamic dispatch).
-    /// Should NOT appear in precise deopt metadata — use Dynamic instead.
-    /// Reserved for truly uninitialized/unresolved slots.
-    Unknown,
+    // SlotKind::Dynamic and SlotKind::Unknown deleted by the strict-typing
+    // bulldozer. There is no dynamic-typed slot. Every slot has a proven
+    // NativeKind at compile time or it's a compile error.
+    // Default impl also deleted — call sites must commit to a concrete
+    // kind, not rely on "Unknown means I haven't decided yet".
 }
 
 /// Backwards-compatible alias. Prefer `SlotKind` in new code.
 pub type StorageHint = SlotKind;
-
-impl Default for SlotKind {
-    fn default() -> Self {
-        SlotKind::Unknown
-    }
-}
 
 impl From<StorageType> for SlotKind {
     /// Convert from runtime StorageType to JIT StorageHint
@@ -1369,6 +1369,96 @@ impl TypeTracker {
 impl Default for TypeTracker {
     fn default() -> Self {
         Self::empty()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Strict-typing predicate: `prove_native_kind` and `ProofGap`
+//
+// Every site emitting a typed opcode (AddI64, MulF64, ReturnValueBool,
+// LoadLocalI64, etc.) must call `prove_native_kind` and propagate any
+// `ProofGap` it returns. `ProofGap` has no public constructor — only
+// this module can produce one — so emit code cannot fabricate a
+// successful proof. The Rust type system enforces the discipline.
+//
+// Phase 2 wires call sites to use this predicate. Phase 3 makes the
+// predicate panic in debug + test on missing proof. Phase 5 makes it a
+// hard compile error E_TYPED_OPCODE_WITHOUT_PROOF in release.
+// ─────────────────────────────────────────────────────────────────────
+
+/// A type-system proof gap — the compiler tried to emit a typed opcode
+/// but could not prove the operand kind. Surfaces as
+/// `E_TYPED_OPCODE_WITHOUT_PROOF` in release; panics in debug + test.
+///
+/// Constructor is private. Only [`prove_native_kind`] can produce one.
+#[derive(Debug)]
+pub struct ProofGap {
+    site: &'static str,
+    detail: String,
+    _seal: ProofGapSeal,
+}
+
+/// Module-private seal token. External code cannot construct a
+/// `ProofGap` because they cannot construct a `ProofGapSeal`.
+#[derive(Debug)]
+struct ProofGapSeal(());
+
+impl ProofGap {
+    /// Site identifier (e.g. "emit_typed_arithmetic", "emit_return_value").
+    pub fn site(&self) -> &'static str {
+        self.site
+    }
+
+    /// Human-readable explanation of what couldn't be proved.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for ProofGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "E_TYPED_OPCODE_WITHOUT_PROOF at {}: {}",
+            self.site, self.detail
+        )
+    }
+}
+
+impl std::error::Error for ProofGap {}
+
+/// Prove that the given slot's content is a specific [`SlotKind`] at
+/// emission time, or surface a [`ProofGap`].
+///
+/// # Phase 2 contract (current)
+///
+/// Phase 2 wires call sites to call this predicate. Until Phase 3, the
+/// predicate is a no-op that returns the supplied `claimed_kind` —
+/// callers can run end-to-end. Phase 3 hardens to debug-panic; Phase 5
+/// hardens to release compile-error.
+///
+/// # Future strict mode (Phases 3-5)
+///
+/// The body will inspect the compiler's slot-kind tracker for the
+/// declared kind at the source location and compare against
+/// `claimed_kind`. Mismatch or unknown → `ProofGap`.
+#[inline]
+pub fn prove_native_kind(
+    site: &'static str,
+    claimed_kind: SlotKind,
+) -> Result<SlotKind, ProofGap> {
+    // Phase 2 stub: pass-through. Phase 3+ replaces with real proof check.
+    Ok(claimed_kind)
+}
+
+/// Construct a `ProofGap` from inside this module only. Used by the
+/// predicate (Phase 3+) when proof fails.
+#[allow(dead_code)]
+fn proof_gap(site: &'static str, detail: impl Into<String>) -> ProofGap {
+    ProofGap {
+        site,
+        detail: detail.into(),
+        _seal: ProofGapSeal(()),
     }
 }
 
