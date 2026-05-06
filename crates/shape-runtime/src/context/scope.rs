@@ -74,7 +74,6 @@ impl super::ExecutionContext {
             enum_registry: self.enum_registry.clone(),
             struct_type_registry: self.struct_type_registry.clone(),
             progress_registry: self.progress_registry.clone(),
-            kernel_compiler: self.kernel_compiler.clone(),
         }
     }
 }

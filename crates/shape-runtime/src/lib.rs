@@ -82,7 +82,6 @@ pub mod simd_forward_fill;
 pub mod simd_i64;
 pub mod simd_rolling;
 pub mod simd_statistics;
-pub mod simulation;
 pub mod snapshot;
 // state_diff.rs was deleted in Phase 2b — its 1486 LoC of ValueWord-typed
 // value-diff/patch logic depends on the deleted ValueWord type and tag_bits.

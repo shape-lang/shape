@@ -27,7 +27,6 @@ use super::data::DataFrame;
 use super::event_queue::{SharedEventQueue, SuspensionState};
 use super::lookahead_guard::LookAheadGuard;
 use super::metadata::MetadataRegistry;
-use super::simulation::KernelCompiler;
 use super::type_methods::TypeMethodRegistry;
 use super::type_schema::TypeSchemaRegistry;
 use crate::data::Timeframe;
@@ -110,9 +109,6 @@ pub struct ExecutionContext {
     struct_type_registry: HashMap<String, shape_ast::ast::StructTypeDef>,
     /// Progress registry for monitoring load operations
     progress_registry: Option<Arc<super::progress::ProgressRegistry>>,
-    /// Optional JIT kernel compiler for high-performance simulation.
-    /// Set this to enable JIT compilation of simulation kernels.
-    kernel_compiler: Option<Arc<dyn KernelCompiler>>,
 }
 
 /// Runtime entry for a type alias with meta parameter overrides
@@ -239,7 +235,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -282,7 +277,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -328,7 +322,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -378,7 +371,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -741,18 +733,6 @@ impl ExecutionContext {
         self.progress_registry.as_ref()
     }
 
-    /// Set the JIT kernel compiler for high-performance simulation.
-    ///
-    /// This enables JIT compilation of simulation kernels when the state is a TypedObject.
-    /// The compiler should be an instance of `shape_jit::JITCompiler` wrapped in Arc.
-    pub fn set_kernel_compiler(&mut self, compiler: Arc<dyn KernelCompiler>) {
-        self.kernel_compiler = Some(compiler);
-    }
-
-    /// Get the JIT kernel compiler, if set.
-    pub fn kernel_compiler(&self) -> Option<&Arc<dyn KernelCompiler>> {
-        self.kernel_compiler.as_ref()
-    }
 }
 
 #[cfg(test)]
