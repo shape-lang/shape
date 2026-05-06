@@ -74,6 +74,11 @@ pub enum ConcreteReturn {
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
     DataTable(Arc<DataTable>),
+    /// `IoHandle` heap handle — opaque OS resource (file, socket,
+    /// process) from `stdlib_io`. Surfaces to Shape as the
+    /// built-in `IoHandle` type. Cluster #2 option γ per
+    /// `docs/defections.md` 2026-05-06.
+    IoHandle(Arc<shape_value::heap_value::IoHandleData>),
 }
 
 /// Typed return value from a native module function.
@@ -169,6 +174,9 @@ pub enum ConcreteType {
     Option(Box<ConcreteType>),
     /// `DataTable` opaque heap handle (arrow / wire).
     DataTable,
+    /// `IoHandle` opaque OS-resource heap handle (file/socket/process)
+    /// from `stdlib_io`. Cluster #2 option γ.
+    IoHandle,
     /// `HashMap<string, string>` — alias for `HashMapStringString`. New
     /// callers should prefer this name; kept distinct for clarity.
     /// Free-form generic type name. Escape hatch for `Result<any>`,
@@ -208,6 +216,7 @@ impl ConcreteType {
             }
             ConcreteType::Option(inner) => format!("Option<{}>", inner.shape_type_name()),
             ConcreteType::DataTable => "DataTable".to_string(),
+            ConcreteType::IoHandle => "IoHandle".to_string(),
             ConcreteType::Named(s) => s.clone(),
             ConcreteType::Any => "any".to_string(),
         }
