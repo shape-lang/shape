@@ -582,6 +582,143 @@ pub fn register_typed_fn_3<F, P0, P1, P2>(
     );
 }
 
+// ─────────────── per-arity `_full` register helpers (optional-arg) ───────────
+//
+// Mirror `register_typed_fn_N` but take `[ModuleParam; N]` directly instead
+// of `[(&str, &str); N]`. This lets per-param `required: bool` and
+// `default_snippet: Option<String>` flow through to the schema-introspection
+// layer and the compiler-side default-arg insertion path
+// (`crates/shape-vm/src/compiler/functions_foreign.rs:433`,
+// `statements.rs:540`). Bodies stay typed — the dispatcher always sees N
+// typed args because the compiler synthesizes any missing trailing optional
+// before emitting the call.
+//
+// On-record marshal-API extension per `docs/defections.md` 2026-05-06
+// `marshal-optional-args`. Considered + rejected: option 2 (sentinel values
+// inline — W-series shape at marshal-API level) and option 3 (defer with
+// user-facing Shape signature regression on canonical I/O).
+
+/// Register a 1-arg native function with full param spec (per-arg
+/// `required` + `default_snippet`).
+pub fn register_typed_fn_1_full<F, P0>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 1],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 1 {
+            return Err(MarshalError::ArgCount {
+                expected: 1,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        body(p0, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 2-arg native function with full param spec.
+pub fn register_typed_fn_2_full<F, P0, P1>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 2],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 2 {
+            return Err(MarshalError::ArgCount {
+                expected: 2,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        body(p0, p1, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 3-arg native function with full param spec.
+pub fn register_typed_fn_3_full<F, P0, P1, P2>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 3],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 3 {
+            return Err(MarshalError::ArgCount {
+                expected: 3,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        body(p0, p1, p2, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
 /// Internal helper: install a fully-prepared typed function entry into a
 /// module's typed registry plus its schema-only entry.
 fn install(
@@ -761,6 +898,128 @@ pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
         })
         .collect();
     install_async(module, name, description, params, return_type, arg_kinds, invoke);
+}
+
+// ──────────── async per-arity `_full` register helpers (optional-arg) ────────
+//
+// Mirror the sync `_full` family for async. See the sync block above for
+// rationale (`docs/defections.md` 2026-05-06 `marshal-optional-args`).
+
+/// Register a 1-arg async native function with full param spec.
+pub fn register_typed_async_fn_1_full<F, Fut, P0>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 1],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 1 {
+            let err = MarshalError::ArgCount {
+                expected: 1,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let body = body.clone();
+        Box::pin(async move { body(p0).await })
+    });
+    install_async(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 2-arg async native function with full param spec.
+pub fn register_typed_async_fn_2_full<F, Fut, P0, P1>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 2],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0, P1) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 2 {
+            let err = MarshalError::ArgCount {
+                expected: 2,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let body = body.clone();
+        Box::pin(async move { body(p0, p1).await })
+    });
+    install_async(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 3-arg async native function with full param spec.
+pub fn register_typed_async_fn_3_full<F, Fut, P0, P1, P2>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 3],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(P0, P1, P2) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        if slots.len() != 3 {
+            let err = MarshalError::ArgCount {
+                expected: 3,
+                got: slots.len(),
+            };
+            return Box::pin(async move { Err(err.into()) });
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let body = body.clone();
+        Box::pin(async move { body(p0, p1, p2).await })
+    });
+    install_async(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
 }
 
 fn install_async(
