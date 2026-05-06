@@ -8,7 +8,6 @@
 //! bitmap identifies which slots contain heap pointers (bit N set = slot N is heap).
 
 use crate::heap_value::HeapValue;
-use crate::value_word::{ValueWord, ValueWordExt};
 
 /// A raw 8-byte value slot for TypedObject field storage.
 #[repr(transparent)]
@@ -85,58 +84,6 @@ impl ValueSlot {
     pub fn as_heap_value(&self) -> &HeapValue {
         let ptr = self.0 as *const HeapValue;
         unsafe { &*ptr }
-    }
-
-    /// Create a ValueWord directly from this heap slot (no intermediate conversion).
-    /// Caller must know this slot is a heap pointer.
-    pub fn as_heap_nb(&self) -> ValueWord {
-        ValueWord::from_heap_value(self.as_heap_value().clone())
-    }
-
-    /// Store a ValueWord losslessly. For inline types (f64, i48, bool,
-    /// none, unit, function, module_function), stores the raw NaN-boxed tag bits
-    /// directly. For heap-tagged values, clones the HeapValue into a new Box.
-    /// Returns `(slot, is_heap)` — caller must set the heap_mask bit if `is_heap`.
-    pub fn from_value_word(nb: &ValueWord) -> (Self, bool) {
-        use crate::value_word::ValueWordExt as _;
-        if nb.is_heap() {
-            // Handle unified heap values (bit-47): materialize to HeapValue.
-            if crate::tags::is_unified_heap(nb.raw_bits()) {
-                if let Some(view) = nb.as_any_array() {
-                    let hv = crate::heap_value::HeapValue::Array(view.to_generic());
-                    return (Self::from_heap(hv), true);
-                }
-                return (Self(0), false);
-            }
-            // cold-path: as_heap_ref retained — generic heap-to-slot fallback
-            if let Some(hv) = nb.as_heap_ref() { // cold-path
-                return (Self::from_heap(hv.clone()), true);
-            }
-            return (Self(0), false);
-        }
-        (Self(nb.raw_bits()), false)
-    }
-
-    /// Backward-compatibility alias.
-    pub fn from_nanboxed(nb: &ValueWord) -> (Self, bool) {
-        Self::from_value_word(nb)
-    }
-
-    /// Reconstruct a ValueWord from this slot. `is_heap` must match the value
-    /// returned by `from_value_word` (i.e., whether heap_mask bit is set).
-    pub fn as_value_word(&self, is_heap: bool) -> ValueWord {
-        if is_heap {
-            ValueWord::from_heap_value(self.as_heap_value().clone())
-        } else {
-            // Safety: bits were stored by from_value_word from a valid inline ValueWord.
-            // No heap pointer involved, so no refcount management needed.
-            unsafe { ValueWord::clone_from_bits(self.0) }
-        }
-    }
-
-    /// Backward-compatibility alias.
-    pub fn as_nanboxed(&self, is_heap: bool) -> ValueWord {
-        self.as_value_word(is_heap)
     }
 
     /// Raw bits for simple copy.

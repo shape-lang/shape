@@ -26,7 +26,6 @@ pub mod ids;
 pub mod method_id;
 pub mod scalar;
 pub mod string_intern;
-pub mod shape_array;
 pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
@@ -47,7 +46,6 @@ pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArra
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar};
-pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
     shape_for_hashmap_keys, shape_property_index, shape_transition,
@@ -58,6 +56,7 @@ pub use shape_graph_current::{
 };
 pub use slot::ValueSlot;
 pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+pub use value::{FilterLiteral, FilterNode, FilterOp, VTable, VTableEntry};
 pub use vm_closure_handle::VmClosureHandle;
 
 // v2 runtime re-exports
