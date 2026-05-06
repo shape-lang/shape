@@ -10,7 +10,6 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
 
-use crate::{ValueWord, ValueWordExt};
 
 /// Raw pointers to Arrow column buffers for zero-cost field access.
 ///
@@ -131,8 +130,6 @@ pub struct DataTable {
     column_ptrs: Vec<ColumnPtrs>,
     /// Index column name (set by index_by(), preserved across operations)
     index_col: Option<String>,
-    /// Origin: the (source, params) arguments passed to load() that created this table
-    origin: Option<(ValueWord, ValueWord)>,
 }
 
 impl DataTable {
@@ -152,7 +149,6 @@ impl DataTable {
             schema_id: None,
             column_ptrs,
             index_col: None,
-            origin: None,
         }
     }
 
@@ -165,7 +161,6 @@ impl DataTable {
             schema_id: None,
             column_ptrs,
             index_col: None,
-            origin: None,
         }
     }
 
@@ -179,74 +174,6 @@ impl DataTable {
     pub fn with_index_col(mut self, name: String) -> Self {
         self.index_col = Some(name);
         self
-    }
-
-    /// Set the origin (source, params) from the load() call that created this table.
-    pub fn set_origin(&mut self, source: ValueWord, params: ValueWord) {
-        self.origin = Some((source, params));
-    }
-
-    /// Get the origin as a structured TypedObject { source, params }.
-    /// Returns ValueWord::none() if no origin is set.
-    pub fn origin(&self) -> ValueWord {
-        use crate::heap_value::HeapValue;
-        use crate::slot::ValueSlot;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static ORIGIN_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
-
-        match &self.origin {
-            Some((source, params)) => {
-                // Use a stable anonymous schema ID for origin objects
-                let schema_id = ORIGIN_SCHEMA_ID.load(Ordering::Relaxed);
-                let schema_id = if schema_id == 0 {
-                    // First call — pick a high ID that won't collide with registered schemas
-                    let id = 0xFFFF_FF00_u64;
-                    ORIGIN_SCHEMA_ID.store(id, Ordering::Relaxed);
-                    id
-                } else {
-                    schema_id
-                };
-                // Convert ValueWord to (ValueSlot, is_heap) pair.
-                // Heap values go through ValueSlot::from_heap; inline values store raw bits.
-                let nb_to_slot = |nb: &ValueWord| -> (ValueSlot, bool) {
-                    use crate::tags::{is_tagged, get_tag, TAG_HEAP, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_REF, TAG_FUNCTION, TAG_MODULE_FN};
-                    use crate::value_word::ValueWordExt as _;
-                    let bits = nb.raw_bits();
-                    if !is_tagged(bits) {
-                        (ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)), false)
-                    } else {
-                        match get_tag(bits) {
-                            TAG_HEAP => {
-                                // cold-path: as_heap_ref retained — datatable cell heap extraction
-                                let hv = nb.as_heap_ref().cloned().unwrap_or_else(|| { // cold-path
-                                    HeapValue::String(std::sync::Arc::new(String::new()))
-                                });
-                                (ValueSlot::from_heap(hv), true)
-                            }
-                            TAG_INT => (ValueSlot::from_int(nb.as_i64().unwrap_or(0)), false),
-                            TAG_BOOL => {
-                                (ValueSlot::from_bool(nb.as_bool().unwrap_or(false)), false)
-                            }
-                            TAG_NONE | TAG_UNIT | TAG_REF => (ValueSlot::none(), false),
-                            TAG_FUNCTION | TAG_MODULE_FN => {
-                                (ValueSlot::from_raw(nb.raw_bits()), false)
-                            }
-                            _ => (ValueSlot::none(), false),
-                        }
-                    }
-                };
-                let (slot0, heap0) = nb_to_slot(source);
-                let (slot1, heap1) = nb_to_slot(params);
-                let heap_mask = (heap0 as u64) | ((heap1 as u64) << 1);
-                let slots = Box::new([slot0, slot1]);
-                ValueWord::from_heap_value(HeapValue::TypedObject {
-                    schema_id,
-                    slots,
-                    heap_mask,
-                })
-            }
-            None => ValueWord::none(),
-        }
     }
 
     /// Get the schema ID if this is a typed table.
@@ -350,7 +277,6 @@ impl DataTable {
             schema_id: self.schema_id,
             column_ptrs,
             index_col: self.index_col.clone(),
-            origin: self.origin.clone(),
         }
     }
 
