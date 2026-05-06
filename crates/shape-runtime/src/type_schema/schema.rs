@@ -48,6 +48,20 @@ pub struct TypeSchema {
 }
 
 impl TypeSchema {
+    /// Project field at `idx` to its strict-typed marshal/wire/snapshot
+    /// `NativeKind`. Returns `None` if `idx` is out of range or if the
+    /// field's type is `FieldType::Any` (which has no strict-typed
+    /// projection — see [`super::field_types::FieldKindError`]).
+    ///
+    /// Used by Phase 2b wire/snapshot kind-threading to read each
+    /// `TypedObject` slot with the correct kind without probing the
+    /// slot's bits.
+    pub fn field_kind(&self, idx: usize) -> Option<shape_value::NativeKind> {
+        self.fields
+            .get(idx)
+            .and_then(|f| f.field_type.to_native_kind().ok())
+    }
+
     /// Create a new type schema with the given fields, allocating an ID
     /// from the current ambient [`super::TypeSchemaRegistry`].
     ///

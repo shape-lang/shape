@@ -4,6 +4,32 @@
 //! including primitives (F64, I64, Bool), composite types (String, Array),
 //! and dynamic types (Any).
 
+use shape_value::{HeapKind, NativeKind};
+
+/// Error returned when a `FieldType` cannot be projected to a strict-typed
+/// `NativeKind`. The current source of error is `FieldType::Any`, which
+/// the strict-typing plan forbids; legacy schemas may still carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldKindError {
+    /// `FieldType::Any` has no strict-typed `NativeKind` projection. Per
+    /// the strict-typing plan (`docs/defections.md` 2026-05-06 Phase 2b
+    /// watchlist), parametric/generic NativeKind variants are not the
+    /// answer — `Any`-typed fields must be eliminated from schemas.
+    AnyTypeNotStrictlyTyped,
+}
+
+impl std::fmt::Display for FieldKindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FieldKindError::AnyTypeNotStrictlyTyped => {
+                write!(f, "FieldType::Any has no strict-typed NativeKind projection")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FieldKindError {}
+
 /// Type of a field in a schema
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldType {
@@ -123,6 +149,40 @@ impl FieldType {
             self,
             FieldType::Any | FieldType::Object(_) | FieldType::Array(_)
         )
+    }
+
+    /// Project this field type to its strict-typed marshal/wire/snapshot
+    /// `NativeKind` discriminator. Used by the wire/snapshot kind-threading
+    /// path (Phase 2b) and by the marshal layer when a TypedObject's per-
+    /// slot kind is needed.
+    ///
+    /// `FieldType::Any` returns
+    /// [`FieldKindError::AnyTypeNotStrictlyTyped`] — callers must handle
+    /// that case explicitly. The strict-typing plan forbids `Any`-typed
+    /// fields in new code; legacy schemas with `Any` fields are the
+    /// only consumers of the error variant.
+    ///
+    /// `Decimal` is stored as `f64` in `TypedObject` slots (lossy) per
+    /// the existing layout — kind is `Float64` accordingly.
+    pub fn to_native_kind(&self) -> Result<NativeKind, FieldKindError> {
+        match self {
+            Self::F64 => Ok(NativeKind::Float64),
+            Self::I64 => Ok(NativeKind::Int64),
+            Self::Bool => Ok(NativeKind::Bool),
+            Self::String => Ok(NativeKind::String),
+            Self::Timestamp => Ok(NativeKind::Int64),
+            Self::Decimal => Ok(NativeKind::Float64),
+            Self::Array(_) => Ok(NativeKind::Ptr(HeapKind::TypedArray)),
+            Self::Object(_) => Ok(NativeKind::Ptr(HeapKind::TypedObject)),
+            Self::I8 => Ok(NativeKind::Int8),
+            Self::U8 => Ok(NativeKind::UInt8),
+            Self::I16 => Ok(NativeKind::Int16),
+            Self::U16 => Ok(NativeKind::UInt16),
+            Self::I32 => Ok(NativeKind::Int32),
+            Self::U32 => Ok(NativeKind::UInt32),
+            Self::U64 => Ok(NativeKind::UInt64),
+            Self::Any => Err(FieldKindError::AnyTypeNotStrictlyTyped),
+        }
     }
 
     /// Returns true if this is a sub-64 or unsigned-64 integer width type.
