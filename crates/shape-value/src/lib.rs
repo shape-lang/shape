@@ -1,8 +1,11 @@
 //! Core value types for Shape
 //!
 //! This crate contains the foundational value types and core data structures
-//! used throughout the Shape language implementation. The canonical runtime
-//! representation is `ValueWord` — an 8-byte NaN-boxed value.
+//! used throughout the Shape language implementation. After the strict-typing
+//! bulldozer, the runtime representation is per-slot raw native bits whose
+//! `NativeKind` is determined at compile time and carried in the
+//! `FunctionBlob`. There is no `ValueWord`, no NaN-boxing, no dynamic
+//! dispatch on value type.
 //!
 //! Dependency hierarchy:
 //! - shape-value → shape-ast (no circular dependencies)
@@ -27,23 +30,10 @@ pub mod ids;
 pub mod method_id;
 pub mod scalar;
 pub mod string_intern;
-pub mod tag_bits;
-pub mod value_bits;
-pub mod value_word;
-pub mod value_word_drop;
-pub mod value_word_ext;
-/// Backward-compatibility alias for the renamed module.
-pub mod nanboxed {
-    pub use crate::value_word::*;
-}
 pub mod shape_array;
 pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
-/// Backward-compatibility shim — tag constants / helpers live in `tag_bits`.
-pub mod tags {
-    pub use crate::tag_bits::*;
-}
 pub mod typed_buffer;
 pub mod unified_array;
 pub mod unified_matrix;
@@ -77,10 +67,8 @@ pub use heap_value::{
 };
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
-pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
-pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay};
-pub use value_word_drop::{ArgVec, ValueMap, vw_clone, vw_clone_slice, vw_drop, vw_drop_slice};
-pub use value_word_ext::ValueWordExt;
+pub use scalar::{ScalarKind, TypedScalar};
+pub use array_view::{ArrayView, ArrayViewMut};
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
