@@ -62,6 +62,270 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-06 — JsonValue marshal extension — deferred (parser cluster blocker)
+
+This is **not** a defection. On-record deferral of the `JsonValue`-return
+marshal extension. The Phase 2b unified marshal entry already established
+that monomorphized typed sum-types are the strict-typed answer for parser
+returns; what remains is the architectural decision on runtime
+representation and the dispatcher projection that wires it through.
+
+**Considered:** add `TypedReturn::JsonValue(JsonValue)` as a new top-level
+variant and project it at the marshal boundary into a Shape-side `JsonValue`
+enum (per `~/.claude/plans/stop-native-vs-tagged-tax.md` line ~17 and the
+2026-05-06 typed-`JsonValue` entry below). Migrate the five parser modules
+(json/yaml/toml/msgpack/xml) to return `JsonValue` from their bodies.
+
+**Architectural decision needed (next session):**
+
+1. **Runtime representation.** `JsonValue` is a typed sum-type with 8
+   variants, each carrying a payload. The defection-watchlist entry
+   (HeapKind trim + NativeKind::Ptr extension) explicitly **rejected**
+   parametric NativeKind variants like `NativeKind::JsonValue`. The
+   strict-typed answer is `HeapKind::TypedObject` plus a `schema_id`
+   per the v2 spec — each `JsonValue` variant gets a monomorphized
+   schema (one for `JsonValue::Null`, one for `JsonValue::Bool`, etc.,
+   or alternatively a single schema with a discriminant field). The
+   schema design choice (per-variant schemas vs single schema with
+   discriminant) is the open question.
+2. **Shape-side enum wiring.** The Shape-side `JsonValue` enum
+   declaration must be in scope at parser registration time so the
+   compiler can resolve `match parse_json(s) { JsonValue::Null => ... }`.
+   Either prelude-bake it (like `Result<T, E>` / `Option<T>`) or
+   require explicit `import { JsonValue } from std::core::json`.
+3. **Dispatcher projection.** The marshal dispatcher must walk the
+   Rust `JsonValue` recursively and project each variant into the
+   matching TypedObject schema. Recursive projection has a
+   stack-depth concern for deeply-nested JSON.
+
+**Pattern recognized:** This is **not** runtime tag-decode dispatch; it
+is monomorphized typed-sum-type construction, which the strict-typing
+plan endorses. The deferral exists because the architectural decisions
+(1)/(2)/(3) above shape the marshal-layer signatures, and committing
+half-blind would risk signature redo.
+
+**Alternative taken:** defer the `TypedReturn::JsonValue` variant + the
+five parser-module migrations to the next session, alongside the
+shape-vm cascade. The on-record entry names the architectural decisions
+needed so the next session can land them with one round-trip
+surface-and-decide each.
+
+**Consumer count blocked:** ~19 errors across `stdlib/json.rs` (4),
+`stdlib/yaml.rs` (3), `stdlib/toml_module.rs` (5), `stdlib/msgpack_module.rs`
+(3), `stdlib/xml.rs` (4).
+
+**Cost saved:** prevented signature-redo from picking parser-side-blind
+runtime representation. Estimate: 1-2 days of "audit Shape-enum wiring
+choice and re-touch dispatcher projection" follow-up avoided.
+Acknowledged: 19 errors remain in shape-runtime --lib until the
+extension lands.
+
+---
+
+## 2026-05-06 — Option<T> / TypedReturn::SomeObjectPairs marshal extension — deferred
+
+On-record deferral. `TypedReturn::Some(payload)` currently takes a
+`ConcreteReturn`, but `ConcreteReturn` is intentionally a leaf-only set
+per the Concrete/Wrapper split (see 2026-05-06 entry "TypedReturn
+recursive variants"). Returning `Some(typed_object)` is therefore
+unrepresentable at the marshal boundary.
+
+**Considered:** extend the marshal layer to support `Some(TypedObject)`
+returns. Two shapes are viable:
+
+- (α) Add `ConcreteReturn::TypedObject(Vec<(String, ConcreteReturn)>)`
+  — recursive payload but bounded by `ConcreteReturn`'s leaf set. Already
+  permits `Ok(TypedObject)` / `Err(TypedObject)` for free, since wrapper
+  variants take `ConcreteReturn`.
+- (β) Add `TypedReturn::SomeObjectPairs(Vec<(String, ConcreteReturn)>)`
+  as a flat variant alongside the existing `TypedReturn::Some(ConcreteReturn)`.
+  Avoids recursion but requires per-wrapper expansion (`OkObjectPairs`,
+  `ErrObjectPairs`).
+
+**Architectural decision needed (next session):** pick (α) vs (β).
+(α) keeps the wrapper variants minimal (recursive payload absorbs all
+typed-object cases) but breaks the "ConcreteReturn is leaf-only" invariant.
+(β) preserves the leaf-only invariant but doubles the wrapper-variant
+count for each typed-object case. The choice has implications for the
+JsonValue marshal (above) since `JsonValue::Object` is structurally a
+typed-object payload.
+
+**Pattern recognized:** This is **not** the runtime-discipline /
+optional-defection-becomes-default pattern; both shapes are structurally
+typed and statically enforced. The deferral exists because the choice
+between (α) and (β) interlocks with the JsonValue runtime
+representation — they should be decided together.
+
+**Alternative taken:** defer the marshal extension. `regex.match` /
+`regex.find` (Option<Object> return) skip registration for now;
+`arrow_module` / `csv_module` typed-row returns wait alongside.
+
+**Consumer count blocked:** ~5 errors visible (regex.match deferred
+already in regex.rs; arrow_module 3, csv_module 4). Plus the parser
+cluster's `JsonValue::Object` case once `JsonValue` lands.
+
+**Cost saved:** prevented locking in `ConcreteReturn` shape before
+JsonValue's runtime representation is decided. Estimate: 1 day of
+"redo Concrete/Wrapper split" follow-up avoided.
+
+---
+
+## 2026-05-06 — IoHandle marshal extension — deferred (stdlib_io cluster blocker)
+
+On-record deferral. The `stdlib_io` module (file_ops, network_ops,
+path_ops, process_ops, async_file_ops + `mod.rs`) routes 48 functions
+through `wrap_legacy()` / `wrap_legacy_async()` adapters that take
+`&[ValueWord]` and produce `TypedReturn::ValueWord` (deleted variant).
+Migration to typed marshal requires `FromSlot` for `IoHandle`-typed
+arguments and `ToSlot` for `IoHandle`-typed returns.
+
+**`HeapKind::IoHandle`** is in the trimmed HeapKind enum (post-2026-05-06
+trim, kind index 13). The Phase 2b foundation entry's "DON'T surface"
+list explicitly permits "Adding FromSlot/ToSlot impls for types already
+in HeapKind." So the surface change is in scope; the architectural
+decision is the **unwrap policy**.
+
+**Considered (option α — Arc<HeapValue> + body unwraps):**
+```rust
+impl FromSlot for Arc<HeapValue> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(HeapKind::IoHandle);
+    fn from_slot(bits: u64) -> Self { /* recover Arc<HeapValue> */ }
+}
+```
+Body declares `arg: Arc<HeapValue>` and calls `match arg.as_ref() {
+HeapValue::IoHandle(h) => …, _ => unreachable!() }` (the heap-kind
+discriminator-already-checked by the dispatcher's NATIVE_KIND
+contract).
+
+**Pattern recognized (option α):** the body's `match` arm is naturally
+exhaustive given the trimmed HeapKind enum (per the unified Phase 2b
+"unreachable arms in match kind blocks" watchlist). But every IoHandle
+body re-writes the same single-arm match. Boilerplate, not unsafe.
+
+**Considered (option β — `&IoHandleData` borrowed):**
+```rust
+impl FromSlot for &IoHandleData {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(HeapKind::IoHandle);
+    fn from_slot(bits: u64) -> Self { /* recover borrow */ }
+}
+```
+Body declares `arg: &IoHandleData` and gets the typed payload directly.
+Saves the boilerplate match.
+
+**Pattern recognized (option β):** the borrow lifetime needs to outlive
+the slot read but not the slot itself; lifetime annotation across the
+`FromSlot` trait boundary is non-trivial. Probably needs a custom `FromSlotRef<'a>`
+trait variant. Real architectural call.
+
+**Considered (option γ — Arc<IoHandleData> separate-Arc):**
+extract the `IoHandleData` payload into its own Arc-counted heap allocation,
+parallel to `Arc<DataTable>`. Each IoHandle slot stores both a
+`HeapValue::IoHandle(...)` outer Arc AND an inner `Arc<IoHandleData>`
+for direct typed access. Mirrors the DataTable pattern.
+
+**Pattern recognized (option γ):** double-Arc allocation per handle is
+a real perf regression for I/O-heavy workloads. Probably the right
+answer is to make `HeapValue::IoHandle` payload directly `Arc<IoHandleData>`
+(single Arc, accessed via `&Arc::clone(&payload)` from the heap value).
+That's a `HeapValue` shape change, not just a marshal extension.
+
+**Architectural decision needed (next session):** pick α/β/γ. The
+choice ripples across all 48 stdlib_io functions; once committed the
+function bodies all rewrite to the chosen shape, so doing it half-
+blind risks 48-site re-touch.
+
+**Alternative taken:** defer the entire stdlib_io cluster (48 functions
++ 7 visible mod.rs errors + body rewrites in file_ops/network_ops/
+path_ops/process_ops/async_file_ops). The cluster lands as one
+coherent migration when the IoHandle FromSlot signature is decided.
+
+**Consumer count blocked:** 7 errors visible in `stdlib_io/mod.rs`
+plus 3 in `file_ops.rs`, 2 in `async_file_ops.rs`. Body-side ValueWord
+references in network_ops/path_ops/process_ops not yet visible
+(masked by import gate). Total cluster: ~48 functions, ~12 visible
+errors, plus body rewrites.
+
+**Cost saved:** prevented committing to one of α/β/γ without the
+consumer perf data that the JIT cascade will surface. Estimate: 2-3
+days of "audit IoHandle hot path under chosen FromSlot signature"
+follow-up avoided.
+
+---
+
+## 2026-05-06 — Array<T> marshal extension — deferred (byte/intrinsics cluster blocker)
+
+On-record deferral. `Array<int>` / `Array<number>` arguments and returns
+are blocked on the choice of FromSlot/ToSlot signature for typed
+heap-array slots.
+
+**`HeapKind::TypedArray`** is in the trimmed HeapKind enum (kind 8).
+`HeapValue::TypedArray(TypedArrayData::*)` carries `Arc<TypedBuffer<i64>>`
+/ `Arc<AlignedTypedBuffer>` / `Arc<TypedBuffer<u8>>` / etc. The marshal
+extension permission is on the "DON'T surface" list — the architectural
+decision is the canonical Rust input/output type.
+
+**Considered (option α — Arc<TypedBuffer<T>>):**
+```rust
+impl FromSlot for Arc<TypedBuffer<i64>> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(HeapKind::TypedArray);
+    fn from_slot(bits: u64) -> Self { /* recover from HeapValue::TypedArray::I64 */ }
+}
+impl ToSlot for Arc<TypedBuffer<i64>> { … }
+```
+Body declares `arr: Arc<TypedBuffer<i64>>` and reads `&arr[..]`. Zero-copy.
+
+**Pattern recognized (option α):** but `HeapKind::TypedArray` covers
+ALL element widths (`I64` / `F64` / `Bool` / `I8` / etc.) — the
+NATIVE_KIND alone doesn't pin the element width. The dispatcher
+needs additional element-width metadata. Either thread it through
+the slot (which is back to runtime tag-decode at the boundary) or
+parametrize NativeKind by element width (parametric NativeKind
+defection, rejected).
+
+**Considered (option β — Vec<T> by-value owned):**
+```rust
+impl FromSlot for Vec<i64> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(HeapKind::TypedArray);
+    fn from_slot(bits: u64) -> Self { /* clone HeapValue::TypedArray::I64 into Vec */ }
+}
+```
+Per-call clone. Simpler but loses the zero-copy benefit.
+
+**Considered (option γ — `&[T]` borrowed):** same lifetime concern as
+IoHandle option β; needs `FromSlotRef<'a>` trait variant.
+
+**Considered (option δ — element-width parametric `NativeKind`):**
+`NativeKind::TypedArrayI64`, `NativeKind::TypedArrayF64`, etc. as
+distinct discriminants. Avoids the "TypedArray's element width is
+not in the NativeKind" gap.
+
+**Pattern recognized (option δ):** This **is** the parametric-NativeKind
+pattern explicitly rejected on the watchlist (HeapKind trim + NativeKind::Ptr
+entry). Re-creates "heterogeneous-by-default" at the discriminator level.
+**Forbidden.**
+
+**Architectural decision needed (next session):** pick α/β/γ, including
+the element-width threading mechanism. The choice has direct perf
+implications for `intrinsics/matrix.rs` (5 errors) and other
+numerically-heavy callers.
+
+**Alternative taken:** defer the Array<T> marshal extension. The
+consumers (compress, archive, byte_utils, intrinsics/matrix, file
+read_bytes/write_bytes) wait alongside.
+
+**Consumer count blocked:** ~10-15 errors visible. compress.rs (2),
+archive.rs (2), byte_utils.rs (3), intrinsics/matrix.rs (5),
+file/read_bytes/write_bytes (deferred portion of file.rs).
+
+**Cost saved:** prevented committing to Vec-clone semantics before
+intrinsics perf data arrives. The hot intrinsic kernels are the
+primary perf-sensitive consumers; their FromSlot signature should
+be picked WITH their consumer profile, not blind. Estimate: 2 days
+of "audit intrinsics hot path under chosen FromSlot signature"
+follow-up avoided.
+
+---
+
 ## 2026-05-06 — type_schema-cluster cross-crate migration — deferred to shape-vm cascade boundary
 
 This is **not** a defection (no strict-typing compromise; no dispatch shape preserved). It is an **on-record deferral**: the migration is correctly typed, but the cluster's coherent migration unit straddles the shape-runtime / shape-vm boundary, and doing half of it from inside shape-runtime risks re-doing the work when the other half's consumer needs surface.
