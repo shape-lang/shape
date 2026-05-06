@@ -1,38 +1,29 @@
 //! Shared byte array conversion utilities.
 //!
-//! Used by both `compress` and `archive` modules for converting between
-//! Shape's `Array<int>` representation and Rust `Vec<u8>`.
+//! Used by the `compress` and `archive` modules. With the option β
+//! Array<T> marshal landing (cluster #3, 2026-05-06 defections.md
+//! entry), the FromSlot layer extracts owned `Vec<i64>` directly
+//! from `Array<int>`-typed slots (`HeapKind::TypedArray` /
+//! `TypedArrayData::I64`). This module's job shrinks to the
+//! per-element 0..=255 range check that turns a `Vec<i64>` of
+//! arbitrary integers into a `Vec<u8>`.
+//!
+//! `bytes_to_array` is gone — bodies return `TypedReturn::Concrete(
+//! ConcreteReturn::Bytes(vec))` directly and the dispatcher projects
+//! the variant into a typed array slot.
 
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
-use std::sync::Arc;
-
-/// Extract a byte array (`Array<int>`) from a ValueWord into a `Vec<u8>`.
+/// Range-check a `Vec<i64>` (semantically `Array<int>` of bytes) into
+/// a `Vec<u8>`.
 ///
-/// Each array element must be an integer in the range 0..=255.
-pub fn bytes_from_array(val: &ValueWord) -> Result<Vec<u8>, String> {
-    let arr = val
-        .as_any_array()
-        .ok_or_else(|| "expected an Array<int> of bytes".to_string())?
-        .to_generic();
+/// Each element must be in `0..=255`. Returns an error message naming
+/// the out-of-range value on the first violation.
+pub fn bytes_from_i64_slice(arr: &[i64]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::with_capacity(arr.len());
-    for item in arr.iter() {
-        let byte_val = item
-            .as_i64()
-            .or_else(|| item.as_f64().map(|n| n as i64))
-            .ok_or_else(|| "array elements must be integers (0-255)".to_string())?;
+    for &byte_val in arr.iter() {
         if !(0..=255).contains(&byte_val) {
             return Err(format!("byte value out of range: {}", byte_val));
         }
         bytes.push(byte_val as u8);
     }
     Ok(bytes)
-}
-
-/// Convert a `Vec<u8>` into a ValueWord `Array<int>`.
-pub fn bytes_to_array(bytes: &[u8]) -> ValueWord {
-    let items: ArgVec = ArgVec::from_vec(bytes
-        .iter()
-        .map(|&b| ValueWord::from_i64(b as i64))
-        .collect());
-    ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
 }

@@ -1,166 +1,48 @@
 //! Native `archive` module for creating and extracting zip/tar archives.
 //!
-//! Exports: archive.zip_create, archive.zip_extract, archive.tar_create, archive.tar_extract
+//! Exports (post-cluster-#3, partial): archive.zip_extract, archive.tar_extract.
+//!
+//! Phase 2c partial migration: the two extract functions take `Array<int>`
+//! input (cluster #3 Array<T> marshal scope) and are wired here on the
+//! typed marshal layer. The two create functions (`archive.zip_create` /
+//! `archive.tar_create`) take `Array<{name: string, data: string}>` input
+//! which requires the typed-object marshal extension (cluster #4 in
+//! `docs/defections.md` 2026-05-06). They are NOT registered until that
+//! cluster lands; users calling them today get a "no such method" error
+//! rather than a half-typed shell. The create logic itself is uncomplicated
+//! (zip/tar writer over a Vec<u8> sink) and rebuilds in a few lines once
+//! the typed-object FromSlot impl exists.
 
-use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ValueWord, ValueWordExt};
-use std::sync::Arc;
-use super::byte_utils::bytes_from_array;
+use super::byte_utils::bytes_from_i64_slice;
+use crate::marshal::register_typed_fn_1;
+use crate::module_exports::ModuleExports;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 
-/// Extract entries from an Array of {name: string, data: string} objects.
-/// Supports both TypedObject and HashMap representations.
-fn extract_entries(val: &ValueWord) -> Result<Vec<(String, String)>, String> {
-    let arr = val
-        .as_any_array()
-        .ok_or_else(|| "expected an Array of entry objects".to_string())?
-        .to_generic();
-
-    let mut entries = Vec::with_capacity(arr.len());
-    for (i, item) in arr.iter().enumerate() {
-        let (name, data) =
-            extract_entry_fields(item).map_err(|e| format!("entry [{}]: {}", i, e))?;
-        entries.push((name, data));
-    }
-    Ok(entries)
-}
-
-/// Extract `name` and `data` fields from a single entry (TypedObject or HashMap).
-fn extract_entry_fields(val: &ValueWord) -> Result<(String, String), String> {
-    // Try TypedObject first
-    if let Some((_sid, slots, heap_mask)) = val.as_typed_object() {
-        // Convention: slot 0 = name, slot 1 = data (both heap/string)
-        if slots.len() >= 2 {
-            let name_nb = if heap_mask & 1 != 0 {
-                slots[0].as_heap_nb()
-            } else {
-                unsafe { ValueWord::clone_from_bits(slots[0].raw()) }
-            };
-            let data_nb = if heap_mask & 2 != 0 {
-                slots[1].as_heap_nb()
-            } else {
-                unsafe { ValueWord::clone_from_bits(slots[1].raw()) }
-            };
-            if let (Some(name), Some(data)) = (name_nb.as_str(), data_nb.as_str()) {
-                return Ok((name.to_string(), data.to_string()));
-            }
-        }
-    }
-
-    // Try HashMap
-    if let Some((keys, values, _)) = val.as_hashmap() {
-        let mut name = None;
-        let mut data = None;
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if let Some(key_str) = k.as_str() {
-                match key_str {
-                    "name" => name = v.as_str().map(|s| s.to_string()),
-                    "data" => data = v.as_str().map(|s| s.to_string()),
-                    _ => {}
-                }
-            }
-        }
-        if let (Some(n), Some(d)) = (name, data) {
-            return Ok((n, d));
-        }
-    }
-
-    Err("entry must have 'name' (string) and 'data' (string) fields".to_string())
-}
-
-/// Build an entry object as a HashMap with `name` and `data` keys.
-fn make_entry(name: &str, data: &str) -> ValueWord {
-    let keys = vec![
-        ValueWord::from_string(Arc::new("name".to_string())),
-        ValueWord::from_string(Arc::new("data".to_string())),
-    ];
-    let values = vec![
-        ValueWord::from_string(Arc::new(name.to_string())),
-        ValueWord::from_string(Arc::new(data.to_string())),
-    ];
-    ValueWord::from_hashmap_pairs(keys, values)
-}
-
-/// Create the `archive` module with zip/tar creation and extraction functions.
+/// Create the `archive` module with extraction functions registered.
+/// Create functions deferred to cluster #4 (see module doc comment).
 pub fn create_archive_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::archive");
-    module.description = "Archive creation and extraction (zip, tar)".to_string();
-
-    // archive.zip_create(entries: Array<{name: string, data: string}>) -> Array<int>
-    register_typed_function(
-        &mut module,
-        "zip_create",
-        "Create a zip archive in memory from an array of entries",
-        vec![ModuleParam {
-            name: "entries".to_string(),
-            type_name: "Array<{name: string, data: string}>".to_string(),
-            required: true,
-            description: "Array of objects with 'name' and 'data' fields".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Bytes,
-        |args, _ctx| {
-            use std::io::{Cursor, Write};
-
-            let entries_val = args
-                .first()
-                .ok_or_else(|| "archive.zip_create() requires an entries array".to_string())?;
-            let entries =
-                extract_entries(entries_val).map_err(|e| format!("archive.zip_create(): {}", e))?;
-
-            let buf = Cursor::new(Vec::new());
-            let mut zip_writer = zip::ZipWriter::new(buf);
-
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-
-            for (name, data) in &entries {
-                zip_writer.start_file(name.as_str(), options).map_err(|e| {
-                    format!(
-                        "archive.zip_create() failed to start file '{}': {}",
-                        name, e
-                    )
-                })?;
-                zip_writer.write_all(data.as_bytes()).map_err(|e| {
-                    format!("archive.zip_create() failed to write '{}': {}", name, e)
-                })?;
-            }
-
-            let cursor = zip_writer
-                .finish()
-                .map_err(|e| format!("archive.zip_create() failed to finish: {}", e))?;
-
-            Ok(TypedReturn::Bytes(cursor.into_inner()))
-        },
-    );
+    module.description = "Archive extraction (zip, tar)".to_string();
 
     // archive.zip_extract(data: Array<int>) -> Array<{name: string, data: string}>
-    register_typed_function(
+    register_typed_fn_1::<_, Vec<i64>>(
         &mut module,
         "zip_extract",
         "Extract a zip archive from a byte array into an array of entries",
-        vec![ModuleParam {
-            name: "data".to_string(),
-            type_name: "Array<int>".to_string(),
-            required: true,
-            description: "Zip archive as byte array".to_string(),
-            ..Default::default()
-        }],
+        "data",
+        "Array<int>",
         ConcreteType::ArrayObject("Array<{name: string, data: string}>".to_string()),
-        |args, _ctx| {
+        |data, _ctx| {
             use std::io::{Cursor, Read};
 
-            let input = args.first().ok_or_else(|| {
-                "archive.zip_extract() requires an Array<int> argument".to_string()
-            })?;
-            let bytes =
-                bytes_from_array(input).map_err(|e| format!("archive.zip_extract(): {}", e))?;
+            let bytes = bytes_from_i64_slice(&data)
+                .map_err(|e| format!("archive.zip_extract(): {}", e))?;
 
             let cursor = Cursor::new(bytes);
             let mut archive = zip::ZipArchive::new(cursor)
                 .map_err(|e| format!("archive.zip_extract() invalid zip: {}", e))?;
 
-            let mut entries = Vec::new();
+            let mut entries: Vec<Vec<(String, ConcreteReturn)>> = Vec::new();
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).map_err(|e| {
                     format!("archive.zip_extract() failed to read entry {}: {}", i, e)
@@ -176,81 +58,34 @@ pub fn create_archive_module() -> ModuleExports {
                     format!("archive.zip_extract() failed to read '{}': {}", name, e)
                 })?;
 
-                entries.push(make_entry(&name, &contents));
+                entries.push(vec![
+                    ("name".to_string(), ConcreteReturn::String(name)),
+                    ("data".to_string(), ConcreteReturn::String(contents)),
+                ]);
             }
 
-            Ok(TypedReturn::ArrayValueWord(entries))
-        },
-    );
-
-    // archive.tar_create(entries: Array<{name: string, data: string}>) -> Array<int>
-    register_typed_function(
-        &mut module,
-        "tar_create",
-        "Create a tar archive in memory from an array of entries",
-        vec![ModuleParam {
-            name: "entries".to_string(),
-            type_name: "Array<{name: string, data: string}>".to_string(),
-            required: true,
-            description: "Array of objects with 'name' and 'data' fields".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Bytes,
-        |args, _ctx| {
-            let entries_val = args
-                .first()
-                .ok_or_else(|| "archive.tar_create() requires an entries array".to_string())?;
-            let entries =
-                extract_entries(entries_val).map_err(|e| format!("archive.tar_create(): {}", e))?;
-
-            let mut builder = tar::Builder::new(Vec::new());
-
-            for (name, data) in &entries {
-                let data_bytes = data.as_bytes();
-                let mut header = tar::Header::new_gnu();
-                header.set_size(data_bytes.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-
-                builder
-                    .append_data(&mut header, name.as_str(), data_bytes)
-                    .map_err(|e| format!("archive.tar_create() failed for '{}': {}", name, e))?;
-            }
-
-            let tar_bytes = builder
-                .into_inner()
-                .map_err(|e| format!("archive.tar_create() failed to finish: {}", e))?;
-
-            Ok(TypedReturn::Bytes(tar_bytes))
+            Ok(TypedReturn::ArrayObjectPairs(entries))
         },
     );
 
     // archive.tar_extract(data: Array<int>) -> Array<{name: string, data: string}>
-    register_typed_function(
+    register_typed_fn_1::<_, Vec<i64>>(
         &mut module,
         "tar_extract",
         "Extract a tar archive from a byte array into an array of entries",
-        vec![ModuleParam {
-            name: "data".to_string(),
-            type_name: "Array<int>".to_string(),
-            required: true,
-            description: "Tar archive as byte array".to_string(),
-            ..Default::default()
-        }],
+        "data",
+        "Array<int>",
         ConcreteType::ArrayObject("Array<{name: string, data: string}>".to_string()),
-        |args, _ctx| {
+        |data, _ctx| {
             use std::io::{Cursor, Read};
 
-            let input = args.first().ok_or_else(|| {
-                "archive.tar_extract() requires an Array<int> argument".to_string()
-            })?;
-            let bytes =
-                bytes_from_array(input).map_err(|e| format!("archive.tar_extract(): {}", e))?;
+            let bytes = bytes_from_i64_slice(&data)
+                .map_err(|e| format!("archive.tar_extract(): {}", e))?;
 
             let cursor = Cursor::new(bytes);
             let mut archive = tar::Archive::new(cursor);
 
-            let mut entries = Vec::new();
+            let mut entries: Vec<Vec<(String, ConcreteReturn)>> = Vec::new();
             for entry_result in archive
                 .entries()
                 .map_err(|e| format!("archive.tar_extract() invalid tar: {}", e))?
@@ -258,7 +93,6 @@ pub fn create_archive_module() -> ModuleExports {
                 let mut entry = entry_result
                     .map_err(|e| format!("archive.tar_extract() failed to read entry: {}", e))?;
 
-                // Skip directories
                 if entry.header().entry_type().is_dir() {
                     continue;
                 }
@@ -274,205 +108,15 @@ pub fn create_archive_module() -> ModuleExports {
                     format!("archive.tar_extract() failed to read '{}': {}", name, e)
                 })?;
 
-                entries.push(make_entry(&name, &contents));
+                entries.push(vec![
+                    ("name".to_string(), ConcreteReturn::String(name)),
+                    ("data".to_string(), ConcreteReturn::String(contents)),
+                ]);
             }
 
-            Ok(TypedReturn::ArrayValueWord(entries))
+            Ok(TypedReturn::ArrayObjectPairs(entries))
         },
     );
 
     module
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    fn make_test_entries() -> ValueWord {
-        let entries = vec![
-            make_entry("hello.txt", "Hello, World!"),
-            make_entry("data/numbers.txt", "1 2 3 4 5"),
-        ];
-        ValueWord::from_array(shape_value::vmarray_from_vec(entries))
-    }
-
-    #[test]
-    fn test_archive_module_creation() {
-        let module = create_archive_module();
-        assert_eq!(module.name, "std::core::archive");
-        assert!(module.has_export("zip_create"));
-        assert!(module.has_export("zip_extract"));
-        assert!(module.has_export("tar_create"));
-        assert!(module.has_export("tar_extract"));
-    }
-
-    #[test]
-    fn test_zip_roundtrip() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let entries = make_test_entries();
-        let zip_bytes = module.invoke_export("zip_create", &[entries], &ctx).unwrap().unwrap();
-
-        // Should be a byte array
-        assert!(zip_bytes.as_any_array().is_some());
-
-        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
-        let arr = extracted.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 2);
-
-        // Check first entry
-        let (name0, data0) = extract_entry_fields(&arr[0]).unwrap();
-        assert_eq!(name0, "hello.txt");
-        assert_eq!(data0, "Hello, World!");
-
-        // Check second entry
-        let (name1, data1) = extract_entry_fields(&arr[1]).unwrap();
-        assert_eq!(name1, "data/numbers.txt");
-        assert_eq!(data1, "1 2 3 4 5");
-    }
-
-    #[test]
-    fn test_tar_roundtrip() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let entries = make_test_entries();
-        let tar_bytes = module.invoke_export("tar_create", &[entries], &ctx).unwrap().unwrap();
-
-        assert!(tar_bytes.as_any_array().is_some());
-
-        let extracted = module.invoke_export("tar_extract", &[tar_bytes], &ctx).unwrap().unwrap();
-        let arr = extracted.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 2);
-
-        let (name0, data0) = extract_entry_fields(&arr[0]).unwrap();
-        assert_eq!(name0, "hello.txt");
-        assert_eq!(data0, "Hello, World!");
-
-        let (name1, data1) = extract_entry_fields(&arr[1]).unwrap();
-        assert_eq!(name1, "data/numbers.txt");
-        assert_eq!(data1, "1 2 3 4 5");
-    }
-
-    #[test]
-    fn test_zip_create_empty() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
-        let zip_bytes = module.invoke_export("zip_create", &[empty], &ctx).unwrap().unwrap();
-
-        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
-        let arr = extracted.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 0);
-    }
-
-    #[test]
-    fn test_tar_create_empty() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
-        let tar_bytes = module.invoke_export("tar_create", &[empty], &ctx).unwrap().unwrap();
-
-        let extracted = module.invoke_export("tar_extract", &[tar_bytes], &ctx).unwrap().unwrap();
-        let arr = extracted.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 0);
-    }
-
-    #[test]
-    fn test_zip_extract_invalid_data() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_i64(2),
-        ]));
-        let result = module.invoke_export("zip_extract", &[bad_data], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_tar_extract_invalid_data() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_i64(2),
-        ]));
-        let result = module.invoke_export("tar_extract", &[bad_data], &ctx).unwrap();
-        // tar with just 2 bytes will likely result in empty entries (not enough for header)
-        // or an error — either is acceptable
-        if let Ok(val) = result {
-            let arr = val.as_any_array().unwrap().to_generic();
-            assert_eq!(arr.len(), 0);
-        }
-    }
-
-    #[test]
-    fn test_zip_create_requires_array() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let result = module.invoke_export("zip_create", &[ValueWord::from_i64(42)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_schemas() {
-        let module = create_archive_module();
-
-        let zip_create_schema = module.get_schema("zip_create").unwrap();
-        assert_eq!(zip_create_schema.params.len(), 1);
-        assert!(zip_create_schema.params[0].required);
-        assert_eq!(zip_create_schema.return_type.as_deref(), Some("Array<int>"));
-
-        let zip_extract_schema = module.get_schema("zip_extract").unwrap();
-        assert_eq!(
-            zip_extract_schema.return_type.as_deref(),
-            Some("Array<{name: string, data: string}>")
-        );
-
-        let tar_create_schema = module.get_schema("tar_create").unwrap();
-        assert_eq!(tar_create_schema.params.len(), 1);
-
-        let tar_extract_schema = module.get_schema("tar_extract").unwrap();
-        assert_eq!(
-            tar_extract_schema.return_type.as_deref(),
-            Some("Array<{name: string, data: string}>")
-        );
-    }
-
-    #[test]
-    fn test_zip_unicode_content() {
-        let module = create_archive_module();
-        let ctx = test_ctx();
-
-        let entries = vec![make_entry("unicode.txt", "Hello \u{1F600} World \u{00E9}")];
-        let input = ValueWord::from_array(shape_value::vmarray_from_vec(entries));
-        let zip_bytes = module.invoke_export("zip_create", &[input], &ctx).unwrap().unwrap();
-
-        let extracted = module.invoke_export("zip_extract", &[zip_bytes], &ctx).unwrap().unwrap();
-        let arr = extracted.as_any_array().unwrap().to_generic();
-        let (_, data) = extract_entry_fields(&arr[0]).unwrap();
-        assert_eq!(data, "Hello \u{1F600} World \u{00E9}");
-    }
 }

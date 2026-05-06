@@ -229,6 +229,115 @@ impl ToSlot for Arc<shape_value::DataTable> {
     }
 }
 
+// ──────────────────── typed-array FromSlot/ToSlot (option β) ─────────────────
+//
+// `Array<int>` / `Array<u8>` slots come in as `Arc<HeapValue>` pointing at
+// `HeapValue::TypedArray(TypedArrayData::*)`. The element-width discrimination
+// is via the body's declared parameter type (`Vec<u8>` vs `Vec<i64>` vs …),
+// not via NativeKind: `NATIVE_KIND` stays `Ptr(HeapKind::TypedArray)` for all
+// element widths. Element-width threading is enforced by the Rust type
+// system at the impl level, with an in-body pattern match that panics on
+// mismatch.
+//
+// Per `docs/runtime-v2-spec.md`: "the kind tells you the arm; HeapValue
+// dispatch is a consistency check, not a probe." The `_ => panic!()` arm
+// in each `from_slot` is `debug_assert!`-equivalent — unreachable in a
+// well-typed system. The dispatcher's registration-time arg-kind contract
+// already verified the slot bits decode to a `HeapKind::TypedArray` heap
+// pointer; the variant pattern match verifies the body's declared element
+// type matches the actual `TypedArrayData::*` arm. If this panics in
+// production, a compiler/dispatcher contract has been violated, not a
+// user-facing condition.
+//
+// Option β chosen over option α (`Arc<TypedBuffer<T>>` zero-copy), option ε
+// (FromSlot variants per element type with consistency checks), option γ
+// (`&[T]` borrowed), and path 2 (per-element `HeapKind` split). See
+// `docs/defections.md` 2026-05-06 cluster #3 entry for the trade-off
+// discussion. Adjacent deferred follow-up workstreams: `maximalist-v2-redesign`
+// (dissolve `HeapValue` sum type at discriminator level) and
+// `move-semantics-marshal` (leverage the existing `LoadLocalMove`/
+// `LoadLocalClone` bytecode opcodes at the FFI boundary instead of always-
+// clone). Both are on-record DEFERRED in the same defections.md page.
+
+/// Read a `Vec<u8>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
+/// whose payload is `TypedArrayData::U8`.
+///
+/// Owns-clone semantics: the body receives an owned `Vec<u8>` independent
+/// of the slot's strong reference. The slot's lifetime is unaffected.
+///
+/// Panics on `TypedArrayData::*` mismatch. The dispatcher's registration
+/// contract guarantees a `HeapKind::TypedArray` slot; the body's declared
+/// `Vec<u8>` parameter type pins the expected `TypedArrayData::U8` arm.
+/// Per spec, this is a consistency check, not a runtime probe.
+impl FromSlot for Vec<u8> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) pins the bits to
+        // an Arc<HeapValue> with the TypedArray variant. We clone the
+        // inner buffer's data into an owned Vec without consuming the
+        // slot's strong ref.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::U8(buf)) => {
+                    buf.data.clone()
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                     not U8. Body's parameter type Vec<u8> requires the U8 element-width \
+                     variant. Marshal kind contract violated by caller (compiler/dispatcher \
+                     bug, not a user-facing condition).",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::{:?}, \
+                     not TypedArray. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Read a `Vec<i64>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
+/// whose payload is `TypedArrayData::I64`.
+///
+/// Owns-clone semantics. Panics on `TypedArrayData::*` mismatch — same
+/// consistency-check rationale as `Vec<u8>` above.
+impl FromSlot for Vec<i64> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::I64(buf)) => {
+                    buf.data.clone()
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                     not I64. Body's parameter type Vec<i64> requires the I64 element-width \
+                     variant. Marshal kind contract violated by caller.",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::{:?}, \
+                     not TypedArray. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
 // ─────────────────────── per-arity register helpers ───────────────────────
 
 /// Body type stored in the typed registry: takes raw `&[u64]` slots and
