@@ -94,7 +94,7 @@ macro_rules! define_heap_types {
             DataTable(std::sync::Arc<$crate::datatable::DataTable>),
             Content(Box<$crate::content::ContentNode>),
             Instant(Box<std::time::Instant>),
-            IoHandle(Box<$crate::heap_value::IoHandleData>),
+            IoHandle(std::sync::Arc<$crate::heap_value::IoHandleData>),
             NativeScalar($crate::heap_value::NativeScalar),
             NativeView(Box<$crate::heap_value::NativeViewData>),
             // ===== Struct variants =====

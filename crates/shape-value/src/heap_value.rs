@@ -318,11 +318,18 @@ impl std::fmt::Debug for IoResource {
     }
 }
 
-/// Data for IoHandle variant (boxed to keep HeapValue small).
+/// Data for IoHandle variant (Arc-wrapped at the HeapValue level to keep
+/// HeapValue small and to enable cluster #2 marshal `FromSlot for
+/// Arc<IoHandleData>`).
 ///
 /// Wraps an OS resource (file, socket, process) in an Arc<Mutex<Option<IoResource>>>
 /// so it can be shared and closed. The `Option` is `None` after close().
 /// Rust's `Drop` closes the underlying resource if not already closed.
+///
+/// Storage: `HeapValue::IoHandle(Arc<IoHandleData>)`. The variant Arc is
+/// the marshal-layer's typed handle (per cluster #2 option γ in
+/// `docs/defections.md` 2026-05-06); the inner `Arc<Mutex<...>>` is the
+/// shared resource lock. Cloning the variant is one atomic op.
 #[derive(Clone)]
 pub struct IoHandleData {
     pub kind: IoHandleKind,
