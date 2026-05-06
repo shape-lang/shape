@@ -514,6 +514,105 @@ than runtime probe.
 
 ---
 
+## 2026-05-06 — move-semantics-marshal — leverage existing LoadLocalMove/LoadLocalClone bytecode opcodes at the stdlib FFI boundary (DEFERRED)
+
+This is **not** a defection (no strict-typing compromise; no dispatch
+shape preserved). It is an **on-record DEFERRED follow-up workstream**:
+the bytecode already encodes per-local move-vs-clone ownership; the
+marshal layer's always-clone shape is consistent with current FromSlot
+abstraction, but it doesn't propagate the existing bytecode-level
+ownership signal across the FFI boundary. Logged so future sessions
+see the architectural target rather than treating option β's
+always-clone as the terminal shape.
+
+**Bytecode-side state (audited 2026-05-06):**
+
+- **Wired (older, in production):** `LoadLocalMove` (0x104) transfers
+  ownership and zeros the source slot; `LoadLocalClone` (0x105)
+  clones, source stays live; `StoreLocalDrop` (0x106) drops old
+  before storing; `DropSharedLocal` (0x139) releases shared locals.
+  These opcodes ARE emitted by the compiler today and respected by
+  the VM hot path.
+- **Unwired (V1.1A planned):** `MoveLocal` (0x125), `CloneLocal`
+  (0x126), `DropLocal` (0x127). Source comment: "UNWIRED — V1.1B
+  adds handlers." Future generation, not load-bearing yet.
+
+So Shape's compiler IS tracking ownership at the local variable
+level and emitting move-vs-clone opcodes for local loads/stores.
+Let-Rust-lifetime semantics are real at the bytecode level. The
+marshal layer just doesn't leverage them at the stdlib FFI boundary.
+
+**Considered:** extend the marshal layer to a `MoveFromSlot` /
+`CloneFromSlot` distinction, parallel to the existing `FromSlot`.
+The calling convention communicates per-arg ownership (move vs
+clone) from the bytecode-emit-side to the dispatcher: each
+`register_typed_fn_N` declares per-param whether the body takes
+ownership or borrows. The dispatcher selects the appropriate slot
+read at call time. Body-side: a body that wants to consume its
+input declares `Vec<u8>` via `MoveFromSlot`; one that just iterates
+declares `&[u8]` via `CloneFromSlot` (or a borrowed-slot equivalent).
+
+**Pattern recognized:** the bytecode already has the move/clone
+distinction; option β's always-clone marshal is "language has it,
+runtime FFI boundary doesn't propagate it." Not a defection — both
+shapes are statically typed and dispatch-safe — but a missed
+optimization opportunity at the FFI boundary specifically. The
+inner-loop hot paths (opcode dispatch, JIT hot loops) already
+respect move-vs-clone via the wired `LoadLocalMove` / `LoadLocalClone`
+opcodes, so the runtime as a whole already has the distinction;
+it just stops at the marshal layer.
+
+**Caveat (audit-discovered):** leveraging the bytecode-level
+distinction at the marshal layer is **not** purely small plumbing.
+The calling convention needs to communicate per-arg ownership
+declaration from emit-side to dispatcher; FromSlot splits into
+`MoveFromSlot` / `CloneFromSlot` (or grows an associated
+`OWNERSHIP` const); every stdlib registration site declares
+ownership per param. Real architectural piece — estimated 2-5 days
+post-design once the trait shape is settled.
+
+**Alternative taken (current):** option β always-clone marshal
+(see cluster #3 entry above). Acceptable because (a) marshal is
+the FFI boundary, not the hot path; (b) the inner-loop perf paths
+already respect move-vs-clone at the bytecode level; (c) the
+clone overhead at the FFI boundary is `Vec<T>::from(slice)`-class
+memcpy, not Arc-clone-class atomic-refcount work, so the residual
+is bounded.
+
+**Trigger conditions for revisit (any one is sufficient):**
+
+(a) **Profile shows marshal-clone overhead is significant in real
+    programs.** Specifically: the per-call `Vec<u8>::from(&buf.data[..])`
+    memcpy in `Vec<u8>::from_slot` registers on sampling profilers
+    under realistic stdlib-heavy workloads, independent of the
+    consistency-check cost from the maximalist-v2-redesign entry.
+(b) **A stdlib function is identified as hot-path-critical and
+    move-semantics would materially improve it.** Specifically:
+    a single function (e.g. a streaming compression call, a hot
+    decode loop) is shown to spend more cycles in marshal-boundary
+    cloning than in its own body.
+(c) **The maximalist-v2-redesign workstream lands.** That workstream
+    naturally includes this one — dissolving `HeapValue` at the
+    slot level lets the compiler emit move-vs-clone slot reads
+    directly without a separate `MoveFromSlot` trait, since the
+    slot bits already are typed pointers.
+
+**Adjacent already-on-record entries:** the maximalist-v2-redesign
+entry above is a strict superset; it would absorb this workstream.
+The HeapKind trim (2026-05-06 entry) and NativeKind::Ptr(HeapKind)
+extension are intermediate steps in the same direction.
+
+**Cost saved:** 2-5 days of trait-redesign + per-stdlib-site
+ownership-declaration work deferred from the current phase, where
+the always-clone residual is spec-permitted and the bytecode
+hot-path layer already respects ownership distinctions. Acknowledged:
+each `Vec<T>::from_slot` impl in the marshal layer carries a
+per-call `Vec::from(slice)` memcpy as long-term residual, with
+the documented bytecode-already-has-move-clone signal as the
+trigger-(a)-(b) reference for revisiting.
+
+---
+
 ## 2026-05-06 — type_schema-cluster cross-crate migration — deferred to shape-vm cascade boundary
 
 This is **not** a defection (no strict-typing compromise; no dispatch shape preserved). It is an **on-record deferral**: the migration is correctly typed, but the cluster's coherent migration unit straddles the shape-runtime / shape-vm boundary, and doing half of it from inside shape-runtime risks re-doing the work when the other half's consumer needs surface.
