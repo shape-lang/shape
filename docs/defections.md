@@ -337,4 +337,205 @@ Callers thread `kind` from the FunctionBlob's per-slot kind table (which already
 
 ---
 
+## 2026-05-06 — HeapKind trim + `NativeKind::Ptr(HeapKind)` extension
+
+The wire/snapshot kind threading (Phase 2b sub-mechanism C) needs the
+discriminator to express heap-pointer slots beyond the single
+`NativeKind::String` variant. Today `NativeKind` has 24 variants — 23
+scalar widths + `String`. It cannot express "this slot holds
+`Arc<HeapValue>` whose discriminant is `DataTable`/`TypedArray`/`Instant`/etc."
+The marshal layer (sub-mechanism A) hits the same gap when stdlib
+functions return heap-allocated values. This entry covers:
+
+- Trimming `HeapKind` to its surviving variants.
+- Adding `NativeKind::Ptr(HeapKind)` as the unified heap-slot discriminator.
+
+---
+
+**Considered (option α, KEEP-AND-EXTEND):** keep `HeapKind` at its
+77-variant size — including the 60 variants annotated `(removed)` or
+`(deprecated)` — and add `NativeKind::Ptr(HeapKind)`. The extension
+compiles cleanly without touching `HeapKind`.
+
+**Rationalization (option α):** "The variant docstrings document
+which are dead. The original `tags.rs` ABI-stability test (deleted
+by the bulldozer) preserved ordinal positions; comments still imply
+that contract. Trimming risks breaking some external consumer we
+haven't audited."
+
+**Pattern recognized (option α):** `NativeKind::Ptr(HeapKind::Some)`
+would compile cleanly even though `Some` was deleted (option-C cut,
+2026-05-06 entry). That's exactly the structurally-expressible-but-
+forbidden state pattern that drove the `ConcreteReturn` /
+`TypedReturn` split in commit `cd0479f` (and the `SlotKind` →
+`NativeKind` rename in `381eff9`). Allowing dead variants to remain
+expressible re-creates the same defection at a lower layer. The
+"what if some external consumer" risk does not justify keeping
+forbidden states reachable — audit, then trim.
+
+**Considered (option β, PARALLEL TYPED-SUBSET):** introduce a smaller
+`TypedHeapKind` enum in shape-value covering only the surviving
+variants. `NativeKind::Ptr(TypedHeapKind)`. Original `HeapKind` keeps
+its full 77-variant surface for the executor's runtime-tag-decode
+paths.
+
+**Rationalization (option β):** "Doesn't disturb existing HeapKind
+consumers. Strict-typed boundary uses the typed subset; legacy paths
+keep the full enum until they migrate."
+
+**Pattern recognized (option β):** parallel-discriminator defection.
+This is the same shape as the rejected "two NativeKind/SlotKind for
+the marshal vs executor boundaries" — explicitly rejected in the
+unified Phase 2b entry above. Two enums for the same domain
+inevitably drift; the executor cascade work eventually has to map
+between them, and the mapping itself becomes a dispatch.
+
+---
+
+**Alternative taken (option γ):** trim `HeapKind` to its 17 surviving
+variants (one per surviving `HeapValue` arm), then add
+`NativeKind::Ptr(HeapKind)`.
+
+Trimmed `HeapKind` (renumbered sequentially, 0..16):
+```
+String        // 0
+TypedObject   // 1
+Closure       // 2  (matches HeapValue::ClosureRaw via the Closure ordinal)
+Decimal       // 3
+BigInt        // 4
+DataTable     // 5
+Future        // 6
+TaskGroup     // 7
+TypedArray    // 8
+Temporal      // 9
+TableView     // 10
+Content       // 11
+Instant       // 12
+IoHandle      // 13
+NativeScalar  // 14
+NativeView    // 15
+Char          // 16
+```
+
+The 60 deleted variants (`Array`, `HostClosure`, `TypedTable`/`RowView`/
+`ColumnRef`/`IndexedTable`, `Range`, `Enum`, `Some`/`Ok`/`Err`,
+`TraitObject`, `ExprProxy`/`FilterExpr`, the legacy temporal arms,
+`TypeAnnotation`/`TypeAnnotatedValue`/`PrintResult`/`SimulationCall`/
+`FunctionRef`/`DataReference`, `Number`/`Bool`/`None`/`Unit`/`Function`/
+`ModuleFunction` (former ValueWord scalar discriminators), `HashMap`,
+`SharedCell`, the typed-array width variants `IntArray`/`FloatArray`/
+`BoolArray`/`Matrix`/`I8Array`..`U64Array`/`F32Array`/`FloatArraySlice`,
+`Iterator`/`Generator`, `Mutex`/`Atomic`/`Lazy`/`Channel`,
+`Set`/`Deque`/`PriorityQueue`, `ProjectedRef`, `Rare`/`Concurrency`)
+are gone from the enum source. References to them (~10 sites in
+shape-vm, all in code that's already broken from the bulldozer
+cascade) become compile errors instead of compile-fine-but-
+semantically-broken.
+
+`NativeKind` extended:
+```rust
+pub enum NativeKind {
+    Float64, NullableFloat64, Int8, ..., UIntSize, NullableUIntSize,
+    Bool, String,
+    Ptr(HeapKind),  // NEW
+}
+```
+
+Wire/snapshot dispatch shape:
+```rust
+match kind {
+    NativeKind::Int64        => WireValue::Integer(bits as i64),
+    NativeKind::Float64      => WireValue::Number(f64::from_bits(bits)),
+    NativeKind::Bool         => WireValue::Bool(bits != 0),
+    NativeKind::String       => WireValue::String(arc_string_from(bits).to_string()),
+    NativeKind::Ptr(hk)      => heap_slot_to_wire(bits, hk, ctx),
+    /* … other scalar widths */
+}
+```
+
+`heap_slot_to_wire(bits, hk, ctx)` casts `bits as *const HeapValue`,
+debug-asserts `(*hv).kind() == hk`, then dispatches per HeapValue
+arm. The `(kind == discriminant)` assert is sanity-only; production
+dispatches on the precomputed `hk`, not on the heap object's
+self-reported discriminant.
+
+---
+
+**Audit findings (ordinal-numbering risk surfaced before trimming):**
+
+- `shape-wire/` has 0 HeapKind references. Wire format does not
+  serialize HeapKind ordinals.
+- Content-addressed bytecode hash includes instructions/strings/
+  permissions; not HeapKind. Trim does not affect hash stability.
+- `HeapHeader.kind: u16` is in-memory only; readers/writers share
+  the same enum at runtime, so renumbering is safe.
+- The `HEAP_KIND_V2_*` constants (80–84) live in
+  `crates/shape-value/src/v2/heap_header.rs` and are a separate
+  namespace from `HeapKind`. Unaffected by the trim.
+- ~10 `HeapKind::X as u8` cast sites in shape-vm reference deleted
+  variants — they are already broken from the bulldozer cascade
+  (commits `7d6dc27` / `128cb8a`) and will be rewritten as part of
+  the shape-vm reconstruction phase. Trim makes them
+  compile-error-now rather than compile-fine-but-semantically-
+  broken.
+
+---
+
+**TaskGroup / Future / inline-fit cases — surfaced before code:**
+
+- `HeapValue::TaskGroup { kind: u8, task_ids: Vec<u64> }` is a struct
+  variant with no corresponding `Arc<TaskGroup>` Rust type. For
+  Phase 2b wire/snapshot READ side this is fine (cast bits to
+  `*const HeapValue`, pattern-match TaskGroup arm). For Phase 2c
+  marshal WRITE side, a stdlib body returning a TaskGroup-shape
+  value will need a Rust struct + `From<TaskGroup> for HeapValue`
+  adapter. **Not blocking Phase 2b.**
+- `HeapValue::Future(u64)` is a u64 (FutureId), `HeapValue::Char(char)`
+  is 4 bytes inline, `HeapValue::BigInt(i64)` is 8 bytes inline. They
+  fit in a slot without heap allocation in principle. The current
+  executor wraps them in `Arc<HeapValue>` anyway — Phase 2b matches
+  the existing model rather than reshaping it. Inline-fit
+  optimization is a Phase 3+ concern.
+
+---
+
+**Watchlist — the next defection attractor:**
+
+When stdlib mass migration (Phase 2c) lands and bodies return
+`Result<T, E>`, `Option<T>`, or `JsonValue`, the temptation will be
+to add parametric NativeKind variants:
+```
+NativeKind::Result(ConcreteReturn, ConcreteReturn)  // FORBIDDEN
+NativeKind::Option(ConcreteReturn)                  // FORBIDDEN
+NativeKind::JsonValue                               // FORBIDDEN
+```
+
+That re-creates heterogeneous-by-default sum types at the discriminator
+level — exactly the option-C cut for `HeapValue` reproduced one
+layer up. The strict-typed answer is `HeapKind::TypedObject` plus a
+`schema_id` per `runtime-v2-spec.md:180`: each `Result<T, E>` /
+`Option<T>` / `JsonValue` instantiation gets its own monomorphized
+`TypedObject` schema. The slot's `NativeKind::Ptr(HeapKind::TypedObject)`
+plus the schema_id (from the function's registered `ConcreteType`)
+fully determines the shape. No new NativeKind variants.
+
+This is the same shape as the rejected `enum SlotValue { Int, Float,
+Bool, Heap }` (option δ in the unified Phase 2b entry): heterogeneous
+discriminator at the boundary, just at a different layer. Future
+agents reading this should treat any "let's add `NativeKind::X` for
+this parameterized return shape" reasoning as a structural defection
+attempt and re-route to monomorphized `TypedObject` schemas.
+
+---
+
+**Cost saved:** option α ($keeping dead HeapKind variants) preserved
+the structurally-expressible defection state for "audit later." The
+prior plan's W-series cleanup is the cost of "audit later" extending
+beyond the original scope. Trim cost: ~1 hour of source change + the
+shape-vm cascade items already on the books. Estimated avoided
+cleanup: 2–3 weeks of "we forgot HeapKind::Some isn't real anymore"
+remediation across the next year.
+
+---
+
 (Add new entries above this line. Newest first.)
