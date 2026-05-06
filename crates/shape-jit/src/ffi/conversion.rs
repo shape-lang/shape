@@ -253,7 +253,7 @@ pub extern "C" fn jit_print(value_bits: u64) {
 
 /// Concatenate two NaN-boxed string values into a freshly boxed
 /// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
-/// operands have `SlotKind::String`.
+/// operands have `NativeKind::String`.
 ///
 /// ## Operand decoding
 ///

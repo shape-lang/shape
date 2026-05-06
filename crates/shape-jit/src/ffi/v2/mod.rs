@@ -733,7 +733,7 @@ pub extern "C" fn jit_v2_array_len_i32(arr: *const TypedArray<i32>) -> u32 {
 // ============================================================================
 //
 // Bool elements are stored as u8 (0 or 1) in the underlying TypedArray<u8>
-// buffer. The Cranelift IR side uses i8 for bool slots (matching SlotKind::Bool
+// buffer. The Cranelift IR side uses i8 for bool slots (matching NativeKind::Bool
 // → I8 in `cranelift_type_for_slot`), and the FFI translates u8 ↔ bool at the
 // edges. This keeps the buffer compact (1 byte per element) and matches the
 // JIT's native i8 width for bool locals.

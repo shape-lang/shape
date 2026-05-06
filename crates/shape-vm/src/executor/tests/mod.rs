@@ -74,7 +74,7 @@ fn execute_bytecode(
 fn execute_bytecode_typed(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
-    return_kind: crate::type_tracking::SlotKind,
+    return_kind: crate::type_tracking::NativeKind,
 ) -> Result<ValueWord, VMError> {
     use crate::type_tracking::FrameDescriptor;
     let mut frame = FrameDescriptor::new();
@@ -169,7 +169,7 @@ fn test_integer_overflow_promotes_to_f64() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Float64,
+        crate::type_tracking::NativeKind::Float64,
     )
     .unwrap();
     // Should be f64, NOT a wrapped negative integer
@@ -192,7 +192,7 @@ fn test_integer_mul_overflow_promotes_to_f64() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Float64,
+        crate::type_tracking::NativeKind::Float64,
     )
     .unwrap();
     let val = result.to_number().unwrap();
@@ -229,7 +229,7 @@ fn test_integer_arithmetic_no_overflow_stays_int() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int64,
+        crate::type_tracking::NativeKind::Int64,
     )
     .unwrap();
     // Should stay as integer (accessible as i64)
@@ -240,7 +240,7 @@ fn test_integer_arithmetic_no_overflow_stays_int() {
 fn test_comparisons() {
     // After Wave-E+5, GtNumber pushes raw native bool bits; stamp Bool
     // so the host boundary decodes via `to_bool()`.
-    let bool_kind = crate::type_tracking::SlotKind::Bool;
+    let bool_kind = crate::type_tracking::NativeKind::Bool;
     // Test: 5 > 3 = true
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
@@ -267,7 +267,7 @@ fn test_comparisons() {
 #[test]
 fn test_logical_and() {
     // After Wave-E+5, And pushes raw native bool bits; stamp Bool.
-    let bool_kind = crate::type_tracking::SlotKind::Bool;
+    let bool_kind = crate::type_tracking::NativeKind::Bool;
     // Test: true && true = true
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
@@ -517,7 +517,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(5.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -538,7 +538,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(3.0), Constant::Number(5.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -559,7 +559,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(7.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -580,7 +580,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(5.0), Constant::Number(3.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -601,7 +601,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Int(42), Constant::Int(42)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -622,7 +622,7 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(1.5), Constant::Number(2.5)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -649,7 +649,7 @@ fn test_logical_or_not() {
         constants: vec![Constant::Bool(false), Constant::Bool(true)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()
@@ -669,7 +669,7 @@ fn test_logical_or_not() {
         constants: vec![Constant::Bool(false)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::SlotKind::Bool;
+            f.return_kind = crate::type_tracking::NativeKind::Bool;
             f
         }),
         ..Default::default()

@@ -57,7 +57,7 @@ pub use executor::{
 };
 pub use feature_matrix::{FeatureCategory, FeatureTest};
 pub use memory::{GCConfig, GCResult, GarbageCollector, ObjectId};
-pub use type_tracking::{FrameDescriptor, SlotKind, StorageHint, TypeTracker, VariableTypeInfo};
+pub use type_tracking::{FrameDescriptor, NativeKind, StorageHint, TypeTracker, VariableTypeInfo};
 
 // Re-export ValueWord and related types from shape-value
 pub use shape_value::{ErrorLocation, LocatedVMError, Upvalue, VMContext, VMError};

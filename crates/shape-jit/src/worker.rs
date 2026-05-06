@@ -325,7 +325,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
 mod tests {
     use super::*;
     use shape_vm::bytecode::*;
-    use shape_vm::type_tracking::{FrameDescriptor, SlotKind};
+    use shape_vm::type_tracking::{FrameDescriptor, NativeKind};
 
     fn make_instr(opcode: OpCode, operand: Option<Operand>) -> Instruction {
         Instruction { opcode, operand }
@@ -362,8 +362,8 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64, // arg0
-                SlotKind::Int64, // arg1
+                NativeKind::Int64, // arg0
+                NativeKind::Int64, // arg1
             ])),
             osr_entry_points: vec![],
         };
@@ -496,9 +496,9 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64, // i
-                SlotKind::Int64, // n
-                SlotKind::Int64, // sum
+                NativeKind::Int64, // i
+                NativeKind::Int64, // n
+                NativeKind::Int64, // sum
             ])),
             osr_entry_points: vec![],
         };
@@ -584,7 +584,7 @@ mod tests {
                     mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Unknown])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Unknown])),
             osr_entry_points: vec![],
         };
 

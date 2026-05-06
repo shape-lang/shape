@@ -2414,7 +2414,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
 
         if let Some(Operand::Local(idx)) = instruction.operand {
@@ -2442,21 +2442,21 @@ impl VirtualMachine {
             let kind = self
                 .current_frame_descriptor()
                 .map(|fd| fd.slot(idx as usize))
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             match kind {
-                SlotKind::Float64 if !is_tagged(bits) => {
+                NativeKind::Float64 if !is_tagged(bits) => {
                     // Plain f64 bits (NaN canonicalized to a non-tagged
                     // pattern). Push raw without ValueWord wrapping.
                     return self.push_raw_f64(f64::from_bits(bits));
                 }
-                SlotKind::Int64 | SlotKind::IntSize
+                NativeKind::Int64 | NativeKind::IntSize
                     if is_tagged(bits) && get_tag(bits) == TAG_INT =>
                 {
                     // Slot holds i48-tagged bits; push_raw_u64 preserves
                     // the encoding so downstream pop_tagged_i64 can decode.
                     return self.push_raw_u64(bits);
                 }
-                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
+                NativeKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
                     // Slot holds TAG_BOOL bits; push_raw_u64 preserves
                     // the encoding so downstream pop_tagged_bool can decode.
                     return self.push_raw_u64(bits);
@@ -2483,7 +2483,7 @@ impl VirtualMachine {
 
     /// Load value from a local variable slot — trusted variant.
     ///
-    /// The compiler has proved that this slot has a known SlotKind in the
+    /// The compiler has proved that this slot has a known NativeKind in the
     /// FrameDescriptor (a primitive type like f64, i64, or bool). This means:
     ///   - No SharedCell auto-deref (slot is a plain value, not a boxed capture)
     ///   - No tag validation (compiler already proved the type)
@@ -2504,7 +2504,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
@@ -2535,19 +2535,19 @@ impl VirtualMachine {
             let kind = self
                 .current_frame_descriptor()
                 .map(|fd| fd.slot(idx as usize))
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             match kind {
-                SlotKind::Float64 if !is_tagged(bits) => {
+                NativeKind::Float64 if !is_tagged(bits) => {
                     return self.push_raw_f64(f64::from_bits(bits));
                 }
-                SlotKind::Int64 | SlotKind::IntSize
+                NativeKind::Int64 | NativeKind::IntSize
                     if is_tagged(bits) && get_tag(bits) == TAG_INT =>
                 {
                     // Slot holds i48-tagged bits; push_raw_u64 preserves
                     // the encoding so downstream pop_tagged_i64 can decode.
                     return self.push_raw_u64(bits);
                 }
-                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
+                NativeKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
                     return self.push_raw_u64(bits);
                 }
                 _ => {
@@ -2677,7 +2677,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_HEAP, TAG_INT};
 
         if let Some(Operand::Local(idx)) = instruction.operand {
@@ -2702,14 +2702,14 @@ impl VirtualMachine {
                 let kind = self
                     .current_frame_descriptor()
                     .map(|fd| fd.slot(idx as usize))
-                    .unwrap_or(SlotKind::Unknown);
+                    .unwrap_or(NativeKind::Unknown);
                 let new_bits = self.stack[self.sp - 1];
                 let new_matches_kind = match kind {
-                    SlotKind::Float64 => !is_tagged(new_bits),
-                    SlotKind::Int64 | SlotKind::IntSize => {
+                    NativeKind::Float64 => !is_tagged(new_bits),
+                    NativeKind::Int64 | NativeKind::IntSize => {
                         is_tagged(new_bits) && get_tag(new_bits) == TAG_INT
                     }
-                    SlotKind::Bool => is_tagged(new_bits) && get_tag(new_bits) == TAG_BOOL,
+                    NativeKind::Bool => is_tagged(new_bits) && get_tag(new_bits) == TAG_BOOL,
                     _ => false,
                 };
                 if new_matches_kind {
@@ -4092,7 +4092,7 @@ mod tests {
         BytecodeProgram, Constant, Instruction, NumericWidth, OpCode, Operand,
     };
     use crate::executor::{VMConfig, VirtualMachine};
-    use crate::type_tracking::{FrameDescriptor, SlotKind};
+    use crate::type_tracking::{FrameDescriptor, NativeKind};
     use shape_value::{ValueWord, ValueWordExt};
 
     /// Helper: build a program, load it, execute, return the top-of-stack value.
@@ -4111,8 +4111,8 @@ mod tests {
 
     /// Helper: like `run_program`, but stamps the program's
     /// `top_level_frame.return_kind` so raw native bits decode as the
-    /// requested `SlotKind`.
-    fn run_program_typed(mut program: BytecodeProgram, return_kind: SlotKind) -> ValueWord {
+    /// requested `NativeKind`.
+    fn run_program_typed(mut program: BytecodeProgram, return_kind: NativeKind) -> ValueWord {
         let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
         frame.return_kind = return_kind;
         program.top_level_frame = Some(frame);
@@ -4149,7 +4149,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4165,7 +4165,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Bool);
+        let result = run_program_typed(program, NativeKind::Bool);
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -4181,7 +4181,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(-99));
     }
 
@@ -4201,7 +4201,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 2;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(20));
     }
 
@@ -4244,7 +4244,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(44));
     }
 
@@ -4263,7 +4263,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 
@@ -4282,7 +4282,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(123456789));
     }
 
@@ -4320,7 +4320,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(4464));
     }
 
@@ -4345,7 +4345,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(200));
     }
 
@@ -4417,7 +4417,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4451,7 +4451,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Bool);
+        let result = run_program_typed(program, NativeKind::Bool);
         assert_eq!(result.as_bool(), Some(true));
     }
 
@@ -4706,7 +4706,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -4749,7 +4749,7 @@ mod tests {
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 2;
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(11));
     }
 

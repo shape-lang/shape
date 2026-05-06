@@ -1184,20 +1184,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             })?;
             let kind = self.slot_kind_of(slot);
             let null = match kind {
-                shape_vm::type_tracking::SlotKind::Float64 => {
+                shape_vm::type_tracking::NativeKind::Float64 => {
                     self.builder.ins().f64const(0.0)
                 }
-                shape_vm::type_tracking::SlotKind::Int32
-                | shape_vm::type_tracking::SlotKind::UInt32 => {
+                shape_vm::type_tracking::NativeKind::Int32
+                | shape_vm::type_tracking::NativeKind::UInt32 => {
                     self.builder.ins().iconst(types::I32, 0)
                 }
-                shape_vm::type_tracking::SlotKind::Bool
-                | shape_vm::type_tracking::SlotKind::Int8
-                | shape_vm::type_tracking::SlotKind::UInt8 => {
+                shape_vm::type_tracking::NativeKind::Bool
+                | shape_vm::type_tracking::NativeKind::Int8
+                | shape_vm::type_tracking::NativeKind::UInt8 => {
                     self.builder.ins().iconst(types::I8, 0)
                 }
-                shape_vm::type_tracking::SlotKind::Int16
-                | shape_vm::type_tracking::SlotKind::UInt16 => {
+                shape_vm::type_tracking::NativeKind::Int16
+                | shape_vm::type_tracking::NativeKind::UInt16 => {
                     self.builder.ins().iconst(types::I16, 0)
                 }
                 // v2-boundary: I64 (NaN-boxed) slots use TAG_NULL as zero value

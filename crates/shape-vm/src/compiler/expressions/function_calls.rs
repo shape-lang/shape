@@ -22,27 +22,27 @@ use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
-/// Strict-typing-sweep (Cluster 3): map a `SlotKind` (the type-tracker's
+/// Strict-typing-sweep (Cluster 3): map a `NativeKind` (the type-tracker's
 /// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
 /// to type closure user params from a bare `[1, 2, 3]`-literal receiver
 /// when no `local_array_element_types` entry exists yet.
 fn slot_kind_to_type_annotation(
-    kind: crate::type_tracking::SlotKind,
+    kind: crate::type_tracking::NativeKind,
 ) -> Option<shape_ast::ast::TypeAnnotation> {
-    use crate::type_tracking::SlotKind;
+    use crate::type_tracking::NativeKind;
     use shape_ast::ast::TypeAnnotation;
     Some(match kind {
-        SlotKind::Float64 => TypeAnnotation::Basic("number".to_string()),
-        SlotKind::Int64 => TypeAnnotation::Basic("int".to_string()),
-        SlotKind::Int32 => TypeAnnotation::Basic("i32".to_string()),
-        SlotKind::Int16 => TypeAnnotation::Basic("i16".to_string()),
-        SlotKind::Int8 => TypeAnnotation::Basic("i8".to_string()),
-        SlotKind::UInt64 => TypeAnnotation::Basic("u64".to_string()),
-        SlotKind::UInt32 => TypeAnnotation::Basic("u32".to_string()),
-        SlotKind::UInt16 => TypeAnnotation::Basic("u16".to_string()),
-        SlotKind::UInt8 => TypeAnnotation::Basic("u8".to_string()),
-        SlotKind::Bool => TypeAnnotation::Basic("bool".to_string()),
-        SlotKind::String => TypeAnnotation::Basic("string".to_string()),
+        NativeKind::Float64 => TypeAnnotation::Basic("number".to_string()),
+        NativeKind::Int64 => TypeAnnotation::Basic("int".to_string()),
+        NativeKind::Int32 => TypeAnnotation::Basic("i32".to_string()),
+        NativeKind::Int16 => TypeAnnotation::Basic("i16".to_string()),
+        NativeKind::Int8 => TypeAnnotation::Basic("i8".to_string()),
+        NativeKind::UInt64 => TypeAnnotation::Basic("u64".to_string()),
+        NativeKind::UInt32 => TypeAnnotation::Basic("u32".to_string()),
+        NativeKind::UInt16 => TypeAnnotation::Basic("u16".to_string()),
+        NativeKind::UInt8 => TypeAnnotation::Basic("u8".to_string()),
+        NativeKind::Bool => TypeAnnotation::Basic("bool".to_string()),
+        NativeKind::String => TypeAnnotation::Basic("string".to_string()),
         // Other kinds (Decimal, BigInt, DateTime, nullable variants,
         // pointers, etc.) are not productive for typed binary-op emission;
         // returning None lets the closure body compile with no annotation,

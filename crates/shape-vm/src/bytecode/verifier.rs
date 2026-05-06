@@ -2,7 +2,7 @@
 //!
 //! Validates that trusted opcode invariants hold:
 //! - Every trusted opcode appears inside a function with a `FrameDescriptor`
-//! - The FrameDescriptor has no `SlotKind::Unknown` entries for the relevant operands
+//! - The FrameDescriptor has no `NativeKind::Unknown` entries for the relevant operands
 //!
 //! Also validates v2 typed opcode invariants:
 //! - Typed array ops require a FrameDescriptor with non-Unknown slots
@@ -10,7 +10,7 @@
 //! - Sized integer (i32) ops require a FrameDescriptor with non-Unknown slots
 
 use super::{BytecodeProgram, OpCode, Operand};
-use crate::type_tracking::SlotKind;
+use crate::type_tracking::NativeKind;
 
 /// Errors produced by the bytecode verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +21,7 @@ pub enum VerifyError {
         opcode: OpCode,
         instruction_offset: usize,
     },
-    /// A trusted opcode operand slot has `SlotKind::Unknown` in the FrameDescriptor.
+    /// A trusted opcode operand slot has `NativeKind::Unknown` in the FrameDescriptor.
     UnknownSlotKind {
         function_name: String,
         opcode: OpCode,
@@ -153,7 +153,7 @@ pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Verif
             if fd.is_empty() || fd.is_all_unknown() {
                 // All slots unknown — the compiler shouldn't have emitted trusted ops
                 for (idx, slot) in fd.slots.iter().enumerate() {
-                    if *slot == SlotKind::Unknown {
+                    if *slot == NativeKind::Unknown {
                         errors.push(VerifyError::UnknownSlotKind {
                             function_name: func.name.clone(),
                             opcode: instruction.opcode,
@@ -362,8 +362,8 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64,
-                SlotKind::Int64,
+                NativeKind::Int64,
+                NativeKind::Int64,
             ])),
             osr_entry_points: vec![],
             mir_data: None,
@@ -474,7 +474,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -502,7 +502,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -530,7 +530,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -562,7 +562,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };

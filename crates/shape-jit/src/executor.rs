@@ -269,7 +269,7 @@ impl JITExecutor {
                 // Use FrameDescriptor hint to preserve integer type identity.
                 // Prefer return_kind when populated; fall back to last slot.
                 let return_hint = bytecode.top_level_frame.as_ref().and_then(|fd| {
-                    if fd.return_kind != shape_vm::type_tracking::SlotKind::Unknown {
+                    if fd.return_kind != shape_vm::type_tracking::NativeKind::Unknown {
                         Some(fd.return_kind)
                     } else {
                         fd.slots.last().copied()

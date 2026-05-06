@@ -187,7 +187,7 @@ pub struct FFIFuncRefs {
     //   `string_concat` — takes two NaN-boxed string operands (`u64`) and
     //   returns a fresh unified-heap string (`u64`). Called from
     //   `mir_compiler::rvalues::compile_rvalue` when both operand slots
-    //   carry `SlotKind::String` under `BinOp::Add`. Covers the desugared
+    //   carry `NativeKind::String` under `BinOp::Add`. Covers the desugared
     //   chain emitted by `f"..."` formatted strings as well.
     pub(crate) string_concat: FuncRef,
 

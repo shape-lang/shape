@@ -151,7 +151,7 @@ impl JITCompiler {
             v2_array_mul_f64: r!("jit_v2_array_mul_f64"),
 
             // F5.a/F5.b: string `+` FFI (used by MIR BinaryOp::Add on
-            // SlotKind::String operands, incl. f-string desugared chains).
+            // NativeKind::String operands, incl. f-string desugared chains).
             string_concat: r!("jit_string_concat"),
 
             // v2 typed HashMap<string, ...>

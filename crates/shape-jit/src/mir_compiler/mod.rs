@@ -63,7 +63,7 @@ use shape_value::v2::struct_layout::FieldKind;
 use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 /// Session 2: side-table entry for a non-escaping stack closure call.
 ///
@@ -109,7 +109,7 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) local_types: Vec<LocalTypeInfo>,
     /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor),
     /// enriched by MIR-level type inference.
-    pub(crate) slot_kinds: Vec<SlotKind>,
+    pub(crate) slot_kinds: Vec<NativeKind>,
     /// v2: Per-slot fully-resolved `ConcreteType` from the bytecode compiler's
     /// `function_local_concrete_types` / `top_level_local_concrete_types`
     /// side-tables. Used by the v2 typed-array codegen path. Empty when the
@@ -426,7 +426,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<NativeKind>,
         strings: &'a [String],
         entry_block: Block,
         function_indices: &'a HashMap<String, u16>,
@@ -455,7 +455,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<NativeKind>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -489,7 +489,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<NativeKind>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -507,7 +507,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // no implicit return slot. Seeding MirToIR with bytecode
         // frame_descriptor kinds thus misaligns every slot by +1. In the
         // worst case this declares MIR's return slot with the bytecode
-        // param's `SlotKind`, so a `return 7.0` write gets narrowed
+        // param's `NativeKind`, so a `return 7.0` write gets narrowed
         // (e.g. `F64 → Bool` via `ireduce`) and corrupts the return value.
         // Regression case: `fn get_val(flag: bool) -> number? { if flag
         // { return 7.0 } return None }` declared MIR slot 0 as `Bool`
@@ -805,7 +805,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let idx = param_slot.0 as usize;
                     if idx < self.slot_kinds.len() {
                         if self.slot_kinds[idx]
-                            == shape_vm::type_tracking::SlotKind::Unknown
+                            == shape_vm::type_tracking::NativeKind::Unknown
                         {
                             self.slot_kinds[idx] = kind;
                         }

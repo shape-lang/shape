@@ -1,6 +1,6 @@
 //! JIT Boundary ABI: TypedScalar marshaling for VM ↔ JIT transitions.
 //!
-//! When a callee function has a `FrameDescriptor` with known `SlotKind`s for
+//! When a callee function has a `FrameDescriptor` with known `NativeKind`s for
 //! its parameters, the VM can marshal arguments into the JIT context buffer
 //! using typed encoding instead of raw NaN-boxed passthrough. This gives the
 //! JIT compiler accurate type information without an additional type-check on
@@ -10,16 +10,16 @@
 //! synthetic None or null.
 
 #[cfg(any(test, feature = "jit"))]
-use crate::type_tracking::SlotKind;
+use crate::type_tracking::NativeKind;
 #[cfg(any(test, feature = "jit"))]
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Marshal a single VM argument into JIT-compatible u64 bits, guided by the
-/// callee's `SlotKind` for that parameter slot.
+/// callee's `NativeKind` for that parameter slot.
 ///
 /// # Encoding
 ///
-/// | SlotKind           | Encoding                                         |
+/// | NativeKind           | Encoding                                         |
 /// |--------------------|--------------------------------------------------|
 /// | Int64/IntSize      | Extract i64, store as `i64 as u64` raw bits      |
 /// | Float64            | NaN-boxed f64 passthrough (already correct)       |
@@ -29,14 +29,14 @@ use shape_value::{ValueWord, ValueWordExt};
 /// The fallback is always the raw NaN-boxed bits — never None/null.
 #[cfg(any(test, feature = "jit"))]
 #[inline]
-pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
+pub fn marshal_arg_to_jit(vw: &ValueWord, kind: NativeKind) -> u64 {
     match kind {
         // Integer types: extract the integer value and store raw bits.
         // The JIT expects plain i64 bits for integer-typed slots.
-        SlotKind::Int64
-        | SlotKind::NullableInt64
-        | SlotKind::IntSize
-        | SlotKind::NullableIntSize => {
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize => {
             if vw.is_i64() {
                 // Fast path: inline i48 -> i64
                 let i = unsafe { vw.as_i64_unchecked() };
@@ -50,12 +50,12 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         }
 
         // Smaller integer types: extract and store as i64 raw bits
-        SlotKind::Int8
-        | SlotKind::NullableInt8
-        | SlotKind::Int16
-        | SlotKind::NullableInt16
-        | SlotKind::Int32
-        | SlotKind::NullableInt32 => {
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::Int32
+        | NativeKind::NullableInt32 => {
             if vw.is_i64() {
                 (unsafe { vw.as_i64_unchecked() }) as u64
             } else if vw.is_f64() {
@@ -66,16 +66,16 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         }
 
         // Unsigned integer types
-        SlotKind::UInt8
-        | SlotKind::NullableUInt8
-        | SlotKind::UInt16
-        | SlotKind::NullableUInt16
-        | SlotKind::UInt32
-        | SlotKind::NullableUInt32
-        | SlotKind::UInt64
-        | SlotKind::NullableUInt64
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => {
+        NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => {
             if vw.is_i64() {
                 (unsafe { vw.as_i64_unchecked() }) as u64
             } else if vw.is_f64() {
@@ -88,10 +88,10 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         }
 
         // Float64: NaN-boxed passthrough (JIT uses same NaN-boxing for f64)
-        SlotKind::Float64 | SlotKind::NullableFloat64 => vw.raw_bits(),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => vw.raw_bits(),
 
         // Bool: extract boolean and store as 0/1
-        SlotKind::Bool => {
+        NativeKind::Bool => {
             if vw.is_bool() {
                 (unsafe { vw.as_bool_unchecked() }) as u64
             } else {
@@ -100,16 +100,16 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         }
 
         // String, Dynamic, Unknown, or anything else: dynamic passthrough
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => vw.raw_bits(),
+        NativeKind::String | NativeKind::Dynamic | NativeKind::Unknown => vw.raw_bits(),
     }
 }
 
 /// Unmarshal a JIT return value back into a `ValueWord`, guided by the
-/// callee's return `SlotKind`.
+/// callee's return `NativeKind`.
 ///
 /// This is the inverse of `marshal_arg_to_jit` for the return path:
 ///
-/// | SlotKind           | Decoding                                         |
+/// | NativeKind           | Decoding                                         |
 /// |--------------------|--------------------------------------------------|
 /// | Int64/IntSize      | Raw bits → i64 → ValueWord::from_i48/from_f64   |
 /// | Float64            | NaN-boxed passthrough (already a ValueWord)       |
@@ -119,32 +119,32 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
 /// The fallback is always NaN-boxed passthrough.
 #[cfg(any(test, feature = "jit"))]
 #[inline]
-pub fn unmarshal_jit_result(bits: u64, kind: SlotKind) -> ValueWord {
+pub fn unmarshal_jit_result(bits: u64, kind: NativeKind) -> ValueWord {
     match kind {
         // Integer return: JIT stored raw i64 bits, reconstruct ValueWord
-        SlotKind::Int64
-        | SlotKind::NullableInt64
-        | SlotKind::IntSize
-        | SlotKind::NullableIntSize
-        | SlotKind::Int8
-        | SlotKind::NullableInt8
-        | SlotKind::Int16
-        | SlotKind::NullableInt16
-        | SlotKind::Int32
-        | SlotKind::NullableInt32 => ValueWord::from_i64(bits as i64),
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::Int32
+        | NativeKind::NullableInt32 => ValueWord::from_i64(bits as i64),
 
         // Unsigned integer return (sub-64: fits in i64)
-        SlotKind::UInt8
-        | SlotKind::NullableUInt8
-        | SlotKind::UInt16
-        | SlotKind::NullableUInt16
-        | SlotKind::UInt32
-        | SlotKind::NullableUInt32
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => ValueWord::from_i64(bits as i64),
+        NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => ValueWord::from_i64(bits as i64),
 
         // U64 return: may exceed i64::MAX
-        SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+        NativeKind::UInt64 | NativeKind::NullableUInt64 => {
             if bits <= i64::MAX as u64 {
                 ValueWord::from_i64(bits as i64)
             } else {
@@ -153,15 +153,15 @@ pub fn unmarshal_jit_result(bits: u64, kind: SlotKind) -> ValueWord {
         }
 
         // Float64: NaN-boxed passthrough
-        SlotKind::Float64 | SlotKind::NullableFloat64 => unsafe {
+        NativeKind::Float64 | NativeKind::NullableFloat64 => unsafe {
             std::mem::transmute::<u64, ValueWord>(bits)
         },
 
         // Bool return: 0 → false, nonzero → true
-        SlotKind::Bool => ValueWord::from_bool(bits != 0),
+        NativeKind::Bool => ValueWord::from_bool(bits != 0),
 
         // Dynamic passthrough: String, Dynamic, Unknown
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => unsafe {
+        NativeKind::String | NativeKind::Dynamic | NativeKind::Unknown => unsafe {
             std::mem::transmute::<u64, ValueWord>(bits)
         },
     }
@@ -181,7 +181,7 @@ mod tests {
         let vw = ValueWord::from_f64(42.0);
         // When the ValueWord is an integer stored as f64, and the slot is Int64,
         // we should get 42 as raw i64 bits.
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Int64);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Int64);
         assert_eq!(bits as i64, 42);
     }
 
@@ -189,21 +189,21 @@ mod tests {
     fn test_marshal_int64_from_inline_int() {
         // Create a value that is an inline i48 integer
         let vw = ValueWord::from_f64(100.0);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Int64);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Int64);
         assert_eq!(bits as i64, 100);
     }
 
     #[test]
     fn test_marshal_int64_negative() {
         let vw = ValueWord::from_f64(-17.0);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Int64);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Int64);
         assert_eq!(bits as i64, -17);
     }
 
     #[test]
     fn test_marshal_float64_passthrough() {
         let vw = ValueWord::from_f64(3.14);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Float64);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Float64);
         // Float64 is NaN-boxed passthrough — should be the same raw bits
         assert_eq!(bits, vw.raw_bits());
     }
@@ -211,21 +211,21 @@ mod tests {
     #[test]
     fn test_marshal_bool_true() {
         let vw = ValueWord::from_bool(true);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Bool);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Bool);
         assert_eq!(bits, 1);
     }
 
     #[test]
     fn test_marshal_bool_false() {
         let vw = ValueWord::from_bool(false);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Bool);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Bool);
         assert_eq!(bits, 0);
     }
 
     #[test]
     fn test_marshal_unknown_passthrough() {
         let vw = ValueWord::from_f64(99.5);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Unknown);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Unknown);
         // Unknown: NaN-boxed passthrough
         assert_eq!(bits, vw.raw_bits());
     }
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_marshal_string_passthrough() {
         let vw = ValueWord::from_string(std::sync::Arc::new("hello".to_string()));
-        let bits = marshal_arg_to_jit(&vw, SlotKind::String);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::String);
         assert_eq!(bits, vw.raw_bits());
     }
 
@@ -242,7 +242,7 @@ mod tests {
         // If we have a float value but the slot expects Bool, it should fall back
         // to NaN-boxed passthrough (not crash or produce nonsense)
         let vw = ValueWord::from_f64(1.0);
-        let bits = marshal_arg_to_jit(&vw, SlotKind::Bool);
+        let bits = marshal_arg_to_jit(&vw, NativeKind::Bool);
         // Falls through to NaN-boxed passthrough since tag is F64, not Bool
         assert_eq!(bits, vw.raw_bits());
     }
@@ -253,13 +253,13 @@ mod tests {
 
     #[test]
     fn test_unmarshal_int64_result() {
-        let result = unmarshal_jit_result(42u64, SlotKind::Int64);
+        let result = unmarshal_jit_result(42u64, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(42));
     }
 
     #[test]
     fn test_unmarshal_int64_negative_result() {
-        let result = unmarshal_jit_result((-17i64) as u64, SlotKind::Int64);
+        let result = unmarshal_jit_result((-17i64) as u64, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(-17));
     }
 
@@ -267,19 +267,19 @@ mod tests {
     fn test_unmarshal_float64_result() {
         let vw = ValueWord::from_f64(2.718);
         let bits = vw.raw_bits();
-        let result = unmarshal_jit_result(bits, SlotKind::Float64);
+        let result = unmarshal_jit_result(bits, NativeKind::Float64);
         assert_eq!(result.as_f64(), Some(2.718));
     }
 
     #[test]
     fn test_unmarshal_bool_true_result() {
-        let result = unmarshal_jit_result(1, SlotKind::Bool);
+        let result = unmarshal_jit_result(1, NativeKind::Bool);
         assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_unmarshal_bool_false_result() {
-        let result = unmarshal_jit_result(0, SlotKind::Bool);
+        let result = unmarshal_jit_result(0, NativeKind::Bool);
         assert_eq!(result.as_bool(), Some(false));
     }
 
@@ -287,7 +287,7 @@ mod tests {
     fn test_unmarshal_unknown_passthrough() {
         let vw = ValueWord::from_f64(123.456);
         let bits = vw.raw_bits();
-        let result = unmarshal_jit_result(bits, SlotKind::Unknown);
+        let result = unmarshal_jit_result(bits, NativeKind::Unknown);
         assert_eq!(result.as_f64(), Some(123.456));
     }
 
@@ -298,8 +298,8 @@ mod tests {
     #[test]
     fn test_roundtrip_int64() {
         let original = ValueWord::from_f64(42.0);
-        let marshaled = marshal_arg_to_jit(&original, SlotKind::Int64);
-        let unmarshaled = unmarshal_jit_result(marshaled, SlotKind::Int64);
+        let marshaled = marshal_arg_to_jit(&original, NativeKind::Int64);
+        let unmarshaled = unmarshal_jit_result(marshaled, NativeKind::Int64);
         // After round-trip through JIT, integer comes back as i64 (not f64)
         assert_eq!(unmarshaled.as_i64(), Some(42));
     }
@@ -307,32 +307,32 @@ mod tests {
     #[test]
     fn test_roundtrip_float64() {
         let original = ValueWord::from_f64(3.14159);
-        let marshaled = marshal_arg_to_jit(&original, SlotKind::Float64);
-        let unmarshaled = unmarshal_jit_result(marshaled, SlotKind::Float64);
+        let marshaled = marshal_arg_to_jit(&original, NativeKind::Float64);
+        let unmarshaled = unmarshal_jit_result(marshaled, NativeKind::Float64);
         assert_eq!(unmarshaled.as_f64(), original.as_f64());
     }
 
     #[test]
     fn test_roundtrip_bool_true() {
         let original = ValueWord::from_bool(true);
-        let marshaled = marshal_arg_to_jit(&original, SlotKind::Bool);
-        let unmarshaled = unmarshal_jit_result(marshaled, SlotKind::Bool);
+        let marshaled = marshal_arg_to_jit(&original, NativeKind::Bool);
+        let unmarshaled = unmarshal_jit_result(marshaled, NativeKind::Bool);
         assert_eq!(unmarshaled.as_bool(), Some(true));
     }
 
     #[test]
     fn test_roundtrip_bool_false() {
         let original = ValueWord::from_bool(false);
-        let marshaled = marshal_arg_to_jit(&original, SlotKind::Bool);
-        let unmarshaled = unmarshal_jit_result(marshaled, SlotKind::Bool);
+        let marshaled = marshal_arg_to_jit(&original, NativeKind::Bool);
+        let unmarshaled = unmarshal_jit_result(marshaled, NativeKind::Bool);
         assert_eq!(unmarshaled.as_bool(), Some(false));
     }
 
     #[test]
     fn test_roundtrip_unknown() {
         let original = ValueWord::from_f64(99.9);
-        let marshaled = marshal_arg_to_jit(&original, SlotKind::Unknown);
-        let unmarshaled = unmarshal_jit_result(marshaled, SlotKind::Unknown);
+        let marshaled = marshal_arg_to_jit(&original, NativeKind::Unknown);
+        let unmarshaled = unmarshal_jit_result(marshaled, NativeKind::Unknown);
         assert_eq!(unmarshaled.as_f64(), original.as_f64());
     }
 
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn test_mixed_type_args() {
         // Simulate a function with signature: fn(int, float, bool)
-        let kinds = [SlotKind::Int64, SlotKind::Float64, SlotKind::Bool];
+        let kinds = [NativeKind::Int64, NativeKind::Float64, NativeKind::Bool];
         let args = [
             ValueWord::from_f64(10.0),  // int arg
             ValueWord::from_f64(2.5),   // float arg
@@ -366,10 +366,10 @@ mod tests {
     fn test_mixed_type_with_unknown() {
         // fn(int, unknown, bool, unknown)
         let kinds = [
-            SlotKind::Int64,
-            SlotKind::Unknown,
-            SlotKind::Bool,
-            SlotKind::Unknown,
+            NativeKind::Int64,
+            NativeKind::Unknown,
+            NativeKind::Bool,
+            NativeKind::Unknown,
         ];
         let args = [
             ValueWord::from_f64(5.0),

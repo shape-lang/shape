@@ -435,7 +435,7 @@ mod tests {
         BytecodeProgram, Constant, Instruction, OpCode, Operand,
     };
     use crate::executor::{VMConfig, VirtualMachine};
-    use crate::type_tracking::{FrameDescriptor, SlotKind};
+    use crate::type_tracking::{FrameDescriptor, NativeKind};
     use shape_value::{ValueWord, ValueWordExt};
     use shape_value::heap_value::{HashMapData, HeapValue};
     use std::collections::HashMap;
@@ -452,7 +452,7 @@ mod tests {
     /// run it. After Wave-E+5 the typed `MapLenTyped` / `StringLenTyped` /
     /// related opcodes push raw native bits; the host-boundary
     /// `synthesize_value_word_from_raw` decodes them per `return_kind`.
-    fn run_program_typed(mut program: BytecodeProgram, return_kind: SlotKind) -> ValueWord {
+    fn run_program_typed(mut program: BytecodeProgram, return_kind: NativeKind) -> ValueWord {
         let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
         frame.return_kind = return_kind;
         program.top_level_frame = Some(frame);
@@ -609,7 +609,7 @@ mod tests {
         program.top_level_locals_count = 1;
         // MapLenTyped pushes raw native i64 bits; declare return_kind so
         // the host-boundary synthesizer decodes them via `from_i64`.
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 
@@ -627,7 +627,7 @@ mod tests {
         program.top_level_locals_count = 1;
         // MapLenTyped pushes raw native i64 bits; declare return_kind so
         // the host-boundary synthesizer decodes them via `from_i64`.
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 
@@ -671,7 +671,7 @@ mod tests {
         program.top_level_locals_count = 1;
         // StringLenTyped pushes raw native i64 bits; declare return_kind so
         // the host-boundary synthesizer decodes them via `from_i64`.
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(5));
     }
 
@@ -688,7 +688,7 @@ mod tests {
         program.top_level_locals_count = 1;
         // StringLenTyped pushes raw native i64 bits; declare return_kind so
         // the host-boundary synthesizer decodes them via `from_i64`.
-        let result = run_program_typed(program, SlotKind::Int64);
+        let result = run_program_typed(program, NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(0));
     }
 

@@ -28,7 +28,7 @@ use crate::executor::control_flow::jit_abi;
 #[cfg(feature = "jit")]
 use crate::executor::VirtualMachine;
 #[cfg(feature = "jit")]
-use crate::type_tracking::SlotKind;
+use crate::type_tracking::NativeKind;
 #[cfg(feature = "jit")]
 use shape_value::{VMError, ValueWord, ValueWordExt};
 
@@ -116,7 +116,7 @@ impl VirtualMachine {
                 .local_kinds
                 .get(i)
                 .copied()
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 let vw_slice = self.stack_slice_raw(slot_idx..(slot_idx + 1));
@@ -151,7 +151,7 @@ impl VirtualMachine {
                 .local_kinds
                 .get(i)
                 .copied()
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
@@ -191,7 +191,7 @@ impl VirtualMachine {
                 .local_kinds
                 .get(i)
                 .copied()
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
@@ -238,7 +238,7 @@ impl VirtualMachine {
                 .local_kinds
                 .get(i)
                 .copied()
-                .unwrap_or(SlotKind::Unknown);
+                .unwrap_or(NativeKind::Unknown);
             let src_idx = LOCALS_U64_OFFSET + jit_idx as usize;
             let dst_idx = base + bc_idx as usize;
             if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
@@ -312,7 +312,7 @@ impl VirtualMachine {
                     .local_kinds
                     .get(j)
                     .copied()
-                    .unwrap_or(SlotKind::Dynamic);
+                    .unwrap_or(NativeKind::Dynamic);
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
@@ -608,12 +608,12 @@ mod tests {
     #[test]
     fn test_deopt_info_inline_frames_default_empty() {
         use crate::bytecode::DeoptInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0)],
-            local_kinds: vec![SlotKind::Dynamic],
+            local_kinds: vec![NativeKind::Dynamic],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -624,19 +624,19 @@ mod tests {
     #[test]
     fn test_deopt_info_with_inline_frames() {
         use crate::bytecode::{DeoptInfo, InlineFrameInfo};
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0), (1, 1)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64],
+            local_kinds: vec![NativeKind::Dynamic, NativeKind::Int64],
             stack_depth: 1,
             innermost_function_id: Some(3),
             inline_frames: vec![InlineFrameInfo {
                 function_id: 2,
                 resume_ip: 30,
                 local_mapping: vec![(200, 0)],
-                local_kinds: vec![SlotKind::Float64],
+                local_kinds: vec![NativeKind::Float64],
                 stack_depth: 0,
             }],
         };
@@ -644,20 +644,20 @@ mod tests {
         assert_eq!(info.inline_frames.len(), 1);
         assert_eq!(info.inline_frames[0].function_id, 2);
         assert_eq!(info.inline_frames[0].resume_ip, 30);
-        assert_eq!(info.inline_frames[0].local_kinds[0], SlotKind::Float64);
+        assert_eq!(info.inline_frames[0].local_kinds[0], NativeKind::Float64);
         assert_eq!(info.innermost_function_id, Some(3));
     }
 
     #[test]
     fn test_deopt_with_info_debug_assert_length_parity() {
         use crate::bytecode::DeoptInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         // Verify that local_mapping and local_kinds lengths match
         let info = DeoptInfo {
             resume_ip: 5,
             local_mapping: vec![(0, 0), (1, 1), (2, 2)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64, SlotKind::Float64],
+            local_kinds: vec![NativeKind::Dynamic, NativeKind::Int64, NativeKind::Float64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -678,13 +678,13 @@ mod tests {
     #[test]
     fn test_deopt_inline_frame_return_ip_calculation() {
         use crate::bytecode::{DeoptInfo, InlineFrameInfo};
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         // Simulates A (func 0) → B (func 1) → C (func 2, innermost)
         let deopt_info = DeoptInfo {
             resume_ip: 45,
             local_mapping: vec![(20, 0), (21, 1)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
+            local_kinds: vec![NativeKind::Dynamic, NativeKind::Dynamic],
             stack_depth: 0,
             innermost_function_id: Some(2),
             inline_frames: vec![
@@ -692,14 +692,14 @@ mod tests {
                     function_id: 0,
                     resume_ip: 5, // A's CallValue(B) at IP=5
                     local_mapping: vec![(0, 0), (1, 1)],
-                    local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
+                    local_kinds: vec![NativeKind::Dynamic, NativeKind::Dynamic],
                     stack_depth: 0,
                 },
                 InlineFrameInfo {
                     function_id: 1,
                     resume_ip: 25, // B's CallValue(C) at IP=25
                     local_mapping: vec![(10, 0)],
-                    local_kinds: vec![SlotKind::Dynamic],
+                    local_kinds: vec![NativeKind::Dynamic],
                     stack_depth: 0,
                 },
             ],
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn test_return_ip_dispatch_loop_semantics() {
         use crate::bytecode::InlineFrameInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let iframe = InlineFrameInfo {
             function_id: 0,

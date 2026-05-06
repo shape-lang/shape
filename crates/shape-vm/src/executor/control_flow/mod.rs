@@ -181,7 +181,7 @@ impl VirtualMachine {
                     // Snapshot per-parameter SlotKinds and the return kind from
                     // the callee's FrameDescriptor. These small copies release
                     // the borrow on `self.program` before we touch the stack.
-                    let mut param_kinds = [crate::type_tracking::SlotKind::Unknown; 256];
+                    let mut param_kinds = [crate::type_tracking::NativeKind::Unknown; 256];
                     let return_kind;
                     if let Some(fd) = &func.frame_descriptor {
                         for i in 0..copy_count {
@@ -189,7 +189,7 @@ impl VirtualMachine {
                         }
                         return_kind = fd.return_kind;
                     } else {
-                        return_kind = crate::type_tracking::SlotKind::Unknown;
+                        return_kind = crate::type_tracking::NativeKind::Unknown;
                     }
                     // --- borrow on `func` / `self.program.functions` ends here ---
 

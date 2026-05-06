@@ -2227,7 +2227,7 @@ impl BytecodeCompiler {
     }
 
     /// Wave E+4 commit 4: infer the top-level program's return-value
-    /// `SlotKind` from the last compiled expression's tracked type metadata.
+    /// `NativeKind` from the last compiled expression's tracked type metadata.
     ///
     /// Source of truth (in priority order):
     ///   1. `self.last_expr_numeric_type` — set by literals, var loads, and
@@ -2235,7 +2235,7 @@ impl BytecodeCompiler {
     ///   2. `self.last_expr_type_info.storage_hint` — covers Bool, String,
     ///      and any nullable / sub-i64 widths the type-tracker has resolved.
     ///
-    /// Returns `SlotKind::Unknown` when no signal is available — this
+    /// Returns `NativeKind::Unknown` when no signal is available — this
     /// preserves pre-E+4 behaviour at the host boundary (synthesis stays in
     /// passthrough mode and the existing `eval()` path round-trips legacy
     /// ValueWord bits unchanged).
@@ -2340,7 +2340,7 @@ impl BytecodeCompiler {
             return StorageHint::Unknown;
         };
 
-        // Map primitive type-annotation names to `SlotKind` (handles
+        // Map primitive type-annotation names to `NativeKind` (handles
         // both `Basic("bool")` and `Reference("Bool")`-style entries).
         // Also resolve through `type_aliases` so a callee declaring a
         // typed return like `fn make() -> MyInt { 42 }; type MyInt = int`
@@ -2496,7 +2496,7 @@ impl BytecodeCompiler {
                         IntWidth::U64 => StorageHint::UInt64,
                     })
                 }
-                // Decimal isn't a `SlotKind` variant — fall through to
+                // Decimal isn't a `NativeKind` variant — fall through to
                 // Unknown so synthesis stays in passthrough.
                 crate::type_tracking::NumericType::Decimal => None,
             })

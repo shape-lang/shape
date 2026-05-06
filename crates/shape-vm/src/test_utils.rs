@@ -14,8 +14,8 @@
 //!
 //! This file exposes three layers of test entry points:
 //!
-//! 1. [`eval_raw`] — compile + execute, return `(u64 raw bits, Option<SlotKind>)`.
-//!    The `SlotKind` is read from the program's `top_level_frame.return_kind`
+//! 1. [`eval_raw`] — compile + execute, return `(u64 raw bits, Option<NativeKind>)`.
+//!    The `NativeKind` is read from the program's `top_level_frame.return_kind`
 //!    when present and not `Unknown`. Most flexible; intended for the
 //!    harness layer to wrap.
 //! 2. [`eval`] — compile + execute, synthesise a tagged `ValueWord` from
@@ -25,7 +25,7 @@
 //!    legacy / pre-E+4 behaviour). This signature is unchanged from before
 //!    the migration; existing callers continue to work unmodified.
 //! 3. [`eval_with_kind`] — compile + execute and synthesise a `ValueWord`
-//!    per a caller-supplied `SlotKind`. Use when a test asserts via
+//!    per a caller-supplied `NativeKind`. Use when a test asserts via
 //!    `as_i64()` / `as_f64()` / `as_bool()` etc. on a program that
 //!    *does not* declare a top-level return type, but you still want
 //!    typed-bits decoding.
@@ -39,7 +39,7 @@
 
 use crate::compiler::BytecodeCompiler;
 use crate::executor::{VMConfig, VirtualMachine};
-use crate::type_tracking::SlotKind;
+use crate::type_tracking::NativeKind;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ─── Layer 1: raw + kind-hint ────────────────────────────────────────────
@@ -55,7 +55,7 @@ use shape_value::{VMError, ValueWord, ValueWordExt};
 /// yourself.
 ///
 /// Panics on parse, compile, or execution failure.
-pub fn eval_raw(source: &str) -> (u64, Option<SlotKind>) {
+pub fn eval_raw(source: &str) -> (u64, Option<NativeKind>) {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
     let compiler = BytecodeCompiler::new();
     let bytecode = compiler.compile(&program).expect("compile failed");
@@ -71,10 +71,10 @@ pub fn eval_raw(source: &str) -> (u64, Option<SlotKind>) {
 /// frame's return kind is `Unknown` (i.e. the compiler did not prove
 /// the type).
 #[inline]
-fn top_level_return_kind(program: &crate::bytecode::BytecodeProgram) -> Option<SlotKind> {
+fn top_level_return_kind(program: &crate::bytecode::BytecodeProgram) -> Option<NativeKind> {
     let kind = program.top_level_frame.as_ref()?.return_kind;
     match kind {
-        SlotKind::Unknown => None,
+        NativeKind::Unknown => None,
         _ => Some(kind),
     }
 }
@@ -110,14 +110,14 @@ pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
 }
 
 /// Compile + execute Shape source code and synthesise a tagged
-/// `ValueWord` from the raw bits per the supplied `SlotKind`. Use this
+/// `ValueWord` from the raw bits per the supplied `NativeKind`. Use this
 /// when a test asserts via `as_i64()` / `as_f64()` / `as_bool()` etc.
 /// on a program whose top-level return kind isn't declared but you
 /// still want typed-bits decoding.
 ///
 /// For convenience-wrapper pendants that return native Rust types
 /// directly, see [`eval_typed_i64`], [`eval_typed_f64`], etc.
-pub fn eval_with_kind(source: &str, expected: SlotKind) -> ValueWord {
+pub fn eval_with_kind(source: &str, expected: NativeKind) -> ValueWord {
     let (bits, _) = eval_raw(source);
     crate::executor::dispatch::synthesize_value_word_from_raw(bits, Some(expected))
 }
@@ -184,7 +184,7 @@ pub fn compile_with_prelude(
 /// Evaluate Shape source and return the result as a native `i64`. Panics
 /// if the value cannot be decoded as an integer.
 pub fn eval_typed_i64(source: &str) -> i64 {
-    eval_with_kind(source, SlotKind::Int64)
+    eval_with_kind(source, NativeKind::Int64)
         .as_i64()
         .expect("eval_typed_i64: result is not an integer")
 }
@@ -192,7 +192,7 @@ pub fn eval_typed_i64(source: &str) -> i64 {
 /// Evaluate Shape source and return the result as a native `f64`. Panics
 /// if the value cannot be decoded as a float.
 pub fn eval_typed_f64(source: &str) -> f64 {
-    eval_with_kind(source, SlotKind::Float64)
+    eval_with_kind(source, NativeKind::Float64)
         .as_f64()
         .expect("eval_typed_f64: result is not a float")
 }
@@ -200,7 +200,7 @@ pub fn eval_typed_f64(source: &str) -> f64 {
 /// Evaluate Shape source and return the result as a native `bool`.
 /// Panics if the value cannot be decoded as a boolean.
 pub fn eval_typed_bool(source: &str) -> bool {
-    eval_with_kind(source, SlotKind::Bool)
+    eval_with_kind(source, NativeKind::Bool)
         .as_bool()
         .expect("eval_typed_bool: result is not a boolean")
 }
@@ -230,7 +230,7 @@ mod kind_hint_api_tests {
         let (bits, kind) = eval_raw("42");
         assert_eq!(
             kind,
-            Some(SlotKind::Int64),
+            Some(NativeKind::Int64),
             "Int literal at top-level should now stamp Int64 return kind",
         );
         assert_eq!(bits as i64, 42, "raw bits decode to 42 as native i64");
@@ -251,7 +251,7 @@ mod kind_hint_api_tests {
     fn eval_with_kind_forces_int64_synthesis_on_raw_bits() {
         // When the bits really are raw `i64` (constructed directly,
         // e.g. by a `ReturnValueI64` opcode after E+4 flips), forcing
-        // SlotKind::Int64 produces a ValueWord that decodes correctly.
+        // NativeKind::Int64 produces a ValueWord that decodes correctly.
         // We construct the raw-bits scenario synthetically — a real
         // `eval_with_kind("42", Int64)` call against today's compiler
         // is **incorrect** because today's compiler emits a tagged
@@ -259,7 +259,7 @@ mod kind_hint_api_tests {
         // call this only when you know the program emits typed bits
         // for the chosen kind.
         let raw_bits = 42i64 as u64;
-        let v = synthesize_value_word_from_raw(raw_bits, Some(SlotKind::Int64));
+        let v = synthesize_value_word_from_raw(raw_bits, Some(NativeKind::Int64));
         assert_eq!(v.as_i64(), Some(42));
     }
 
@@ -273,7 +273,7 @@ mod kind_hint_api_tests {
         // the synthesiser produces sane values for raw integer bits.
         let raw = 100i64 as u64;
         assert_eq!(
-            synthesize_value_word_from_raw(raw, Some(SlotKind::Int64))
+            synthesize_value_word_from_raw(raw, Some(NativeKind::Int64))
                 .as_i64()
                 .unwrap(),
             100
@@ -281,20 +281,20 @@ mod kind_hint_api_tests {
 
         let raw = 2.5f64.to_bits();
         assert_eq!(
-            synthesize_value_word_from_raw(raw, Some(SlotKind::Float64))
+            synthesize_value_word_from_raw(raw, Some(NativeKind::Float64))
                 .as_f64()
                 .unwrap(),
             2.5
         );
 
         assert_eq!(
-            synthesize_value_word_from_raw(1, Some(SlotKind::Bool))
+            synthesize_value_word_from_raw(1, Some(NativeKind::Bool))
                 .as_bool()
                 .unwrap(),
             true
         );
         assert_eq!(
-            synthesize_value_word_from_raw(0, Some(SlotKind::Bool))
+            synthesize_value_word_from_raw(0, Some(NativeKind::Bool))
                 .as_bool()
                 .unwrap(),
             false

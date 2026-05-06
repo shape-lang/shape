@@ -5,7 +5,7 @@
 //! compile-time-proven types are passed in their native Cranelift
 //! representation:
 //!
-//! | SlotKind      | Cranelift type | Register class | Notes                       |
+//! | NativeKind      | Cranelift type | Register class | Notes                       |
 //! |---------------|---------------|----------------|-----------------------------|
 //! | Float64       | F64           | XMM (x86)      | Plain double                |
 //! | NullableFloat64 | F64         | XMM            | NaN sentinel = null         |
@@ -32,7 +32,7 @@
 
 use cranelift::prelude::*;
 use shape_vm::bytecode::Function;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 // ---------------------------------------------------------------------------
 // TypedFunctionSignature
@@ -47,14 +47,14 @@ use shape_vm::type_tracking::SlotKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedFunctionSignature {
     /// Native type per parameter (positional, in declaration order).
-    pub param_types: Vec<SlotKind>,
+    pub param_types: Vec<NativeKind>,
     /// Native type of the return value.
-    pub return_type: SlotKind,
+    pub return_type: NativeKind,
 }
 
 impl TypedFunctionSignature {
     /// Returns true when every parameter *and* the return type are
-    /// `SlotKind::Unknown` (or Dynamic), meaning this signature carries no
+    /// `NativeKind::Unknown` (or Dynamic), meaning this signature carries no
     /// more information than the v1 ABI and can be compiled with the legacy
     /// uniform-I64 path.
     pub fn is_fully_untyped(&self) -> bool {
@@ -65,15 +65,15 @@ impl TypedFunctionSignature {
 
 /// True when a slot kind would produce the same representation as the v1
 /// NaN-boxed ABI (I64 GPR).
-fn is_untyped_slot(kind: SlotKind) -> bool {
-    matches!(kind, SlotKind::Unknown | SlotKind::Dynamic)
+fn is_untyped_slot(kind: NativeKind) -> bool {
+    matches!(kind, NativeKind::Unknown | NativeKind::Dynamic)
 }
 
 // ---------------------------------------------------------------------------
-// SlotKind -> Cranelift type mapping
+// NativeKind -> Cranelift type mapping
 // ---------------------------------------------------------------------------
 
-/// Map a single `SlotKind` to the Cranelift IR type that should be used in
+/// Map a single `NativeKind` to the Cranelift IR type that should be used in
 /// the function signature.
 ///
 /// The mapping follows the native-width convention:
@@ -81,41 +81,41 @@ fn is_untyped_slot(kind: SlotKind) -> bool {
 /// - Integer kinds -> `I64`, `I32`, `I16`, or `I8` depending on width
 /// - Bool -> `I8`
 /// - String / Unknown / Dynamic -> `I64` (dynamic fallback)
-pub fn slot_kind_to_clif_type(kind: SlotKind) -> types::Type {
+pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
     match kind {
         // --- floating point ---
-        SlotKind::Float64 | SlotKind::NullableFloat64 => types::F64,
+        NativeKind::Float64 | NativeKind::NullableFloat64 => types::F64,
 
         // --- 64-bit integers ---
-        SlotKind::Int64
-        | SlotKind::NullableInt64
-        | SlotKind::UInt64
-        | SlotKind::NullableUInt64
-        | SlotKind::IntSize
-        | SlotKind::NullableIntSize
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => types::I64,
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => types::I64,
 
         // --- 32-bit integers ---
-        SlotKind::Int32 | SlotKind::NullableInt32 | SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
             types::I32
         }
 
         // --- 16-bit integers ---
-        SlotKind::Int16 | SlotKind::NullableInt16 | SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
             types::I16
         }
 
         // --- 8-bit integers ---
-        SlotKind::Int8 | SlotKind::NullableInt8 | SlotKind::UInt8 | SlotKind::NullableUInt8 => {
+        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
             types::I8
         }
 
         // --- boolean ---
-        SlotKind::Bool => types::I8,
+        NativeKind::Bool => types::I8,
 
         // --- fallback (dynamic) ---
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => types::I64,
+        NativeKind::String | NativeKind::Dynamic | NativeKind::Unknown => types::I64,
     }
 }
 
@@ -172,18 +172,18 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 /// types beyond what the bytecode compiler emitted.
 pub fn resolve_function_signature(
     func: &Function,
-    slot_kinds_override: &[SlotKind],
+    slot_kinds_override: &[NativeKind],
 ) -> TypedFunctionSignature {
     let arity = func.arity as usize;
 
     // If the caller provided overrides, use them directly.
     if !slot_kinds_override.is_empty() {
-        let param_types: Vec<SlotKind> = if slot_kinds_override.len() >= arity {
+        let param_types: Vec<NativeKind> = if slot_kinds_override.len() >= arity {
             slot_kinds_override[..arity].to_vec()
         } else {
             // Pad with Unknown for any missing slots.
             let mut kinds = slot_kinds_override.to_vec();
-            kinds.resize(arity, SlotKind::Unknown);
+            kinds.resize(arity, NativeKind::Unknown);
             kinds
         };
 
@@ -193,7 +193,7 @@ pub fn resolve_function_signature(
             .frame_descriptor
             .as_ref()
             .map(|fd| fd.return_kind)
-            .unwrap_or(SlotKind::Unknown);
+            .unwrap_or(NativeKind::Unknown);
 
         return TypedFunctionSignature {
             param_types,
@@ -203,11 +203,11 @@ pub fn resolve_function_signature(
 
     // Use the frame descriptor when available.
     if let Some(fd) = &func.frame_descriptor {
-        let param_types: Vec<SlotKind> = if fd.slots.len() >= arity {
+        let param_types: Vec<NativeKind> = if fd.slots.len() >= arity {
             fd.slots[..arity].to_vec()
         } else {
             let mut kinds = fd.slots.clone();
-            kinds.resize(arity, SlotKind::Unknown);
+            kinds.resize(arity, NativeKind::Unknown);
             kinds
         };
 
@@ -218,8 +218,8 @@ pub fn resolve_function_signature(
     } else {
         // No type information at all -- fully untyped (v1 compatible).
         TypedFunctionSignature {
-            param_types: vec![SlotKind::Unknown; arity],
-            return_type: SlotKind::Unknown,
+            param_types: vec![NativeKind::Unknown; arity],
+            return_type: NativeKind::Unknown,
         }
     }
 }

@@ -536,7 +536,7 @@ val
         .top_level_frame
         .clone()
         .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
-    frame.return_kind = crate::type_tracking::SlotKind::Int64;
+    frame.return_kind = crate::type_tracking::NativeKind::Int64;
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);

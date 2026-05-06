@@ -109,11 +109,11 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
     }
 }
 
-/// `SlotKind` analogue.
+/// `NativeKind` analogue.
 ///
 /// Provided as a bridge for compiler call sites that haven't yet been
 /// converted to use `ConcreteType`. The element-type inference may return
-/// `SlotKind`, so `compile_expr_array` calls this variant to look up a
+/// `NativeKind`, so `compile_expr_array` calls this variant to look up a
 /// typed array kind directly.
 ///
 /// The mapping mirrors [`should_use_typed_array`]: only the four element
@@ -123,14 +123,14 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
 /// legacy NaN-boxed `NewArray` path.
 #[inline]
 pub fn should_use_typed_array_from_slot_kind(
-    slot: crate::type_tracking::SlotKind,
+    slot: crate::type_tracking::NativeKind,
 ) -> Option<TypedArrayKind> {
-    use crate::type_tracking::SlotKind;
+    use crate::type_tracking::NativeKind;
     match slot {
-        SlotKind::Float64 => Some(TypedArrayKind::F64),
-        SlotKind::Int64 => Some(TypedArrayKind::I64),
-        SlotKind::Int32 => Some(TypedArrayKind::I32),
-        SlotKind::Bool => Some(TypedArrayKind::Bool),
+        NativeKind::Float64 => Some(TypedArrayKind::F64),
+        NativeKind::Int64 => Some(TypedArrayKind::I64),
+        NativeKind::Int32 => Some(TypedArrayKind::I32),
+        NativeKind::Bool => Some(TypedArrayKind::Bool),
         _ => None,
     }
 }
@@ -302,67 +302,67 @@ mod tests {
         }
     }
 
-    // ---- SlotKind variant ----
+    // ---- NativeKind variant ----
 
     #[test]
     fn test_slot_kind_float64_maps_to_f64() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Float64),
+            should_use_typed_array_from_slot_kind(NativeKind::Float64),
             Some(TypedArrayKind::F64)
         );
     }
 
     #[test]
     fn test_slot_kind_int64_maps_to_i64() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Int64),
+            should_use_typed_array_from_slot_kind(NativeKind::Int64),
             Some(TypedArrayKind::I64)
         );
     }
 
     #[test]
     fn test_slot_kind_int32_maps_to_i32() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Int32),
+            should_use_typed_array_from_slot_kind(NativeKind::Int32),
             Some(TypedArrayKind::I32)
         );
     }
 
     #[test]
     fn test_slot_kind_bool_maps_to_bool() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Bool),
+            should_use_typed_array_from_slot_kind(NativeKind::Bool),
             Some(TypedArrayKind::Bool)
         );
     }
 
     #[test]
     fn test_slot_kind_string_falls_back() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::String),
+            should_use_typed_array_from_slot_kind(NativeKind::String),
             None
         );
     }
 
     #[test]
     fn test_slot_kind_unknown_falls_back() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Unknown),
+            should_use_typed_array_from_slot_kind(NativeKind::Unknown),
             None
         );
     }
 
     #[test]
     fn test_slot_kind_dynamic_falls_back() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Dynamic),
+            should_use_typed_array_from_slot_kind(NativeKind::Dynamic),
             None
         );
     }
@@ -370,8 +370,8 @@ mod tests {
     #[test]
     fn test_slot_kind_int8_falls_back() {
         // Sized ints we don't have typed opcodes for fall back to legacy.
-        use crate::type_tracking::SlotKind;
-        assert_eq!(should_use_typed_array_from_slot_kind(SlotKind::Int8), None);
+        use crate::type_tracking::NativeKind;
+        assert_eq!(should_use_typed_array_from_slot_kind(NativeKind::Int8), None);
     }
 
     // ---- typed_array_kind_from_type_name ----

@@ -1091,7 +1091,7 @@ mod tests {
     fn run_bit_op_int_return(program: &mut BytecodeProgram) {
         program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
             slots: Vec::new(),
-            return_kind: crate::type_tracking::SlotKind::Int64,
+            return_kind: crate::type_tracking::NativeKind::Int64,
         });
     }
 
@@ -1252,11 +1252,11 @@ mod tests {
         // regardless of operand width; arithmetic ops produce a value of the
         // operand width family (Int for integer widths, Float64 for floats).
         let kind = if op == OpCode::CmpTyped {
-            crate::type_tracking::SlotKind::Int64
+            crate::type_tracking::NativeKind::Int64
         } else if width.is_integer() {
-            crate::type_tracking::SlotKind::Int64
+            crate::type_tracking::NativeKind::Int64
         } else {
-            crate::type_tracking::SlotKind::Float64
+            crate::type_tracking::NativeKind::Float64
         };
         program.top_level_frame =
             Some(crate::type_tracking::FrameDescriptor {
@@ -1497,7 +1497,7 @@ mod tests {
     fn set_int64_return(program: &mut BytecodeProgram) {
         program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
             slots: Vec::new(),
-            return_kind: crate::type_tracking::SlotKind::Int64,
+            return_kind: crate::type_tracking::NativeKind::Int64,
         });
     }
 
@@ -2179,7 +2179,7 @@ mod tests {
         // synthesises a tagged Int ValueWord from the native i64 result.
         program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
             slots: Vec::new(),
-            return_kind: crate::type_tracking::SlotKind::Int64,
+            return_kind: crate::type_tracking::NativeKind::Int64,
         });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
@@ -2200,7 +2200,7 @@ mod tests {
         ];
         program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
             slots: Vec::new(),
-            return_kind: crate::type_tracking::SlotKind::Int64,
+            return_kind: crate::type_tracking::NativeKind::Int64,
         });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
@@ -2219,7 +2219,7 @@ mod tests {
         ];
         program.top_level_frame = Some(crate::type_tracking::FrameDescriptor {
             slots: Vec::new(),
-            return_kind: crate::type_tracking::SlotKind::Int64,
+            return_kind: crate::type_tracking::NativeKind::Int64,
         });
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);

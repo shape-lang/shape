@@ -23,6 +23,7 @@ pub mod heap_variants;
 pub mod heap_value;
 pub mod ids;
 pub mod method_id;
+pub mod native_kind;
 pub mod scalar;
 pub mod string_intern;
 pub mod shape_graph;
@@ -44,6 +45,7 @@ pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
+pub use native_kind::NativeKind;
 pub use scalar::{ScalarKind, TypedScalar};
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

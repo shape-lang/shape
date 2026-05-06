@@ -389,41 +389,41 @@ fn lookup_function_name(
 /// type identity across the boundary.
 pub fn jit_bits_to_typed_scalar(
     bits: u64,
-    hint: Option<shape_vm::SlotKind>,
+    hint: Option<shape_vm::NativeKind>,
 ) -> shape_value::TypedScalar {
     use shape_value::TypedScalar;
-    use shape_vm::SlotKind;
+    use shape_vm::NativeKind;
 
     if is_number(bits) {
         let f = unbox_number(bits);
         // Check if the hint says this should be an integer
         if let Some(h) = hint {
             match h {
-                SlotKind::Int8 | SlotKind::NullableInt8 => {
+                NativeKind::Int8 | NativeKind::NullableInt8 => {
                     return TypedScalar::i8(f as i8);
                 }
-                SlotKind::UInt8 | SlotKind::NullableUInt8 => {
+                NativeKind::UInt8 | NativeKind::NullableUInt8 => {
                     return TypedScalar::u8(f as u8);
                 }
-                SlotKind::Int16 | SlotKind::NullableInt16 => {
+                NativeKind::Int16 | NativeKind::NullableInt16 => {
                     return TypedScalar::i16(f as i16);
                 }
-                SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+                NativeKind::UInt16 | NativeKind::NullableUInt16 => {
                     return TypedScalar::u16(f as u16);
                 }
-                SlotKind::Int32 | SlotKind::NullableInt32 => {
+                NativeKind::Int32 | NativeKind::NullableInt32 => {
                     return TypedScalar::i32(f as i32);
                 }
-                SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+                NativeKind::UInt32 | NativeKind::NullableUInt32 => {
                     return TypedScalar::u32(f as u32);
                 }
-                SlotKind::Int64 | SlotKind::NullableInt64 => {
+                NativeKind::Int64 | NativeKind::NullableInt64 => {
                     return TypedScalar::i64(f as i64);
                 }
-                SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+                NativeKind::UInt64 | NativeKind::NullableUInt64 => {
                     return TypedScalar::u64(f as u64);
                 }
-                SlotKind::Float64 | SlotKind::NullableFloat64 => {
+                NativeKind::Float64 | NativeKind::NullableFloat64 => {
                     return TypedScalar::f64_from_bits(bits);
                 }
                 _ => {

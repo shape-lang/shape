@@ -9,15 +9,15 @@ mod module_qualified_type_tests {
     }
 
     /// Like `eval`, but stamps `top_level_frame.return_kind` with the
-    /// supplied `SlotKind` so the host-boundary synthesizer re-tags
+    /// supplied `NativeKind` so the host-boundary synthesizer re-tags
     /// raw native bits the post-Wave-E+5 typed match arms produce.
-    fn eval_with_kind(code: &str, kind: crate::type_tracking::SlotKind) -> ValueWord {
+    fn eval_with_kind(code: &str, kind: crate::type_tracking::NativeKind) -> ValueWord {
         eval_with_kind_opt(code, Some(kind))
     }
 
     fn eval_with_kind_opt(
         code: &str,
-        kind: Option<crate::type_tracking::SlotKind>,
+        kind: Option<crate::type_tracking::NativeKind>,
     ) -> ValueWord {
         // Install a per-test TypeSchemaRegistry scope so compile-time
         // predeclared-schema registration and VM-side schema lookups
@@ -154,7 +154,7 @@ mod module_qualified_type_tests {
                 m::C::R => 1,
                 m::C::B => 2,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
@@ -238,7 +238,7 @@ mod module_qualified_type_tests {
             match m::E::V { x: 1, y: 2 } {
                 m::E::V { x, y } => x + y,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 
@@ -268,7 +268,7 @@ mod module_qualified_type_tests {
                 m::Color::Red => 1,
                 m::Color::Blue => 2,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
@@ -284,7 +284,7 @@ mod module_qualified_type_tests {
                 }
             }
             m::Counter { n: 0 }.inc().inc().inc().value()
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 

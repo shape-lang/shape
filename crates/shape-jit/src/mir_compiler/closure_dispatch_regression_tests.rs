@@ -124,7 +124,7 @@ times_two(7)
 /// numbering. MIR reserves `SlotId(0)` for the implicit return value
 /// and numbers parameters starting at 1; the bytecode compiler puts
 /// the first parameter at slot 0. Seeding via the bytecode layout
-/// mis-declared MIR's return slot with the first param's `SlotKind`,
+/// mis-declared MIR's return slot with the first param's `NativeKind`,
 /// so e.g. a `bool` parameter forced slot 0 (the F64 return) to be
 /// declared as `Bool` in Cranelift. Writing `return 7.0` then went
 /// through `ensure_kind(F64, Bool) → ireduce I8` which truncated the

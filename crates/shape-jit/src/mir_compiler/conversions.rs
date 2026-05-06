@@ -15,11 +15,11 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
-    /// Get the SlotKind for a given SlotId.
-    pub(crate) fn slot_kind_of(&self, slot: shape_vm::mir::types::SlotId) -> SlotKind {
+    /// Get the NativeKind for a given SlotId.
+    pub(crate) fn slot_kind_of(&self, slot: shape_vm::mir::types::SlotId) -> NativeKind {
         super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
     }
 
@@ -72,7 +72,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn nan_box_for_value_word(
         &mut self,
         val: Value,
-        hint: Option<SlotKind>,
+        hint: Option<NativeKind>,
     ) -> Value {
         use shape_value::tag_bits::{TAG_BASE, TAG_INT, TAG_SHIFT, PAYLOAD_MASK};
         let val_type = self.builder.func.dfg.value_type(val);
@@ -83,7 +83,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         }
         // I8 bool: emit select on TAG_BOOL_TRUE/FALSE.
-        if val_type == types::I8 && matches!(hint, Some(SlotKind::Bool)) {
+        if val_type == types::I8 && matches!(hint, Some(NativeKind::Bool)) {
             let true_val = self.builder.ins().iconst(
                 types::I64,
                 crate::ffi::value_ffi::TAG_BOOL_TRUE as i64,
@@ -134,7 +134,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// no ValueWord tags or NaN-box bit patterns are involved. F64 ↔ I64
     /// goes through `bitcast` (raw IEEE 754 bits live in the I64 slot),
     /// integer widths use `sextend`/`uextend`/`ireduce`.
-    pub(crate) fn ensure_kind(&mut self, val: Value, target_kind: SlotKind) -> Value {
+    pub(crate) fn ensure_kind(&mut self, val: Value, target_kind: NativeKind) -> Value {
         let target_cl_type = super::types::cranelift_type_for_slot(target_kind);
         let val_type = self.builder.func.dfg.value_type(val);
 
@@ -145,18 +145,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // I64 → native (unbox-equivalent width reduction).
         if val_type == types::I64 {
             return match target_kind {
-                SlotKind::Float64 => {
+                NativeKind::Float64 => {
                     self.builder
                         .ins()
                         .bitcast(types::F64, MemFlags::new(), val)
                 }
-                SlotKind::Int32 | SlotKind::UInt32 => {
+                NativeKind::Int32 | NativeKind::UInt32 => {
                     self.builder.ins().ireduce(types::I32, val)
                 }
-                SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
+                NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
                     self.builder.ins().ireduce(types::I8, val)
                 }
-                SlotKind::Int16 | SlotKind::UInt16 => {
+                NativeKind::Int16 | NativeKind::UInt16 => {
                     self.builder.ins().ireduce(types::I16, val)
                 }
                 _ => val,
@@ -192,18 +192,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         };
 
         match target_kind {
-            SlotKind::Float64 => {
+            NativeKind::Float64 => {
                 self.builder
                     .ins()
                     .bitcast(types::F64, MemFlags::new(), widened)
             }
-            SlotKind::Int32 | SlotKind::UInt32 => {
+            NativeKind::Int32 | NativeKind::UInt32 => {
                 self.builder.ins().ireduce(types::I32, widened)
             }
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
                 self.builder.ins().ireduce(types::I8, widened)
             }
-            SlotKind::Int16 | SlotKind::UInt16 => {
+            NativeKind::Int16 | NativeKind::UInt16 => {
                 self.builder.ins().ireduce(types::I16, widened)
             }
             _ => widened,

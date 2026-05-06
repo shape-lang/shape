@@ -32,7 +32,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let r_type = self.builder.func.dfg.value_type(r);
 
                 // F5.a/F5.b: string `+` — concat via FFI. Either operand being a
-                // `SlotKind::String` is enough; the FFI handles `str + <any>` by
+                // `NativeKind::String` is enough; the FFI handles `str + <any>` by
                 // falling back to `format_value_word` on non-string operands,
                 // which matches the lowering emitted by f-string interpolation.
                 if matches!(op, BinOp::Add) && self.either_string(lhs_kind, rhs_kind) {
@@ -148,22 +148,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     // ── Operand kind helpers ───────────────────────────────────────
 
-    /// Get the SlotKind of an operand's source (before compilation).
-    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::SlotKind> {
+    /// Get the NativeKind of an operand's source (before compilation).
+    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::NativeKind> {
         match operand {
             Operand::Constant(MirConstant::Int(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Int64)
+                Some(shape_vm::type_tracking::NativeKind::Int64)
             }
             Operand::Constant(MirConstant::Float(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Float64)
+                Some(shape_vm::type_tracking::NativeKind::Float64)
             }
             Operand::Constant(MirConstant::Bool(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Bool)
+                Some(shape_vm::type_tracking::NativeKind::Bool)
             }
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                 let slot = p.root_local();
                 let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-                if kind != shape_vm::type_tracking::SlotKind::Unknown {
+                if kind != shape_vm::type_tracking::NativeKind::Unknown {
                     Some(kind)
                 } else {
                     None
@@ -176,29 +176,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Check if both operand kinds are Int64 (NaN-boxed integers suitable for inline i64 ops).
     fn both_int64(
         &self,
-        lhs: Option<shape_vm::type_tracking::SlotKind>,
-        rhs: Option<shape_vm::type_tracking::SlotKind>,
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
     ) -> bool {
         matches!(
             (lhs, rhs),
             (
-                Some(shape_vm::type_tracking::SlotKind::Int64),
-                Some(shape_vm::type_tracking::SlotKind::Int64)
+                Some(shape_vm::type_tracking::NativeKind::Int64),
+                Some(shape_vm::type_tracking::NativeKind::Int64)
             )
         )
     }
 
-    /// F5.a/F5.b: true if either operand kind is `SlotKind::String`. The MIR
+    /// F5.a/F5.b: true if either operand kind is `NativeKind::String`. The MIR
     /// emits `BinOp::Add` on heterogeneous operand types for f-string
     /// interpolation (e.g. `str + number + str`) — the FFI's non-string
     /// fallback (`format_value_word`) does the rest.
     fn either_string(
         &self,
-        lhs: Option<shape_vm::type_tracking::SlotKind>,
-        rhs: Option<shape_vm::type_tracking::SlotKind>,
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
     ) -> bool {
-        matches!(lhs, Some(shape_vm::type_tracking::SlotKind::String))
-            || matches!(rhs, Some(shape_vm::type_tracking::SlotKind::String))
+        matches!(lhs, Some(shape_vm::type_tracking::NativeKind::String))
+            || matches!(rhs, Some(shape_vm::type_tracking::NativeKind::String))
     }
 
     /// F5.a/F5.b: emit a call to `jit_string_concat(a_bits, b_bits) -> bits`.
@@ -206,7 +206,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Both operand `Value`s must be widened to I64 bit-patterns (the FFI
     /// signature expects two `i64` params). This handles the cases where the
     /// MIR lowering produced a native-typed constant for one side — e.g.
-    /// `f"x={n}"` where `n: int` is `SlotKind::Int64` (I64 bits already) or
+    /// `f"x={n}"` where `n: int` is `NativeKind::Int64` (I64 bits already) or
     /// a plain number constant (F64, must bitcast to I64).
     fn compile_string_concat(
         &mut self,

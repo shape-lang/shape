@@ -17,7 +17,7 @@
 //!
 //! ## Element sizes
 //!
-//! | SlotKind  | Cranelift type | Size (bytes) |
+//! | NativeKind  | Cranelift type | Size (bytes) |
 //! |-----------|---------------|--------------|
 //! | Float64   | F64           | 8            |
 //! | Int64     | I64           | 8            |
@@ -28,7 +28,7 @@
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place, SlotId};
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
@@ -43,38 +43,38 @@ const LEN_OFFSET: i32 = 16;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Return the (Cranelift IR type, element byte size) for a given `SlotKind`.
+/// Return the (Cranelift IR type, element byte size) for a given `NativeKind`.
 ///
 /// Panics on slot kinds that do not map to a scalar element type (e.g.
 /// `String`, `Dynamic`, `Unknown`).
-fn elem_type_info(kind: SlotKind) -> (types::Type, i64) {
+fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
     match kind {
-        SlotKind::Float64 | SlotKind::NullableFloat64 => (types::F64, 8),
-        SlotKind::Int64 | SlotKind::NullableInt64 | SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+        NativeKind::Float64 | NativeKind::NullableFloat64 => (types::F64, 8),
+        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
             (types::I64, 8)
         }
-        SlotKind::IntSize | SlotKind::NullableIntSize | SlotKind::UIntSize | SlotKind::NullableUIntSize => {
+        NativeKind::IntSize | NativeKind::NullableIntSize | NativeKind::UIntSize | NativeKind::NullableUIntSize => {
             // Pointer-sized — 8 bytes on 64-bit targets.
             (types::I64, 8)
         }
-        SlotKind::Int32 | SlotKind::NullableInt32 | SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
             (types::I32, 4)
         }
-        SlotKind::Int16 | SlotKind::NullableInt16 | SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
             (types::I16, 2)
         }
-        SlotKind::Int8 | SlotKind::NullableInt8 | SlotKind::UInt8 | SlotKind::NullableUInt8 => {
+        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
             (types::I8, 1)
         }
-        SlotKind::Bool => (types::I8, 1),
-        other => panic!("v2_array: unsupported element SlotKind: {:?}", other),
+        NativeKind::Bool => (types::I8, 1),
+        other => panic!("v2_array: unsupported element NativeKind: {:?}", other),
     }
 }
 
-/// Return the zero/default Cranelift constant for a given `SlotKind`.
+/// Return the zero/default Cranelift constant for a given `NativeKind`.
 ///
 /// Used as the out-of-bounds fallback value in `v2_array_get`.
-fn emit_default(builder: &mut FunctionBuilder, kind: SlotKind) -> Value {
+fn emit_default(builder: &mut FunctionBuilder, kind: NativeKind) -> Value {
     let (ty, _) = elem_type_info(kind);
     match ty {
         types::F64 => builder.ins().f64const(0.0),
@@ -103,14 +103,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// If the place's root local is known to hold a v2 `Array<T>` whose
     /// element type is a scalar primitive, return the matching element
-    /// `SlotKind`. Returns `None` for non-array slots, arrays of non-scalar
+    /// `NativeKind`. Returns `None` for non-array slots, arrays of non-scalar
     /// elements, or unresolved types — caller falls back to legacy path.
     ///
     /// Note: today only the per-MirToIR `concrete_types` vector is consulted.
     /// The bytecode compiler / MIR-level slot concrete types are still in
     /// flux upstream (other Phase 3.1 agents are refactoring them), so the
     /// MirFunction-side fallback is intentionally not used here.
-    pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<SlotKind> {
+    pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<NativeKind> {
         let slot = match place {
             Place::Local(s) => *s,
             _ => return None,
@@ -119,26 +119,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.
-    pub(crate) fn v2_array_new_func(&self, elem: SlotKind) -> Option<cranelift::codegen::ir::FuncRef> {
+    pub(crate) fn v2_array_new_func(&self, elem: NativeKind) -> Option<cranelift::codegen::ir::FuncRef> {
         match elem {
-            SlotKind::Float64 => Some(self.ffi.v2_array_new_f64),
-            SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_new_i64),
-            SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_new_i32),
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::Float64 => Some(self.ffi.v2_array_new_f64),
+            NativeKind::Int64 | NativeKind::UInt64 => Some(self.ffi.v2_array_new_i64),
+            NativeKind::Int32 | NativeKind::UInt32 => Some(self.ffi.v2_array_new_i32),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
             _ => None,
         }
     }
 
-    /// Return the element byte size for `SlotKind`s backed by the generic
+    /// Return the element byte size for `NativeKind`s backed by the generic
     /// `jit_v2_array_push` dispatcher, or `None` for unsupported kinds. The
     /// caller uses the returned size as the `elem_size` I8 immediate passed
     /// to the dispatcher.
-    pub(crate) fn v2_array_push_elem_size(&self, elem: SlotKind) -> Option<i64> {
+    pub(crate) fn v2_array_push_elem_size(&self, elem: NativeKind) -> Option<i64> {
         match elem {
-            SlotKind::Float64 => Some(8),
-            SlotKind::Int64 | SlotKind::UInt64 => Some(8),
-            SlotKind::Int32 | SlotKind::UInt32 => Some(4),
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(1),
+            NativeKind::Float64 => Some(8),
+            NativeKind::Int64 | NativeKind::UInt64 => Some(8),
+            NativeKind::Int32 | NativeKind::UInt32 => Some(4),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(1),
             _ => None,
         }
     }
@@ -152,7 +152,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         arr_ptr: Value,
         val: Value,
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<(), String> {
         let elem_size = match self.v2_array_push_elem_size(elem) {
             Some(s) => s,
@@ -188,10 +188,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Convert a Cranelift value into the native type expected by the v2
     /// element store/push helpers for `elem`.
-    pub(crate) fn coerce_to_v2_elem(&mut self, val: Value, elem: SlotKind) -> Value {
+    pub(crate) fn coerce_to_v2_elem(&mut self, val: Value, elem: NativeKind) -> Value {
         let val_type = self.builder.func.dfg.value_type(val);
         match elem {
-            SlotKind::Float64 => {
+            NativeKind::Float64 => {
                 if val_type == types::F64 {
                     val
                 } else if val_type == types::I64 {
@@ -207,7 +207,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().fcvt_from_sint(types::F64, i64_val)
                 }
             }
-            SlotKind::Int64 | SlotKind::UInt64 => {
+            NativeKind::Int64 | NativeKind::UInt64 => {
                 if val_type == types::I64 {
                     let shifted = self.builder.ins().ishl_imm(val, 16);
                     self.builder.ins().sshr_imm(shifted, 16)
@@ -219,7 +219,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
-            SlotKind::Int32 | SlotKind::UInt32 => {
+            NativeKind::Int32 | NativeKind::UInt32 => {
                 if val_type == types::I32 {
                     val
                 } else if val_type == types::I64 {
@@ -232,7 +232,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
                 if val_type == types::I8 {
                     val
                 } else if val_type == types::I64 {
@@ -273,7 +273,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn emit_v2_array_aggregate(
         &mut self,
         operands: &[Operand],
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<Option<Value>, String> {
         let alloc_func = match self.v2_array_new_func(elem) {
             Some(f) => f,
@@ -303,7 +303,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         receiver: &Place,
         rest_args: &[Operand],
         destination: &Place,
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<Option<()>, String> {
         match method_name {
             "length" | "len" => {
@@ -340,8 +340,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(None);
                 }
                 let sum_func = match elem {
-                    SlotKind::Float64 => self.ffi.v2_array_sum_f64,
-                    SlotKind::Int64 | SlotKind::UInt64 => self.ffi.v2_array_sum_i64,
+                    NativeKind::Float64 => self.ffi.v2_array_sum_f64,
+                    NativeKind::Int64 | NativeKind::UInt64 => self.ffi.v2_array_sum_i64,
                     _ => return Ok(None),
                 };
                 let arr_ptr = self.read_place(receiver)?;
@@ -356,7 +356,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if !rest_args.is_empty() {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -378,7 +378,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -388,7 +388,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 };
                 let arr_ptr = self.read_place(receiver)?;
                 let raw = self.compile_operand_raw(&rest_args[0])?;
-                let scalar = self.coerce_to_v2_elem(raw, SlotKind::Float64);
+                let scalar = self.coerce_to_v2_elem(raw, NativeKind::Float64);
                 let inst = self.builder.ins().call(func, &[arr_ptr, scalar]);
                 let new_arr = self.builder.inst_results(inst)[0];
                 self.release_old_value_if_heap(destination)?;
@@ -401,7 +401,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -449,7 +449,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         arr_ptr: Value,
         index: Value,
-        elem_type: SlotKind,
+        elem_type: NativeKind,
     ) -> Value {
         let (cl_type, elem_size) = elem_type_info(elem_type);
 
@@ -542,7 +542,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         arr_ptr: Value,
         index: Value,
         val: Value,
-        elem_type: SlotKind,
+        elem_type: NativeKind,
     ) {
         let (_cl_type, elem_size) = elem_type_info(elem_type);
 

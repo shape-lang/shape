@@ -7,7 +7,7 @@
 
 use crate::bytecode::*;
 use crate::executor::{VMConfig, VirtualMachine};
-use crate::type_tracking::{FrameDescriptor, SlotKind};
+use crate::type_tracking::{FrameDescriptor, NativeKind};
 use shape_value::heap_value::{HeapValue, NativeScalar};
 use shape_value::{FunctionId, VMError, ValueWord, ValueWordExt};
 
@@ -28,7 +28,7 @@ fn execute_program(program: BytecodeProgram) -> Result<ValueWord, VMError> {
 /// bits as the requested kind.
 fn execute_program_typed(
     mut program: BytecodeProgram,
-    return_kind: SlotKind,
+    return_kind: NativeKind,
 ) -> Result<ValueWord, VMError> {
     let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
     frame.return_kind = return_kind;
@@ -95,7 +95,7 @@ fn v2_stack_raw_i64_push_pop_roundtrip() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), -42, "i64 value must round-trip exactly");
 }
 
@@ -108,7 +108,7 @@ fn v2_stack_raw_i64_zero() {
         constants: vec![Constant::Int(0)],
         ..Default::default()
     };
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 0);
 }
 
@@ -123,7 +123,7 @@ fn v2_stack_raw_i64_large_positive() {
         constants: vec![Constant::Int(val)],
         ..Default::default()
     };
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), val);
 }
 
@@ -180,7 +180,7 @@ fn v2_stack_raw_bool_push_pop_true() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true);
 }
 
@@ -194,7 +194,7 @@ fn v2_stack_raw_bool_push_pop_false() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), false);
 }
 
@@ -306,7 +306,7 @@ fn v2_stack_typed_add_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 30, "AddInt must produce raw i64 result");
 }
 
@@ -323,7 +323,7 @@ fn v2_stack_typed_sub_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 63);
 }
 
@@ -340,7 +340,7 @@ fn v2_stack_typed_mul_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 42);
 }
 
@@ -395,7 +395,7 @@ fn v2_stack_typed_gt_number_true() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true, "GtNumber 5.0>3.0 must produce raw bool true");
 }
 
@@ -412,7 +412,7 @@ fn v2_stack_typed_gt_number_false() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), false);
 }
 
@@ -429,7 +429,7 @@ fn v2_stack_typed_gt_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true);
 }
 
@@ -446,7 +446,7 @@ fn v2_stack_typed_lt_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true);
 }
 
@@ -463,7 +463,7 @@ fn v2_stack_typed_eq_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true);
 }
 
@@ -545,7 +545,7 @@ fn v2_stack_typed_field_load_i64() {
     ];
     program.constants = vec![Constant::Int(12345)];
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 12345);
 }
 
@@ -580,7 +580,7 @@ fn v2_stack_typed_field_load_bool() {
     ];
     program.constants = vec![Constant::Bool(true)];
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true);
 }
 
@@ -696,7 +696,7 @@ fn v2_stack_number_to_int_conversion() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     // NumberToInt truncates toward zero (Rust `as i64` semantics)
     assert_eq!(result.as_i64().unwrap(), 7, "NumberToInt must truncate 7.9 to 7");
 }
@@ -930,7 +930,7 @@ fn v2_stack_frame_locals_isolation() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(
         result.as_i64().unwrap(),
         999,
@@ -969,7 +969,7 @@ fn v2_stack_dup_preserves_type() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 84, "Dup + AddInt: 42 + 42 = 84");
 }
 
@@ -1010,7 +1010,7 @@ fn v2_stack_chained_typed_arithmetic() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Int64).unwrap();
+    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(result.as_i64().unwrap(), 90);
 }
 
@@ -1039,6 +1039,6 @@ fn v2_stack_typed_comparison_chain() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, SlotKind::Bool).unwrap();
+    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
     assert_eq!(result.as_bool().unwrap(), true, "chain: (5>3) AND (1<2) must be true");
 }

@@ -146,7 +146,7 @@ fn run_table_count_loop(table_nb: ValueWord) -> ValueWord {
     // top-level return kind so `execute()` synthesizes a tagged i48
     // ValueWord for the test's `as_i64()` assertion.
     let mut top_level_frame = crate::type_tracking::FrameDescriptor::with_unknown_slots(3);
-    top_level_frame.return_kind = crate::type_tracking::SlotKind::Int64;
+    top_level_frame.return_kind = crate::type_tracking::NativeKind::Int64;
 
     let program = BytecodeProgram {
         instructions,

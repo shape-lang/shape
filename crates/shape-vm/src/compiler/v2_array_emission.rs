@@ -7,12 +7,12 @@
 //! These are pure query functions -- they do NOT modify compilation state.
 //! Integration into the actual opcode emission paths will happen separately.
 
-use crate::type_tracking::{SlotKind, TypeTracker};
+use crate::type_tracking::{NativeKind, TypeTracker};
 use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 
 /// Check if an array literal has a proven homogeneous element type.
 ///
-/// Returns `Some(SlotKind)` when every element in the array is provably the
+/// Returns `Some(NativeKind)` when every element in the array is provably the
 /// same scalar type, allowing the compiler to emit a typed `NewArray` variant.
 ///
 /// Rules:
@@ -28,7 +28,7 @@ use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 ///   outer literal must fall back to the generic `NewArray` path so the
 ///   inner arrays round-trip as heap-ref ValueWords, not as raw
 ///   `NativeScalar::Ptr` words that can't be decoded downstream.)
-pub fn infer_array_element_type(elements: &[Expr], type_tracker: &TypeTracker) -> Option<SlotKind> {
+pub fn infer_array_element_type(elements: &[Expr], type_tracker: &TypeTracker) -> Option<NativeKind> {
     if elements.is_empty() {
         return None;
     }
@@ -67,7 +67,7 @@ pub fn infer_array_element_type(elements: &[Expr], type_tracker: &TypeTracker) -
 /// - `let arr: Array<string>` -> `Some(String)`
 /// - `let arr: number[]` -> `Some(Float64)`
 /// - `let arr: Array<SomeStruct>` -> `None`
-pub fn typed_array_from_annotation(annotation: &TypeAnnotation) -> Option<SlotKind> {
+pub fn typed_array_from_annotation(annotation: &TypeAnnotation) -> Option<NativeKind> {
     match annotation {
         // `Array<T>` form
         TypeAnnotation::Generic { name, args } if *name == "Array" && args.len() == 1 => {
@@ -79,26 +79,26 @@ pub fn typed_array_from_annotation(annotation: &TypeAnnotation) -> Option<SlotKi
     }
 }
 
-/// Map a scalar type annotation to a `SlotKind`.
+/// Map a scalar type annotation to a `NativeKind`.
 ///
 /// Only maps types that have a direct v2 typed representation.
 /// Returns `None` for compound types, user-defined types, etc.
-fn scalar_annotation_to_slot_kind(annotation: &TypeAnnotation) -> Option<SlotKind> {
+fn scalar_annotation_to_slot_kind(annotation: &TypeAnnotation) -> Option<NativeKind> {
     match annotation {
         TypeAnnotation::Basic(name) => match name.as_str() {
-            "number" => Some(SlotKind::Float64),
-            "int" => Some(SlotKind::Int64),
-            "i8" => Some(SlotKind::Int8),
-            "u8" => Some(SlotKind::UInt8),
-            "i16" => Some(SlotKind::Int16),
-            "u16" => Some(SlotKind::UInt16),
-            "i32" => Some(SlotKind::Int32),
-            "u32" => Some(SlotKind::UInt32),
-            "u64" => Some(SlotKind::UInt64),
-            "isize" => Some(SlotKind::IntSize),
-            "usize" => Some(SlotKind::UIntSize),
-            "bool" => Some(SlotKind::Bool),
-            "string" => Some(SlotKind::String),
+            "number" => Some(NativeKind::Float64),
+            "int" => Some(NativeKind::Int64),
+            "i8" => Some(NativeKind::Int8),
+            "u8" => Some(NativeKind::UInt8),
+            "i16" => Some(NativeKind::Int16),
+            "u16" => Some(NativeKind::UInt16),
+            "i32" => Some(NativeKind::Int32),
+            "u32" => Some(NativeKind::UInt32),
+            "u64" => Some(NativeKind::UInt64),
+            "isize" => Some(NativeKind::IntSize),
+            "usize" => Some(NativeKind::UIntSize),
+            "bool" => Some(NativeKind::Bool),
+            "string" => Some(NativeKind::String),
             _ => None,
         },
         _ => None,
@@ -106,15 +106,15 @@ fn scalar_annotation_to_slot_kind(annotation: &TypeAnnotation) -> Option<SlotKin
 }
 
 /// Attempt to infer a homogeneous element type purely from literal nodes.
-fn infer_from_literals(elements: &[Expr]) -> Option<SlotKind> {
-    let mut kind: Option<SlotKind> = None;
+fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
+    let mut kind: Option<NativeKind> = None;
 
     for elem in elements {
         let elem_kind = match elem {
-            Expr::Literal(Literal::Number(_), _) => SlotKind::Float64,
-            Expr::Literal(Literal::Int(_), _) => SlotKind::Int64,
-            Expr::Literal(Literal::Bool(_), _) => SlotKind::Bool,
-            Expr::Literal(Literal::String(_), _) => SlotKind::String,
+            Expr::Literal(Literal::Number(_), _) => NativeKind::Float64,
+            Expr::Literal(Literal::Int(_), _) => NativeKind::Int64,
+            Expr::Literal(Literal::Bool(_), _) => NativeKind::Bool,
+            Expr::Literal(Literal::String(_), _) => NativeKind::String,
             Expr::Literal(Literal::TypedInt(_, w), _) => typed_int_width_to_slot(*w),
             // Non-literal or unsupported literal -- can't infer from literals alone.
             _ => return None,
@@ -130,17 +130,17 @@ fn infer_from_literals(elements: &[Expr]) -> Option<SlotKind> {
     kind
 }
 
-/// Map an `IntWidth` to the corresponding `SlotKind`.
-fn typed_int_width_to_slot(w: shape_ast::IntWidth) -> SlotKind {
+/// Map an `IntWidth` to the corresponding `NativeKind`.
+fn typed_int_width_to_slot(w: shape_ast::IntWidth) -> NativeKind {
     use shape_ast::IntWidth;
     match w {
-        IntWidth::I8 => SlotKind::Int8,
-        IntWidth::U8 => SlotKind::UInt8,
-        IntWidth::I16 => SlotKind::Int16,
-        IntWidth::U16 => SlotKind::UInt16,
-        IntWidth::I32 => SlotKind::Int32,
-        IntWidth::U32 => SlotKind::UInt32,
-        IntWidth::U64 => SlotKind::UInt64,
+        IntWidth::I8 => NativeKind::Int8,
+        IntWidth::U8 => NativeKind::UInt8,
+        IntWidth::I16 => NativeKind::Int16,
+        IntWidth::U16 => NativeKind::UInt16,
+        IntWidth::I32 => NativeKind::Int32,
+        IntWidth::U32 => NativeKind::UInt32,
+        IntWidth::U64 => NativeKind::UInt64,
     }
 }
 
@@ -148,12 +148,12 @@ fn typed_int_width_to_slot(w: shape_ast::IntWidth) -> SlotKind {
 ///
 /// Only succeeds when every element is an `Identifier` whose local slot has a
 /// known, non-`Unknown` `storage_hint`, and all those hints are equal.
-fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Option<SlotKind> {
-    let mut kind: Option<SlotKind> = None;
+fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Option<NativeKind> {
+    let mut kind: Option<NativeKind> = None;
 
     for elem in elements {
         let elem_kind = expr_storage_hint(elem, type_tracker)?;
-        if elem_kind == SlotKind::Unknown || elem_kind == SlotKind::Dynamic {
+        if elem_kind == NativeKind::Unknown || elem_kind == NativeKind::Dynamic {
             return None;
         }
 
@@ -171,7 +171,7 @@ fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Op
 ///
 /// Currently only resolves `Identifier` expressions (local variables).
 /// Could be extended to handle more expression forms in the future.
-fn expr_storage_hint(expr: &Expr, type_tracker: &TypeTracker) -> Option<SlotKind> {
+fn expr_storage_hint(expr: &Expr, type_tracker: &TypeTracker) -> Option<NativeKind> {
     // For identifiers, we'd need the local slot index, which isn't available
     // from the AST alone. This path requires cooperation from the compiler
     // to resolve names -> slots. For now, only literal-based inference is
@@ -238,7 +238,7 @@ mod tests {
         let elems = vec![num_lit(1.0), num_lit(2.5), num_lit(3.14)];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::Float64)
+            Some(NativeKind::Float64)
         );
     }
 
@@ -248,7 +248,7 @@ mod tests {
         let elems = vec![int_lit(1), int_lit(2), int_lit(3)];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::Int64)
+            Some(NativeKind::Int64)
         );
     }
 
@@ -258,7 +258,7 @@ mod tests {
         let elems = vec![bool_lit(true), bool_lit(false), bool_lit(true)];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::Bool)
+            Some(NativeKind::Bool)
         );
     }
 
@@ -268,7 +268,7 @@ mod tests {
         let elems = vec![string_lit("a"), string_lit("b")];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::String)
+            Some(NativeKind::String)
         );
     }
 
@@ -281,7 +281,7 @@ mod tests {
         ];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::Int32)
+            Some(NativeKind::Int32)
         );
     }
 
@@ -307,7 +307,7 @@ mod tests {
         let elems = vec![num_lit(42.0)];
         assert_eq!(
             infer_array_element_type(&elems, &tt),
-            Some(SlotKind::Float64)
+            Some(NativeKind::Float64)
         );
     }
 
@@ -363,7 +363,7 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Float64));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Float64));
     }
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("int".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Int64));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Int64));
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("i32".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Int32));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Int32));
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("bool".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Bool));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Bool));
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("string".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::String));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::String));
     }
 
     #[test]
@@ -413,20 +413,20 @@ mod tests {
             name: TypePath::simple("Array"),
             args: vec![TypeAnnotation::Basic("u8".to_string())],
         };
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::UInt8));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::UInt8));
     }
 
     #[test]
     fn test_annotation_array_sugar_number() {
         // T[] syntax -> TypeAnnotation::Array(Box<T>)
         let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("number".to_string())));
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Float64));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Float64));
     }
 
     #[test]
     fn test_annotation_array_sugar_int() {
         let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
-        assert_eq!(typed_array_from_annotation(&ann), Some(SlotKind::Int64));
+        assert_eq!(typed_array_from_annotation(&ann), Some(NativeKind::Int64));
     }
 
     #[test]
@@ -480,19 +480,19 @@ mod tests {
     fn test_all_scalar_widths_via_annotation() {
         use shape_ast::ast::type_path::TypePath;
         let cases = vec![
-            ("number", SlotKind::Float64),
-            ("int", SlotKind::Int64),
-            ("i8", SlotKind::Int8),
-            ("u8", SlotKind::UInt8),
-            ("i16", SlotKind::Int16),
-            ("u16", SlotKind::UInt16),
-            ("i32", SlotKind::Int32),
-            ("u32", SlotKind::UInt32),
-            ("u64", SlotKind::UInt64),
-            ("isize", SlotKind::IntSize),
-            ("usize", SlotKind::UIntSize),
-            ("bool", SlotKind::Bool),
-            ("string", SlotKind::String),
+            ("number", NativeKind::Float64),
+            ("int", NativeKind::Int64),
+            ("i8", NativeKind::Int8),
+            ("u8", NativeKind::UInt8),
+            ("i16", NativeKind::Int16),
+            ("u16", NativeKind::UInt16),
+            ("i32", NativeKind::Int32),
+            ("u32", NativeKind::UInt32),
+            ("u64", NativeKind::UInt64),
+            ("isize", NativeKind::IntSize),
+            ("usize", NativeKind::UIntSize),
+            ("bool", NativeKind::Bool),
+            ("string", NativeKind::String),
         ];
         for (type_name, expected_kind) in cases {
             let ann = TypeAnnotation::Generic {
@@ -514,12 +514,12 @@ mod tests {
     #[test]
     fn test_typed_int_width_mapping() {
         use shape_ast::IntWidth;
-        assert_eq!(typed_int_width_to_slot(IntWidth::I8), SlotKind::Int8);
-        assert_eq!(typed_int_width_to_slot(IntWidth::U8), SlotKind::UInt8);
-        assert_eq!(typed_int_width_to_slot(IntWidth::I16), SlotKind::Int16);
-        assert_eq!(typed_int_width_to_slot(IntWidth::U16), SlotKind::UInt16);
-        assert_eq!(typed_int_width_to_slot(IntWidth::I32), SlotKind::Int32);
-        assert_eq!(typed_int_width_to_slot(IntWidth::U32), SlotKind::UInt32);
-        assert_eq!(typed_int_width_to_slot(IntWidth::U64), SlotKind::UInt64);
+        assert_eq!(typed_int_width_to_slot(IntWidth::I8), NativeKind::Int8);
+        assert_eq!(typed_int_width_to_slot(IntWidth::U8), NativeKind::UInt8);
+        assert_eq!(typed_int_width_to_slot(IntWidth::I16), NativeKind::Int16);
+        assert_eq!(typed_int_width_to_slot(IntWidth::U16), NativeKind::UInt16);
+        assert_eq!(typed_int_width_to_slot(IntWidth::I32), NativeKind::Int32);
+        assert_eq!(typed_int_width_to_slot(IntWidth::U32), NativeKind::UInt32);
+        assert_eq!(typed_int_width_to_slot(IntWidth::U64), NativeKind::UInt64);
     }
 }

@@ -59,16 +59,16 @@ impl VirtualMachine {
     /// Read the program's declared top-level return kind, if present.
     ///
     /// Returns `Some(kind)` when `top_level_frame.return_kind` is set to a
-    /// concrete `SlotKind` (i.e. the compiler proved a return type for the
+    /// concrete `NativeKind` (i.e. the compiler proved a return type for the
     /// top-level program). Returns `None` when no concrete kind is set —
     /// after the strict-typing bulldozer, `None` should be reachable only
     /// during Phase 2 reconstruction; once `prove_native_kind` is on, every
     /// program has a proved return kind at compile time.
     #[inline]
-    pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
+    pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::NativeKind> {
         let kind = self.program.top_level_frame.as_ref()?.return_kind;
         match kind {
-            crate::type_tracking::SlotKind::Unknown => None,
+            crate::type_tracking::NativeKind::Unknown => None,
             _ => Some(kind),
         }
     }

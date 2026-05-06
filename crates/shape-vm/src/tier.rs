@@ -1058,8 +1058,8 @@ mod tests {
             bytecode_ip: 42,
             live_locals: vec![0, 1],
             local_kinds: vec![
-                crate::type_tracking::SlotKind::Int64,
-                crate::type_tracking::SlotKind::Float64,
+                crate::type_tracking::NativeKind::Int64,
+                crate::type_tracking::NativeKind::Float64,
             ],
             exit_ip: 100,
         };
@@ -1148,7 +1148,7 @@ mod tests {
                 osr_entry: Some(crate::bytecode::OsrEntryPoint {
                     bytecode_ip: 55,
                     live_locals: vec![0],
-                    local_kinds: vec![crate::type_tracking::SlotKind::Int64],
+                    local_kinds: vec![crate::type_tracking::NativeKind::Int64],
                     exit_ip: 80,
                 }),
                 deopt_points: Vec::new(),
@@ -1179,8 +1179,8 @@ mod tests {
             resume_ip: 42,
             local_mapping: vec![(0, 0), (1, 2)],
             local_kinds: vec![
-                crate::type_tracking::SlotKind::Int64,
-                crate::type_tracking::SlotKind::Float64,
+                crate::type_tracking::NativeKind::Int64,
+                crate::type_tracking::NativeKind::Float64,
             ],
             stack_depth: 1,
             innermost_function_id: None,
@@ -1231,7 +1231,7 @@ mod tests {
         let deopt_info = crate::bytecode::DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0)],
-            local_kinds: vec![crate::type_tracking::SlotKind::Int64],
+            local_kinds: vec![crate::type_tracking::NativeKind::Int64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),

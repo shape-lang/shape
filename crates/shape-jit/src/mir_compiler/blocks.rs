@@ -3,7 +3,7 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 // Alias to avoid conflict with cranelift::prelude::types
 use super::types as slot_types;
@@ -27,7 +27,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Declare Cranelift variables for each MIR local slot.
     ///
-    /// Variables are declared with their native Cranelift type per SlotKind:
+    /// Variables are declared with their native Cranelift type per NativeKind:
     /// - Float64 → F64
     /// - Int32/UInt32 → I32
     /// - Bool/Int8/UInt8 → I8
@@ -62,17 +62,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Produce the default (zero/null) value for a given SlotKind.
-    fn default_value_for_kind(&mut self, kind: SlotKind) -> Value {
+    /// Produce the default (zero/null) value for a given NativeKind.
+    fn default_value_for_kind(&mut self, kind: NativeKind) -> Value {
         match kind {
-            SlotKind::Float64 => self.builder.ins().f64const(0.0),
-            SlotKind::Int32 | SlotKind::UInt32 => {
+            NativeKind::Float64 => self.builder.ins().f64const(0.0),
+            NativeKind::Int32 | NativeKind::UInt32 => {
                 self.builder.ins().iconst(types::I32, 0)
             }
-            SlotKind::Int8 | SlotKind::UInt8 | SlotKind::Bool => {
+            NativeKind::Int8 | NativeKind::UInt8 | NativeKind::Bool => {
                 self.builder.ins().iconst(types::I8, 0)
             }
-            SlotKind::Int16 | SlotKind::UInt16 => {
+            NativeKind::Int16 | NativeKind::UInt16 => {
                 self.builder.ins().iconst(types::I16, 0)
             }
             // v2-boundary: I64 NaN-boxed slots use TAG_NULL as default

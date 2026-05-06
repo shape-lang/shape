@@ -8,7 +8,7 @@ use cranelift::prelude::*;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a single MIR statement.
@@ -453,10 +453,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let slot = p.root_local();
                     super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
                 }
-                Operand::Constant(MirConstant::Float(_)) => SlotKind::Float64,
-                Operand::Constant(MirConstant::Int(_)) => SlotKind::Int64,
-                Operand::Constant(MirConstant::Bool(_)) => SlotKind::Bool,
-                _ => SlotKind::Unknown,
+                Operand::Constant(MirConstant::Float(_)) => NativeKind::Float64,
+                Operand::Constant(MirConstant::Int(_)) => NativeKind::Int64,
+                Operand::Constant(MirConstant::Bool(_)) => NativeKind::Bool,
+                _ => NativeKind::Unknown,
             };
             capture_types.push(super::types::cranelift_type_for_slot(kind));
         }

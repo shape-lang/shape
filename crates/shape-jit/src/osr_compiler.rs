@@ -23,7 +23,7 @@ use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 
 use shape_vm::bytecode::{DeoptInfo, Instruction, OpCode, Operand, OsrEntryPoint};
-use shape_vm::type_tracking::{FrameDescriptor, SlotKind};
+use shape_vm::type_tracking::{FrameDescriptor, NativeKind};
 
 use crate::loop_analysis::LoopInfo;
 
@@ -201,15 +201,15 @@ pub fn compile_osr_loop(
         }
     }
 
-    // Map each live local to its SlotKind from the frame descriptor.
-    let local_kinds: Vec<SlotKind> = live_locals
+    // Map each live local to its NativeKind from the frame descriptor.
+    let local_kinds: Vec<NativeKind> = live_locals
         .iter()
         .map(|&slot| {
             frame_descriptor
                 .slots
                 .get(slot as usize)
                 .copied()
-                .unwrap_or(SlotKind::Unknown)
+                .unwrap_or(NativeKind::Unknown)
         })
         .collect();
 

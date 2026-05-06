@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_tracking::{FrameDescriptor, SlotKind, StorageHint};
+use crate::type_tracking::{FrameDescriptor, NativeKind, StorageHint};
 use std::sync::Arc;
 
 /// Cached MIR analysis data for JIT v2 (MirToIR compilation).
@@ -141,8 +141,8 @@ pub struct OsrEntryPoint {
     pub bytecode_ip: usize,
     /// Which local slots are live at the entry point.
     pub live_locals: Vec<u16>,
-    /// SlotKind for each live local (parallel to `live_locals`, used for marshaling).
-    pub local_kinds: Vec<SlotKind>,
+    /// NativeKind for each live local (parallel to `live_locals`, used for marshaling).
+    pub local_kinds: Vec<NativeKind>,
     /// The bytecode IP of the loop exit (LoopEnd + 1).
     pub exit_ip: usize,
 }
@@ -160,9 +160,9 @@ pub struct DeoptInfo {
     /// Map from JIT local index to bytecode local index.
     /// Each pair is `(jit_local_idx, bytecode_local_idx)`.
     pub local_mapping: Vec<(u16, u16)>,
-    /// SlotKind for each mapped local (parallel to `local_mapping`, used for
+    /// NativeKind for each mapped local (parallel to `local_mapping`, used for
     /// unmarshaling JIT values back to interpreter `ValueWord` representation).
-    pub local_kinds: Vec<SlotKind>,
+    pub local_kinds: Vec<NativeKind>,
     /// Stack depth at this deopt point (number of values on the operand stack).
     pub stack_depth: u16,
     /// Function ID of the innermost frame (where the guard fired).
@@ -188,8 +188,8 @@ pub struct InlineFrameInfo {
     pub resume_ip: usize,
     /// Map from ctx_buf position to bytecode local index for this frame.
     pub local_mapping: Vec<(u16, u16)>,
-    /// SlotKind for each mapped local.
-    pub local_kinds: Vec<SlotKind>,
+    /// NativeKind for each mapped local.
+    pub local_kinds: Vec<NativeKind>,
     /// Stack depth for this frame.
     pub stack_depth: u16,
 }

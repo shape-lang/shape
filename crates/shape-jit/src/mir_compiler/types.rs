@@ -1,13 +1,13 @@
 //! Type mapping for MIR-to-Cranelift IR compilation.
 //!
-//! Maps MIR LocalTypeInfo and SlotKind to Cranelift types.
+//! Maps MIR LocalTypeInfo and NativeKind to Cranelift types.
 //! Includes MIR-level type inference for determining slot kinds
 //! when the bytecode compiler doesn't provide them.
 
 use cranelift::prelude::types;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 /// Whether a local slot holds a heap value that needs reference counting.
 pub(crate) fn is_heap_type(type_info: &LocalTypeInfo) -> bool {
@@ -19,68 +19,68 @@ pub(crate) fn is_copy_type(type_info: &LocalTypeInfo) -> bool {
     matches!(type_info, LocalTypeInfo::Copy)
 }
 
-/// Get the SlotKind for a local, falling back to Unknown.
-pub(crate) fn slot_kind_for_local(slot_kinds: &[SlotKind], slot_idx: u16) -> SlotKind {
+/// Get the NativeKind for a local, falling back to Unknown.
+pub(crate) fn slot_kind_for_local(slot_kinds: &[NativeKind], slot_idx: u16) -> NativeKind {
     slot_kinds
         .get(slot_idx as usize)
         .copied()
-        .unwrap_or(SlotKind::Unknown)
+        .unwrap_or(NativeKind::Unknown)
 }
 
-/// Whether a SlotKind is i32 (Int32 or UInt32).
-pub(crate) fn is_i32_slot(kind: SlotKind) -> bool {
-    matches!(kind, SlotKind::Int32 | SlotKind::UInt32)
+/// Whether a NativeKind is i32 (Int32 or UInt32).
+pub(crate) fn is_i32_slot(kind: NativeKind) -> bool {
+    matches!(kind, NativeKind::Int32 | NativeKind::UInt32)
 }
 
-/// Whether a SlotKind represents a native (non-NaN-boxed) Cranelift type.
-pub(crate) fn is_native_slot(kind: SlotKind) -> bool {
+/// Whether a NativeKind represents a native (non-NaN-boxed) Cranelift type.
+pub(crate) fn is_native_slot(kind: NativeKind) -> bool {
     matches!(
         kind,
-        SlotKind::Float64
-            | SlotKind::Int32
-            | SlotKind::UInt32
-            | SlotKind::Bool
-            | SlotKind::Int8
-            | SlotKind::UInt8
-            | SlotKind::Int16
-            | SlotKind::UInt16
+        NativeKind::Float64
+            | NativeKind::Int32
+            | NativeKind::UInt32
+            | NativeKind::Bool
+            | NativeKind::Int8
+            | NativeKind::UInt8
+            | NativeKind::Int16
+            | NativeKind::UInt16
     )
 }
 
-/// Map a SlotKind to its Cranelift type.
+/// Map a NativeKind to its Cranelift type.
 /// Native numeric types get their natural width; everything else is I64 (NaN-boxed).
-pub(crate) fn cranelift_type_for_slot(kind: SlotKind) -> cranelift::prelude::Type {
+pub(crate) fn cranelift_type_for_slot(kind: NativeKind) -> cranelift::prelude::Type {
     match kind {
-        SlotKind::Float64 => types::F64,
-        SlotKind::Int32 | SlotKind::UInt32 => types::I32,
-        SlotKind::Int8 | SlotKind::UInt8 | SlotKind::Bool => types::I8,
-        SlotKind::Int16 | SlotKind::UInt16 => types::I16,
+        NativeKind::Float64 => types::F64,
+        NativeKind::Int32 | NativeKind::UInt32 => types::I32,
+        NativeKind::Int8 | NativeKind::UInt8 | NativeKind::Bool => types::I8,
+        NativeKind::Int16 | NativeKind::UInt16 => types::I16,
         // Int64, UInt64, Unknown, Dynamic, String, Nullable*, IntSize, UIntSize
         _ => types::I64,
     }
 }
 
-/// Whether a SlotKind is a v2 heap pointer type (TypedArray, TypedStruct, StringObj).
+/// Whether a NativeKind is a v2 heap pointer type (TypedArray, TypedStruct, StringObj).
 /// These use inline refcounting via HeapHeader at offset 0.
-pub(crate) fn is_v2_heap_slot(kind: SlotKind) -> bool {
+pub(crate) fn is_v2_heap_slot(kind: NativeKind) -> bool {
     let _ = kind;
     false
 }
 
-/// Map a `ConcreteType` element type to the matching `SlotKind` for the v2
+/// Map a `ConcreteType` element type to the matching `NativeKind` for the v2
 /// typed-array codegen helpers (`v2_array_get`/`v2_array_set`).
-pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<SlotKind> {
+pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<NativeKind> {
     match elem {
-        ConcreteType::F64 => Some(SlotKind::Float64),
-        ConcreteType::I64 => Some(SlotKind::Int64),
-        ConcreteType::I32 => Some(SlotKind::Int32),
-        ConcreteType::I16 => Some(SlotKind::Int16),
-        ConcreteType::I8 => Some(SlotKind::Int8),
-        ConcreteType::U64 => Some(SlotKind::UInt64),
-        ConcreteType::U32 => Some(SlotKind::UInt32),
-        ConcreteType::U16 => Some(SlotKind::UInt16),
-        ConcreteType::U8 => Some(SlotKind::UInt8),
-        ConcreteType::Bool => Some(SlotKind::Bool),
+        ConcreteType::F64 => Some(NativeKind::Float64),
+        ConcreteType::I64 => Some(NativeKind::Int64),
+        ConcreteType::I32 => Some(NativeKind::Int32),
+        ConcreteType::I16 => Some(NativeKind::Int16),
+        ConcreteType::I8 => Some(NativeKind::Int8),
+        ConcreteType::U64 => Some(NativeKind::UInt64),
+        ConcreteType::U32 => Some(NativeKind::UInt32),
+        ConcreteType::U16 => Some(NativeKind::UInt16),
+        ConcreteType::U8 => Some(NativeKind::UInt8),
+        ConcreteType::Bool => Some(NativeKind::Bool),
         _ => None,
     }
 }
@@ -92,7 +92,7 @@ pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<SlotKin
 pub(crate) fn is_v2_typed_array_slot(
     concrete_types: &[ConcreteType],
     slot_idx: u16,
-) -> Option<SlotKind> {
+) -> Option<NativeKind> {
     let ct = concrete_types.get(slot_idx as usize)?;
     match ct {
         ConcreteType::Array(elem) => elem_slot_kind_for_concrete(elem),
@@ -115,13 +115,13 @@ pub(crate) fn is_v2_typed_array_slot(
 /// - Assign(slot, BinaryOp(arith, lhs, rhs)) → inherits from operands if both agree
 /// - Assign(slot, Use(Move/Copy(other_slot))) → inherits from other_slot
 /// - Conflicting assignments → Unknown
-pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<SlotKind> {
+pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[NativeKind]) -> Vec<NativeKind> {
     let n = mir.num_locals as usize;
-    let mut kinds = vec![SlotKind::Unknown; n];
+    let mut kinds = vec![NativeKind::Unknown; n];
 
     // Seed from existing slot_kinds (from bytecode compiler).
     for (i, &k) in existing.iter().enumerate() {
-        if i < n && k != SlotKind::Unknown {
+        if i < n && k != NativeKind::Unknown {
             kinds[i] = k;
         }
     }
@@ -133,7 +133,7 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
                 StatementKind::Assign(place, rvalue) => {
                     if let Place::Local(slot) = place {
                         let idx = slot.0 as usize;
-                        if idx < n && kinds[idx] == SlotKind::Unknown {
+                        if idx < n && kinds[idx] == NativeKind::Unknown {
                             if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
                                 kinds[idx] = inferred;
                             }
@@ -250,7 +250,7 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
     // NaN-boxed values from the calling convention.
     for &param_slot in &mir.param_slots {
         let idx = param_slot.0 as usize;
-        if idx < n && existing.get(idx).copied().unwrap_or(SlotKind::Unknown) != SlotKind::Unknown
+        if idx < n && existing.get(idx).copied().unwrap_or(NativeKind::Unknown) != NativeKind::Unknown
         {
             // Keep the existing kind from the compiler for params.
             kinds[idx] = existing[idx];
@@ -263,7 +263,7 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[SlotKind]) -> Vec<
 /// F7.c — `true` when `operand` reads through a heap projection
 /// (`Place::Field` / `Place::Index` / `Place::Deref`). The runtime type
 /// of such a read is opaque to the compiler; backward type propagation
-/// must not invent a `SlotKind` for the destination slot from unrelated
+/// must not invent a `NativeKind` for the destination slot from unrelated
 /// uses of that slot in later binops.
 fn is_opaque_operand(operand: &Operand) -> bool {
     match operand {
@@ -297,8 +297,8 @@ fn operand_local_slot(operand: &Operand) -> Option<usize> {
 
 /// Set `kinds[idx] = kind` if the slot was previously `Unknown`, returning
 /// `true` when an update happened.
-fn set_kind_if_unknown(kinds: &mut [SlotKind], idx: usize, kind: SlotKind) -> bool {
-    if idx < kinds.len() && kinds[idx] == SlotKind::Unknown && kind != SlotKind::Unknown {
+fn set_kind_if_unknown(kinds: &mut [NativeKind], idx: usize, kind: NativeKind) -> bool {
+    if idx < kinds.len() && kinds[idx] == NativeKind::Unknown && kind != NativeKind::Unknown {
         kinds[idx] = kind;
         true
     } else {
@@ -306,8 +306,8 @@ fn set_kind_if_unknown(kinds: &mut [SlotKind], idx: usize, kind: SlotKind) -> bo
     }
 }
 
-/// Infer the SlotKind produced by an Rvalue.
-fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[SlotKind]) -> Option<SlotKind> {
+/// Infer the NativeKind produced by an Rvalue.
+fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[NativeKind]) -> Option<NativeKind> {
     match rvalue {
         Rvalue::Use(operand) => infer_operand_kind(operand, kinds),
         Rvalue::BinaryOp(op, lhs, rhs) => {
@@ -319,7 +319,7 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[SlotKind]) -> Option<SlotKind> {
                     // Arithmetic on floats → float, on ints → int.
                     // Comparisons always → Bool.
                     if is_comparison_op(op) {
-                        Some(SlotKind::Bool)
+                        Some(NativeKind::Bool)
                     } else {
                         Some(l)
                     }
@@ -327,7 +327,7 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[SlotKind]) -> Option<SlotKind> {
                 _ => {
                     // Mixed or unknown operands. Comparison still → Bool.
                     if is_comparison_op(op) {
-                        Some(SlotKind::Bool)
+                        Some(NativeKind::Bool)
                     } else {
                         None
                     }
@@ -335,22 +335,22 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[SlotKind]) -> Option<SlotKind> {
             }
         }
         Rvalue::UnaryOp(UnOp::Neg, operand) => infer_operand_kind(operand, kinds),
-        Rvalue::UnaryOp(UnOp::Not, _) => Some(SlotKind::Bool),
+        Rvalue::UnaryOp(UnOp::Not, _) => Some(NativeKind::Bool),
         Rvalue::Clone(operand) => infer_operand_kind(operand, kinds),
         Rvalue::Borrow(_, _) => None,     // References are heap pointers
         Rvalue::Aggregate(_) => None,      // Arrays are heap objects
     }
 }
 
-/// Infer the SlotKind of an operand.
-fn infer_operand_kind(operand: &Operand, kinds: &[SlotKind]) -> Option<SlotKind> {
+/// Infer the NativeKind of an operand.
+fn infer_operand_kind(operand: &Operand, kinds: &[NativeKind]) -> Option<NativeKind> {
     match operand {
         Operand::Constant(c) => infer_constant_kind(c),
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             let slot = place.root_local();
             let idx = slot.0 as usize;
-            let k = kinds.get(idx).copied().unwrap_or(SlotKind::Unknown);
-            if k != SlotKind::Unknown {
+            let k = kinds.get(idx).copied().unwrap_or(NativeKind::Unknown);
+            if k != NativeKind::Unknown {
                 Some(k)
             } else {
                 None
@@ -359,14 +359,14 @@ fn infer_operand_kind(operand: &Operand, kinds: &[SlotKind]) -> Option<SlotKind>
     }
 }
 
-/// Infer the SlotKind of a constant.
-fn infer_constant_kind(constant: &MirConstant) -> Option<SlotKind> {
+/// Infer the NativeKind of a constant.
+fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
     match constant {
-        MirConstant::Float(_) => Some(SlotKind::Float64),
-        MirConstant::Int(_) => Some(SlotKind::Int64),
-        MirConstant::Bool(_) => Some(SlotKind::Bool),
+        MirConstant::Float(_) => Some(NativeKind::Float64),
+        MirConstant::Int(_) => Some(NativeKind::Int64),
+        MirConstant::Bool(_) => Some(NativeKind::Bool),
         MirConstant::None => None,
-        MirConstant::StringId(_) | MirConstant::Str(_) => Some(SlotKind::String),
+        MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
         MirConstant::Function(_) | MirConstant::Method(_) | MirConstant::ClosurePlaceholder => {
             None
         }
@@ -420,21 +420,21 @@ mod tests {
     fn infer_float_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Float(0))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], SlotKind::Float64);
+        assert_eq!(kinds[1], NativeKind::Float64);
     }
 
     #[test]
     fn infer_int_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Int(42))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], SlotKind::Int64);
+        assert_eq!(kinds[1], NativeKind::Int64);
     }
 
     #[test]
     fn infer_bool_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Bool(true))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], SlotKind::Bool);
+        assert_eq!(kinds[1], NativeKind::Bool);
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
             },
         ]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[3], SlotKind::Float64);
+        assert_eq!(kinds[3], NativeKind::Float64);
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
             },
         ]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[3], SlotKind::Bool);
+        assert_eq!(kinds[3], NativeKind::Bool);
     }
 
     #[test]
@@ -508,7 +508,7 @@ mod tests {
         let kinds = infer_slot_kinds(&mir, &[]);
         assert_eq!(
             kinds[0],
-            SlotKind::Int64,
+            NativeKind::Int64,
             "backward pass should infer x: Int64 from `x + Int(1)`"
         );
     }
@@ -558,26 +558,26 @@ mod tests {
         mir.param_slots = vec![SlotId(0), SlotId(1)];
         let kinds = infer_slot_kinds(&mir, &[]);
         // The inner binop picks up the type from `_2 + Int(1)` backwards.
-        assert_eq!(kinds[2], SlotKind::Int64);
+        assert_eq!(kinds[2], NativeKind::Int64);
     }
 
     #[test]
     fn existing_kinds_preserved() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Float(0))]);
-        let existing = vec![SlotKind::Unknown, SlotKind::Int32];
+        let existing = vec![NativeKind::Unknown, NativeKind::Int32];
         let kinds = infer_slot_kinds(&mir, &existing);
         // Existing Int32 is preserved (not overridden by Float64 inference)
-        assert_eq!(kinds[1], SlotKind::Int32);
+        assert_eq!(kinds[1], NativeKind::Int32);
     }
 
     #[test]
     fn cranelift_type_mapping() {
-        assert_eq!(cranelift_type_for_slot(SlotKind::Float64), types::F64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int32), types::I32);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Bool), types::I8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Unknown), types::I64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int64), types::I64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::String), types::I64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Float64), types::F64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int32), types::I32);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Bool), types::I8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Unknown), types::I64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int64), types::I64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::String), types::I64);
     }
 
     // -----------------------------------------------------------------------
@@ -594,18 +594,18 @@ mod tests {
     #[test]
     fn r4_2f_borrow_cell_sizes() {
         // Native-typed slots get their natural width.
-        assert_eq!(cranelift_type_for_slot(SlotKind::Float64).bytes(), 8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int64).bytes(), 8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int32).bytes(), 4);
-        assert_eq!(cranelift_type_for_slot(SlotKind::UInt32).bytes(), 4);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int16).bytes(), 2);
-        assert_eq!(cranelift_type_for_slot(SlotKind::UInt16).bytes(), 2);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int8).bytes(), 1);
-        assert_eq!(cranelift_type_for_slot(SlotKind::UInt8).bytes(), 1);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Bool).bytes(), 1);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Float64).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int64).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int32).bytes(), 4);
+        assert_eq!(cranelift_type_for_slot(NativeKind::UInt32).bytes(), 4);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int16).bytes(), 2);
+        assert_eq!(cranelift_type_for_slot(NativeKind::UInt16).bytes(), 2);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int8).bytes(), 1);
+        assert_eq!(cranelift_type_for_slot(NativeKind::UInt8).bytes(), 1);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Bool).bytes(), 1);
         // Non-native slots collapse to 8 bytes (legacy behaviour).
-        assert_eq!(cranelift_type_for_slot(SlotKind::Unknown).bytes(), 8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::String).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Unknown).bytes(), 8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::String).bytes(), 8);
     }
 
     #[test]
@@ -614,17 +614,17 @@ mod tests {
         // every power-of-two native width. If this ever breaks, the
         // `StackSlotData::new` call in `Rvalue::Borrow` will assert.
         for kind in [
-            SlotKind::Float64,
-            SlotKind::Int64,
-            SlotKind::Int32,
-            SlotKind::UInt32,
-            SlotKind::Int16,
-            SlotKind::UInt16,
-            SlotKind::Int8,
-            SlotKind::UInt8,
-            SlotKind::Bool,
-            SlotKind::Unknown,
-            SlotKind::String,
+            NativeKind::Float64,
+            NativeKind::Int64,
+            NativeKind::Int32,
+            NativeKind::UInt32,
+            NativeKind::Int16,
+            NativeKind::UInt16,
+            NativeKind::Int8,
+            NativeKind::UInt8,
+            NativeKind::Bool,
+            NativeKind::Unknown,
+            NativeKind::String,
         ] {
             let size = cranelift_type_for_slot(kind).bytes();
             assert!(

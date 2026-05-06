@@ -854,14 +854,14 @@ impl BytecodeCompiler {
                     //      info came from an annotation rather than
                     //      full inference).
                     //   2. `storage_hint_for_expr` fallback, which reads
-                    //      the tracker's `SlotKind` hint (set by
+                    //      the tracker's `NativeKind` hint (set by
                     //      `let x: string = ...` annotations and by
                     //      literals). This is the same helper the numeric
                     //      path uses via `storage_hint_for_expr` below.
                     let lhs_is_string = matches!(lhs_name.as_deref(), Some("string"))
                         || matches!(
                             self.storage_hint_for_expr(left),
-                            Some(crate::type_tracking::SlotKind::String)
+                            Some(crate::type_tracking::NativeKind::String)
                         );
                     if lhs_is_string
                         && crate::compiler::helpers::typed_string_coerce_concat_enabled()
@@ -872,13 +872,13 @@ impl BytecodeCompiler {
                             Some("number") => Some(OpCode::StringConcatNumber),
                             Some("bool") => Some(OpCode::StringConcatBool),
                             _ => match rhs_hint {
-                                Some(crate::type_tracking::SlotKind::Int64) => {
+                                Some(crate::type_tracking::NativeKind::Int64) => {
                                     Some(OpCode::StringConcatInt)
                                 }
-                                Some(crate::type_tracking::SlotKind::Float64) => {
+                                Some(crate::type_tracking::NativeKind::Float64) => {
                                     Some(OpCode::StringConcatNumber)
                                 }
-                                Some(crate::type_tracking::SlotKind::Bool) => {
+                                Some(crate::type_tracking::NativeKind::Bool) => {
                                     Some(OpCode::StringConcatBool)
                                 }
                                 _ => None,

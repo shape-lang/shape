@@ -348,7 +348,7 @@ fn test_v2_add_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(42));
@@ -365,7 +365,7 @@ fn test_v2_sub_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(42));
@@ -382,7 +382,7 @@ fn test_v2_mul_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(42));
@@ -399,7 +399,7 @@ fn test_v2_div_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(42));
@@ -416,7 +416,7 @@ fn test_v2_mod_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(2));
@@ -459,7 +459,7 @@ fn test_v2_i32_overflow_wraps() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(i32::MIN as i64));
@@ -476,7 +476,7 @@ fn test_v2_i32_underflow_wraps() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Int32,
+        crate::type_tracking::NativeKind::Int32,
     )
     .unwrap();
     assert_eq!(result.as_i64(), Some(i32::MAX as i64));
@@ -497,7 +497,7 @@ fn test_v2_eq_i32_true() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -514,7 +514,7 @@ fn test_v2_eq_i32_false() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(false));
@@ -531,7 +531,7 @@ fn test_v2_neq_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -548,7 +548,7 @@ fn test_v2_lt_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -565,7 +565,7 @@ fn test_v2_gt_i32() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -582,7 +582,7 @@ fn test_v2_lte_i32_equal() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -599,7 +599,7 @@ fn test_v2_gte_i32_equal() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));
@@ -616,7 +616,7 @@ fn test_v2_lt_i32_negative() {
     let result = execute_bytecode_typed(
         instructions,
         constants,
-        crate::type_tracking::SlotKind::Bool,
+        crate::type_tracking::NativeKind::Bool,
     )
     .unwrap();
     assert_eq!(result.as_bool(), Some(true));

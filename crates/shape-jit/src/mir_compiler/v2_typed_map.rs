@@ -25,7 +25,7 @@
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place};
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
 
@@ -34,7 +34,7 @@ use super::MirToIR;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TypedMapKinds {
     /// The concrete value type stored in the map (e.g. `I64`, `F64`).
-    pub value: SlotKind,
+    pub value: NativeKind,
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -57,8 +57,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return None;
         }
         let value_kind = match v {
-            ConcreteType::I64 => SlotKind::Int64,
-            ConcreteType::F64 => SlotKind::Float64,
+            ConcreteType::I64 => NativeKind::Int64,
+            ConcreteType::F64 => NativeKind::Float64,
             _ => return None,
         };
         Some(TypedMapKinds { value: value_kind })
@@ -122,14 +122,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let map_bits = self.read_place(receiver)?;
                 let key_bits = self.compile_operand_raw(&rest_args[0])?;
                 let result = match kinds.value {
-                    SlotKind::Int64 | SlotKind::UInt64 => {
+                    NativeKind::Int64 | NativeKind::UInt64 => {
                         let inst = self.builder.ins().call(
                             self.ffi.v2_map_get_str_i64,
                             &[map_bits, key_bits],
                         );
                         self.builder.inst_results(inst)[0]
                     }
-                    SlotKind::Float64 => {
+                    NativeKind::Float64 => {
                         let inst = self.builder.ins().call(
                             self.ffi.v2_map_get_str_f64,
                             &[map_bits, key_bits],
@@ -151,7 +151,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 2 {
                     return Ok(None);
                 }
-                if !matches!(kinds.value, SlotKind::Int64 | SlotKind::UInt64) {
+                if !matches!(kinds.value, NativeKind::Int64 | NativeKind::UInt64) {
                     return Ok(None);
                 }
                 // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map,

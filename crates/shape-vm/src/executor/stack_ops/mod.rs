@@ -361,7 +361,7 @@ mod promote_to_shared_tests {
             Instruction::simple(OpCode::Halt),
         ];
         let mut frame = crate::type_tracking::FrameDescriptor::new();
-        frame.return_kind = crate::type_tracking::SlotKind::Int64;
+        frame.return_kind = crate::type_tracking::NativeKind::Int64;
         program.top_level_frame = Some(frame);
         let result = run_program(program);
         assert_eq!(

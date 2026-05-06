@@ -1064,7 +1064,7 @@ define_opcodes! {
     //
     // SAFETY invariants — enforced by the compiler (Wave E+ codegen):
     //   * The emitter only fires `LoadLocal<Kind>` / `StoreLocal<Kind>` on
-    //     a slot whose proven SlotKind matches `<Kind>`. The slot's bits
+    //     a slot whose proven NativeKind matches `<Kind>`. The slot's bits
     //     were last written by a matching-Kind `StoreLocal<Kind>` (or a
     //     producer that emitted matching native bits), so a raw read
     //     reinterprets the correct bit pattern.
