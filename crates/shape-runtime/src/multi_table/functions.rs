@@ -1,4 +1,22 @@
-//! Built-in functions for multi-table analysis
+//! Built-in functions for multi-table analysis.
+//!
+//! Per the intrinsics-typed-CC migration's batch-4 disposition: the 3
+//! unimplemented stubs (`find_divergences`, `spread`, `temporal_join`) are
+//! deleted as orphan-cleanup (zero callers + RuntimeError-only behavior;
+//! same shape as scan.rs deletion at `663b63a`). `align_tables` and
+//! `correlation` stay legacy:
+//!
+//! - `align_tables` requires `ExecutionContext::get_current_timeframe()`
+//!   access that `ModuleContext` does not expose; typed marshal migration
+//!   would need a `ModuleContext` extension (architectural — out of M-A
+//!   scope). It also has a cross-crate consumer in shape-jit
+//!   (`crates/shape-jit/src/ffi_symbols/data_access/mod.rs:95`) that
+//!   passes the legacy `(ctx, &[ValueWord])` signature. Defer pending
+//!   ModuleContext-access architectural decision + shape-jit cleanup
+//!   workstream.
+//! - `correlation` is a placeholder returning `f64::from(0.0)`; trivial
+//!   to migrate but kept legacy to keep multi_table file in a
+//!   coherent partial-deferred state alongside align_tables.
 
 use super::alignment::{align_intersection, align_union};
 use super::config::AlignmentMode;
@@ -26,7 +44,12 @@ fn load_rows(_ctx: &ExecutionContext, _id: &str, _timeframe: Timeframe) -> Resul
     })
 }
 
-/// Align multiple datasets
+/// Align multiple datasets.
+///
+/// **Migration deferred** pending ModuleContext-access architectural
+/// decision (ExecutionContext::get_current_timeframe() not exposed via
+/// &ModuleContext) AND shape-jit cleanup workstream (cross-crate consumer
+/// at `crates/shape-jit/src/ffi_symbols/data_access/mod.rs:95`).
 pub fn align_tables(ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<ValueWord> {
     if args.is_empty() || args.len() > 2 {
         return Err(ShapeError::RuntimeError {
@@ -123,6 +146,12 @@ pub fn align_tables(ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<Va
     ]))
 }
 
+/// Correlation between two series (placeholder; returns 0.0).
+///
+/// **Migration deferred**: kept as legacy alongside `align_tables` to keep
+/// the multi_table file in a coherent partial-deferred state. Trivial to
+/// migrate (2x Arc<AlignedTypedBuffer> → ConcreteReturn::F64(0.0)) when
+/// align_tables's deferral resolves.
 pub fn correlation(_ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<ValueWord> {
     if args.len() != 2 {
         return Err(ShapeError::RuntimeError {
@@ -133,25 +162,4 @@ pub fn correlation(_ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<Va
 
     // Placeholder
     Ok(ValueWord::from_f64(0.0))
-}
-
-pub fn find_divergences(_ctx: &mut ExecutionContext, _args: &[ValueWord]) -> Result<ValueWord> {
-    Err(ShapeError::RuntimeError {
-        message: "find_divergences() not implemented".into(),
-        location: None,
-    })
-}
-
-pub fn spread(_ctx: &mut ExecutionContext, _args: &[ValueWord]) -> Result<ValueWord> {
-    Err(ShapeError::RuntimeError {
-        message: "spread() not implemented".into(),
-        location: None,
-    })
-}
-
-pub fn temporal_join(_ctx: &mut ExecutionContext, _args: &[ValueWord]) -> Result<ValueWord> {
-    Err(ShapeError::RuntimeError {
-        message: "temporal_join() not implemented".into(),
-        location: None,
-    })
 }
