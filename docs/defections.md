@@ -62,6 +62,167 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-07 — HashMap-marshal micro-cluster — named on-record (full entry)
+
+This is **not** a defection. On-record promotion from named-in-passing
+references (B1 audit-grounded correction at line ~334 + 343, dated
+2026-05-07 sub-entry on csv consumer expansion) to a fully-named
+cluster entry. Per finding #11 in-place-update discipline, the
+prior named-in-passing references in the B1 entry are correct as
+written; this entry consolidates the cluster into one place for
+future audits.
+
+**Cluster identity.** Three confirmed consumer sites, one
+architectural decision:
+
+- **`http.rs`** — body builds object responses
+  `{status, headers, body, ok}` via `ValueWord::from_hashmap_pairs`
+  (deleted) and parses option args via `as_hashmap` (deleted).
+  Currently still uses the legacy `register_typed_function` ABI;
+  has 5+ shape-runtime --lib errors blocked on the HashMap-marshal
+  decision plus the marshal-extension surface.
+- **`csv.parse_records`** — returns `Array<HashMap<string, string>>`
+  via the deleted `ValueWord::from_hashmap_pairs(keys, values)`
+  helper. Held back from Phase 2d Array's `csv_module` migration
+  (commit `9f6b1d3`) explicitly because the HashMap shape was not
+  yet decided. Body documented as deferred at
+  `crates/shape-runtime/src/stdlib/csv_module.rs` deferred-list
+  comment.
+- **`csv.stringify_records`** — consumes
+  `Array<HashMap<string, string>>` via `as_hashmap` (deleted).
+  Same deferral as `csv.parse_records`.
+
+**Plus B1 sub-decision #2 unblock:** the JSON `Json::Object(...)`
+payload currently uses `ValueWord::from_hashmap_pairs(keys, values)`
+to build a HashMap-shaped value. B1 sub-decision #2's runtime shape
+question (per the 2026-05-07 B1 audit-grounded correction) reduces
+to "what HashMap-marshal shape does the JSON Object variant use?" —
+landing HashMap-marshal answers it. After HashMap-marshal lands,
+B1 becomes mechanical (5 parser modules + ~19 errors).
+
+**Storage-shape options (3 surfaced; architectural decision pending):**
+
+- **(P1) `HeapValue::HashMap(HashMapData)` variant.**
+  Add a new top-level variant to `HeapValue` (similar to how
+  `TypedArray(TypedArrayData)` and `Temporal(TemporalData)` are
+  shaped). `HashMapData` carries either:
+  - (a) `Vec<(Arc<String>, Arc<HeapValue>)>` for general
+    `HashMap<string, *>` keying, or
+  - (b) two separate buffers — `Arc<TypedBuffer<Arc<String>>>` keys
+    + `Arc<TypedBuffer<Arc<HeapValue>>>` values — reusing Phase 2d
+    Array's `TypedArrayData::String` / `TypedArrayData::HeapValue`
+    storage shapes for the underlying buffers.
+
+  Pro: a real HashMap variant with O(1) key lookup if backed by a
+  hash index (mirrors the legacy `from_hashmap_pairs` shape).
+  Update `HeapKind` enum (one new variant); update all
+  match-on-HeapKind sites; provide accessor methods.
+  Con: adds a `HeapKind`/`HeapValue` variant — incremental scope
+  similar to Phase 2d Array's TypedArrayData additions, but
+  workspace-wide rather than enum-internal.
+
+- **(P2) Two-slot `TypedObject` projection (`{keys: Array<string>,
+  values: Array<HeapValue>}`).**
+  Encode `HashMap<string, T>` as a TypedObject with a fixed
+  2-slot schema where slot 0 is a `TypedArrayData::String` keys
+  array and slot 1 is a `TypedArrayData::HeapValue` values array.
+  Reuses Phase 2d Array's already-landed variants entirely; no
+  new HeapValue variant needed.
+
+  Pro: zero new HeapKind variants; uses already-landed Phase 2d
+  Array shapes; fits the strict-typed model cleanly.
+  Con: O(n) key lookup unless a hash index is added separately.
+  **Cross-crate interlock** — shape-vm's `__json_object_get` /
+  `__json_array_at` / `as_hashmap` accessors currently expect a
+  HashMap-shaped runtime value; switching to two-slot TypedObject
+  requires updating those accessors in lockstep. The lockstep
+  change is bounded but adds shape-vm scope to the HashMap-marshal
+  landing.
+
+- **(P3) `from_hashmap_pairs`-equivalent free function returning a
+  pre-existing typed shape.**
+  E.g., produce a `HeapValue::TypedObject{schema_id: HashMap, slots,
+  heap_mask}` where `HashMap` is a registered schema with
+  per-instance keys. The downside is that anonymous schemas (one
+  per HashMap instance) inflate the schema registry; alternatively
+  use a single canonical "HashMap shape" schema as a marker, with
+  the actual key/value data in slots. This is option P2 in
+  disguise; refused as a separate option once examined.
+
+**Open sub-decisions within the storage-shape choice:**
+
+- If P1: hash index — eager (build at insert) vs lazy
+  (build at first lookup) vs none (linear scan).
+- If P1 with hash index: index storage — inline in `HashMapData`
+  vs separate cache.
+- If P2: shape-vm `__json_object_get`/`as_hashmap` accessor
+  migration — single combined commit vs split runtime/dispatch
+  commits.
+
+**Already-rejected options (refuse on sight):**
+
+- **Use `serde_json::Map`-style ordered map as the storage type
+  directly** — third-party type at the FFI boundary; refuses
+  cleanly on the same grounds as foreign-type-at-marshal-layer
+  rejections elsewhere.
+- **Use Rust's `HashMap<String, HeapValue>` directly** — does not
+  preserve insertion order (Shape's `from_hashmap_pairs` semantics
+  preserve insertion order); behavioral regression vs the legacy
+  shape.
+- **Single `HashMapStringString`-only path** with a separate
+  `HashMapStringJsonValue` etc. for each value type —
+  parametric-explosion shape (same family as the rejected
+  per-element-kind `TypedArrayData` variants from Phase 2d Array).
+  `HashMap<string, string>` is the most-used shape but
+  `HashMap<string, *>` (for any heap-typed value) is the general
+  consumer surface.
+
+**DAG dependencies:**
+
+- **Phase 2d Array (resolved)** — both P1(b) and P2 reuse Phase 2d
+  Array's `TypedArrayData::String` / `TypedArrayData::HeapValue`
+  variants. No interlock; supports either path.
+- **Cluster #4 Option (resolved)** — independent. `ConcreteReturn::HashMapStringString`
+  already exists; `Option<HashMap<*, *>>` would compose via
+  `TypedReturn::Some(ConcreteReturn::HashMap*)` — no new architectural
+  decision per Cluster #4's β shape.
+- **shape-vm cascade** — interlock present for P2 only. P1 is
+  shape-runtime-internal; shape-vm consumers continue to use
+  `as_hashmap()`-equivalent which gets re-implemented to read
+  `HeapValue::HashMap` instead of the deleted ValueWord-HashMap.
+- **B4 core-foundation** — independent. HashMap-marshal storage
+  shape doesn't depend on closure-captures, module-loader-value,
+  plugin-ABI, etc.
+
+**HashMap-marshal disposition:** named cluster on-record. Audit
+1+2+3 binding pre-work pending — Stage C of the supervisor's
+three-stage plan covers this once Stage B (zero-copy) lands. The
+storage-shape decision (P1 vs P2) is the architectural commit
+candidate; sign-off relay required before any code change.
+
+**Predicted error-drop on landing:**
+
+- Architectural extension commit (storage-shape variant + FromSlot/
+  ToSlot + ConcreteReturn::HashMap* additions): 0 ± 3 (same shape
+  as Phase 2d Array + Cluster #4 leaf landings).
+- Consumer migration commits:
+  - `http.rs` migration: -2 to -4
+  - `csv.parse_records` + `csv.stringify_records` activation: ~0
+    (currently commented-out / stubbed, like regex.match/find were
+    pre-Cluster #4)
+  - B1 cascade after this lands: -19 across 5 parser modules
+    (separate session, mechanical)
+- Total this cluster's landing (Stage C): -2 to -4 errors directly.
+  Plus the structural unblock value of B1's mechanical cascade.
+
+**Cost saved by full on-record entry:** prevents the named-in-passing
+references from being re-derived in future audits. The 3 storage-
+shape options are surfaced with structural reasoning so Stage C's
+audit can read once and trust the framing — same model as the
+zero-copy entry above.
+
+---
+
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
 
 This is **not** a defection. On-record promotion of a previously-
