@@ -2,6 +2,39 @@
 //!
 //! Exports: msgpack.encode(value), msgpack.decode(data),
 //!          msgpack.encode_bytes(value), msgpack.decode_bytes(data)
+//!
+//! NOTE: ALL FOUR FUNCTIONS REMAIN DEFERRED pending the **N4** (any-input
+//! typed marshal) and **N6** (any-output typed marshal) architectural
+//! decisions per `docs/defections.md` HashMap-marshal cluster's
+//! sub-decision queue extension subsection (commit `d3411a7`).
+//!
+//! - `msgpack.encode(value: any)` and `msgpack.encode_bytes(value: any)`
+//!   take a polymorphic `value: any` input parameter that maps to the
+//!   N4 architectural surface. There is no `FromSlot` impl for an
+//!   `any`-typed input in the post-bulldozer typed marshal layer
+//!   (`ConcreteType::Any` exists as a RETURN type only).
+//! - `msgpack.decode(data: string)` and
+//!   `msgpack.decode_bytes(data: Array<int>)` return `Result<any>` —
+//!   the decoded payload is a recursive `serde_json::Value`-equivalent
+//!   tree projected via the deleted `TypedReturn::ValueWord` escape-
+//!   hatch wrapper. `ConcreteReturn::Any` doesn't exist; mapping to
+//!   the N6 architectural surface.
+//!
+//! Both N4 + N6 are supervisor-level decisions queued in the
+//! HashMap-marshal cluster's sub-decision queue. After both land, the
+//! msgpack module migrates as a batch (Stage D or equivalent).
+//! Mirrors the deferral pattern from `csv_module.rs:7-8/183-189`'s
+//! `parse_records`/`stringify_records` breadcrumb (now activated at
+//! commit `fbe6155` once HashMap-marshal P1(b) landed).
+//!
+//! Tests use the deleted ValueWord API; deletable per `csv_module.rs`
+//! migration precedent (commit `9f6b1d3`) once the bodies migrate. New
+//! typed-marshal test fixtures arrive with the shape-vm cleanup
+//! workstream.
+//!
+//! Current state: legacy bodies retained as cascade-broken pending
+//! N4+N6 sign-off; the import errors at lines 7-8 + body errors
+//! remain on-record in the cascade.
 
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
