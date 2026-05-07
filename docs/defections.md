@@ -468,19 +468,20 @@ vs pre-bulldozer baseline) before declaring Stage B landing
 complete; >10% regression = STOP and surface, do not proceed
 to consumer migration.
 
-**Meta-finding (calibration #13 candidate).** This is the first
-audit-grounded correction applied to a supervisor-authored on-
-record entry. The original zero-copy entry (lines 226-371 above,
-dated 2026-05-07) was reviewed and signed off by the supervisor
-at write-time; Audit 2 caught the calibration over-simplification
+**Finding #11 symmetry-extension.** This is the first audit-
+grounded correction applied to a supervisor-authored on-record
+entry. The original zero-copy entry (lines 226-371 above, dated
+2026-05-07) was reviewed and signed off by the supervisor at
+write-time; Audit 2 caught the calibration over-simplification
 by verifying body type vs storage variant against current code
 (`heap_value.rs:482`) rather than trusting the entry's framing.
-**Lesson:** structural reasoning at sign-off time is not infallible
-against ground truth either. Verify against current code, don't
-trust prior framing — even framing the supervisor signed off on.
-Finding #11 (audit-grounded-correction is binding for prior on-
-record entries) applies symmetrically to entries the supervisor
-authored.
+Finding #11 stated "audit-grounded correction is binding for
+prior on-record entries" without distinguishing entry-author.
+**The rule applies symmetrically — supervisor-authored entries
+are not exempt.** Lesson: structural reasoning at sign-off time
+is not infallible against ground truth either. Verify against
+current code, don't trust prior framing, even framing the
+supervisor signed off on.
 
 ---
 
