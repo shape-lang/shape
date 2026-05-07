@@ -1918,6 +1918,133 @@ batch-3 disposition documented (convolution full-migrate; stochastic
 full-defer). Calibration row for batch-3 will be appended at
 batch-3 close.
 
+### 2026-05-07 — Sub-decision queue extension: N3 ifft polymorphic-input split
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The seven prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration + partial-migration pattern + sub-decision queue +
+M1-split-and-N1 extension + N2 marshal arity 4/5/6) stay
+on-record.** This subsection adds **item #7 (N3 ifft polymorphic-
+input split)**, surfaced during the fft.rs / matrix.rs /
+multi_table/functions.rs batched-3 architectural-flagged-trio
+audit at Commit X16-pending.
+
+**Audit during fft.rs / matrix.rs / multi_table batched-3
+preparation revealed:**
+
+The batched-3 audit found the architectural-flagged trio is much
+**less architectural than the handover anticipated** — TypedObject
+infrastructure (`TypedReturn::TypedObject`,
+`ConcreteReturn::TypedObject`, `ConcreteType::TypedObject`)
+already exists at `typed_module_exports.rs:140/124/222`, in active
+production use by 5 stdlib modules (stdlib_time at line 135,
+network_ops at 306, file_ops at 345, process_ops at 143,
+crypto's ObjectPairs at 205). matrix.rs's flagged
+`Arc<MatrixData>` storage was confirmed NOT used at body
+boundary — extraction goes via nested `Vec<Arc<HeapValue>>`
+(Phase 2d Array's already-landed FromSlot pattern).
+
+**The actually-architectural sub-decision: N3 — `intrinsic_ifft`
+polymorphic input.** ifft (fft.rs:60-120) takes either
+(a) an FFT-result-TypedObject containing `real`/`imag` fields, OR
+(b) two separate `Array<number>` args (real_arr, imag_arr).
+Single typed entry can't carry both shapes — same architectural
+pattern as M1-split (per-element-type-or-shape compiler emission)
+and char_code multi-input-type dispatch (queue item #2).
+Cross-crate change to shape-vm compiler emission required.
+
+**N3 architectural shape (two options for supervisor sign-off):**
+
+- **N3-α (split):** two separate intrinsics:
+  `__intrinsic_ifft_from_obj(Arc<TypedObject>) -> Array<number>`
+  and
+  `__intrinsic_ifft_from_arrays(Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>) -> Array<number>`.
+  Compiler picks based on input type inference (FFT result is a
+  predeclared-schema TypedObject; two-array form is overload). Same
+  cross-crate compiler-emission scope as M1-split.
+- **N3-β (defer permanent legacy):** keep ifft as legacy IntrinsicFn
+  body indefinitely. ifft has zero stdlib consumers per post-
+  bulldozer rg, so the consumer cost of permanent legacy is
+  near-zero. Deletion is also a candidate (see N3-γ).
+- **N3-γ (delete):** delete ifft entirely as orphan-cleanup, same
+  shape as scan.rs deletion. Zero stdlib consumers; if a future
+  consumer needs ifft, add it via N3-α at that point. Locks in
+  deletion before exploring N3-α; team-lead's batch-4 sign-off
+  rejected this on the grounds that "ifft is a real DSP primitive
+  users would expect" and deletion now removes the primitive
+  before N3-α makes it cheap to re-add.
+
+**Updated sub-decision queue (binding):**
+
+1. **M1-split** (8 functions per the prior subsection's update;
+   validity-aware-return for `diff` + `rolling_sum`). Architectural
+   extension; out of M-A scope. (Prior queue item #1.)
+
+2. **char_code multi-input-type dispatch.** Unchanged. (Prior
+   queue item #2.)
+
+3. **bspline2_3d_batch generic-array consumer audit.** Unchanged.
+   (Prior queue item #3.)
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** (Prior queue item #4.)
+
+5. **N1: `FromSlot for Option<T>` typed marshal.** Confirmed
+   consumers: scan.rs (deleted at `663b63a` — orphan; no longer
+   relevant), recurrence.rs::intrinsic_linear_recurrence.
+   Architectural extension; out of M-A scope. (Prior queue item
+   #5; consumer count effectively reduced to 1 post-scan.rs
+   deletion. Discriminator question PASTE-BLOCK 1A-V1 pending
+   supervisor sign-off as of 2026-05-07.)
+
+6. **N2: marshal arity extension to register_typed_fn_4/5/6
+   (+ `_full` variants).** **LANDED at `5dcb1ce`** (sync-only at
+   first landing per supervisor sign-off; 6 new functions added;
+   per-arity LoC under 30-line ceiling). (Prior queue item #6,
+   resolved.)
+
+7. **N3: ifft polymorphic-input split.** Confirmed consumer
+   needing N3: fft.rs::intrinsic_ifft (TypedObject vs
+   (Array<number>, Array<number>) input shapes). Architectural
+   extension; cross-crate compiler-emission change; out of M-A
+   scope. **AUDIT RECOMMENDATION (pending supervisor sign-off):**
+   N3-β (defer permanent legacy) at first landing — orphan
+   consumer count, low real-consumer urgency, deletion preserved
+   as fallback if no consumer surfaces. N3-α (split) deferred
+   pending consumer-driven need. **Team-lead sign-off relayed
+   2026-05-07 batch-4 disposition: ifft DEFER (NOT delete) at
+   first landing per "ifft is a real DSP primitive users would
+   expect" framing.**
+
+**Sub-decision queue items remain on-record-only.** Adding to the
+queue ≠ approval to execute. Each item requires its own surface-
+and-decide round-trip with audit-1+2+3 binding pre-work +
+supervisor sign-off + structural reasoning.
+
+**Batch-4 disposition (binding for this round):**
+
+- **matrix.rs full migration LANDS (Commit X17-pending):** 4 of 4
+  intrinsics; uses existing `Vec<Arc<HeapValue>>` FromSlot for
+  nested-array inputs and `ConcreteReturn::ArrayHeapValue(...)`
+  returns. Predicted -5 (per-file table's flagged outlier).
+- **fft.rs partial migration LANDS (Commit X18-pending):** 4 of 5
+  intrinsics (fft, psd, dominant_frequency, bandpass, harmonics);
+  uses existing `TypedReturn::TypedObject(Vec<(String,
+  ConcreteReturn)>)` for object returns. ifft deferred as legacy
+  body pending N3 sign-off. Predicted 0 to -1 (partial-pattern;
+  legacy ifft retains import).
+- **multi_table/functions.rs partial-with-deletions LANDS (Commit
+  X19-pending):** align_tables + correlation migrate to typed;
+  find_divergences + spread + temporal_join DELETE per scan.rs
+  precedent (zero-consumer + zero-real-implementation = orphan-
+  cleanup). Predicted -1 to -2.
+
+**Disposition for this subsection:** N3 added as queue item #7;
+N2 marked landed; batch-4 disposition documented; N1 consumer
+count clarified post-scan.rs deletion. Calibration rows for
+batch-4 commits will be appended at batch-4 close.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
