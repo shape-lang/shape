@@ -493,34 +493,178 @@ pub fn create_http_module() -> ModuleExports {
         },
     );
 
-    // Deferred: http.post_json, http.put_json.
+    // N7 ε disposition (REFINEMENT-3A γ + a, 2026-05-07): post_json /
+    // put_json take `body: object` which lands in this body as
+    // `Vec<(Arc<String>, Arc<HeapValue>)>` via the existing FromSlot
+    // impl at `crates/shape-runtime/src/marshal.rs:624`
+    // (`NATIVE_KIND = NativeKind::Ptr(HeapKind::HashMap)` — supervisor's
+    // load-bearing finding: the HashMap container anchors the slot kind
+    // structurally, side-stepping the N4-α single-any wildcard refusal
+    // that blocks the 5 single-any consumers C7/C10-C13 deferred to the
+    // n7-single-any-input-resolution follow-on workstream).
     //
-    // Both functions would take a `body: object` parameter that maps to
-    // `Vec<(Arc<String>, Arc<HeapValue>)>` at the runtime body-type
-    // boundary. The marshal layer for that input shape already exists
-    // (FromSlot impl at `marshal.rs:608`); the BLOCKER is the body-side
-    // serialization step: walking the polymorphic HeapValue tree and
-    // producing a JSON string for `reqwest`'s `Content-Type:
-    // application/json` body.
-    //
-    // The legacy http.post body called `body_arg.to_json_value()` —
-    // a deleted ValueWord method. The strict-typed equivalent must
-    // classify all 18 HeapValue variants per JSON-serializability and
-    // define semantics for the 5 architectural-choice variants
-    // (Decimal precision; DataTable rows-as-array shape; Content;
-    // Temporal; TableView). Each represents a user-visible behavioral
-    // commitment that needs supervisor sign-off, NOT team-lead-default.
-    //
-    // Surfaced as architectural sub-decision **N7 — HeapValue→JSON
-    // serializer for HTTP / object-output marshal contexts** alongside
-    // the per-format-typed-sums-or-unified-parsed-value workstream.
-    // See `docs/defections.md` HashMap-marshal cluster sub-decision
-    // queue (the N7 entry will be added when Dev 2's defections.md
-    // slot frees from Dev 1's N1/N3/N5 batch).
-    //
-    // Held until N7 sign-off via team-lead's relay batch. Deferral
-    // pattern mirrors `csv_module.rs:7-8/183-189`'s `parse_records`/
-    // `stringify_records` breadcrumb.
+    // Body algorithm: build `JsonValue::Object` by walking each HashMap
+    // pair via `heap_to_json_value(&v)?` (C2) → `json_value_to_serde_json`
+    // (C3) → `serde_json::to_string(&serde_json_v)?` → reqwest body with
+    // `Content-Type: application/json`. Insertion order preserved per
+    // ObjectPairs contract.
+
+    let url_param_post_json = ModuleParam {
+        name: "url".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "URL to request".to_string(),
+        ..Default::default()
+    };
+    let body_object_param_post = ModuleParam {
+        name: "body".to_string(),
+        type_name: "object".to_string(),
+        required: true,
+        description: "Request body as an object (sent as JSON)".to_string(),
+        ..Default::default()
+    };
+    let options_param_post_json = ModuleParam {
+        name: "options".to_string(),
+        type_name: "HashMap<string, any>".to_string(),
+        required: false,
+        description: "Request options: { headers?: HashMap, timeout?: int }"
+            .to_string(),
+        default_snippet: Some("{}".to_string()),
+        ..Default::default()
+    };
+    let response_ty_post_json =
+        ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
+
+    // http.post_json(url: string, body: object, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_json",
+        "Perform an HTTP POST request with a JSON body",
+        [
+            url_param_post_json.clone(),
+            body_object_param_post,
+            options_param_post_json.clone(),
+        ],
+        response_ty_post_json.clone(),
+        |url: Arc<String>,
+         body: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut json_pairs: Vec<(String, crate::json_value::JsonValue)> =
+                Vec::with_capacity(body.len());
+            for (k, v) in body.iter() {
+                json_pairs.push(((**k).clone(), crate::json_value::heap_to_json_value(v)?));
+            }
+            let json_value = crate::json_value::JsonValue::Object(json_pairs);
+            let serde_json_v = crate::json_value::json_value_to_serde_json(&json_value);
+            let body_str = serde_json::to_string(&serde_json_v)
+                .map_err(|e| format!("http.post_json() body serialization failed: {}", e))?;
+
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_json() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_json() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_json(url: string, body: object, options?: HashMap) -> Result<HttpResponse>
+    let body_object_param_put = ModuleParam {
+        name: "body".to_string(),
+        type_name: "object".to_string(),
+        required: true,
+        description: "Request body as an object (sent as JSON)".to_string(),
+        ..Default::default()
+    };
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_json",
+        "Perform an HTTP PUT request with a JSON body",
+        [url_param_post_json, body_object_param_put, options_param_post_json],
+        response_ty_post_json,
+        |url: Arc<String>,
+         body: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut json_pairs: Vec<(String, crate::json_value::JsonValue)> =
+                Vec::with_capacity(body.len());
+            for (k, v) in body.iter() {
+                json_pairs.push(((**k).clone(), crate::json_value::heap_to_json_value(v)?));
+            }
+            let json_value = crate::json_value::JsonValue::Object(json_pairs);
+            let serde_json_v = crate::json_value::json_value_to_serde_json(&json_value);
+            let body_str = serde_json::to_string(&serde_json_v)
+                .map_err(|e| format!("http.put_json() body serialization failed: {}", e))?;
+
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_json() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_json() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
 
     module
 }
