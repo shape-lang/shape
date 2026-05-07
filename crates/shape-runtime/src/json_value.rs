@@ -293,3 +293,45 @@ fn typed_object_to_json_value(
     }
     Ok(JsonValue::Object(pairs))
 }
+
+/// Convert a `JsonValue` into a `serde_json::Value`.
+///
+/// Inverse of `serde_json_to_json_value` (`stdlib/json.rs:172-196`).
+/// Used by N7 consumers that produce JSON strings: `json.stringify`
+/// (C7), `http.post_json` (C8), `http.put_json` (C9). Pair with
+/// `heap_to_json_value` to round-trip a `HeapValue` tree to a JSON
+/// string via `serde_json::to_string(&v)?` / `to_string_pretty(&v)?`.
+///
+/// `JsonValue::Bytes` maps to `serde_json::Value::Array` of `u8`-as-
+/// `Number` per JSON's no-byte-array convention. `JsonValue::Bytes` is
+/// not currently produced by `heap_to_json_value` (the C2 walker has
+/// no path that emits Bytes); included here for completeness +
+/// bidirectional symmetry with future 3.C msgpack-binary parse paths
+/// per supervisor PB 3/4.
+pub fn json_value_to_serde_json(jv: &JsonValue) -> serde_json::Value {
+    match jv {
+        JsonValue::Null => serde_json::Value::Null,
+        JsonValue::Bool(b) => serde_json::Value::Bool(*b),
+        JsonValue::Int(i) => serde_json::Value::Number((*i).into()),
+        JsonValue::Number(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        JsonValue::String(s) => serde_json::Value::String(s.clone()),
+        JsonValue::Bytes(bytes) => serde_json::Value::Array(
+            bytes
+                .iter()
+                .map(|&b| serde_json::Value::Number(b.into()))
+                .collect(),
+        ),
+        JsonValue::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(json_value_to_serde_json).collect())
+        }
+        JsonValue::Object(pairs) => {
+            let mut map = serde_json::Map::with_capacity(pairs.len());
+            for (k, v) in pairs.iter() {
+                map.insert(k.clone(), json_value_to_serde_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+    }
+}
