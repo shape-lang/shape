@@ -1060,6 +1060,358 @@ pub fn register_typed_fn_3_full<F, P0, P1, P2>(
     );
 }
 
+// ─────────────── per-arity register helpers — arities 4/5/6 (N2 extension) ──
+//
+// Per-arity parallel-impl extension to support intrinsics with > 3 typed args.
+// Mechanical mirror of arities 0..3 above; no new architectural surface — no
+// dyn, no parametric NativeKind, no rename-to-less-suspicious-name. Same
+// per-arity pattern as `marshal-optional-args`'s `_full` extension precedent.
+//
+// On-record marshal-API extension per `docs/defections.md` 2026-05-07
+// intrinsics-typed-CC entry's N2 sub-decision queue subsection (queue
+// item #6, supervisor sign-off relayed via team-lead). Sync-only at first
+// landing per consumer pattern (stochastic gbm/ou_process synchronous);
+// async _N variants deferred until consumer-driven need.
+
+/// Register a 4-arg native function with positional `(name, type)` param spec.
+pub fn register_typed_fn_4<F, P0, P1, P2, P3>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 4],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 4 {
+            return Err(MarshalError::ArgCount {
+                expected: 4,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        body(p0, p1, p2, p3, ctx)
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 5-arg native function with positional `(name, type)` param spec.
+pub fn register_typed_fn_5<F, P0, P1, P2, P3, P4>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 5],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, P4, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+    P4: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+        P4::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 5 {
+            return Err(MarshalError::ArgCount {
+                expected: 5,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        let p4 = P4::from_slot(slots[4]);
+        body(p0, p1, p2, p3, p4, ctx)
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 6-arg native function with positional `(name, type)` param spec.
+pub fn register_typed_fn_6<F, P0, P1, P2, P3, P4, P5>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 6],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, P4, P5, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+    P4: FromSlot + Send + Sync + 'static,
+    P5: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+        P4::NATIVE_KIND,
+        P5::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 6 {
+            return Err(MarshalError::ArgCount {
+                expected: 6,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        let p4 = P4::from_slot(slots[4]);
+        let p5 = P5::from_slot(slots[5]);
+        body(p0, p1, p2, p3, p4, p5, ctx)
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 4-arg native function with full param spec.
+pub fn register_typed_fn_4_full<F, P0, P1, P2, P3>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 4],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 4 {
+            return Err(MarshalError::ArgCount {
+                expected: 4,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        body(p0, p1, p2, p3, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 5-arg native function with full param spec.
+pub fn register_typed_fn_5_full<F, P0, P1, P2, P3, P4>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 5],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, P4, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+    P4: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+        P4::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 5 {
+            return Err(MarshalError::ArgCount {
+                expected: 5,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        let p4 = P4::from_slot(slots[4]);
+        body(p0, p1, p2, p3, p4, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a 6-arg native function with full param spec.
+pub fn register_typed_fn_6_full<F, P0, P1, P2, P3, P4, P5>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: [crate::module_exports::ModuleParam; 6],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(P0, P1, P2, P3, P4, P5, &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+    P0: FromSlot + Send + Sync + 'static,
+    P1: FromSlot + Send + Sync + 'static,
+    P2: FromSlot + Send + Sync + 'static,
+    P3: FromSlot + Send + Sync + 'static,
+    P4: FromSlot + Send + Sync + 'static,
+    P5: FromSlot + Send + Sync + 'static,
+{
+    let arg_kinds = vec![
+        P0::NATIVE_KIND,
+        P1::NATIVE_KIND,
+        P2::NATIVE_KIND,
+        P3::NATIVE_KIND,
+        P4::NATIVE_KIND,
+        P5::NATIVE_KIND,
+    ];
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 6 {
+            return Err(MarshalError::ArgCount {
+                expected: 6,
+                got: slots.len(),
+            }
+            .into());
+        }
+        let p0 = P0::from_slot(slots[0]);
+        let p1 = P1::from_slot(slots[1]);
+        let p2 = P2::from_slot(slots[2]);
+        let p3 = P3::from_slot(slots[3]);
+        let p4 = P4::from_slot(slots[4]);
+        let p5 = P5::from_slot(slots[5]);
+        body(p0, p1, p2, p3, p4, p5, ctx)
+    });
+    install(
+        module,
+        name,
+        description,
+        params.into_iter().collect(),
+        return_type,
+        arg_kinds,
+        invoke,
+    );
+}
+
 /// Internal helper: install a fully-prepared typed function entry into a
 /// module's typed registry plus its schema-only entry.
 fn install(
