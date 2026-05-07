@@ -340,6 +340,26 @@ The original 2026-05-06 entry's "five parser modules
 expansion was the seventh instance of the directory-adjacency
 cluster fallacy — same imports, different cluster identities.
 
+**(a.1) 2026-05-07 — HashMap-marshal micro-cluster gains csv consumers.**
+The Phase 2d Array cluster landing migrated csv.parse, csv.stringify,
+csv.read_file, csv.is_valid to the typed marshal layer (commits
+9f6b1d3 and earlier in this same workstream). The two remaining
+csv functions — **csv.parse_records** (returns
+`Array<HashMap<string, string>>`) and **csv.stringify_records**
+(consumes `Array<HashMap<string, string>>`) — were deferred for
+exactly the same reason `http.rs` was: `HeapValue` has no `HashMap`
+variant in the strict-typed runtime. The architectural decision is
+shared: a single HashMap-marshal landing unblocks both
+`http.rs`'s response-object construction *and* csv's record-row
+construction. Cluster identity confirmed: **HashMap-marshal
+micro-cluster, two consumer sites (`http.rs` + `csv_module.rs`),
+one architectural decision.** Do not split into per-consumer
+sub-decisions — the storage shape (whether a new
+`HeapValue::HashMap` variant, a `TypedObject`-with-keys/values
+projection, or some `from_hashmap_pairs`-equivalent) is the same
+question for both. See `crates/shape-runtime/src/stdlib/csv_module.rs`
+deferred-list comment for the consumer-side hold.
+
 **(b) Sub-decision count: was 3, audit revealed 5 with interlocks.**
 The 2026-05-06 entry listed three architectural decisions
 (runtime representation, Shape-side enum wiring, dispatcher
