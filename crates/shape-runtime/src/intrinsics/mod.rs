@@ -236,28 +236,15 @@ impl IntrinsicsRegistry {
         // Empty: all 5 random intrinsics migrated to typed marshal layer.
     }
 
-    /// Register statistical distribution intrinsics
-    fn register_distributions_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_dist_uniform".to_string(),
-            distributions::intrinsic_dist_uniform,
-        );
-        functions.insert(
-            "__intrinsic_dist_lognormal".to_string(),
-            distributions::intrinsic_dist_lognormal,
-        );
-        functions.insert(
-            "__intrinsic_dist_exponential".to_string(),
-            distributions::intrinsic_dist_exponential,
-        );
-        functions.insert(
-            "__intrinsic_dist_poisson".to_string(),
-            distributions::intrinsic_dist_poisson,
-        );
-        functions.insert(
-            "__intrinsic_dist_sample_n".to_string(),
-            distributions::intrinsic_dist_sample_n,
-        );
+    /// All distribution intrinsics (dist_uniform, dist_lognormal,
+    /// dist_exponential, dist_poisson, dist_sample_n) migrated to typed
+    /// marshal entries in `distributions::create_distributions_intrinsics_module`.
+    /// `dist_sample_n`'s body delegates to shared sampling helpers
+    /// (`sample_uniform`/`sample_lognormal`/etc.) so both per-call typed
+    /// entries and `dist_sample_n` share the math without going through
+    /// the marshal layer twice.
+    fn register_distributions_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: all 5 distribution intrinsics migrated to typed marshal layer.
     }
 
     /// Register stochastic process intrinsics
