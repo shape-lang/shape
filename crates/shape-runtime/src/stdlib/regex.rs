@@ -1,17 +1,11 @@
 //! Native `regex` module for regular expression operations.
 //!
-//! Exports: regex.match_all, regex.replace, regex.replace_all,
-//!          regex.is_match, regex.split
+//! Exports: regex.match, regex.match_all, regex.find, regex.replace,
+//!          regex.replace_all, regex.is_match, regex.split
 //!
 //! Phase 2c migration: ported to the typed marshal layer.
-//!
-//! `regex.match` and `regex.find` (Option<Object> return) are deferred —
-//! `TypedReturn::Some` takes a `ConcreteReturn` payload, and
-//! `ConcreteReturn` is intentionally a leaf-only set (no recursive
-//! `TypedObject` variant per the Concrete/Wrapper split). The strict-
-//! typed answer needs either a flat `TypedReturn::SomeObjectPairs`
-//! variant or a monomorphized TypedObject schema_id projection. Both
-//! are marshal extensions tracked alongside the parser-cluster work.
+//! Phase 2d Cluster #4 (2026-05-07): regex.match and regex.find activated
+//! using the new `TypedReturn::SomeObjectPairs` variant.
 
 use crate::marshal::{register_typed_fn_2, register_typed_fn_3};
 use crate::module_exports::ModuleExports;
@@ -41,6 +35,49 @@ fn match_to_pairs(m: &regex::Match, captures: &regex::Captures) -> Vec<(String, 
 pub fn create_regex_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::regex");
     module.description = "Regular expression matching and replacement".to_string();
+
+    // regex.match(text: string, pattern: string) -> Option<{text, start, end, groups}>
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
+        &mut module,
+        "match",
+        "Find the first match of the pattern, returning Some({text, start, end, groups}) or None",
+        [("text", "string"), ("pattern", "string")],
+        ConcreteType::Option(Box::new(ConcreteType::Object)),
+        |text, pattern, _ctx| {
+            let re = regex::Regex::new(pattern.as_str())
+                .map_err(|e| format!("regex.match() invalid pattern: {}", e))?;
+            match re.captures(text.as_str()) {
+                Some(caps) => {
+                    let m = caps.get(0).unwrap();
+                    Ok(TypedReturn::SomeObjectPairs(match_to_pairs(&m, &caps)))
+                }
+                None => Ok(TypedReturn::None),
+            }
+        },
+    );
+
+    // regex.find(text: string, pattern: string) -> Option<{text, start, end, groups}>
+    //
+    // Same shape as regex.match — kept as a separate name for the
+    // historical "find first match" idiom in Shape user code.
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
+        &mut module,
+        "find",
+        "Find the first match of the pattern (alias for regex.match)",
+        [("text", "string"), ("pattern", "string")],
+        ConcreteType::Option(Box::new(ConcreteType::Object)),
+        |text, pattern, _ctx| {
+            let re = regex::Regex::new(pattern.as_str())
+                .map_err(|e| format!("regex.find() invalid pattern: {}", e))?;
+            match re.captures(text.as_str()) {
+                Some(caps) => {
+                    let m = caps.get(0).unwrap();
+                    Ok(TypedReturn::SomeObjectPairs(match_to_pairs(&m, &caps)))
+                }
+                None => Ok(TypedReturn::None),
+            }
+        },
+    );
 
     // regex.is_match(text: string, pattern: string) -> bool
     register_typed_fn_2::<_, Arc<String>, Arc<String>>(
@@ -133,6 +170,8 @@ mod tests {
     fn test_regex_module_creation() {
         let module = create_regex_module();
         assert_eq!(module.name, "std::core::regex");
+        assert!(module.has_export("match"));
+        assert!(module.has_export("find"));
         assert!(module.has_export("is_match"));
         assert!(module.has_export("match_all"));
         assert!(module.has_export("replace"));
