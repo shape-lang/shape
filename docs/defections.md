@@ -2045,6 +2045,140 @@ N2 marked landed; batch-4 disposition documented; N1 consumer
 count clarified post-scan.rs deletion. Calibration rows for
 batch-4 commits will be appended at batch-4 close.
 
+### 2026-05-07 — Sub-decision queue extension: N5 ModuleContext access for ExecutionContext-dependent body migrations
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The eight prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration + partial-migration pattern + sub-decision queue +
+M1-split-and-N1 + N2 marshal arity 4/5/6 + N3 ifft polymorphic-
+input split) stay on-record.** This subsection adds **item #8 (N5
+ModuleContext access for ExecutionContext-dependent body
+migrations)**, surfaced during the multi_table partial-with-
+deletions commit at `d1c37e5`.
+
+**Audit during multi_table batch-4 preparation revealed:**
+
+`align_tables` body (`crates/shape-runtime/src/multi_table/functions.rs:30-124`)
+calls `ctx.get_current_timeframe()` at line 78 to compute `default_tf`
+for `parse_dataset_id`. The legacy `IntrinsicFn` signature passes
+`&mut ExecutionContext` directly; the typed marshal layer's body
+signature passes `&ModuleContext` (`module_exports.rs:109`).
+**`ModuleContext` does NOT expose `ExecutionContext` access** —
+verified via reading the struct definition + impl methods. Fields
+present: `schemas`, `invoke_callable`, `raw_invoker`,
+`function_hashes`, `vm_state` (read-only), `granted_permissions`,
+`scope_constraints`, `set_pending_resume`, `set_pending_frame_resume`.
+None expose `get_current_timeframe()` or analogous
+ExecutionContext state.
+
+`align_tables` also has a confirmed cross-crate consumer at
+`crates/shape-jit/src/ffi_symbols/data_access/mod.rs:95` that calls
+the legacy `(ctx, &[ValueWord])` signature directly. Cross-crate
+scope extends beyond shape-runtime body migration.
+
+**N5 architectural shape (three options for supervisor sign-off):**
+
+- **N5-α (extend ModuleContext to expose ExecutionContext access):**
+  add a field to `ModuleContext` like
+  `exec_ctx: Option<&'a mut crate::context::ExecutionContext>`, OR
+  expose a narrower trait
+  `pub trait ExecutionContextAccess { fn current_timeframe(&self)
+  -> Option<Timeframe>; }`. Each typed body that needs runtime-state
+  access reads from this. Body type for align_tables would be
+  `register_typed_fn_2_full<Vec<Arc<String>>, Arc<String>>`. Cross-
+  crate scope: shape-vm dispatcher passes `&mut ModuleContext` per
+  call; the additional field threads through. Architectural
+  extension scope similar to N1.
+- **N5-β (refactor body to drop ctx dependency):** rewrite
+  `align_tables` to use `Timeframe::default()` instead of
+  `ctx.get_current_timeframe()`. Lose current-timeframe-context
+  inheritance. Functionally OK in the current state (load_rows
+  always errors anyway, so the path beyond default_tf is dead
+  code), but lossy if load_rows ever lands a real impl. Body-side
+  refactor — within M-A standing IF semantically acceptable. Not
+  zero-cost: changes observable behavior of align_tables once
+  load_rows works.
+- **N5-γ (defer permanent legacy):** keep align_tables as legacy
+  IntrinsicFn body indefinitely. shape-jit cross-crate consumer
+  continues to call the legacy path. Migration awaits shape-vm
+  cleanup workstream's broader cross-crate-cleanup landing.
+
+**Updated sub-decision queue (binding):**
+
+1. **M1-split** (8 functions; validity-aware-return for diff +
+   rolling_sum). Architectural extension; out of M-A scope.
+   (Prior queue item #1.)
+
+2. **char_code multi-input-type dispatch.** (Prior queue item #2.)
+
+3. **bspline2_3d_batch generic-array consumer audit.** (Prior
+   queue item #3.)
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** (Prior queue item #4.)
+
+5. **N1: `FromSlot for Option<T>` typed marshal.** Confirmed
+   consumers: recurrence.rs::intrinsic_linear_recurrence (post-
+   scan.rs deletion). Discriminator question PASTE-BLOCK 1A-V1
+   pending supervisor sign-off as of 2026-05-07. (Prior queue
+   item #5; consumer count effectively reduced to 1 post-scan.rs
+   deletion.)
+
+6. **N2: marshal arity extension to register_typed_fn_4/5/6
+   (+ `_full` variants).** **LANDED at `5dcb1ce`** (sync-only at
+   first landing; per-arity LoC under 30-line ceiling). (Prior
+   queue item #6, resolved.)
+
+7. **N3: ifft polymorphic-input split.** (Prior queue item #7;
+   N3-β disposition relayed batch-4: defer permanent legacy at
+   first landing.)
+
+8. **N5: ModuleContext access for ExecutionContext-dependent body
+   migrations.** Confirmed consumer needing N5:
+   multi_table::align_tables (`get_current_timeframe()`).
+   Architectural extension scope similar to N1; cross-crate
+   scope extends to shape-jit FFI consumer at
+   `data_access/mod.rs:95`. **AUDIT RECOMMENDATION (pending
+   supervisor sign-off):** N5-γ (defer permanent legacy) at first
+   landing — single confirmed consumer, cross-crate scope expands,
+   and shape-jit cleanup workstream natural absorption. N5-α
+   (ModuleContext extension) preserves runtime-context behavior at
+   architectural extension cost; reconsider when a second
+   ExecutionContext-dependent consumer surfaces. N5-β (refactor
+   body to drop ctx dependency) is observable behavior change;
+   reject unless load_rows is also confirmed-permanent-stub.
+
+**Note on N4 (Dev 2's body: any param decision):** N4 lives in
+the HashMap-marshal cluster's queue, not the intrinsics-typed-CC
+queue. Cross-cluster sub-decision dependency exists if any
+intrinsics file surfaces a `body: any`-shaped param; none have
+to date.
+
+**Sub-decision queue items remain on-record-only.** Adding to the
+queue ≠ approval to execute. Each item requires its own surface-
+and-decide round-trip with audit-1+2+3 binding pre-work +
+supervisor sign-off + structural reasoning.
+
+**Batch-4 calibration rows (appended per the prior subsection's
+"calibration rows for batch-4 commits will be appended at batch-4
+close" disposition):**
+
+| Commit | Predicted | Measured | In window |
+|---|---|---|---|
+| `9a7600e` (N3 queue add) | 0 | 0 (81→81) | exact |
+| `2877d1f` (matrix.rs full) | -5 | -4 (81→77) | within (off by 1; per-file table's "non-import-cascade outlier" estimate) |
+| `9b34b3f` (fft.rs partial) | 0 to -1 | 0 (77→77) | within lower bound |
+| `d1c37e5` (multi_table delete-3) | -1 to -2 | 0 (77→77) | outside lower bound by 1 (stub deletions don't move cascade if same-file functions retain imports — calibration sub-finding for queue) |
+
+**15/16 strictly in window** across the cumulative session.
+multi_table miss is the first calibration miss this session;
+diagnostic captured for forward calibration.
+
+**Disposition for this subsection:** N5 added as queue item #8;
+N1 consumer count tracked alongside; batch-4 calibration rows
+appended.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
