@@ -515,6 +515,727 @@ corollary) anchored by empirical citations. Catch-layer #10 + #11
 both audit-time-pre-commit-cargo-check rank.
 
 ---
+## 2026-05-07 — N7 unified workstream — ε disposition (JsonValue universal intermediate)
+
+This is **not** a defection. On-record disposition of the **N7 unified
+any-typed-marshal-for-serialization workstream** (6 consumers + 1
+structural 7th) per supervisor sign-off (relay batch via team-lead,
+2026-05-07 PB 1/4). N7's blocked-consumer list and earlier
+sub-decision-queue framing live at the HashMap-marshal cluster's Stage
+B+D close-out subsection (defections.md:1205-1245); this entry captures
+the architectural-shape disposition that closes the queue item.
+
+## Background
+
+The Stage D supervisor relay (defections.md:976-1027) surfaced N7 as an
+architectural sub-decision: how should stdlib bodies that need to walk a
+polymorphic `HeapValue` tree and produce a target-format byte/string
+output be shaped? The Stage B+D close-out batch (defections.md:1205-1245)
+unified N7's HTTP/object-output context (post_json/put_json) and the
+prior N4 sub-cluster's serialization context (yaml.stringify,
+toml.stringify, msgpack.encode, msgpack.encode_bytes) into a single
+6-consumer architectural decision.
+
+Pre-architectural audit (dev2-n7) surfaced 5 candidate option-shapes
+(α/β/γ/δ/ε), 5 open architectural sub-questions, and confirmed N9
+non-overlap + 3.C structural-reuse-implication of option ε. Supervisor
+disposition: **ε (JsonValue universal intermediate)**.
+
+## Confirmed N7 consumers (7 — handover lists 6; structural 7th flagged)
+
+| # | Function | File | Lines | Format |
+|---|---|---|---|---|
+| 1 | `http.post_json` | `crates/shape-runtime/src/stdlib/http.rs` | 496-523 (deferral block) | JSON |
+| 2 | `http.put_json` | same file | same block | JSON |
+| 3 | `yaml.stringify` | `crates/shape-runtime/src/stdlib/yaml.rs` | 146-170 | YAML |
+| 4 | `toml.stringify` | `crates/shape-runtime/src/stdlib/toml_module.rs` | 141-165 | TOML |
+| 5 | `msgpack.encode` | `crates/shape-runtime/src/stdlib/msgpack_module.rs` | 86-111 | MsgPack (hex string) |
+| 6 | `msgpack.encode_bytes` | same file | 148-173 | MsgPack (bytes) |
+| 7 | `json.stringify` | `crates/shape-runtime/src/stdlib/json.rs` | 377-418 | JSON |
+
+`json.stringify` is structurally a 7th N7 consumer (uses the same
+deleted `value.to_json_value()` pattern at `json.rs:407` as yaml /
+msgpack stringify); surfaced during pre-architectural audit and confirmed
+by supervisor in the disposition batch.
+
+## Architectural shape — option ε signed off
+
+**Free fn `heap_to_json_value(&HeapValue) -> Result<JsonValue, String>`
+in `crates/shape-runtime/src/json_value.rs`.** NOT a method on
+`HeapValue`; NOT in `shape-value`. Format-specific encoders take
+`&JsonValue` (NOT `&HeapValue`) and produce per-format bytes/string.
+
+**Why ε over α/β/γ/δ** (verbatim from supervisor PB 1/4): structural-
+enforcement principle. Forbidden state "format-specific HeapValue
+walker" is unrepresentable when format encoders take `&JsonValue`. The
+5+ architectural-choice variants decompose ONCE at the
+`HeapValue → JsonValue` layer, not per-format. Mirrors json.rs's
+parse-side `serde_json_to_json_value` (`json.rs:172-196`) in reverse;
+JsonValue's module-doc (`json_value.rs:1-15`) was written for this
+universal-intermediate role.
+
+**Refused alternatives** (binders in their own subsection below):
+α (unified visitor) / β (per-format ConcreteType) / γ (Serialize trait)
+/ δ (per-format helpers).
+
+## Walker scope — 18 actual `HeapValue` arms
+
+Per `crates/shape-value/src/heap_variants.rs:87-135`, the current
+`HeapValue` enum has exactly 18 arms:
+
+String / Decimal / BigInt / Future / Char / DataTable / Content /
+Instant / IoHandle / NativeScalar / NativeView / TypedObject /
+ClosureRaw / TaskGroup / TypedArray / Temporal / TableView / HashMap.
+
+The C2 walker matches all 18 exhaustively. Rust's exhaustive-match
+checker enforces no `_` wildcard; no silently-skipped variant.
+
+**Note on stale variant names**: the original N7 surface-table
+(defections.md:993, "18 `HeapValue` variants") and team-lead's pre-
+disposition paraphrase referenced names from older HeapValue eras
+(`Some` / `Ok` / `Err` / `Array` / `Bool` / `Int` / `Float` / `None`)
+that no longer exist as HeapValue arms — `Some/Ok/Err/None` were
+deleted from HeapValue and now live as `TypedReturn` wrappers at the
+marshal layer; `Array` was deleted and replaced by `TypedArray`;
+`Bool/Int/Float` are inline-scalar slot kinds, not heap-resident.
+shape-vm's `foreign_marshal.rs::heap_to_msgpack_value` still references
+those deleted variants (`HeapValue::Array/Some/Ok/Err`) — that file's
+breakage is part of shape-vm's pre-existing tail, unrelated to N7.
+
+## Three-class classification (REFINEMENT-1A in-place correction)
+
+Original Stage D entry (defections.md:985-1010) classified 7 mechanical-
+yes / 5 reject / 5 architectural-choice / 1 TypedObject = 18. The
+audit + supervisor REFINEMENT-1A disposition supersedes this with:
+
+| Class | Count | Variants | Walker semantics |
+|---|---|---|---|
+| **Mechanical-yes** | 5 | Char, TypedArray, HashMap, BigInt, String | Direct or recursive sub-walk via `JsonValue::*` constructors |
+| **Categorically-non-data Reject** | 5 | Future, IoHandle, NativeView, ClosureRaw, TaskGroup | `Err("cannot serialize: <variant>")` permanently; no future sub-decisions |
+| **Architectural-choice deferred** | 7 | Decimal, DataTable, Content, Temporal, TableView, **Instant**, **NativeScalar** | First-landing `Err(<policy not yet decided>)`; each policy = separate sub-decision when first consumer needs it |
+| **TypedObject schema-aware** | 1 | TypedObject | Schema lookup via `lookup_schema_by_id_public(schema_id)`; per-FieldDef field_type dispatch |
+| **Total** | 18 | | |
+
+Math checks: 5 + 5 + 7 + 1 = 18.
+
+**The two distinct Err() classes are load-bearing and MUST stay
+distinguished by these canonical labels**:
+
+- **Categorically-non-data Reject**: hold runtime resources (file
+  handles / async task IDs / native pointers / closure environments /
+  task groups). No serialization policy can convert them to wire format.
+  Permanent. No future sub-decisions.
+- **Architectural-choice deferred**: each represents a user-visible
+  behavioral commitment requiring explicit decision per consumer
+  demand. First-landing Err; each variant gets its own per-consumer-
+  driven sub-decision when the first consumer needs that variant
+  serialized.
+
+Renaming or merging these two labels in future N7 sub-disposition
+relays is refused (binder below).
+
+### REFINEMENT-1A — Instant + NativeScalar promoted from mechanical-yes to architectural-choice deferred
+
+In-place dated subsection per finding #11. **The original 7/5/5/1
+framing in defections.md:985-1010 stays on-record;** this REFINEMENT-1A
+correction supersedes Instant + NativeScalar to architectural-choice
+deferred.
+
+**Instant — promoted via I-b (deferred Err first-landing)**:
+`std::time::Instant` is a monotonic clock value, not an absolute
+time. ISO-8601 rendering is not applicable to a monotonic clock without
+imposing a process-start epoch convention — that convention is itself
+an architectural choice. The earlier "ISO-8601 is the obvious mechanical
+rendering" social-contract framing (defections.md:993) is FALSE for
+Instant (it is true for `Temporal::DateTime` payloads; structurally
+distinct types). I-b makes the forbidden state ("locked-in Instant
+rendering consumers can't override") unrepresentable in first-landing.
+
+**NativeScalar — entire enum promoted to architectural-choice deferred**:
+NativeScalar's actual variants per `heap_value.rs:94-105` are
+Isize(isize) / Usize(usize) / Ptr(usize) / I8/U8/I16/U16/I32/U32/I64/
+U64/F32. **Ptr is hostile to JSON** — leaks raw memory addresses,
+ASLR-disclosure-class issue, meaningless cross-process. First-landing
+Err is the safe shape; per-inner-kind dispatch (Isize→Int / Usize→Int /
+F32→Number / Ptr→Err / overflow handling for U64) becomes its own
+sub-decision per consumer demand. **Per-inner-kind dispatch in C2
+walker is REFUSED** at first-landing (binder below); the entire
+NativeScalar arm is single Err() until consumer-driven sub-decision
+lands.
+
+**Audit-grounded consumer-safety verification**: of the 7 N7 consumers
+audited (http.post_json/put_json, json.stringify, yaml.stringify,
+toml.stringify, msgpack.encode/encode_bytes), zero produce Instant or
+NativeScalar in their input-tree shape. The single Instant/NativeScalar
+hit across consumer files is a comment-only reference at `http.rs:112`
+documenting that `extract_timeout` doesn't yet handle a future
+`HeapValue::NativeScalar`-aware branch for `number`-typed timeout
+values (separate feature concern, not N7-walker concern). The
+class-B Err() first-landing is **consumer-safe** — no current N7
+consumer call path touches an Instant or NativeScalar arm.
+
+### TypedArrayData inner-dispatch (Matrix/FloatSlice)
+
+`HeapValue::TypedArray(TypedArrayData)` is itself a 15-arm sub-enum at
+`heap_value.rs:616-636`:
+- 12 primitive-element sub-variants (I8/I16/I32/I64/U8/U16/U32/U64/F32
+  /F64/Bool/String) + HeapValue (recursive) → JsonValue::Array of
+  per-element-mapped JsonValue
+- TypedArrayData::Bool storage-vs-semantic distinction: storage is
+  `Arc<TypedBuffer<u8>>` but the semantic type is bool — walker maps
+  `(b != 0) → JsonValue::Bool`, NOT `(u8 → JsonValue::Int)`
+- **Matrix(Arc<MatrixData>)** and **FloatSlice { parent, offset, len }**:
+  2D-layout / aliasing-slice-into-parent. JSON encoding shape (nested
+  array-of-arrays vs flat with shape metadata vs flat row-major) is a
+  user-visible architectural choice. **First-landing disposition pending
+  REFINEMENT-1B supervisor relay** (Matrix/FloatSlice architectural-
+  choice candidates surfaced; not yet dispositioned).
+
+C2 walker holds the Matrix/FloatSlice arms in the TypedArrayData inner-
+dispatch pending REFINEMENT-1B; all OTHER walker arms (5 mechanical-
+yes top-level + 5 categorically-non-data + 7 architectural-choice
+deferred + TypedObject schema-aware + the 13 mechanical TypedArrayData
+sub-variants) are finalized.
+
+### REFINEMENT-1B-ITEM-A — Matrix + FloatSlice promoted to architectural-choice deferred
+
+In-place dated subsection per finding #11. **The placeholder framing
+above (lines 224-245) stays on-record;** this REFINEMENT-1B-ITEM-A
+subsection supersedes the "pending REFINEMENT-1B supervisor relay"
+disposition on the two TypedArrayData inner-sub-variants.
+
+**Matrix — promoted to architectural-choice deferred (first-landing Err)**:
+2D-layout encoding question (nested array-of-arrays vs flat row-major
+vs `{rows, cols, data}` shape-metadata vs schema-derived) is structurally
+identical to DataTable's row-shape question. Multiple natural encodings;
+no canonical-default; user-visible behavioral commitment. Same precedent
+as REFINEMENT-1A's Instant + NativeScalar promotion. Structural-
+enforcement: forbidden state "locked-in Matrix encoding consumers can't
+override" unrepresentable in first-landing Err.
+
+**FloatSlice — promoted to architectural-choice deferred**:
+structurally inherits Matrix's encoding question via shared MatrixData
+(`heap_value.rs:32` doc-comment confirms "used by TypedArrayData::Matrix
+and FloatSlice"). Two consistent shapes possible per consumer policy —
+(i) materialize-into-Matrix-then-encode, (ii) encode-as-slice-with-
+parent-context. Per binders below: **separate sub-decision from Matrix
+when first consumer needs it; not pre-locked**. Mirrors Instant +
+NativeScalar separation precedent.
+
+### Nesting discipline — load-bearing (binder)
+
+Matrix and FloatSlice are TypedArrayData INNER sub-variants, NOT
+top-level HeapValue variants. The framework extends recursively, NOT
+by promotion to top-level:
+
+- **Top-level**: `HeapValue::TypedArray` STAYS mechanical-yes (walker
+  confidently reaches into TypedArrayData). Top-level mechanical-yes
+  count = 5: Char / TypedArray / HashMap / BigInt / String.
+- **Inner-dispatch**: 15 TypedArrayData sub-variants split as 13
+  mechanical-yes + 2 architectural-choice deferred (Matrix +
+  FloatSlice).
+- **REFINEMENT-1A's labels** (categorically-non-data Reject /
+  architectural-choice deferred / mechanical-yes) extend to sub-
+  variant level via the SAME framework.
+
+**Total architectural-choice deferred policy decisions = 9 distributed
+across two levels** (NOT flattened to 9 top-level):
+- Top-level (7 from REFINEMENT-1A): Decimal / DataTable / Content /
+  Temporal / TableView / Instant / NativeScalar
+- TypedArrayData sub-variant (2 new): Matrix / FloatSlice
+
+Flattening sub-variant architectural-choice up to top-level count is
+refused on sight (binder). The framework extends recursively at any
+level where a sub-enum surface emerges; future framework extensions
+preserve this nesting discipline.
+
+### Audit-grounded consumer-safety verification
+
+Of the 7 N7 consumers (http.post_json/put_json, json.stringify,
+yaml.stringify, toml.stringify, msgpack.encode/encode_bytes), zero
+produce Matrix or FloatSlice in their input-tree shape. MatrixData
+arrival paths are intrinsics-side (vector / matrix / fft / convolution
+intrinsic kernels), NOT stdlib-stringify-side. Class-B Err()
+first-landing for Matrix + FloatSlice is **consumer-safe** for all 7
+N7 consumers — no current call path touches a Matrix or FloatSlice
+arm.
+
+### Refused candidates and binders (REFINEMENT-1B-ITEM-A — binding throughout)
+
+- ❌ Renaming "architectural-choice deferred" labels at sub-variant
+  level (REFINEMENT-1A canonical labels extend recursively; sub-variant
+  level uses same labels)
+- ❌ Bundling Matrix policy with FloatSlice policy when first
+  per-consumer sub-decisions land (separate consumer demands; mirrors
+  Instant + NativeScalar separation precedent)
+- ❌ Partial-mechanical-yes for Matrix or FloatSlice ahead of
+  architectural-choice disposition (consistent with NativeScalar
+  partial-dispatch refusal)
+- ❌ **Flattening sub-variant architectural-choice up to top-level
+  count** (the framework extends recursively at any sub-enum surface;
+  preserve TypedArrayData inner-dispatch nesting; 7 + 2 = 9 across
+  two levels, NOT 9 at top level)
+
+### Restated classification (REFINEMENT-1B-ITEM-A nesting refinement)
+
+The REFINEMENT-1A three-class top-level table (defections.md ~lines
+171-178) stays on-record. REFINEMENT-1B-ITEM-A adds a TypedArrayData
+inner-dispatch sub-table for completeness:
+
+| Sub-variant | Class | Walker semantics |
+|---|---|---|
+| I8/I16/I32/I64/U8/U16/U32/U64 (8) | Mechanical-yes | `Vec<JsonValue::Int>` |
+| F32/F64 (2) | Mechanical-yes | `Vec<JsonValue::Number>` |
+| Bool (1) | Mechanical-yes | `Vec<JsonValue::Bool>` (storage `u8` 0/1 → semantic bool) |
+| String (1) | Mechanical-yes | `Vec<JsonValue::String>` |
+| HeapValue (1) | Mechanical-yes | `Vec<JsonValue>` recursing via `heap_to_json_value` |
+| **Matrix** (1) | **Architectural-choice deferred** | `Err(<Matrix encoding policy not yet decided>)` |
+| **FloatSlice** (1) | **Architectural-choice deferred** | `Err(<FloatSlice encoding policy not yet decided>)` |
+| **Total** | 15 | |
+
+Math checks: 8 + 2 + 1 + 1 + 1 + 1 + 1 = 15.
+
+### Calibration
+
+**This entry (C1.5)**: 0 errors expected. Defections-only, no source
+file changes (Rule A).
+
+**C2 calibration unchanged from REFINEMENT-1A**: 0±2 (Rule C — additive
+helper; no consumers yet). Per-consumer C7-C13 -1 to -3 each per Rule D
++ candidate Rule H (FQ/bare/method-call audit per consumer).
+
+### Disposition
+
+REFINEMENT-1B-ITEM-A signed off: Matrix + FloatSlice promoted to
+architectural-choice deferred at TypedArrayData sub-variant level;
+nesting discipline established as binder; audit-grounded
+consumer-safety verified.
+
+C2 walker now fully unblocked: emits Err() at the TypedArrayData
+inner-dispatch arms for Matrix and FloatSlice (first-landing); all
+other walker arms unchanged from REFINEMENT-1A finalization. Per-
+sub-variant policy sub-decisions deferred until first consumer demand
+(separate sub-decisions; not bundled).
+
+## Cross-cluster non-overlaps + interlocks
+
+**N9 non-overlap (verified)**: shape-runtime `nb_to_slot` is at
+`crates/shape-runtime/src/type_schema/mod.rs:354` (`pub(crate)`); zero
+N7 consumer call paths invoke it. json.rs's path-c2 N8 helpers
+explicitly note "no call to `nb_to_slot`" at `json.rs:50,52` (Option A2
+atomicity-gate self-correction). N9 and N7 are non-overlapping at the
+call-graph level today. Bundling N7 + N9 dispositions is refused
+(binder below).
+
+**3.C reverse-direction pairing (sequenced AFTER N7-C6)**: per
+supervisor PB 3/4, the per-format-typed-sums-or-unified-parsed-value
+workstream (3.C — yaml.parse, toml.parse, msgpack.decode,
+msgpack.decode_bytes) is signed off as **unified via JsonValue (lossy
+mappings stay; no extension first-landing)**. Sequenced AFTER N7-C6
+lands. **Independent of N9.** Per-direction commits, NOT bundled with
+N7. Bundling N7 + 3.C in single architectural commit is refused
+(binder below).
+
+JsonValue extension policy for 3.C: NO new variants first-landing.
+- YAML Tagged → unwrap (yaml.rs:75-78 precedent)
+- TOML Datetime → String (existing)
+- JsonValue.Bytes → msgpack-binary
+
+**JsonValue.Bytes variant first-landing scope**: defined in
+`json_value.rs:23` but currently unproduced by any helper. Reserved for
+msgpack-binary parse (3.C) and msgpack.encode_bytes (N7-C13 via
+msgpack-bytes encoding path). Future variant additions (e.g.
+`YamlTagged`, `TomlDatetime`) refused first-landing (binder below).
+
+## Commit sequence (N7 cluster — binding per supervisor)
+
+| Commit | Description | Calibration |
+|---|---|---|
+| **C1** | This defections.md entry | 0 (defections-only) |
+| **C2** | `heap_to_json_value(&HeapValue) -> Result<JsonValue, String>` in `shape-runtime/src/json_value.rs` (Err() on 7 architectural-choice variants + 5 categorically-non-data variants; mechanical-yes for the 5 + TypedObject schema-aware; Matrix/FloatSlice arms HOLD pending REFINEMENT-1B) | 0±2 (Rule C — additive) |
+| **C3** | `json_value_to_serde_json` reverse helper (used by C7 + C8 + C9) | 0±2 (additive) |
+| **C4** | `json_value_to_serde_yaml` reverse helper (used by C10) | 0±2 (additive) |
+| **C5** | `json_value_to_toml_value` reverse helper (used by C11; replaces `nanboxed_to_toml_value` walker entirely in C11) | 0±2 (additive) |
+| **C6** | `json_value_to_rmpv_value` reverse helper (used by C12 + C13; after this lands, 3.C is unblocked) | 0±2 (additive) |
+| **C7** | `json.stringify` migration (uses C2 + C3) | -1 to -3 per consumer (Rule D + Rule G) |
+| **C8** | `http.post_json` migration (uses C2 + C3; mirrors `post_text`/`post_bytes` from `d0a73e7`) | -1 to -3 |
+| **C9** | `http.put_json` migration (uses C2 + C3; mirrors `put_text`/`put_bytes` from `d0a73e7`) | -1 to -3 |
+| **C10** | `yaml.stringify` migration (uses C2 + C4) | -1 to -3 |
+| **C11** | `toml.stringify` migration (uses C2 + C5; replaces `nanboxed_to_toml_value` walker) | -1 to -3 |
+| **C12** | `msgpack.encode` migration (uses C2 + C6) | -1 to -3 |
+| **C13** | `msgpack.encode_bytes` migration (uses C2 + C6) | -1 to -3 |
+
+**N7 cluster total**: -7 to -14 errors.
+
+**Plus 3.C cascade post-N7-C6** (per supervisor PB 3/4):
+- 3.C-C1 — defections.md unified disposition entry
+- 3.C-C2 — `serde_yaml_to_json_value` reverse helper
+- 3.C-C3 — `toml_value_to_json_value` reverse helper
+- 3.C-C4 — `rmpv_to_json_value` reverse helper
+- 3.C-C5+ — per-consumer migrations: yaml.parse, yaml.parse_all,
+  toml.parse, msgpack.decode, msgpack.decode_bytes
+- 3.C calibration: C2-C4 ~0±2 each; C5+ -1 to -3 each; cluster -10 to
+  -20
+
+**Combined N7 + 3.C cascade total**: -17 to -34 errors when both land.
+
+## Refused candidates and binders (binding throughout N7 execution)
+
+**Refused option-shapes** (audit pre-architectural surface, supervisor
+sign-off):
+- ❌ Option α (unified visitor with single `serialize_heap_value(value:
+  &HeapValue, fmt: Format)` + internal Format-enum dispatch) — risks
+  parametric-explosion at format dispatch; ε's per-format encoders take
+  JsonValue as the load-bearing structural-purity property
+- ❌ Option β (per-format `ConcreteReturn::JsonString` /
+  `YamlString` / etc. variants) — output type is already string or
+  bytes; new ConcreteReturn variants don't add type-system enforcement;
+  parametric-explosion shape (CLAUDE.md "per-element-kind variants")
+- ❌ Option γ (`Serialize` trait for HeapValue in shape-value) — wider
+  cross-crate scope; trait-family-proliferation risk; the 5+
+  architectural-choice variants decompose at the trait impl anyway
+- ❌ Option δ (per-format `heap_to_json` / `heap_to_yaml` / `heap_to_toml`
+  / `heap_to_msgpack_bytes` helper functions in stdlib bodies) —
+  matches refused "ad-hoc serialize_heap_value_to_json helper bolted
+  into stdlib::http"
+
+**Refused candidates** (cited verbatim per supervisor; binding):
+- ❌ Ad-hoc `serialize_heap_value_to_json` helper bolted into
+  `stdlib::http` — refused; ε's universal intermediate replaces this
+- ❌ `ToSlot<JsonString>` for `HeapValue` with format-specific
+  serialization — refused; output types are already string/bytes via
+  existing marshal-layer arms
+- ❌ Reuse of intrinsics-layer JSON encoder via back-channel — the
+  ε walker is NEW infrastructure; not reuse-as-is of any existing
+  walker (including shape-vm `foreign_marshal.rs:363
+  heap_to_msgpack_value`, which has its own pre-existing breakage tail)
+- ❌ N7 + N9 bundled disposition — separate surfaces; separate
+  decisions
+- ❌ JsonValue rename (designed as universal intermediate;
+  `json_value.rs:1-15` module-doc finalizes name)
+- ❌ HeapValue→bytes-direct walker bypassing JsonValue intermediate
+  (defeats ε structural-enforcement)
+- ❌ Bundling 5+ architectural-choice variant policies into C2 (each
+  variant policy is its own sub-decision when first consumer needs it)
+- ❌ JsonValue extension (e.g. `YamlTagged`, `TomlDatetime` variants)
+  in first-landing
+- ❌ Bundling N7 + 3.C in single architectural commit
+- ❌ Renaming "Categorically-non-data Reject" or "Architectural-choice
+  deferred" labels (canonical terminology for future N7 sub-disposition
+  relays)
+- ❌ Bundling Instant policy with NativeScalar policy when first
+  per-consumer sub-decision lands (separate consumer demands; separate
+  sub-decisions)
+- ❌ Walker producing partial-mechanical-yes for NativeScalar inner
+  kinds (Isize/Usize/F32) ahead of architectural-choice disposition —
+  earlier audit-time scaffolding had per-inner-kind dispatch;
+  SUPERSEDED — entire NativeScalar arm is single Err() in C2
+- ❌ ISO-8601 as default Instant rendering anywhere in C2 walker (Err
+  is the only rendering until per-consumer policy lands)
+
+## Calibration
+
+**This commit (C1)**: 0 errors expected. Defections-only, no source
+file changes.
+
+**Cluster prediction**: -7 to -14 (N7) + -10 to -20 (3.C cascade
+post-N7-C6) = -17 to -34 combined. Anchored to dev2-n7 worktree
+fresh `cargo check -p shape-runtime --lib` baseline of 67 at HEAD
+`5f637e1` (verified pre-commit).
+
+**Rule G applies to C7-C13** per dev1-n9's broken-code-deletion finding
+(commit `2f78994`, predicted 0 / measured -4): when a body-migration
+deletes content that cites deleted symbols (e.g. `value.to_json_value()`
+in yaml/msgpack/json stringify bodies), the body-line errors clear at
+deletion time AS WELL as Rule D's progressive-import-clearing for
+multi-function files. Per-consumer ceiling widened from -1 to -2 to
+-1 to -3 to reflect Rule G additionality.
+
+## Disposition
+
+ε option-shape signed off; defections.md slot rotation discipline +
+finding-#11 in-place dated-subsection corrections + canonical
+two-Err-class labels established. C2 walker authorized post-this-commit
+with HOLD on TypedArrayData::Matrix/FloatSlice inner-dispatch arms
+pending REFINEMENT-1B (supervisor disposition in flight). C3-C13
+authorized once C2 lands. 3.C-C1+ sequenced post-N7-C6.
+
+The N7 unified workstream framework is now complete: structural-
+enforcement-principle satisfied via JsonValue universal intermediate;
+canonical labels established for future class-B per-consumer policy
+relays; commit sequence + per-commit calibration anchored; refused
+candidates locked in.
+
+### REFINEMENT-3A — γ + a limited-scope mixed-disposition (cluster-close)
+
+In-place dated subsection per finding #11. **The C1 commit-sequence
+table (lines ~280-294) and per-commit calibration framing stay
+on-record;** this REFINEMENT-3A subsection supersedes the per-consumer
+sequencing for THIS session and frames the residual 5+1 consumers as
+a follow-on workstream.
+
+#### Architectural disposition: Option γ + Option a
+
+Per supervisor REFINEMENT-3A relay (2026-05-07; routed via team-lead).
+The N7 ε disposition (this entry's parent section) was incomplete on
+the **input axis**: the `Vec<Arc<HeapValue>>` `FromSlot` impl exists
+(`crates/shape-runtime/src/marshal.rs:463`; `Vec<(Arc<String>,
+Arc<HeapValue>)>` at `marshal.rs:624`), but **NO `FromSlot for
+Arc<HeapValue>` (single-element-any) impl exists**. The 7 N7 consumers
+split structurally on input shape:
+
+- **2 of 7 (object input)**: `http.post_json` + `http.put_json` —
+  body type `object` lands as `Vec<(Arc<String>, Arc<HeapValue>)>` via
+  HashMap-anchored slot (`NativeKind::Ptr(HeapKind::HashMap)`).
+  Structurally unblocked TODAY.
+- **5 of 7 (single-any input)**: `json.stringify` (+ `json.is_valid`
+  per RATIFICATION-1 Item B per-file-atomic), `yaml.stringify`,
+  `toml.stringify`, `msgpack.encode`, `msgpack.encode_bytes` —
+  body type `value: any` requires single-element `Arc<HeapValue>`
+  FromSlot. **N4-α refusal binds** (defections.md:880-887; supervisor
+  refused wildcard `NativeKind` for single-any with no outer container
+  during Stage D N4 disposition).
+
+Three options surfaced (audit-time pre-implementation; pre-architectural
+analysis):
+
+- **Option α — revisit N4-α refusal**: re-litigate the wildcard
+  `NativeKind` decision. **REFUSED** by supervisor: "without new
+  structural reasoning, this is the 'renaming on sight' pattern.
+  Wildcard NativeKind is on the watchlist; re-litigating without
+  empirical or structural-enforcement justification is defection-shape."
+- **Option γ — limited scope**: land C8 + C9 (2 of 7; structurally
+  unblocked); defer C7 + json.is_valid + C10 + C11 + C12 + C13 (5 of 7
+  + json.is_valid via RATIFICATION-1 Item B) to a follow-on workstream.
+  Mirrors Stage D N4 mixed-disposition precedent (4-of-6 HTTP overloads
+  landed at `d0a73e7`; 2 deferred pending unified). **CHOSEN.**
+- **Option δ — new typed-input shape bypassing FromSlot**: bypass
+  `FromSlot` trait via a new dispatcher mechanism (e.g.,
+  `register_typed_fn_with_heap_value_arg`). **REFUSED** by supervisor:
+  "under-audited. The framing leaves ambiguity between (i) wildcard-
+  dispatcher (forbidden — same defection at dispatcher-layer instead
+  of discriminator-layer) and (ii) multi-NativeKind registration
+  (registers body across all 18 HeapKind variants; could be structurally
+  pure but needs full audit). Sign-off without that audit is bundling-
+  architectural-decisions."
+
+Sequencing options:
+
+- **Option a — mixed-disposition**: C8/C9 land NOW; C7/C10-C13 +
+  is_valid defer. **CHOSEN** per same Stage D N4 precedent.
+- **Option b — atomic full or 0**: HALT all 7 pending unified
+  architectural disposition. Refused: heavier revisit; misses Stage D
+  precedent.
+- **Option c — substantial revisit**: question whether ε is the right
+  architectural shape at all. Refused: ε is signed off; only the
+  input-axis is incomplete.
+
+Combined disposition: **γ + a** — limited scope C8/C9 land; remaining
+5 + json.is_valid become **n7-single-any-input-resolution** follow-on
+workstream.
+
+#### N7 commit landings this session
+
+| Commit | Hash | Description | Predicted | Measured |
+|---|---|---|---|---|
+| C1 | `45cb4dc` | defections.md ε disposition | 0 | 0 |
+| C1.5 | `85684f3` | defections.md REFINEMENT-1B-ITEM-A (Matrix/FloatSlice promotion) | 0 | 0 |
+| C2 | `92ac972` | `heap_to_json_value` walker (additive; 18-arm exhaustive HeapValue match + 15-arm TypedArrayData inner-dispatch + TypedObject schema-aware) | 0±2 | 0 |
+| C3 | `c756ccb` | `json_value_to_serde_json` reverse helper | 0±2 | 0 |
+| C4 | `1c19101` | `json_value_to_serde_yaml` reverse helper | 0±2 | 0 |
+| C5 | `b84de8d` | `json_value_to_toml_value` reverse helper | 0±2 | 0 |
+| C6 | `6a402fc` | `json_value_to_msgpack_bytes` thin wrapper (Option C; team-lead-paraphrase-correction of `rmpv_value` to `msgpack_bytes` matching supervisor PB 1/4 verbatim) | 0±2 | 0 |
+| C8+C9 | `3820d74` | `http.post_json` + `http.put_json` combined per-file-atomic migration (HashMap-anchored slot via `marshal.rs:624`); also extends `stdlib-src/core/http.shape` with public builtin declarations | -1 to -2 | **0 (calibration miss; see candidate Rule C/D discriminator below)** |
+| Cluster-close (this) | TBD | defections.md cluster-close (REFINEMENT-3A subsection) | 0 | TBD |
+
+8 commits (or 9 counting C8+C9 as separate logical units; per-file-atomic per RATIFICATION-1 Item B precedent for json.rs's stringify+is_valid reduces to 1 file-level commit).
+
+**Cluster total measured this session: 0** (vs supervisor projected
+-2 to -4 in REFINEMENT-3A scope brief). Calibration-miss explanation
+in candidate Rule C/D discriminator subsection below.
+
+#### n7-single-any-input-resolution follow-on workstream (deferred)
+
+**Workstream name on-record**: `n7-single-any-input-resolution`.
+
+**Scope**: takes the FromSlot input-side architectural decision for
+the 5 single-any consumers + json.is_valid (via RATIFICATION-1 Item B
+per-file-atomic with C7 stringify):
+
+| Consumer | File | Body input shape | Lines |
+|---|---|---|---|
+| `json.stringify` | `crates/shape-runtime/src/stdlib/json.rs` | `value: any` + `pretty: bool` | 377-418 |
+| `json.is_valid` | same file | `text: string` (trivial, but per-file-atomic per RATIFICATION-1 Item B with stringify) | 420-442 |
+| `yaml.stringify` | `crates/shape-runtime/src/stdlib/yaml.rs` | `value: any` | 146-170 |
+| `toml.stringify` | `crates/shape-runtime/src/stdlib/toml_module.rs` | `value: any` | 141-165 |
+| `msgpack.encode` | `crates/shape-runtime/src/stdlib/msgpack_module.rs` | `value: any` → hex-encoded string | 86-111 |
+| `msgpack.encode_bytes` | same file | `value: any` → bytes | 148-173 |
+
+**Architectural decision pending** (own audit cycle; full pre-
+architectural analysis required including input-direction enumeration):
+- Re-evaluate Option α (with NEW structural reasoning if any emerges)
+- Audit Option δ (multi-NativeKind registration semantics; dispatcher-
+  side dispatch shape; watchlist self-check)
+- Surface NEW structural shapes if discoverable
+
+**Refused at REFINEMENT-3A disposition** (binders below): bundling
+n7-single-any-input-resolution into shape-jit-cleanup or other
+existing workstreams.
+
+#### Input-direction-audit codification (Audit-1 expansion)
+
+Per supervisor REFINEMENT-3A relay:
+
+> "Codify 'input-direction audit' as forward-discipline binder.
+> Naming: expand audit-1 from 'consumer-call-shape' to 'consumer-
+> call-shape + per-consumer input-shape FromSlot inventory.'
+> Empirical citation: catch-layer #13 (FromSlot<Arc> gap caught at C7
+> pre-implementation). Empirical strength: 1 citation; sufficient
+> because structural derivation is clean (input-direction is distinct
+> from output-direction; auditing one without the other is structurally
+> incomplete)."
+
+**Audit-1 canonical name (binder)**: "consumer-call-shape +
+per-consumer input-shape FromSlot inventory". Forward audits enumerate
+per-consumer input-shape and verify FromSlot impl per input type,
+alongside output-direction.
+
+#### Supervisor Rule F miss self-correction (verbatim)
+
+Per supervisor REFINEMENT-3A relay:
+
+> "Honest framing for defections.md update: REFINEMENT-1A's ε
+> disposition was incomplete on the input axis. This was a supervisor-
+> layer Rule F miss (verify against current cross-crate call graph +
+> current build state for any decision touching dispatch / calling
+> conventions / public APIs / serialization — the FromSlot inventory
+> is exactly the kind of cross-crate dispatch surface Rule F covers).
+> Catch-layer #13 caught at audit-time-pre-implementation; framework
+> working as designed at lower layers when supervisor audit is
+> incomplete."
+
+This is the **SECOND supervisor-layer Rule F miss this session**
+(first: PB 2/4 binder-conflict in REFINEMENT-2A; second: this
+REFINEMENT-1A input-axis-incomplete). Both caught at audit-time-pre-
+implementation by devs. Catch-layer flip across both supervisor + dev
+layers strengthening — the discipline catalog now extends earlier in
+the pipeline at every layer.
+
+#### Candidate Rule C/D discriminator (forward-discipline candidate; 1 empirical citation)
+
+C8+C9 calibration-miss empirical citation surfaced a NEW
+forward-discipline candidate:
+
+> **Rule C/D discriminator at deferral-comment-block-vs-broken-code
+> boundary**: when migrating a previously-deferred function whose
+> deferral was a COMMENT BLOCK (not broken code citing deleted symbols),
+> the migration is purely additive (Rule C 0±2), NOT Rule D progressive
+> shared-import clearance. Rule D requires actual broken-import lines
+> that get cleared by the migration; comment-block-deferral has no
+> broken imports to clear.
+
+**Empirical citation**: commit `3820d74` (C8+C9). Predicted -1 to -2
+per Rule D; measured 0 per Rule C. http.rs's existing 4 typed
+overloads (post_text/post_bytes/put_text/put_bytes from `d0a73e7`)
+already used the strict-typed ABI; the deferral at `http.rs:496-523`
+was a comment block (NOT broken code citing deleted symbols).
+Migration purely additive.
+
+**Empirical strength**: 1 citation; 1 shape (comment-block-deferral
+vs broken-code-deferral discriminator). Per supervisor's codification
+threshold framework (≥2 empirical citations across distinct shapes for
+candidate Rule H), this is borderline — discriminators may have lower
+threshold if structurally clean. **Codification deferred** to
+supervisor consideration; 2nd empirical citation could arrive from
+n7-single-any-input-resolution's per-consumer migrations (where some
+deferrals are broken-code-deferral, distinct shape).
+
+#### NEW binders (from REFINEMENT-3A; binding throughout)
+
+- ❌ **Re-litigating N4-α refusal without explicit new structural-
+  enforcement reasoning**: re-litigation must surface NEW structural
+  reasoning, not just "let's try again"
+- ❌ **Sign-off on δ-shape mechanisms without full pre-architectural
+  audit** of dispatcher-side dispatch, multi-NativeKind registration
+  semantics, and watchlist self-check
+- ❌ **Bundling n7-single-any-input-resolution into shape-jit-cleanup
+  or other existing workstreams**: separate workstream; own audit cycle
+
+#### Per-file-atomic precedent reinforcement
+
+C8+C9 combined per-file-atomic per RATIFICATION-1 Item B precedent
+(json.rs's stringify+is_valid framing) supersedes the literal commit-
+list count of 13 with per-function-atomic granularity. The
+`d0a73e7` precedent (4 HTTP overloads in one commit) and this
+`3820d74` precedent (2 HTTP overloads in one commit) consistently
+demonstrate per-file-atomic-on-shared-imports as the binding granularity
+for stdlib migrations.
+
+Forward-discipline note: per-file-atomic is the migration-commit
+granularity unit. Per-function-atomic ceremony (one commit per function
+even when multiple functions share imports + ABI registration in same
+file) is REJECTED on the same grounds RATIFICATION-1 Item B authorized
+the per-file-atomic interpretation.
+
+#### HashMap-anchored slot finding citation
+
+Supervisor REFINEMENT-3A-SUPPLEMENT load-bearing finding:
+
+> "marshal.rs:624 FromSlot has NATIVE_KIND =
+> NativeKind::Ptr(HeapKind::HashMap) — anchored to HashMap container,
+> NOT wildcard. The N4-α refusal applies only to single-element-any
+> (no outer container); C8/C9 use the HashMap-anchored slot, which
+> clears N4-α precedent without litigating it."
+
+The HashMap container provides the structural anchor that makes the
+forbidden state ("wildcard NativeKind dispatch") unrepresentable.
+Structural-enforcement principle in action — the OUTER container
+provides the slot-kind anchor; the body's `Vec<(Arc<String>,
+Arc<HeapValue>)>` body type pins the per-pair element shape via Rust's
+type system; element-kind walking happens at body layer via
+`heap_to_json_value(&v)?` per pair; no wildcard NativeKind needed.
+
+This finding is the structural reason C8/C9 can land at γ limited-
+scope without re-litigating N4-α; the 5 single-any consumers cannot
+follow this pattern because they have no outer container providing the
+slot-kind anchor.
+
+#### Calibration
+
+**Cluster total this session**: 0 errors moved (8 commits; 67 → 67).
+
+**Vs supervisor projected -2 to -4 N7 cluster total** (REFINEMENT-3A
+scope brief): calibration miss explained by candidate Rule C/D
+discriminator above. The supervisor's projection was anchored on Rule
+D applying to C8/C9; Rule C actually applies (additive at deferral-
+comment-block boundary).
+
+**Combined session total** with N9's -5 (dev1-n9 cluster close at
+`0d95efb`): **-5 against 67 baseline → 62 errors at session close**.
+
+**Honest projection adjustment**: when n7-single-any-input-resolution
+follow-on workstream picks up C7/C10-C13 + json.is_valid in a future
+session, those consumers MAY produce -5 to -10 drop class (Rule G +
+Rule D + candidate Rule H apply because those bodies DO cite deleted
+symbols). The 5 single-any bodies use deleted `value.to_json_value()`
+(method-call shape #1 across 4 consumers), bare deleted ValueWord
+accessors (Rule G null case), and `nanboxed_to_toml_value` helper
+(unique multi-accessor body deletion in toml_module.rs at C11
+shape #2 candidate). Empirical Rule H feedstock arrives there.
+
+### Disposition
+
+REFINEMENT-3A γ + a signed off. C8 + C9 LANDED at `3820d74`. N7
+cluster CLOSED at limited scope for this session. n7-single-any-input-
+resolution workstream framed for next-session pickup.
+
+The framework is working as designed: architectural-adjacent findings
+caught at audit-time-pre-implementation; supervisor-layer Rule F misses
+caught at sub-supervisor layers; per-file-atomic discipline supersedes
+literal commit-list ceremony; refused candidates locked in via binders;
+forward-calibration empirical-citation feedstock accumulates for
+candidate-rule codification (Rule H method-call third category +
+candidate Rule C/D discriminator).
 
 ## 2026-05-07 — HashMap-marshal micro-cluster — named on-record (full entry)
 

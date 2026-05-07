@@ -122,13 +122,50 @@ pub builtin fn put_text(url: string, body: string, options: _) -> Result<_, stri
 /// ```
 pub builtin fn put_bytes(url: string, body: Array<int>, options: _) -> Result<_, string>;
 
-// `http.post_json(url, body: object, options)` and the matching
-// `http.put_json` overload are NOT yet declared. They are queued as part
-// of the Stage D batch awaiting supervisor sign-off on architectural
-// sub-decision N7 (HeapValue→JSON serializer for HTTP / object-output
-// marshal contexts). See `crates/shape-runtime/src/stdlib/http.rs`'s
-// deferred-list comment + `docs/defections.md` HashMap-marshal cluster
-// queue for details.
+/// Perform an HTTP POST request with a JSON body.
+///
+/// Sets `Content-Type: application/json` automatically. The body object
+/// is serialized to JSON via the universal `JsonValue` intermediate
+/// (N7 ε disposition; see `docs/defections.md`).
+///
+/// # Arguments
+///
+/// * `url` - URL to request
+/// * `body` - Request body as an object (serialized to JSON)
+/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+///
+/// # Returns
+///
+/// `Ok({ status, headers, body, ok })` with the response, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let r = http.post_json("https://api.example.com/users", { name: "Alice", age: 30 })
+/// ```
+pub builtin fn post_json(url: string, body: _, options: _) -> Result<_, string>;
+
+/// Perform an HTTP PUT request with a JSON body.
+///
+/// Sets `Content-Type: application/json` automatically. Body serialization
+/// matches `post_json`.
+///
+/// # Arguments
+///
+/// * `url` - URL to request
+/// * `body` - Request body as an object (serialized to JSON)
+/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+///
+/// # Returns
+///
+/// `Ok({ status, headers, body, ok })` with the response, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let r = http.put_json("https://api.example.com/users/1", { name: "Alice" })
+/// ```
+pub builtin fn put_json(url: string, body: _, options: _) -> Result<_, string>;
 
 /// Perform an HTTP DELETE request.
 ///
