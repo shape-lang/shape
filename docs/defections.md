@@ -849,6 +849,101 @@ pending bench-feasibility gate. (Q3) `IntrinsicsRegistry`
 deletion is unchanged — mechanical commit, can land before /
 during / after migration with no architectural risk.
 
+### 2026-05-07 — Q2 resolves at first-migration-commit, not at gate (Q2-C correction)
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The prior Q2 evaluation-methodology-shift subsection above
+stays on-record.** This subsection corrects two structural flaws
+in that subsection's framing, surfaced during vector.rs migration
+preparation. Cross-references the cross-crate-scope finding on
+the zero-copy entry's fourth audit-grounded correction subsection
+(forward reference; lands together as a coordinated documentation
+update).
+
+**Audit during vector.rs migration preparation revealed two
+structural flaws in the prior X2 subsection:**
+
+1. **Q2 cannot stay tentative through migration.** The previous
+   subsection wrote "Q2 disposition stays 'tentative-marshal-fold
+   pending empirical validation' until the gate fires." That
+   framing is wrong. Migration of any single intrinsic file from
+   legacy `IntrinsicFn` to `register_typed_fn_N` *requires* a
+   coordinated cross-crate change to shape-vm's dispatcher
+   (`crates/shape-vm/src/executor/builtins/vector_intrinsics.rs:25-39`
+   for vector intrinsics; analogous dispatcher sites for the
+   other 13 intrinsic files). The dispatcher routing change *is*
+   Q2's resolution — there is no migration commit that can be
+   "tentatively-marshal-fold." The choice is committed at the
+   first migration commit (vector.rs), and every subsequent
+   intrinsic file follows that pattern.
+
+2. **The gate validates the chosen option, it doesn't choose.**
+   "Bench-feasibility gate fires when shape-runtime --lib
+   compiles" is correct for *measuring* the chosen option's perf
+   characteristic. It is not the moment of architectural choice.
+   That moment is the first migration commit's dispatcher
+   routing.
+
+**Corrected Q2 disposition lifecycle (binding):**
+
+| Phase | Q2 disposition |
+|---|---|
+| Pre-vector.rs commit | **Tentative** — both options live; sign-off pending |
+| At vector.rs commit (Commit 6) | **Committed-to-marshal-fold-light** pending gate validation |
+| Through rest-of-intrinsics migration | Same — committed; each file's commit reaffirms |
+| At first bench-feasibility (after Phase 2d completes) | Gate fires: validates committed-to choice |
+| Pass | **Resolved as marshal-fold-light** — committed choice confirmed |
+| Fail | **Revert all intrinsics commits in series** + fresh surface-and-decide for separate-path |
+
+**Q2-A explicitly resolved as marshal-fold-light** (per
+2026-05-07 supervisor sign-off relayed through user). Two scope
+variants of marshal-fold were enumerated:
+
+- **Q2-marshal-fold-light** (chosen): keep
+  `BuiltinFunction::IntrinsicVec*` opcodes in the bytecode;
+  reroute the dispatcher's match arms to look up via
+  `module.typed_exports().functions.get("__intrinsic_vec_*")`
+  and invoke the typed closure. Smaller cross-crate scope; opcode
+  discriminants preserved (JIT specialization unaffected); each
+  dispatcher arm becomes ~5-10 lines. Achieves the structural
+  unification benefit of marshal-fold (single dispatch path
+  through `typed_exports`).
+- **Q2-marshal-fold-heavy** (deferred follow-on workstream):
+  delete `BuiltinFunction::IntrinsicVec*` opcodes entirely;
+  compiler emits regular typed-module-call opcode for
+  `__intrinsic_vec_*`. Fully unified dispatch. Touches compiler-
+  side emission (`crates/shape-vm/src/compiler/helpers.rs:3161-3175`
+  + `matrix_ops.rs:294-298` + opcode definitions at
+  `bytecode/opcode_defs.rs:2162-2455` + tests at
+  `executor/tests/operator_overload.rs:518`). Cleaner end-state;
+  bigger cross-crate scope. **Deferred as follow-on cleanup
+  workstream after Q2 = marshal-fold-light validates via the
+  eventual gate.**
+
+**Structural reasoning (per supervisor brief).** Marshal-fold
+preserves the typed-module-export API as the single dispatch
+surface — the structural-enforcement principle (forbidden state
+unrepresentable in the type system) extends to the dispatch
+layer: one dispatch path, not two. Separate-path keeps a parallel
+calling-convention which is the "smaller subset of existing
+discriminator" defection-pattern at the dispatch layer. Light
+variant of marshal-fold avoids compiler-emission scope while
+still landing the structural unification.
+
+**Per-file migration shape (binding for all 14 intrinsic files):**
+each migration commit covers one intrinsics file's bodies
+(shape-runtime side) AND updates shape-vm's dispatcher routing
+for those intrinsics (shape-vm side) atomically. Cross-crate
+revert is one commit, not many. No splitting shape-runtime +
+shape-vm changes per-file.
+
+**Disposition for this subsection:** Q2-A resolved as marshal-
+fold-light; Q2-B per-file commits scoped as cross-crate;
+Q2-marshal-fold-heavy deferred. Q2 disposition transitions from
+"tentative" to "committed-to-marshal-fold-light pending gate
+validation" at the vector.rs migration commit (Commit 6 in the
+post-X4 ordering).
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
