@@ -10,7 +10,7 @@
 //! - `build_config()` — returns build-time configuration
 
 use shape_runtime::module_exports::ModuleExports;
-use shape_runtime::type_schema::typed_object_from_nb_pairs;
+use shape_runtime::type_schema::typed_object_from_pairs;
 use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
 use shape_value::{ValueWord, ValueWordExt};
@@ -241,8 +241,8 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             // The comptime compiler resolves field access via a predeclared schema
             // (registered above), so we need to materialize an Object-shaped
             // ValueWord with the matching schema. Using TypedReturn::ValueWord
-            // pass-through preserves the existing typed_object_from_nb_pairs path.
-            Ok(TypedReturn::ValueWord(typed_object_from_nb_pairs(&[
+            // pass-through preserves the existing typed_object_from_pairs path.
+            Ok(TypedReturn::ValueWord(typed_object_from_pairs(&[
                 ("debug", ValueWord::from_bool(cfg!(debug_assertions))),
                 ("version", nb_str(env!("CARGO_PKG_VERSION"))),
                 ("target_os", nb_str(std::env::consts::OS)),
