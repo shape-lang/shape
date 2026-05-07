@@ -264,12 +264,10 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register convolution intrinsics
-    fn register_convolution_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_stencil".to_string(),
-            convolution::intrinsic_stencil,
-        );
+    /// The single convolution intrinsic (`__intrinsic_stencil`) migrated to a
+    /// typed marshal entry in `convolution::create_convolution_intrinsics_module`.
+    fn register_convolution_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: __intrinsic_stencil migrated to typed marshal layer.
     }
 
     /// Register scan intrinsics

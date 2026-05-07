@@ -1,76 +1,109 @@
-//! Convolution intrinsics - 1D stencil operations
+//! Convolution intrinsics — full migration to typed marshal layer.
+//!
+//! Per the intrinsics-typed-CC migration's per-file table, the single
+//! convolution intrinsic (`stencil`) migrates to a `register_typed_fn_3_full`
+//! typed entry via [`create_convolution_intrinsics_module`]. Inputs are
+//! `Arc<AlignedTypedBuffer>` (series + kernel) and an optional
+//! `Arc<String>` mode keyword (default `"same"`). Output projects through
+//! `ConcreteReturn::ArrayF64`.
+//!
+//! `__intrinsic_stencil` was found to have **zero stdlib/package
+//! consumers** via post-bulldozer `rg` across `crates/shape-runtime/stdlib-src/`
+//! and `packages/`; full-migrate-anyway maintains consumer-surface parity
+//! for any in-flight Shape consumer and flags the function as a
+//! deletion-candidate for shape-vm cleanup workstream's natural scope
+//! (analogous to the scan.rs zero-consumer flag in N1's queue subsection).
 //!
 //! Provides SIMD-accelerated 1D convolution for:
 //! - Physics simulations (heat diffusion, wave equation)
 //! - Signal processing (FIR filters)
 //! - Spatial operations (smoothing, edge detection)
 
-use super::{extract_f64_array, f64_vec_to_nb_array};
-use crate::context::ExecutionContext;
-use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::marshal::register_typed_fn_3_full;
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::AlignedTypedBuffer;
+use std::sync::Arc;
 use wide::f64x4;
 
-/// Intrinsic: 1D Stencil/Convolution
-pub fn intrinsic_stencil(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_stencil requires 2-3 arguments (series, kernel, [mode])"
-                .to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Module factory (1 typed entry) ─────────────────────
 
-    let data = extract_f64_array(&args[0], "Input array")?;
-    let kernel = extract_f64_array(&args[1], "Kernel")?;
+/// Create the convolution intrinsics module with the single typed-marshal
+/// entry point `__intrinsic_stencil`.
+pub fn create_convolution_intrinsics_module() -> ModuleExports {
+    let mut module = ModuleExports::new("std::core::intrinsics::convolution");
+    module.description = "1D stencil/convolution intrinsics (SIMD-accelerated)".to_string();
 
-    if kernel.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "Kernel cannot be empty".to_string(),
-            location: None,
-        });
-    }
+    register_typed_fn_3_full::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>, Arc<String>>(
+        &mut module,
+        "__intrinsic_stencil",
+        "1D convolution of a Vec<number> series against a kernel; modes 'valid' / 'same' / 'full'",
+        [
+            ModuleParam {
+                name: "series".to_string(),
+                type_name: "Array<number>".to_string(),
+                required: true,
+                description: "Input series".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "kernel".to_string(),
+                type_name: "Array<number>".to_string(),
+                required: true,
+                description: "Convolution kernel".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "mode".to_string(),
+                type_name: "string".to_string(),
+                required: false,
+                description: "Boundary mode: 'valid', 'same' (default), or 'full'".to_string(),
+                default_snippet: Some("\"same\"".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::ArrayNumber,
+        |series, kernel, mode, _ctx| {
+            let kernel_slice = kernel.as_slice();
+            if kernel_slice.is_empty() {
+                return Err("Kernel cannot be empty".to_string());
+            }
+            let result = convolve_1d(series.as_slice(), kernel_slice, mode.as_str())?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
 
-    let mode = if args.len() == 3 {
-        args[2].as_str().unwrap_or("same")
-    } else {
-        "same"
-    };
-
-    let result = convolve_1d(&data, &kernel, mode)?;
-    Ok(f64_vec_to_nb_array(result))
+    module
 }
 
-/// 1D convolution with SIMD acceleration
-fn convolve_1d(data: &[f64], kernel: &[f64], mode: &str) -> Result<Vec<f64>> {
-    let n = data.len();
+// ───────────────────── Helpers (used by typed body) ─────────────────────
 
-    if n == 0 {
+/// 1D convolution with SIMD acceleration. Reverses `kernel` once at the boundary
+/// then dispatches to the `valid` / `same` / `full` shape per `mode`.
+fn convolve_1d(data: &[f64], kernel: &[f64], mode: &str) -> Result<Vec<f64>, String> {
+    if data.is_empty() {
         return Ok(vec![]);
     }
 
     let kernel_rev: Vec<f64> = kernel.iter().rev().copied().collect();
 
     match mode {
-        "valid" => convolve_valid(data, &kernel_rev),
-        "same" => convolve_same(data, &kernel_rev),
-        "full" => convolve_full(data, &kernel_rev),
-        _ => Err(ShapeError::RuntimeError {
-            message: format!(
-                "Unknown convolution mode: {}. Use 'valid', 'same', or 'full'",
-                mode
-            ),
-            location: None,
-        }),
+        "valid" => Ok(convolve_valid(data, &kernel_rev)),
+        "same" => Ok(convolve_same(data, &kernel_rev)),
+        "full" => Ok(convolve_full(data, &kernel_rev)),
+        _ => Err(format!(
+            "Unknown convolution mode: {}. Use 'valid', 'same', or 'full'",
+            mode
+        )),
     }
 }
 
-fn convolve_valid(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
+fn convolve_valid(data: &[f64], kernel: &[f64]) -> Vec<f64> {
     let n = data.len();
     let k = kernel.len();
 
     if k > n {
-        return Ok(vec![]);
+        return vec![];
     }
 
     let out_len = n - k + 1;
@@ -106,15 +139,15 @@ fn convolve_valid(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
         }
     }
 
-    Ok(result)
+    result
 }
 
-fn convolve_same(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
+fn convolve_same(data: &[f64], kernel: &[f64]) -> Vec<f64> {
     let n = data.len();
     let k = kernel.len();
 
     if n == 0 {
-        return Ok(vec![]);
+        return vec![];
     }
 
     let mut result = vec![0.0; n];
@@ -131,15 +164,15 @@ fn convolve_same(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
         result[i] = sum;
     }
 
-    Ok(result)
+    result
 }
 
-fn convolve_full(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
+fn convolve_full(data: &[f64], kernel: &[f64]) -> Vec<f64> {
     let n = data.len();
     let k = kernel.len();
 
     if n == 0 || k == 0 {
-        return Ok(vec![]);
+        return vec![];
     }
 
     let out_len = n + k - 1;
@@ -156,20 +189,19 @@ fn convolve_full(data: &[f64], kernel: &[f64]) -> Result<Vec<f64>> {
         result[i] = sum;
     }
 
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_stencil_smoothing() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let kernel = vec![0.25, 0.5, 0.25];
-        let result =
-            convolve_same(&data, &kernel.iter().rev().copied().collect::<Vec<_>>()).unwrap();
+        let kernel_rev: Vec<f64> = kernel.iter().rev().copied().collect();
+        let result = convolve_same(&data, &kernel_rev);
         assert_eq!(result.len(), 5);
         assert!((result[2] - 3.0).abs() < 0.01);
     }
@@ -178,8 +210,8 @@ mod tests {
     fn test_stencil_valid() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let kernel = vec![1.0, 0.0, -1.0];
-        let result =
-            convolve_valid(&data, &kernel.iter().rev().copied().collect::<Vec<_>>()).unwrap();
+        let kernel_rev: Vec<f64> = kernel.iter().rev().copied().collect();
+        let result = convolve_valid(&data, &kernel_rev);
         assert_eq!(result.len(), 3);
     }
 
@@ -187,31 +219,8 @@ mod tests {
     fn test_stencil_heat_diffusion() {
         let data = vec![1.0, 1.0, 1.0, 1.0, 1.0];
         let kernel = vec![0.25, 0.5, 0.25];
-        let result =
-            convolve_same(&data, &kernel.iter().rev().copied().collect::<Vec<_>>()).unwrap();
+        let kernel_rev: Vec<f64> = kernel.iter().rev().copied().collect();
+        let result = convolve_same(&data, &kernel_rev);
         assert!((result[2] - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_intrinsic_stencil() {
-        let mut ctx = ExecutionContext::new_empty();
-
-        let series = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(1.0),
-            ValueWord::from_f64(2.0),
-            ValueWord::from_f64(3.0),
-            ValueWord::from_f64(4.0),
-            ValueWord::from_f64(5.0),
-        ]));
-
-        let kernel = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(0.25),
-            ValueWord::from_f64(0.5),
-            ValueWord::from_f64(0.25),
-        ]));
-
-        let result = intrinsic_stencil(&[series, kernel], &mut ctx).unwrap();
-        let arr = result.as_any_array().expect("Expected array");
-        assert_eq!(arr.len(), 5);
     }
 }
