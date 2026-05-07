@@ -513,6 +513,277 @@ canonical labels established for future class-B per-consumer policy
 relays; commit sequence + per-commit calibration anchored; refused
 candidates locked in.
 
+### REFINEMENT-3A — γ + a limited-scope mixed-disposition (cluster-close)
+
+In-place dated subsection per finding #11. **The C1 commit-sequence
+table (lines ~280-294) and per-commit calibration framing stay
+on-record;** this REFINEMENT-3A subsection supersedes the per-consumer
+sequencing for THIS session and frames the residual 5+1 consumers as
+a follow-on workstream.
+
+#### Architectural disposition: Option γ + Option a
+
+Per supervisor REFINEMENT-3A relay (2026-05-07; routed via team-lead).
+The N7 ε disposition (this entry's parent section) was incomplete on
+the **input axis**: the `Vec<Arc<HeapValue>>` `FromSlot` impl exists
+(`crates/shape-runtime/src/marshal.rs:463`; `Vec<(Arc<String>,
+Arc<HeapValue>)>` at `marshal.rs:624`), but **NO `FromSlot for
+Arc<HeapValue>` (single-element-any) impl exists**. The 7 N7 consumers
+split structurally on input shape:
+
+- **2 of 7 (object input)**: `http.post_json` + `http.put_json` —
+  body type `object` lands as `Vec<(Arc<String>, Arc<HeapValue>)>` via
+  HashMap-anchored slot (`NativeKind::Ptr(HeapKind::HashMap)`).
+  Structurally unblocked TODAY.
+- **5 of 7 (single-any input)**: `json.stringify` (+ `json.is_valid`
+  per RATIFICATION-1 Item B per-file-atomic), `yaml.stringify`,
+  `toml.stringify`, `msgpack.encode`, `msgpack.encode_bytes` —
+  body type `value: any` requires single-element `Arc<HeapValue>`
+  FromSlot. **N4-α refusal binds** (defections.md:880-887; supervisor
+  refused wildcard `NativeKind` for single-any with no outer container
+  during Stage D N4 disposition).
+
+Three options surfaced (audit-time pre-implementation; pre-architectural
+analysis):
+
+- **Option α — revisit N4-α refusal**: re-litigate the wildcard
+  `NativeKind` decision. **REFUSED** by supervisor: "without new
+  structural reasoning, this is the 'renaming on sight' pattern.
+  Wildcard NativeKind is on the watchlist; re-litigating without
+  empirical or structural-enforcement justification is defection-shape."
+- **Option γ — limited scope**: land C8 + C9 (2 of 7; structurally
+  unblocked); defer C7 + json.is_valid + C10 + C11 + C12 + C13 (5 of 7
+  + json.is_valid via RATIFICATION-1 Item B) to a follow-on workstream.
+  Mirrors Stage D N4 mixed-disposition precedent (4-of-6 HTTP overloads
+  landed at `d0a73e7`; 2 deferred pending unified). **CHOSEN.**
+- **Option δ — new typed-input shape bypassing FromSlot**: bypass
+  `FromSlot` trait via a new dispatcher mechanism (e.g.,
+  `register_typed_fn_with_heap_value_arg`). **REFUSED** by supervisor:
+  "under-audited. The framing leaves ambiguity between (i) wildcard-
+  dispatcher (forbidden — same defection at dispatcher-layer instead
+  of discriminator-layer) and (ii) multi-NativeKind registration
+  (registers body across all 18 HeapKind variants; could be structurally
+  pure but needs full audit). Sign-off without that audit is bundling-
+  architectural-decisions."
+
+Sequencing options:
+
+- **Option a — mixed-disposition**: C8/C9 land NOW; C7/C10-C13 +
+  is_valid defer. **CHOSEN** per same Stage D N4 precedent.
+- **Option b — atomic full or 0**: HALT all 7 pending unified
+  architectural disposition. Refused: heavier revisit; misses Stage D
+  precedent.
+- **Option c — substantial revisit**: question whether ε is the right
+  architectural shape at all. Refused: ε is signed off; only the
+  input-axis is incomplete.
+
+Combined disposition: **γ + a** — limited scope C8/C9 land; remaining
+5 + json.is_valid become **n7-single-any-input-resolution** follow-on
+workstream.
+
+#### N7 commit landings this session
+
+| Commit | Hash | Description | Predicted | Measured |
+|---|---|---|---|---|
+| C1 | `45cb4dc` | defections.md ε disposition | 0 | 0 |
+| C1.5 | `85684f3` | defections.md REFINEMENT-1B-ITEM-A (Matrix/FloatSlice promotion) | 0 | 0 |
+| C2 | `92ac972` | `heap_to_json_value` walker (additive; 18-arm exhaustive HeapValue match + 15-arm TypedArrayData inner-dispatch + TypedObject schema-aware) | 0±2 | 0 |
+| C3 | `c756ccb` | `json_value_to_serde_json` reverse helper | 0±2 | 0 |
+| C4 | `1c19101` | `json_value_to_serde_yaml` reverse helper | 0±2 | 0 |
+| C5 | `b84de8d` | `json_value_to_toml_value` reverse helper | 0±2 | 0 |
+| C6 | `6a402fc` | `json_value_to_msgpack_bytes` thin wrapper (Option C; team-lead-paraphrase-correction of `rmpv_value` to `msgpack_bytes` matching supervisor PB 1/4 verbatim) | 0±2 | 0 |
+| C8+C9 | `3820d74` | `http.post_json` + `http.put_json` combined per-file-atomic migration (HashMap-anchored slot via `marshal.rs:624`); also extends `stdlib-src/core/http.shape` with public builtin declarations | -1 to -2 | **0 (calibration miss; see candidate Rule C/D discriminator below)** |
+| Cluster-close (this) | TBD | defections.md cluster-close (REFINEMENT-3A subsection) | 0 | TBD |
+
+8 commits (or 9 counting C8+C9 as separate logical units; per-file-atomic per RATIFICATION-1 Item B precedent for json.rs's stringify+is_valid reduces to 1 file-level commit).
+
+**Cluster total measured this session: 0** (vs supervisor projected
+-2 to -4 in REFINEMENT-3A scope brief). Calibration-miss explanation
+in candidate Rule C/D discriminator subsection below.
+
+#### n7-single-any-input-resolution follow-on workstream (deferred)
+
+**Workstream name on-record**: `n7-single-any-input-resolution`.
+
+**Scope**: takes the FromSlot input-side architectural decision for
+the 5 single-any consumers + json.is_valid (via RATIFICATION-1 Item B
+per-file-atomic with C7 stringify):
+
+| Consumer | File | Body input shape | Lines |
+|---|---|---|---|
+| `json.stringify` | `crates/shape-runtime/src/stdlib/json.rs` | `value: any` + `pretty: bool` | 377-418 |
+| `json.is_valid` | same file | `text: string` (trivial, but per-file-atomic per RATIFICATION-1 Item B with stringify) | 420-442 |
+| `yaml.stringify` | `crates/shape-runtime/src/stdlib/yaml.rs` | `value: any` | 146-170 |
+| `toml.stringify` | `crates/shape-runtime/src/stdlib/toml_module.rs` | `value: any` | 141-165 |
+| `msgpack.encode` | `crates/shape-runtime/src/stdlib/msgpack_module.rs` | `value: any` → hex-encoded string | 86-111 |
+| `msgpack.encode_bytes` | same file | `value: any` → bytes | 148-173 |
+
+**Architectural decision pending** (own audit cycle; full pre-
+architectural analysis required including input-direction enumeration):
+- Re-evaluate Option α (with NEW structural reasoning if any emerges)
+- Audit Option δ (multi-NativeKind registration semantics; dispatcher-
+  side dispatch shape; watchlist self-check)
+- Surface NEW structural shapes if discoverable
+
+**Refused at REFINEMENT-3A disposition** (binders below): bundling
+n7-single-any-input-resolution into shape-jit-cleanup or other
+existing workstreams.
+
+#### Input-direction-audit codification (Audit-1 expansion)
+
+Per supervisor REFINEMENT-3A relay:
+
+> "Codify 'input-direction audit' as forward-discipline binder.
+> Naming: expand audit-1 from 'consumer-call-shape' to 'consumer-
+> call-shape + per-consumer input-shape FromSlot inventory.'
+> Empirical citation: catch-layer #13 (FromSlot<Arc> gap caught at C7
+> pre-implementation). Empirical strength: 1 citation; sufficient
+> because structural derivation is clean (input-direction is distinct
+> from output-direction; auditing one without the other is structurally
+> incomplete)."
+
+**Audit-1 canonical name (binder)**: "consumer-call-shape +
+per-consumer input-shape FromSlot inventory". Forward audits enumerate
+per-consumer input-shape and verify FromSlot impl per input type,
+alongside output-direction.
+
+#### Supervisor Rule F miss self-correction (verbatim)
+
+Per supervisor REFINEMENT-3A relay:
+
+> "Honest framing for defections.md update: REFINEMENT-1A's ε
+> disposition was incomplete on the input axis. This was a supervisor-
+> layer Rule F miss (verify against current cross-crate call graph +
+> current build state for any decision touching dispatch / calling
+> conventions / public APIs / serialization — the FromSlot inventory
+> is exactly the kind of cross-crate dispatch surface Rule F covers).
+> Catch-layer #13 caught at audit-time-pre-implementation; framework
+> working as designed at lower layers when supervisor audit is
+> incomplete."
+
+This is the **SECOND supervisor-layer Rule F miss this session**
+(first: PB 2/4 binder-conflict in REFINEMENT-2A; second: this
+REFINEMENT-1A input-axis-incomplete). Both caught at audit-time-pre-
+implementation by devs. Catch-layer flip across both supervisor + dev
+layers strengthening — the discipline catalog now extends earlier in
+the pipeline at every layer.
+
+#### Candidate Rule C/D discriminator (forward-discipline candidate; 1 empirical citation)
+
+C8+C9 calibration-miss empirical citation surfaced a NEW
+forward-discipline candidate:
+
+> **Rule C/D discriminator at deferral-comment-block-vs-broken-code
+> boundary**: when migrating a previously-deferred function whose
+> deferral was a COMMENT BLOCK (not broken code citing deleted symbols),
+> the migration is purely additive (Rule C 0±2), NOT Rule D progressive
+> shared-import clearance. Rule D requires actual broken-import lines
+> that get cleared by the migration; comment-block-deferral has no
+> broken imports to clear.
+
+**Empirical citation**: commit `3820d74` (C8+C9). Predicted -1 to -2
+per Rule D; measured 0 per Rule C. http.rs's existing 4 typed
+overloads (post_text/post_bytes/put_text/put_bytes from `d0a73e7`)
+already used the strict-typed ABI; the deferral at `http.rs:496-523`
+was a comment block (NOT broken code citing deleted symbols).
+Migration purely additive.
+
+**Empirical strength**: 1 citation; 1 shape (comment-block-deferral
+vs broken-code-deferral discriminator). Per supervisor's codification
+threshold framework (≥2 empirical citations across distinct shapes for
+candidate Rule H), this is borderline — discriminators may have lower
+threshold if structurally clean. **Codification deferred** to
+supervisor consideration; 2nd empirical citation could arrive from
+n7-single-any-input-resolution's per-consumer migrations (where some
+deferrals are broken-code-deferral, distinct shape).
+
+#### NEW binders (from REFINEMENT-3A; binding throughout)
+
+- ❌ **Re-litigating N4-α refusal without explicit new structural-
+  enforcement reasoning**: re-litigation must surface NEW structural
+  reasoning, not just "let's try again"
+- ❌ **Sign-off on δ-shape mechanisms without full pre-architectural
+  audit** of dispatcher-side dispatch, multi-NativeKind registration
+  semantics, and watchlist self-check
+- ❌ **Bundling n7-single-any-input-resolution into shape-jit-cleanup
+  or other existing workstreams**: separate workstream; own audit cycle
+
+#### Per-file-atomic precedent reinforcement
+
+C8+C9 combined per-file-atomic per RATIFICATION-1 Item B precedent
+(json.rs's stringify+is_valid framing) supersedes the literal commit-
+list count of 13 with per-function-atomic granularity. The
+`d0a73e7` precedent (4 HTTP overloads in one commit) and this
+`3820d74` precedent (2 HTTP overloads in one commit) consistently
+demonstrate per-file-atomic-on-shared-imports as the binding granularity
+for stdlib migrations.
+
+Forward-discipline note: per-file-atomic is the migration-commit
+granularity unit. Per-function-atomic ceremony (one commit per function
+even when multiple functions share imports + ABI registration in same
+file) is REJECTED on the same grounds RATIFICATION-1 Item B authorized
+the per-file-atomic interpretation.
+
+#### HashMap-anchored slot finding citation
+
+Supervisor REFINEMENT-3A-SUPPLEMENT load-bearing finding:
+
+> "marshal.rs:624 FromSlot has NATIVE_KIND =
+> NativeKind::Ptr(HeapKind::HashMap) — anchored to HashMap container,
+> NOT wildcard. The N4-α refusal applies only to single-element-any
+> (no outer container); C8/C9 use the HashMap-anchored slot, which
+> clears N4-α precedent without litigating it."
+
+The HashMap container provides the structural anchor that makes the
+forbidden state ("wildcard NativeKind dispatch") unrepresentable.
+Structural-enforcement principle in action — the OUTER container
+provides the slot-kind anchor; the body's `Vec<(Arc<String>,
+Arc<HeapValue>)>` body type pins the per-pair element shape via Rust's
+type system; element-kind walking happens at body layer via
+`heap_to_json_value(&v)?` per pair; no wildcard NativeKind needed.
+
+This finding is the structural reason C8/C9 can land at γ limited-
+scope without re-litigating N4-α; the 5 single-any consumers cannot
+follow this pattern because they have no outer container providing the
+slot-kind anchor.
+
+#### Calibration
+
+**Cluster total this session**: 0 errors moved (8 commits; 67 → 67).
+
+**Vs supervisor projected -2 to -4 N7 cluster total** (REFINEMENT-3A
+scope brief): calibration miss explained by candidate Rule C/D
+discriminator above. The supervisor's projection was anchored on Rule
+D applying to C8/C9; Rule C actually applies (additive at deferral-
+comment-block boundary).
+
+**Combined session total** with N9's -5 (dev1-n9 cluster close at
+`0d95efb`): **-5 against 67 baseline → 62 errors at session close**.
+
+**Honest projection adjustment**: when n7-single-any-input-resolution
+follow-on workstream picks up C7/C10-C13 + json.is_valid in a future
+session, those consumers MAY produce -5 to -10 drop class (Rule G +
+Rule D + candidate Rule H apply because those bodies DO cite deleted
+symbols). The 5 single-any bodies use deleted `value.to_json_value()`
+(method-call shape #1 across 4 consumers), bare deleted ValueWord
+accessors (Rule G null case), and `nanboxed_to_toml_value` helper
+(unique multi-accessor body deletion in toml_module.rs at C11
+shape #2 candidate). Empirical Rule H feedstock arrives there.
+
+### Disposition
+
+REFINEMENT-3A γ + a signed off. C8 + C9 LANDED at `3820d74`. N7
+cluster CLOSED at limited scope for this session. n7-single-any-input-
+resolution workstream framed for next-session pickup.
+
+The framework is working as designed: architectural-adjacent findings
+caught at audit-time-pre-implementation; supervisor-layer Rule F misses
+caught at sub-supervisor layers; per-file-atomic discipline supersedes
+literal commit-list ceremony; refused candidates locked in via binders;
+forward-calibration empirical-citation feedstock accumulates for
+candidate-rule codification (Rule H method-call third category +
+candidate Rule C/D discriminator).
+
 ## 2026-05-07 — HashMap-marshal micro-cluster — named on-record (full entry)
 
 This is **not** a defection. On-record promotion from named-in-passing
