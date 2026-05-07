@@ -1293,6 +1293,106 @@ adjacent surfacing BEFORE writing code (non-primitive return
 shapes likely require `ConcreteReturn` extensions, an
 architectural extension not consumer migration).
 
+### 2026-05-07 — Multi-architectural files: partial-migration pattern + sub-decision queue
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The four prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration) stay on-record.** This subsection captures the
+partial-migration pattern surfaced during math.rs (Commit 8 =
+`0fd7959`) and the on-record sub-decision queue.
+
+**Audit during math.rs migration preparation revealed:** some
+intrinsic files are **multi-architectural-surface bodies** —
+they contain a mix of intrinsics where some are clean
+single-typed-input/single-typed-return migrations and others
+have polymorphic shapes (polymorphic return, polymorphic input,
+fast-path/slow-path duality) that can't fit single typed-marshal
+entries. These files migrate **partially**: clean intrinsics
+land via `register_typed_fn_N`; polymorphic ones stay as legacy
+`IntrinsicFn` bodies pending follow-on architectural sub-decisions.
+
+**math.rs (Commit 8 = `0fd7959`) is the canonical example.** 14
+of 19 intrinsics migrated to typed marshal entries
+(`create_math_intrinsics_module`); 5 intrinsics deferred:
+
+| Function | Polymorphism shape | Sub-decision queue entry |
+|---|---|---|
+| `intrinsic_sum` | Polymorphic return: `i64` (Vec<int> fast path) vs `f64` (Vec<number>) | M1-split (cross-crate) |
+| `intrinsic_min` | Polymorphic return + polymorphic input | M1-split (cross-crate) |
+| `intrinsic_max` | Polymorphic return + polymorphic input | M1-split (cross-crate) |
+| `intrinsic_char_code` | Polymorphic input: `Char` vs `String` | char_code multi-input-type dispatch |
+| `intrinsic_bspline2_3d_batch` | Fast-path/slow-path: FloatArray vs generic Array | bspline consumer audit |
+
+**Per-file expectation refinement (binding for forward
+calibration):** ~30-50% of intrinsic files may be partial-
+migration cases with **0 error drop** in their migration commit
+(legacy bodies keep ValueWord import alive). Full migration
+follows when the per-file sub-decisions land. **Partial-migration
+0-drop commits are NOT failures** — they are the normal outcome
+of decision-heavy architectural cluster work (mirroring Phase
+2c's 8/8 calibration miss observation that "architectural
+cluster work is decision-heavy, not code-heavy").
+
+**Refined intrinsics-typed-CC migration total estimate:** ~15-20
+errors total (down from the prior ~22-25 estimate from the
+predicted error-drop calibration correction subsection above).
+Several files will be in partial-migration state pending follow-
+on sub-decisions. Full intrinsics-typed-CC error-drop happens
+across multiple sessions: clean migrations now, follow-on
+sub-decisions later.
+
+### Follow-on architectural sub-decisions (on-record queue)
+
+Sub-decisions surfaced by partial-migration audits during the
+intrinsics-typed-CC migration. Each gets its own surface-and-
+decide round-trip with audits; none bundled into consumer
+migration commits.
+
+1. **M1-split: per-element-type intrinsics for polymorphic-
+   return intrinsics (`sum`, `min`, `max`).** Cross-crate change
+   to shape-vm compiler emission (`crates/shape-vm/src/compiler/helpers.rs:3231-3236`),
+   new opcode discriminants (`bytecode/opcode_defs.rs:2392-2396`),
+   and classification logic analog of `classify_typed_vec_arithmetic`
+   at `matrix_ops.rs:243`. Two typed entries per polymorphic
+   intrinsic: `__intrinsic_sum_f64(Arc<AlignedTypedBuffer>) -> f64`
+   and `__intrinsic_sum_i64(Arc<TypedBuffer<i64>>) -> i64`,
+   compiler picks based on input type inference. Architectural
+   extension; out of M-A scope.
+
+2. **char_code multi-input-type dispatch (`Char` vs `String`).**
+   `HeapValue::Char` is first-class (`heap_value.rs:846`); some
+   user code holds Char values from `for c in s.chars()`-style
+   iteration. Either two separate intrinsics
+   (`__intrinsic_char_code_char(Arc<Char>) -> f64` and
+   `__intrinsic_char_code_str(Arc<String>) -> f64`), or a new
+   `register_typed_fn` variant that handles type-driven dispatch
+   within the marshal layer. Architectural sub-decision.
+
+3. **bspline2_3d_batch generic-array consumer audit.** Trace
+   `math.shape:243` wrapper consumer + any user-code consumers;
+   determine if FloatArray-only suffices or generic-array slow
+   path is needed. If audit shows generic-array consumers exist,
+   slow-path requires a `ConcreteReturn` extension or a
+   different dispatch shape. Audit-only sub-decision (no code
+   yet); architectural call follows audit.
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** Forward intrinsic file audits may surface
+   additional polymorphism patterns. Append to this queue
+   per-instance with the same shape.
+
+These sub-decisions land **AFTER** intrinsics-typed-CC migration
+of the clean cases completes (i.e., after all 14 intrinsic files
+have had their clean intrinsics migrated and the polymorphic
+ones queued here). Each sub-decision is its own surface-and-
+decide round-trip; no bundling.
+
+**Disposition for this subsection:** partial-migration pattern
+on-record; sub-decision queue established. Forward intrinsic file
+migrations follow the same pattern: audit per file, migrate clean
+intrinsics, queue polymorphic ones.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
