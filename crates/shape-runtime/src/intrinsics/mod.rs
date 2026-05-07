@@ -170,39 +170,21 @@ impl IntrinsicsRegistry {
         functions.insert("__intrinsic_ema".to_string(), rolling::intrinsic_ema);
     }
 
-    /// Register all column transformation intrinsics
+    /// Register the 2 array-transform intrinsics whose migration is deferred
+    /// pending the M1-split sub-decision (sub-decision queue entry on
+    /// intrinsics-typed-CC: per-element-type intrinsics for polymorphic-
+    /// return cases). The other 6 array-transform intrinsics migrated to
+    /// typed marshal entries in `array_transforms::create_array_transforms_module`.
     fn register_series_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_shift".to_string(),
-            array_transforms::intrinsic_shift,
-        );
+        // Polymorphic input/return — pending M1-split sub-decision.
+        // diff additionally needs a validity-aware return variant for its i64 fast path.
         functions.insert(
             "__intrinsic_diff".to_string(),
             array_transforms::intrinsic_diff,
         );
         functions.insert(
-            "__intrinsic_pct_change".to_string(),
-            array_transforms::intrinsic_pct_change,
-        );
-        functions.insert(
-            "__intrinsic_fillna".to_string(),
-            array_transforms::intrinsic_fillna,
-        );
-        functions.insert(
             "__intrinsic_cumsum".to_string(),
             array_transforms::intrinsic_cumsum,
-        );
-        functions.insert(
-            "__intrinsic_cumprod".to_string(),
-            array_transforms::intrinsic_cumprod,
-        );
-        functions.insert(
-            "__intrinsic_clip".to_string(),
-            array_transforms::intrinsic_clip,
-        );
-        functions.insert(
-            "__intrinsic_series".to_string(),
-            array_transforms::intrinsic_column_select,
         );
     }
 

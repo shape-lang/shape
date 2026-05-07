@@ -1,61 +1,196 @@
-//! Column intrinsic functions
+//! Array-transform intrinsics — partial migration to typed marshal layer.
+//!
+//! Per the intrinsics-typed-CC migration's partial-migration pattern (see
+//! `docs/defections.md` 2026-05-07 intrinsics-typed-CC entry's partial-
+//! migration subsection), 6 of 8 array-transform intrinsics migrate to
+//! `register_typed_fn_N` typed entries via [`create_array_transforms_module`].
+//! 2 polymorphic intrinsics (diff, cumsum) remain as legacy `IntrinsicFn`
+//! bodies pending the M1-split sub-decision (per-element-type intrinsics
+//! for polymorphic-return cases; cross-crate compiler change). diff
+//! additionally needs a validity-aware return variant for its i64 fast
+//! path (`option_i64_vec_to_nb` carries a validity bitmap; current
+//! `ConcreteReturn::ArrayI64(Vec<i64>)` does not).
+
+use crate::context::ExecutionContext;
+use crate::marshal::{
+    register_typed_fn_1, register_typed_fn_2, register_typed_fn_2_full, register_typed_fn_3,
+};
+use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::simd_i64;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_ast::error::{Result, ShapeError};
+use shape_value::{AlignedTypedBuffer, ValueWord};
+use std::sync::Arc;
 
 use super::{
-    extract_f64, extract_f64_array, extract_usize, f64_vec_to_nb_array, i64_vec_to_nb_int_array,
-    option_i64_vec_to_nb, try_extract_i64_slice,
+    extract_f64_array, i64_vec_to_nb_int_array, option_i64_vec_to_nb, try_extract_i64_slice,
 };
-use crate::context::ExecutionContext;
-use crate::simd_i64;
-use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
 
-pub fn intrinsic_column_select(
-    args: &[ValueWord],
-    _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_series requires exactly 1 argument".to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Module factory (6 typed entries) ─────────────────────
 
-    let data = extract_f64_array(&args[0], "series")?;
-    Ok(f64_vec_to_nb_array(data))
+/// Create the array-transforms intrinsics module with 6 typed-marshal entry
+/// points. The 2 polymorphic intrinsics (diff, cumsum) remain as legacy
+/// `IntrinsicFn` bodies in this module until their M1-split sub-decision lands.
+pub fn create_array_transforms_module() -> ModuleExports {
+    let mut module = ModuleExports::new("std::core::intrinsics::array_transforms");
+    module.description =
+        "Array-transform intrinsics (typed entries; polymorphic-shape intrinsics stay as legacy bodies pending M1-split sub-decision)"
+            .to_string();
+
+    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+        &mut module,
+        "__intrinsic_series",
+        "Identity column projection of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(
+                input.as_slice().to_vec(),
+            )))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, i64>(
+        &mut module,
+        "__intrinsic_shift",
+        "Shift a Vec<number> by N positions, padding with NaN",
+        [("series", "Array<number>"), ("shift", "int")],
+        ConcreteType::ArrayNumber,
+        |series, shift, _ctx| {
+            let data = series.as_slice();
+            let mut result = Vec::with_capacity(data.len());
+            if shift > 0 {
+                let s = (shift as usize).min(data.len());
+                for _ in 0..s {
+                    result.push(f64::NAN);
+                }
+                result.extend_from_slice(&data[..data.len().saturating_sub(s)]);
+            } else if shift < 0 {
+                let s = ((-shift) as usize).min(data.len());
+                result.extend_from_slice(&data[s..]);
+                for _ in 0..s {
+                    result.push(f64::NAN);
+                }
+            } else {
+                result.extend_from_slice(data);
+            }
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2_full::<_, Arc<AlignedTypedBuffer>, i64>(
+        &mut module,
+        "__intrinsic_pct_change",
+        "Percent change between consecutive (or period-spaced) Vec<number> elements",
+        [
+            ModuleParam {
+                name: "series".to_string(),
+                type_name: "Array<number>".to_string(),
+                required: true,
+                description: "Input series".to_string(),
+                ..Default::default()
+            },
+            ModuleParam {
+                name: "period".to_string(),
+                type_name: "int".to_string(),
+                required: false,
+                description: "Period for change comparison (default 1)".to_string(),
+                default_snippet: Some("1".to_string()),
+                ..Default::default()
+            },
+        ],
+        ConcreteType::ArrayNumber,
+        |series, period, _ctx| {
+            let data = series.as_slice();
+            let period = period.max(0) as usize;
+            let mut result = Vec::with_capacity(data.len());
+            for i in 0..data.len() {
+                if i < period {
+                    result.push(f64::NAN);
+                } else {
+                    let prev = data[i - period];
+                    if prev == 0.0 {
+                        result.push(f64::NAN);
+                    } else {
+                        result.push((data[i] - prev) / prev);
+                    }
+                }
+            }
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, f64>(
+        &mut module,
+        "__intrinsic_fillna",
+        "Replace NaN entries in a Vec<number> with a fill value",
+        [("series", "Array<number>"), ("value", "number")],
+        ConcreteType::ArrayNumber,
+        |series, value, _ctx| {
+            let result: Vec<f64> = series
+                .as_slice()
+                .iter()
+                .map(|&v| if v.is_nan() { value } else { v })
+                .collect();
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+        &mut module,
+        "__intrinsic_cumprod",
+        "Cumulative product of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            let data = input.as_slice();
+            let mut result = Vec::with_capacity(data.len());
+            let mut acc = 1.0;
+            for &v in data {
+                acc *= v;
+                result.push(acc);
+            }
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_3::<_, Arc<AlignedTypedBuffer>, f64, f64>(
+        &mut module,
+        "__intrinsic_clip",
+        "Clip Vec<number> elements to the [min, max] interval",
+        [
+            ("series", "Array<number>"),
+            ("min", "number"),
+            ("max", "number"),
+        ],
+        ConcreteType::ArrayNumber,
+        |series, min, max, _ctx| {
+            let result: Vec<f64> = series
+                .as_slice()
+                .iter()
+                .map(|&v| v.max(min).min(max))
+                .collect();
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    module
 }
 
-pub fn intrinsic_shift(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "shift() requires 2 arguments (series, shift)".to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Legacy bodies (2 polymorphic intrinsics) ─────────────────────
 
-    let data = extract_f64_array(&args[0], "shift")?;
-    let shift = extract_f64(&args[1], "shift() second argument")? as i64;
-
-    let mut result = Vec::with_capacity(data.len());
-
-    if shift > 0 {
-        let shift_usize = shift.min(data.len() as i64) as usize;
-        for _ in 0..shift_usize {
-            result.push(f64::NAN);
-        }
-        result.extend_from_slice(&data[..data.len().saturating_sub(shift_usize)]);
-    } else if shift < 0 {
-        let shift_usize = (-shift).min(data.len() as i64) as usize;
-        result.extend_from_slice(&data[shift_usize..]);
-        for _ in 0..shift_usize {
-            result.push(f64::NAN);
-        }
-    } else {
-        result.extend_from_slice(&data);
-    }
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
+/// Intrinsic: Discrete difference of a series.
+///
+/// **Migration deferred** pending M1-split sub-decision (polymorphic
+/// return: `Vec<int>` with validity bitmap for `Vec<int>` fast path vs
+/// `Vec<f64>` with NaN sentinels for `Vec<number>`). The i64 fast path
+/// uses `option_i64_vec_to_nb` (validity-bitmap-aware); a future M1-split
+/// resolution for `diff` specifically needs a validity-aware return
+/// variant (e.g. `ConcreteReturn::ArrayOptionI64`) since
+/// `ConcreteReturn::ArrayI64(Vec<i64>)` does not carry validity. See
+/// the intrinsics-typed-CC entry's sub-decision queue.
 pub fn intrinsic_diff(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
     if args.is_empty() || args.len() > 2 {
         return Err(ShapeError::RuntimeError {
@@ -65,7 +200,7 @@ pub fn intrinsic_diff(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result
     }
 
     let period = if args.len() == 2 {
-        extract_usize(&args[1], "diff() second argument")?
+        super::extract_usize(&args[1], "diff() second argument")?
     } else {
         1
     };
@@ -86,61 +221,14 @@ pub fn intrinsic_diff(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result
         }
     }
 
-    Ok(f64_vec_to_nb_array(result))
+    Ok(super::f64_vec_to_nb_array(result))
 }
 
-pub fn intrinsic_pct_change(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "pct_change() requires 1 or 2 arguments (series, [period])".to_string(),
-            location: None,
-        });
-    }
-
-    let data = extract_f64_array(&args[0], "pct_change")?;
-
-    let period = if args.len() == 2 {
-        extract_usize(&args[1], "pct_change() second argument")?
-    } else {
-        1
-    };
-
-    let mut result = Vec::with_capacity(data.len());
-    for i in 0..data.len() {
-        if i < period {
-            result.push(f64::NAN);
-        } else {
-            let prev = data[i - period];
-            if prev == 0.0 {
-                result.push(f64::NAN);
-            } else {
-                result.push((data[i] - prev) / prev);
-            }
-        }
-    }
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
-pub fn intrinsic_fillna(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "fillna() requires 2 arguments (series, value)".to_string(),
-            location: None,
-        });
-    }
-
-    let data = extract_f64_array(&args[0], "fillna")?;
-    let fill_value = extract_f64(&args[1], "fillna() second argument")?;
-
-    let result: Vec<f64> = data
-        .iter()
-        .map(|&v| if v.is_nan() { fill_value } else { v })
-        .collect();
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
+/// Intrinsic: Cumulative sum of a series.
+///
+/// **Migration deferred** pending M1-split sub-decision (polymorphic
+/// input/return: `Vec<int>` for i64 fast path vs `Vec<number>` for f64
+/// path). See the intrinsics-typed-CC entry's sub-decision queue.
 pub fn intrinsic_cumsum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
     if args.len() != 1 {
         return Err(ShapeError::RuntimeError {
@@ -162,41 +250,5 @@ pub fn intrinsic_cumsum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Resu
         result.push(acc);
     }
 
-    Ok(f64_vec_to_nb_array(result))
-}
-
-pub fn intrinsic_cumprod(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "cumprod() requires 1 argument (series)".to_string(),
-            location: None,
-        });
-    }
-
-    let data = extract_f64_array(&args[0], "cumprod")?;
-    let mut result = Vec::with_capacity(data.len());
-    let mut acc = 1.0;
-    for &v in &data {
-        acc *= v;
-        result.push(acc);
-    }
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
-pub fn intrinsic_clip(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 3 {
-        return Err(ShapeError::RuntimeError {
-            message: "clip() requires 3 arguments (series, min, max)".to_string(),
-            location: None,
-        });
-    }
-
-    let data = extract_f64_array(&args[0], "clip")?;
-    let min = extract_f64(&args[1], "clip() second argument")?;
-    let max = extract_f64(&args[2], "clip() third argument")?;
-
-    let result: Vec<f64> = data.iter().map(|&v| v.max(min).min(max)).collect();
-
-    Ok(f64_vec_to_nb_array(result))
+    Ok(super::f64_vec_to_nb_array(result))
 }
