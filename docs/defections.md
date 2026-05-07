@@ -62,6 +62,238 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-07 — type_schema-slot-construction-cleanup workstream — N9 disposition (Option C signed off)
+
+This is **not** a defection. On-record promotion of the N9 candidate
+(deferred-with-surface-only at the Stage B+D close-out batch, see
+`### 2026-05-07 — Stage B+D close-out batch dispositions` above)
+to a fully-named workstream with supervisor sign-off on Option C.
+
+### Provenance
+
+The N9 surface was discovered during Dev 2's verification gate at
+close-out Step 3 (json.rs `__parse_typed` migration via N8
+`OpaqueTypedObject`, commit `5f637e1`): `nb_to_slot` is `pub(crate)`
+in `crates/shape-runtime/src/type_schema/mod.rs:354` and consumed
+by both json.rs's helper stack AND `type_schema/mod.rs` itself at
+lines 215 + 260. Option A2 (delete json.rs helpers as dead code)
+was chosen at the close-out batch to preserve per-file atomicity
+and avoid bundling type_schema/mod.rs slot-construction work into
+the json.rs commit. The surface was queued for next-session
+supervisor disposition.
+
+This entry records the next-session disposition.
+
+### Pre-architectural audit
+
+Audit-1+2+3 conducted by dev1-n9 in this session before any code
+changes (Stage B's binding pre-work template applied to N9). Key
+findings:
+
+- **`nb_to_slot` cross-crate consumers: 0.** `pub(crate)`
+  visibility confines it to shape-runtime; verified via
+  `rg "type_schema::nb_to_slot|::nb_to_slot\(" crates/`. After
+  json.rs Step 3 deleted the json-side helper stack, the only
+  remaining consumers are lines 215 + 260 within `type_schema/mod.rs`
+  itself.
+- **Public API surface above `nb_to_slot` is the cross-crate
+  surface**: `typed_object_from_pairs`, `typed_object_from_nb_pairs`,
+  `typed_object_to_hashmap`, `typed_object_to_hashmap_nb`. Cross-
+  crate consumers are in shape-vm **compiler** territory
+  (`shape-vm/src/compiler/{comptime, comptime_builtins,
+  comptime_target}.rs`) NOT shape-vm executor territory. This
+  distinction is material: the shape-jit-cleanup workstream
+  (BUNDLED-AUTHORIZATION) is shape-vm executor territory; N9 is
+  shape-runtime + shape-vm compiler territory. **Different
+  subsystems; N9 is NOT a sub-item of shape-jit-cleanup.**
+- **Dead-code duplication finding**: `typed_object_from_pairs`
+  (lines 192-227) and `typed_object_from_nb_pairs` (lines 235-272)
+  have STRUCTURALLY IDENTICAL bodies. The `_nb` suffix is a
+  residual from an earlier mid-migration where one variant
+  materialized ValueWord and the other took it natively; after the
+  migration converged both call `nb_to_slot` and produce the same
+  output. `typed_object_to_hashmap` (lines 308-311) is a 1-line
+  delegate to `typed_object_to_hashmap_nb` — same residual-rename
+  pattern. Three dead-code-duplicate functions account for ~50
+  lines of mostly-identical code in the file.
+- **Twin parallel-impls in shape-vm**: `nb_to_slot_with_field_type`
+  at `crates/shape-vm/src/executor/objects/object_creation.rs:317`
+  (schema-driven), trivial `nb_to_slot` at
+  `crates/shape-vm/src/executor/exceptions/mod.rs:26`. Distinct
+  surfaces from N9; remain ValueWord-bound until shape-vm cascade
+  reaches them.
+- **Strict-typed primitive surface available**: `ValueSlot::from_*`
+  primitives in `shape-value/src/slot.rs` (`from_number`, `from_int`,
+  `from_bool`, `from_heap`, `from_raw`). json.rs Step 3's helpers
+  used these directly in the migration commit `5f637e1`,
+  demonstrating body-level ValueSlot construction is feasible in
+  shape-runtime without architectural extension.
+
+### Architectural-extension shape options (all 5 surfaced; A/B/D/ε refused)
+
+Five options surfaced to supervisor at audit-time. Refusal reasoning:
+
+- **(A) `Arc<HeapValue>` arg pattern.** Would force public
+  signature change of `typed_object_from_pairs` from
+  `&[(&str, ValueWord)]` to `&[(&str, Arc<HeapValue>)]` —
+  cross-crate breaking change touching 9-10 caller sites
+  (shape-vm compiler + shape-runtime consumers). **Refused on
+  bundling-with-adjacent-work grounds** (handover N9-territory
+  refusal): public-signature migration is cluster #1 territory,
+  not N9.
+- **(B) Per-NativeKind primitives** (`nb_to_slot_int`,
+  `nb_to_slot_string`, etc.). Replaces `nb_to_slot` with a family
+  of typed primitives keyed by NativeKind/FieldType. **Refused on
+  parametric-explosion grounds** (supervisor watchlist:
+  "per-element-kind variants of typed-array discriminators —
+  scope-explosion at the array layer"). Adds redirection layer
+  with no structural-enforcement gain over `ValueSlot::from_*`
+  primitives that already exist.
+- **(D) `ConcreteSlotConstruction` sum type.** New typed input to
+  `nb_to_slot`-replacement, mirroring ConcreteReturn's
+  structural-enforcement pattern. **Refused on parallel-
+  discriminator grounds** (supervisor brief: "smaller subset
+  enum of an existing discriminator"). NativeKind already
+  discriminates these variants; introducing a parallel
+  discriminator recreates the SlotKind-vs-NativeKind drift the
+  prior consolidation eliminated.
+- **(ε) Schema-coupled strict primitive.** Most structurally-pure
+  shape: hoist type info to schema layer; construction primitive
+  takes `(field_type: FieldType, value_per_type: TypedValue)`.
+  Identified as the strict-typed-correct shape but **refused on
+  bundling-with-adjacent-work grounds**: schema-coupled
+  construction is cluster #1 territory; bundling readback path
+  migration into N9 violates the handover N9-territory refusal.
+  **ε remains the right shape for cluster #1** when that cluster
+  is taken up; logged here as on-record-rejected-for-N9 with
+  scope reasoning per supervisor structural-enforcement
+  principle's residual-permission.
+
+### Disposition: Option C signed off (no-intermediate; inline + dead-code cleanup)
+
+Supervisor PB 2/4 (this session): Option C selected. Rationale:
+
+> Why C over A/B/D/ε: mirrors json.rs Step 3 (5f637e1) — pure
+> additive deletion + inline. ε IS the strict-typed-correct shape
+> but is cluster #1 territory; bundling-with-adjacent-work
+> refusal binding. A/B/D refused at audit.
+
+**Scope: construction-only.** Readback path
+(`typed_object_to_hashmap_nb` line 329 `as_heap_nb` + line 337
+`clone_from_bits`) defers to cluster #1.
+
+**Public signatures: stable.** `typed_object_from_pairs`'s
+`&[(&str, ValueWord)]` retained. Cluster #1 decides signature
+migration.
+
+**Twin parallel-impls in shape-vm**: stay shape-runtime-only.
+
+**Ghost methods** (`from_value_word`, `as_heap_nb` — referenced
+extensively in shape-vm with no traceable definition; pre-existing
+compile failures upstream of shape-runtime --lib's 67-error
+baseline): out of scope for N9.
+
+**Workstream identity**: type_schema-slot-construction-cleanup
+(own dedicated workstream, shape-runtime-territory). NOT
+shape-jit-cleanup-folded; the audit established that
+shape-jit-cleanup is shape-vm executor territory while N9 is
+shape-runtime + shape-vm compiler territory.
+
+### Commit sequence (binding)
+
+- **C1** (this entry) — defections.md disposition entry. Predict 0
+  drop (defections-only).
+- **C2** — delete `typed_object_from_nb_pairs` (lines 235-272;
+  identical body to `typed_object_from_pairs`); update test at
+  line 280 to call surviving fn. Predict 0 (Rule A — pure
+  additive deletion of dead-code duplicate).
+- **C3** — delete `typed_object_to_hashmap` delegate (lines
+  308-311); rg callers; point to `_nb` version directly. Predict
+  0 (Rule A — pure delegate deletion).
+- **C4** — inline `nb_to_slot` at remaining call site
+  (`typed_object_from_pairs:215` after C2 deletion); delete
+  `pub(crate) fn nb_to_slot` (lines 354-376); delete stale
+  `use shape_value::{ValueWord, ValueWordExt}` at line 22.
+  Predict -3 to -6 (Rule F wide window; some imports persist via
+  cluster #1 callers — `schema_cache.rs`, `multi_table/functions.rs`,
+  `const_eval.rs`, shape-vm compiler consumers `comptime.rs` /
+  `comptime_builtins.rs` / `comptime_target.rs`).
+
+**Inline body preservation (binding)**: at C4, the inlined
+`nb_to_slot` body MUST preserve the `is_heap` branch + the
+unified-heap-bit-47 (`ValueBits::is_unified_heap`) path +
+`as_any_array().to_generic()` Array materialization +
+`as_heap_ref().clone()` cold-path + `ValueSlot::from_raw(raw_bits)`
+fallback verbatim. NO simplification, NO refactor, NO collapsing
+the conditional. The handover binder is explicit:
+
+> ❌ Simplifying inlined body — preserve is_heap branch + cold-path
+>    + ValueSlot::from_raw fallback verbatim
+
+### Refused-on-sight reinforcement (this disposition)
+
+For any future agent encountering the type_schema/mod.rs
+slot-construction surface:
+
+- ❌ Renaming `_nb`-suffixed survivors (touches public API;
+  scope-creep — supervisor refusal).
+- ❌ Simplifying the inlined body (preserve unified-heap-bit-47 +
+  cold-path + raw-bits fallback verbatim).
+- ❌ Bundling readback path migration into N9 commits (cluster #1
+  territory).
+- ❌ Bundling cluster #1 caller migrations into N9 commits.
+- ❌ Touching shape-vm parallel-impls (`object_creation.rs:317`,
+  `exceptions/mod.rs:26`) — those move with shape-vm cascade.
+- ❌ Re-introducing ValueWord at the slot-construction layer.
+- ❌ Naming the rewrite shape (already named: type_schema-slot-
+  construction-cleanup, supervisor-named at sign-off).
+- ❌ Adding `Convert<X>To<Y>` opcode for the inline-path bit
+  reconstruction (CLAUDE.md forbidden pattern).
+- ❌ Reintroducing `SlotKind::Dynamic` / `SlotKind::Unknown`
+  (CLAUDE.md forbidden).
+
+### Predicted error-drop calibration
+
+Cluster total: **-3 to -6 errors** (Rule F wide window).
+
+- C1: 0 (defections-only)
+- C2: 0 (Rule A — pure additive deletion of dead-code duplicate;
+  `from_pairs` absorbs all callers)
+- C3: 0 (Rule A — pure delegate deletion; same shape)
+- C4: -3 to -6 (10 file-scoped errors clear partially; some
+  persist via cross-crate callers' own ValueWord usage — Rule D
+  multi-function-file shared-import calibration)
+
+STOP-AND-SURFACE if measured outside [-3, -6] cluster total.
+
+### Workstream relationships
+
+- **Independent of N7** (any-typed-marshal-for-serialization,
+  parallel workstream this session): no shared infrastructure;
+  N7 is HeapValue→bytes (output direction); N9 is
+  ValueWord→ValueSlot (construction direction).
+- **Independent of shape-jit-cleanup workstream**: different
+  subsystem (shape-vm executor vs shape-runtime + shape-vm
+  compiler).
+- **Sub-decision within cluster #1 (type_schema)** umbrella; N9
+  scopes to `nb_to_slot` only. Cluster #1 retains the readback
+  path migration + the public signature redesign + ε strict-
+  typed-correct schema-coupling — explicitly NOT bundled here.
+
+### Cost saved
+
+Prevents the N9 surface from being re-derived in future sessions
+or quietly bundled with cluster #1 work. The five-option
+enumeration with refused-shape reasoning is the durable
+contribution: future agents reading the disposition will
+recognize the parametric-explosion / parallel-discriminator
+shapes if they re-emerge under different names. The dead-code-
+duplication finding (3 functions, ~50 lines) is captured before
+the cleanup commits land; without this entry the rename pattern
+risks recurring at later type_schema/mod.rs work.
+
+---
+
 ## 2026-05-07 — HashMap-marshal micro-cluster — named on-record (full entry)
 
 This is **not** a defection. On-record promotion from named-in-passing
