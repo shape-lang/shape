@@ -515,6 +515,228 @@ impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     }
 }
 
+// ────── typed-array Arc<TypedBuffer<T>> zero-copy FromSlot/ToSlot (option α + ε) ──────
+//
+// Stage B (`docs/defections.md` 2026-05-07 — Arc<TypedBuffer<T>> zero-copy
+// named cluster, lines 226-371; refined by the dated correction
+// subsection — per-storage-variant body-type map). The α + ε zero-copy
+// pattern lands alongside β: each impl pins a single `TypedArrayData::*`
+// storage variant via the body's declared parameter type, and the
+// `from_slot` path performs **one `Arc::clone` (atomic refcount op) and
+// zero data copy** rather than β's owned-clone (full element-by-element
+// copy of the inner buffer). β stays in production parallel for existing
+// consumers (compress / archive / byte_utils / csv / etc.) that don't
+// benefit from zero-copy.
+//
+// Per-storage-variant body-type map (per the 2026-05-07 dated correction
+// subsection):
+//
+//   TypedArrayData::F64 ↔ Arc<AlignedTypedBuffer>      (this section)
+//   TypedArrayData::I64 ↔ Arc<TypedBuffer<i64>>        (this section)
+//   TypedArrayData::U8  ↔ Arc<TypedBuffer<u8>>         (this section)
+//   TypedArrayData::Bool deferred — Rust-type-collision with U8;
+//                                   resolution comes when a Bool consumer
+//                                   surfaces, likely via a newtype wrapper.
+//   I32 / Matrix / others — deferred per consumer-driven scope.
+//
+// `NATIVE_KIND` stays `Ptr(HeapKind::TypedArray)` for all three — the
+// element-width discriminator lives in the body-side Rust type (ε
+// pattern), not in slot bits or `NativeKind`. Same consistency-check
+// residual as β: the in-body pattern match panics on the wrong
+// `TypedArrayData::*` arm. Per `docs/runtime-v2-spec.md`, this is a
+// `debug_assert!`-equivalent — unreachable in a well-typed system.
+//
+// f64 uses `Arc<AlignedTypedBuffer>` rather than `Arc<TypedBuffer<f64>>`
+// because `TypedArrayData::F64` stores the SIMD-aligned `AlignedVec<f64>`
+// shape (`heap_value.rs:482`, `typed_buffer.rs:230`). This asymmetric
+// body-type map is the established codebase pattern (mirrors shape-vm's
+// `extract_float_array` / `extract_int_array` helpers in
+// `crates/shape-vm/src/executor/objects/typed_array_methods.rs:19,26`).
+// See the 2026-05-07 dated correction subsection of the zero-copy entry
+// for A1/A2/A3 surfacing, A4-A7 supervisor-checked alternatives, and
+// the structural rationale.
+
+/// Read an `Arc<AlignedTypedBuffer>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::F64`.
+///
+/// Zero-copy semantics: the body receives a strong reference cloned from
+/// the inner `Arc<AlignedTypedBuffer>` of the heap value's TypedArray
+/// payload — one `Arc::clone` (single atomic refcount op) and **zero
+/// data copy**. The body accesses the f64 buffer via
+/// `Arc::deref` → `&[f64]` (`AlignedTypedBuffer`'s `Deref<Target=[f64]>` impl).
+///
+/// Panics on `TypedArrayData::*` mismatch — same consistency-check
+/// rationale as the β `Vec<u8>` impl above.
+impl FromSlot for Arc<shape_value::AlignedTypedBuffer> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above. Marshal kind contract
+        // pins this slot to an Arc<HeapValue> with the TypedArray
+        // variant; this impl pins the F64 storage arm via the body's
+        // declared Arc<AlignedTypedBuffer> parameter type.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::F64(arc)) => {
+                    Arc::clone(arc)
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
+                     HeapValue::TypedArray::{}, not F64. Body's parameter type \
+                     Arc<AlignedTypedBuffer> requires the F64 storage variant. \
+                     Marshal kind contract violated by caller (compiler/dispatcher \
+                     bug, not a user-facing condition).",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
+                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
+                     violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Project an `Arc<AlignedTypedBuffer>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::F64`.
+///
+/// The body's `Arc<AlignedTypedBuffer>` is already wrapped — the only
+/// allocations are constructing `HeapValue::TypedArray(TypedArrayData::F64(self))`
+/// and `Arc::new(hv)` for the slot's outer `Arc<HeapValue>`. **No
+/// element copy.**
+impl ToSlot for Arc<shape_value::AlignedTypedBuffer> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let hv = shape_value::HeapValue::TypedArray(
+            shape_value::TypedArrayData::F64(self),
+        );
+        Arc::into_raw(Arc::new(hv)) as u64
+    }
+}
+
+/// Read an `Arc<TypedBuffer<i64>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::I64`.
+///
+/// Zero-copy semantics: see `Arc<AlignedTypedBuffer>::from_slot` above.
+/// Body accesses `&[i64]` via `Arc::deref` → `TypedBuffer<i64>`'s
+/// `Deref<Target=[i64]>` impl.
+impl FromSlot for Arc<shape_value::TypedBuffer<i64>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::I64(arc)) => {
+                    Arc::clone(arc)
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
+                     HeapValue::TypedArray::{}, not I64. Body's parameter type \
+                     Arc<TypedBuffer<i64>> requires the I64 storage variant. \
+                     Marshal kind contract violated by caller.",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
+                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
+                     violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Project an `Arc<TypedBuffer<i64>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::I64`. **No element copy.**
+impl ToSlot for Arc<shape_value::TypedBuffer<i64>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let hv = shape_value::HeapValue::TypedArray(
+            shape_value::TypedArrayData::I64(self),
+        );
+        Arc::into_raw(Arc::new(hv)) as u64
+    }
+}
+
+/// Read an `Arc<TypedBuffer<u8>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::U8`.
+///
+/// Zero-copy semantics: see `Arc<AlignedTypedBuffer>::from_slot` above.
+/// Body accesses `&[u8]` via `Arc::deref`.
+///
+/// Note: `TypedArrayData::Bool` also stores `Arc<TypedBuffer<u8>>`; this
+/// impl matches `TypedArrayData::U8` only. Bool consumer projection is
+/// deferred per the 2026-05-07 dated correction subsection (Rust-type-
+/// collision with U8 — body type alone cannot disambiguate; resolution
+/// comes when a Bool consumer surfaces, likely via a newtype wrapper).
+/// A Bool slot reaching this impl is a marshal-kind-contract violation.
+impl FromSlot for Arc<shape_value::TypedBuffer<u8>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::U8(arc)) => {
+                    Arc::clone(arc)
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
+                     HeapValue::TypedArray::{}, not U8. Body's parameter type \
+                     Arc<TypedBuffer<u8>> requires the U8 storage variant \
+                     (Bool deferred — see zero-copy entry's 2026-05-07 dated \
+                     correction subsection). Marshal kind contract violated \
+                     by caller.",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
+                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
+                     violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Project an `Arc<TypedBuffer<u8>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::U8`. **No element copy.**
+///
+/// As with `FromSlot` above, this projects to the U8 storage variant
+/// only; Bool projection is deferred.
+impl ToSlot for Arc<shape_value::TypedBuffer<u8>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let hv = shape_value::HeapValue::TypedArray(
+            shape_value::TypedArrayData::U8(self),
+        );
+        Arc::into_raw(Arc::new(hv)) as u64
+    }
+}
+
 // ─────────────────────── per-arity register helpers ───────────────────────
 
 /// Body type stored in the typed registry: takes raw `&[u64]` slots and
