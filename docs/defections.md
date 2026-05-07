@@ -659,6 +659,105 @@ for measurement-based decisions specifically.
 Q2 disposition explicitly tentative-marshal-fold pending empirical
 gate. Consumer migration proceeds with per-file revert discipline.
 
+### 2026-05-07 — Fourth audit-grounded correction: cross-crate dispatcher scope
+
+Fourth finding #11 symmetry-extension applied to this entry.
+**The four prior subsections (lines 226-371 original entry +
+per-storage-variant correction + α-ToSlot-dead-at-marshal
+correction + gate-infeasibility correction) stay on-record.**
+This subsection captures the cross-crate-dispatcher-scope finding
+caught during vector.rs migration preparation.
+
+**Audit during vector.rs migration preparation revealed:** the
+intrinsic-bodies-per-file framing in the gate-infeasibility
+subsection ("each intrinsic file lands as its own atomically-
+revertible commit") is incomplete. The 14 intrinsic files'
+public functions (`vector::intrinsic_vec_add`, etc.) are called
+from **shape-vm's dispatcher** at
+`crates/shape-vm/src/executor/builtins/vector_intrinsics.rs:25-39`
+(for vector intrinsics; analogous dispatcher sites for the other
+13 files) via `BuiltinFunction::IntrinsicVec*`-class opcode match
+arms, with `&[ValueWord]` argument slices. Migration of any
+intrinsic from legacy `IntrinsicFn` to `register_typed_fn_N`
+**changes the Rust signature** in a way that breaks shape-vm's
+dispatcher call sites — and `ValueWord` is deleted, so the
+legacy signature cannot exist on this branch in any form.
+
+**The migration is inherently cross-crate.** Each file's commit
+must update both:
+
+- **shape-runtime side** — intrinsic body migration to
+  `register_typed_fn_N` with typed Rust args.
+- **shape-vm side** — dispatcher arm rerouting in
+  `vector_intrinsics.rs` (or analogous file for other intrinsic
+  groups) to look up via `module.typed_exports().functions.get(...)`
+  and invoke the typed closure.
+
+The two changes ship together as one atomic per-file commit;
+splitting them creates a temporarily-broken interim state
+(W-series rename pattern at the dispatcher layer).
+
+**The original "shape-runtime-only commit per file" framing
+missed this.** Audit-1 of Stage B pre-work enumerated body
+shapes inside shape-runtime intrinsic files but did not trace
+the cross-crate call graph from each public function to its
+shape-vm consumer site. Audit-3 of Stage B caught the cross-
+crate `TypedArrayData` consumer surface in shape-vm but didn't
+apply the same lens to `BuiltinFunction::IntrinsicVec*` opcodes
+— those are a parallel cross-crate scope that the audit missed.
+
+**This fourth audit catch surfaces an additional discipline
+addition (binding-as-baseline for future audits — this is the
+fourth finding #11 symmetry-extension applied to supervisor-
+authored framing in one session, baking the pattern in):**
+
+The audit-1+2+3 binding pre-work for any architectural decision
+now includes three specific verification disciplines, all under
+finding #11's audit-grounded-correction scope:
+
+1. **"Verify against current code"** (always — original
+   finding #11 baseline).
+2. **"Verify against current build state"** (for measurement-
+   based or empirical-gate decisions — third instance, captured
+   in the gate-infeasibility correction subsection above).
+3. **"Verify against current cross-crate call graph"** (for
+   architectural decisions touching dispatch / calling-conventions
+   / public-API / serialization — this instance).
+
+For each new architectural decision, the implementing agent
+runs `rg`/`cargo check --workspace`/dispatch-table inspection at
+scoping time to enumerate cross-crate consumers of the symbols
+being changed. Supervisor sign-off includes verification that
+the cross-crate call graph was checked.
+
+These three disciplines aren't separate findings; they are scope
+clarifications under finding #11's audit-grounded-correction
+discipline. Future on-record entries cite finding #11 as the
+load-bearing rule.
+
+**Implication for the per-file migration plan (binding):**
+the migration commits stay scoped per-intrinsic-file but expand
+to include both crates. Predicted error windows per file:
+
+- shape-runtime side: -3 to -8 errors per file (intrinsic body
+  migration + use-statement removal + per-file removed-symbol
+  cascades).
+- shape-vm side: 0 to -1 error per file (dispatcher arm changes;
+  mostly mechanical 1:1 reroute).
+- Combined: -3 to -9 errors per file.
+
+If shape-vm side touches >10 lines per dispatcher arm, that's a
+sign Q2-marshal-fold-light is bigger than scoped — implementing
+agent surfaces and stops. Each dispatcher reroute should be
+~5-10 lines (one match arm fetching from `typed_exports` and
+invoking).
+
+**Disposition for this subsection:** in-place correction logged.
+Q2 = marshal-fold-light per the intrinsics-typed-CC entry's
+Q2-C correction subsection (cross-referenced). Migration
+proceeds as cross-crate per-file commits with combined
+shape-runtime + shape-vm changes.
+
 ---
 
 ## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
