@@ -595,6 +595,106 @@ extension. Bounded scope; doesn't touch existing migrated callers
 (file.rs, regex.rs, crypto.rs, env.rs, unicode.rs, compress.rs,
 archive.rs all use the non-`_full` variants and stay unchanged).
 
+### 2026-05-07 — first-position-optional sub-cluster (deferred)
+
+Audit-grounded sub-entry under the marshal-optional-args extension
+above. The above entry's audit identified "pipe-ops `handle?` (default
+stdin)" among the 17 trailing-optional-arg sites. Phase 2d's
+`process_ops` migration revealed that this case is structurally
+different from the other optionals and warrants its own sub-cluster
+identity.
+
+**Shape difference.** Trailing-optional with N≥1 required params
+(e.g. `io.open(path, mode?)`, `io.read(handle, n?)`) is fully
+addressed by the `register_typed_fn_N_full` family — the body
+always receives N typed args; the missing call-site arg is
+synthesized from `default_snippet` by the compile-time default-arg
+insertion path. Body sees no "optional" semantics.
+
+**First-position-optional** is the case where the optional param
+is the **only** param. Two distinct user-facing surfaces:
+
+1. **`fn()` (arity 0)** — no args, body uses an internal default.
+2. **`fn(x)` (arity 1)** — one arg, body uses provided value.
+
+These two surfaces share a function name. The current
+`register_typed_fn_N` family is **fixed-arity**: a name registers
+to exactly one (arity, arg-kinds) tuple. Supporting both arity-0
+and arity-1 forms under the same name requires arity-disambiguation
+at the registration layer, which the marshal-API surface does not
+currently expose.
+
+**Audit 1 (consumer-call-shape) finding:** `io.read_line` is the
+**unique consumer** of this shape in the current stdlib. The 0-arg
+fns currently registered (`stdin`, `stdout`, `stderr`,
+`ed25519_generate_keypair`, `cwd`, `os`, `arch`) have no 1-arg
+overload partner. The pending modules (json/http/yaml/toml/msgpack/
+xml) have only trailing-position optionals with required first
+params (already handled by `_full` variants). No other current or
+near-term consumer.
+
+**Considered (option α — arity-1 with `default_snippet: Some("io.stdin()")`):**
+register `io.read_line(handle: IoHandle)` as required-1-arg with
+the default snippet being a function call. The compile-time
+default-arg insertion path expands the call site `read_line()`
+into `read_line(io.stdin())` before marshal sees it. **Open
+question:** does `default_snippet` parse arbitrary expressions, or
+literals only? If arbitrary expressions: this works with no
+marshal-API extension. If literals only: option α requires
+extending the default-arg insertion path to handle expression
+defaults. Audit 2 (default-snippet expression-vs-literal capability
+in the compile-time insertion path) is the gating sub-question for
+this shape.
+
+**Considered (option β — arity overloading at the registration
+layer):** allow `register_typed_fn_0` *and* `register_typed_fn_1`
+to be called with the same name; dispatcher disambiguates by
+call-site argument count. Adds a runtime field
+(`overload_by_arity: HashMap<usize, Box<TypedInvoke>>`) to
+`ModuleFnEntry`. Cleaner if multiple consumers eventually surface;
+heavier than necessary for a single consumer.
+
+**Considered (option γ — split into two distinct names):** rename
+the arity-1 form to `read_line_from(handle)` and keep `read_line()`
+arity-0. User-facing surface change to canonical Shape I/O
+(`io.read_line(handle)` is documented as the file/pipe form).
+Same precedent as the `marshal-optional-args` entry's option 3
+rejection — `io.read_line(handle?)` is part of Shape's public API,
+breaking it isn't a deferred residual but a behavior change.
+
+**Watchlist refusals (binding when this lands):**
+- Refuse "register two names internally and alias" (rename-to-
+  less-suspicious-name shape).
+- Refuse "body checks `args.is_empty()` and dispatches" — this is
+  the dynamic-fallback shape applied at the marshal-API entry
+  point. Forbidden per CLAUDE.md.
+- Refuse "make `Arc<IoHandleData>` an `Option<Arc<IoHandleData>>`
+  parameter" — interlocks with Cluster #4 Option marshal which is
+  itself a deferred decision; would push the first-position-
+  optional question into the Option<T> cluster's sub-decisions.
+- Refuse "default_snippet parses Shape source at registration time
+  and bakes the result into the schema" — moves arbitrary-
+  expression evaluation into stdlib registration (sandbox/
+  permission boundary violation potential).
+
+**Disposition:** deferred to its own surface-and-decide round-trip.
+Currently held as a source-comment TODO in
+`crates/shape-runtime/src/stdlib_io/process_ops.rs::read_line`
+that says "Callers should use `io.stdin()` then `read_line(handle)`
+instead." This is a **behavior workaround**, not a permanent
+solution — Shape's documented `io.read_line()` 0-arg form is
+broken until this sub-cluster lands.
+
+**Predicted error-drop:** 0 (no current shape-runtime --lib
+errors; this is a feature-completeness gap, not a compile-time
+break). Surfaces in shape-test as a `read_line()`-no-arg test
+failure when the test harness comes back online.
+
+**Cost saved by sub-entry:** prevents the source-comment-TODO
+accumulation pattern. Future sessions don't need to re-derive
+"why is `read_line()` no-arg deferred" — the architectural shape,
+options, and watchlist refusals are on-record.
+
 ---
 
 ## 2026-05-06 — IoHandle marshal extension — deferred (stdlib_io cluster blocker)
