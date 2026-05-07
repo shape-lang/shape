@@ -63,5 +63,6 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         crate::intrinsics::convolution::create_convolution_intrinsics_module(),
         crate::intrinsics::stochastic::create_stochastic_intrinsics_module(),
         crate::intrinsics::matrix::create_matrix_intrinsics_module(),
+        crate::intrinsics::fft::create_fft_intrinsics_module(),
     ]
 }

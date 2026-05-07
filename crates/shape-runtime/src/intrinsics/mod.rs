@@ -249,20 +249,16 @@ impl IntrinsicsRegistry {
         // Empty: __intrinsic_stencil migrated to typed marshal layer.
     }
 
-    /// Register FFT (Fast Fourier Transform) intrinsics
+    /// Register the 1 fft intrinsic (`__intrinsic_ifft`) whose migration is
+    /// deferred pending the N3 sub-decision (polymorphic input: TypedObject
+    /// FFT-result vs (real_arr, imag_arr) two-array form). The other 4 fft
+    /// intrinsics (fft, psd, dominant_frequency, bandpass, harmonics)
+    /// migrated to typed marshal entries in
+    /// `fft::create_fft_intrinsics_module`.
     fn register_fft_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_fft".to_string(), fft::intrinsic_fft);
+        // Polymorphic-input: ifft — pending N3 sub-decision (N3-β = defer
+        // permanent legacy at first landing per supervisor 2026-05-07).
         functions.insert("__intrinsic_ifft".to_string(), fft::intrinsic_ifft);
-        functions.insert("__intrinsic_psd".to_string(), fft::intrinsic_psd);
-        functions.insert(
-            "__intrinsic_dominant_frequency".to_string(),
-            fft::intrinsic_dominant_frequency,
-        );
-        functions.insert("__intrinsic_bandpass".to_string(), fft::intrinsic_bandpass);
-        functions.insert(
-            "__intrinsic_harmonics".to_string(),
-            fft::intrinsic_harmonics,
-        );
     }
 }
 
