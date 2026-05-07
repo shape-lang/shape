@@ -368,6 +368,120 @@ HAS arrived. Promotion cements the trigger. Estimated avoided
 intrinsic-by-intrinsic perf regressions disguised as "small
 migration cost we can profile later."
 
+### 2026-05-07 — Audit-grounded correction: per-storage-variant body-type map
+
+Audit-grounded correction in-place per finding #11. **The original
+entry text above stays.** This dated subsection supersedes the
+original framing of α's body type as uniformly `Arc<TypedBuffer<T>>`.
+No contradictory new entry. No retroactive rewrite.
+
+**Audit 2 finding (Stage B pre-work, 2026-05-07).** `TypedArrayData::F64`
+stores `Arc<AlignedTypedBuffer>` (`crates/shape-value/src/heap_value.rs:482`),
+**not `Arc<TypedBuffer<f64>>`**. `AlignedTypedBuffer` wraps
+`AlignedVec<f64>` for 32-byte SIMD alignment
+(`crates/shape-value/src/typed_buffer.rs:230`); it is not
+interchangeable with `TypedBuffer<f64>` (whose `data` is `Vec<f64>`)
+without a per-element copy.
+
+The original entry text wrote α with body type `Arc<TypedBuffer<f64>>`
+uniformly across all element types (lines 264-271 above). That
+framing approximates. **The load-bearing structural property of
+α + ε is per-element-type body types pinning storage variants via
+the Rust type system — *not* uniform-element-type-storage-shape.**
+A1 below is α-refinement, not α-alternative: it specifies α's per-
+element-type ε-pattern impls more precisely than the original
+entry's text. The α + ε load-bearing property (per-element-type
+impls; body type pins storage variant via Rust types; NATIVE_KIND
+uniform `Ptr(HeapKind::TypedArray)`; in-body pattern-match
+consistency check) is preserved.
+
+**Per-storage-variant body-type map (binding for Stage B's
+architectural-extension commit):**
+
+| Storage variant | Body type | First-landing? | Notes |
+|---|---|---|---|
+| `TypedArrayData::F64` | `Arc<AlignedTypedBuffer>` | ✅ yes | 78 intrinsic consumers (~85%); AlignedVec<f64> SIMD alignment preserved |
+| `TypedArrayData::I64` | `Arc<TypedBuffer<i64>>` | ✅ yes | 12 consumers (~13%) — vector / rolling / array_transforms |
+| `TypedArrayData::U8` | `Arc<TypedBuffer<u8>>` | ✅ yes | symmetry with existing β `Vec<u8>`; minor incremental scope |
+| `TypedArrayData::Bool` | `Arc<TypedBuffer<u8>>` | ❌ deferred | Rust-type-collision with U8 — body type alone cannot disambiguate. Defer until consumer surfaces (likely newtype resolution). Only 2 sites currently use bool-as-f64-0/1 (scan_or, scan_and); deferral cost near-zero. |
+| `TypedArrayData::I32` | `Arc<TypedBuffer<i32>>` | ❌ deferred | 1 helper consumer; follow consumer-driven |
+| `TypedArrayData::Matrix` | `Arc<MatrixData>` | follow-on within Stage B | non-primitive storage; separate ε-style impl. Land if matmul / mat_add / mat_sub consumer migration needs it within Stage B; otherwise defer. **Don't add speculatively.** |
+| Other variants (F32 / I8 / I16 / U16 / U32 / U64 / String / HeapValue / FloatSlice) | per-need | ❌ deferred | no current intrinsic consumer per Audit 1 |
+
+**First-landing element-type set rationale.** Audit 1 enumerated
+92 functions across 14 intrinsics files. f64 dominates (~85%);
+i64 next (~13%); u8 covered for symmetry with already-landed β
+`Vec<u8>` impl. Bool / i32 deferred per consumer count and (for
+Bool) the Rust-type-collision-with-U8 disambiguation question.
+Matrix as separate ε-style impl is a follow-on; don't add
+speculatively.
+
+**Options surfaced by the implementing agent (A1/A2/A3) — A1 chosen:**
+
+- **(A1) Asymmetric body types per storage variant.** Each impl
+  pins its storage variant via in-body pattern match. The Rust
+  trait system enforces the body-side mapping. **Chosen.**
+  Mirrors existing shape-vm precedent —
+  `crates/shape-vm/src/executor/objects/typed_array_methods.rs:19`
+  has `extract_float_array(args) -> &Arc<AlignedTypedBuffer>` and
+  line 26 has `extract_int_array(args) -> &Arc<TypedBuffer<i64>>`
+  side-by-side. Asymmetric body types are the **established
+  pattern in this codebase**, not an invention of Stage B.
+- **(A2) Symmetric `Arc<TypedBuffer<f64>>` body via copy-at-FromSlot.**
+  Element-by-element copy of 10K-1M f64s on every call. **Refused
+  on watchlist (perf-non-negotiable softening).** Direct
+  rationalization shape — re-classifying intrinsics as not-
+  really-hot-path is forbidden.
+- **(A3) Refactor `TypedArrayData::F64` to hold `Arc<TypedBuffer<f64>>`.**
+  Storage refactor; loses `AlignedVec<f64>`'s 32-byte SIMD
+  alignment, regressing the existing SIMD inner-loop perf. Cross-
+  crate workspace scope (touches shape-vm executor, JIT FFI, viz,
+  wire). **Refused on cross-crate scope + AlignedVec SIMD
+  alignment regression risk.** Out of Stage B scope; would need
+  its own surface-and-decide round-trip.
+
+**Additional alternatives (A4-A7) the supervisor checked; all
+rejected on structural grounds:**
+
+- **(A4) Generic dispatch via `Arc<dyn AlignedBuffer>` trait.**
+  Re-introduces `dyn` at the marshal boundary. **Refused — no-
+  dynamic-types defection** (`shape/CLAUDE.md` Forbidden Patterns).
+- **(A5) Refactor `TypedBuffer<T>` to support optional alignment
+  via const-generic.** Same cross-crate blast radius as A3 minus
+  the storage-variant change. **Refused — probably net negative.**
+- **(A6) Body declares via enum `MaybeAligned<f64>`.** Re-
+  introduces dynamic dispatch in the body. **Refused — defection-
+  shape (W-series rename pattern at body-type layer).**
+- **(A7) Newtype wrapper `Arc<TypedBufferF64Aligned>`.** Adds
+  indirection without solving the underlying storage-shape
+  difference. **Refused — net negative.**
+
+**Disposition:** A1 chosen; first-landing set f64 + i64 + u8;
+supervisor sign-off relayed through user. Architectural-extension
+commit candidate cleared to land (6 impls in `marshal.rs`:
+FromSlot + ToSlot for each of `Arc<AlignedTypedBuffer>`,
+`Arc<TypedBuffer<i64>>`, `Arc<TypedBuffer<u8>>`). Predicted
+0 ± 3 errors. β stays parallel; no enum modifications; no
+dispatch-table changes. **Microbenchmark verification gate
+binding** (`vec_abs` / `vec_add` over a 10K-element f64 array
+vs pre-bulldozer baseline) before declaring Stage B landing
+complete; >10% regression = STOP and surface, do not proceed
+to consumer migration.
+
+**Meta-finding (calibration #13 candidate).** This is the first
+audit-grounded correction applied to a supervisor-authored on-
+record entry. The original zero-copy entry (lines 226-371 above,
+dated 2026-05-07) was reviewed and signed off by the supervisor
+at write-time; Audit 2 caught the calibration over-simplification
+by verifying body type vs storage variant against current code
+(`heap_value.rs:482`) rather than trusting the entry's framing.
+**Lesson:** structural reasoning at sign-off time is not infallible
+against ground truth either. Verify against current code, don't
+trust prior framing — even framing the supervisor signed off on.
+Finding #11 (audit-grounded-correction is binding for prior on-
+record entries) applies symmetrically to entries the supervisor
+authored.
+
 ---
 
 ## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
