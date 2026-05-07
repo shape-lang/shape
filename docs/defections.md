@@ -428,6 +428,90 @@ based on observed import-layer counts. AUDIT RECOMMENDATION
 P1(b) surfaced; **supervisor sign-off relay pending** before any
 architectural-extension commit. No code changes pending sign-off.
 
+### 2026-05-07 — Follow-on note: HashMap structural_eq/equals deferred to shape-vm cleanup
+
+In-place dated subsection per finding #11 symmetry-extension. **The
+prior entry text + the consumer-body-case audit-grounded correction
+subsection both stay on-record.** This subsection captures a
+deferral note surfaced during P1(b) architectural-extension commit
+preparation (Commit `36519f6`, rebased to `6cd9181` after Dev 1's
+N2 extension landed).
+
+**The pattern-match exhaustiveness audit at P1(b) commit time
+identified that `HeapValue::structural_eq` and `HeapValue::equals`
+both terminate with a catch-all `_ => false` arm.** Adding HashMap-
+vs-HashMap arms speculatively (without consumer test coverage)
+would trip the dead-infrastructure-attractor pattern. The
+catch-all preserves match exhaustiveness for the architectural-
+extension commit's scope (Step 1: P1(b) extension) and the
+follow-on Stage C scope (Step 2 schemaful refactor + Step 3
+dynamic-keys consumer migration) — none of those exercise
+HashMap-vs-HashMap equality in stdlib body code, which returns
+HashMap values rather than computing equality on them.
+
+**Supervisor sign-off (verbatim) on the deferral and follow-on
+trigger condition:** "HashMap structural_eq/equals MUST land
+before HashMap is user-accessible. Current catch-all `_ => false`
+would silently break user equality ops. Lands as part of shape-vm
+cleanup workstream's HashMap user-API completion."
+
+**Concrete failure mode if missed:** when shape-vm's HashMap
+user-API surface lands (the cleanup workstream replacing
+`crates/shape-vm/src/executor/objects/hashmap_methods.rs`'s 31
+user-facing methods to operate on the new `HeapValue::HashMap`
+variant), Shape user code can write `let m1 = HashMap(); let m2 =
+HashMap(); m1 == m2`. With current catch-all, the equality
+operator would silently return `false` for genuinely-equal
+HashMap values — user-visible behavior bug in production Shape
+programs, NOT a compile error.
+
+**Trigger for landing:** structural_eq/equals HashMap arms land
+**before or alongside** shape-vm cleanup workstream's HashMap
+user-API completion. They MUST land in the same workstream-cycle
+as the user-API surface to prevent the silent-equality bug.
+Landing earlier (e.g., as part of a dynamic-keys consumer
+migration commit in Step 3) is fine if a consumer test exercises
+HashMap equality, but is not required.
+
+**Implementation shape (binding when it lands):** add two arms
+to `HeapValue::structural_eq` and `HeapValue::equals`:
+
+```rust
+(HeapValue::HashMap(a), HeapValue::HashMap(b)) => {
+    a.keys.data.len() == b.keys.data.len()
+        && a.keys.data.iter().zip(b.keys.data.iter()).all(|(ka, kb)| ka == kb)
+        && a.values.data.iter().zip(b.values.data.iter()).all(|(va, vb)| va.structural_eq(vb))
+}
+```
+
+(or `equals` for the equality-operator path, with the same
+shape). Insertion-order-comparing semantics — two HashMaps with
+the same keys+values inserted in different order are NOT
+structurally equal. Matches the pre-bulldozer semantics where
+`HashMapData::keys` was canonical-order-bearing. If
+order-insensitive equality is needed (a user-facing question
+beyond marshal scope), that's a separate decision at user-API
+time.
+
+**Watchlist refusal — DO NOT add catch-all-returns-true.** Some
+implementations might be tempted to add `_ => true` or
+`HeapValue::HashMap(_) => true` as a "default-equal" placeholder
+until proper structural compare lands. **Refused.** Equality
+defaulting to true is worse than defaulting to false — the
+silent-failure mode flips from "user code thinks values are
+unequal when they are" (false positive on `!=`) to "user code
+thinks values are equal when they aren't" (false positive on
+`==`), which is harder to debug. Keep catch-all `_ => false`
+until proper structural compare lands.
+
+**Disposition for this subsection:** deferral note logged.
+HashMap structural_eq/equals does NOT land in Stage C (Steps 1+2+3).
+Lands as part of the shape-vm cleanup workstream's HashMap
+user-API completion, with the implementation shape above as the
+binding sketch. Same parallel deferral as `shape_id` hidden-class
+optimization workstream (HashMap-marshal entry's eager-bucket-only
+disposition).
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
