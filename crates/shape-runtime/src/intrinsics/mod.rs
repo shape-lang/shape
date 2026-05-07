@@ -229,25 +229,11 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register random number generation intrinsics
-    fn register_random_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_random".to_string(), random::intrinsic_random);
-        functions.insert(
-            "__intrinsic_random_int".to_string(),
-            random::intrinsic_random_int,
-        );
-        functions.insert(
-            "__intrinsic_random_seed".to_string(),
-            random::intrinsic_random_seed,
-        );
-        functions.insert(
-            "__intrinsic_random_normal".to_string(),
-            random::intrinsic_random_normal,
-        );
-        functions.insert(
-            "__intrinsic_random_array".to_string(),
-            random::intrinsic_random_array,
-        );
+    /// All random intrinsics (random, random_int, random_seed, random_normal,
+    /// random_array) migrated to typed marshal entries in
+    /// `random::create_random_intrinsics_module`.
+    fn register_random_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: all 5 random intrinsics migrated to typed marshal layer.
     }
 
     /// Register statistical distribution intrinsics
