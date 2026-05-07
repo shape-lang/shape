@@ -1190,6 +1190,274 @@ explicitly, refuse defection-shape ad-hoc resolutions, document each
 disposition in finding-#11 dated subsections, accept honest 0-delta
 when architectural blockers genuinely gate consumers.
 
+### 2026-05-07 — Stage B+D close-out batch dispositions (supervisor relay)
+
+In-place dated subsection per finding #11 symmetry-extension. **All
+prior N4/N6/N7/N8 entry text + sub-shape categorization + consumer-
+expansion + mixed-disposition subsections stay on-record.** This
+subsection captures the supervisor's session close-out dispositions
+on the four architectural surfaces queued during Stage D, plus the
+two new follow-on workstreams introduced earlier.
+
+Per supervisor's "tightly-cross-referencing log entries into one
+commit" allowance: five sub-entries bundled here.
+
+#### N7 — UNIFIED workstream (subsumes 3.A + 3.D)
+
+Supervisor disposition: **unify N7 with the prior any-typed-marshal-
+for-serialization workstream into a single architectural decision**.
+N7's HTTP/object-output context (post_json/put_json) and the prior
+N4 sub-cluster's serialization context (yaml.stringify, toml.stringify,
+msgpack.encode, msgpack.encode_bytes) share the same architectural
+shape: the body needs to walk a polymorphic HeapValue tree and produce
+a target-format byte/string output. Per-format dispatch logic is the
+delta (JSON vs YAML vs TOML vs MsgPack-binary), but the HeapValue-
+walker pattern is the load-bearing question.
+
+**N7 unified workstream — 6 confirmed consumers**:
+
+| Function | Format | Output |
+|---|---|---|
+| `http.post_json(url, body: object, options)` | JSON | string body for `Content-Type: application/json` |
+| `http.put_json(url, body: object, options)` | JSON | same |
+| `yaml.stringify(value: any)` | YAML | string |
+| `toml.stringify(value: any)` | TOML | string |
+| `msgpack.encode(value: any)` | MsgPack | string |
+| `msgpack.encode_bytes(value: any)` | MsgPack | bytes |
+
+**Architectural shape (open; NOT yet ranked)**: HeapValue→bytes
+serializer pattern with format-specific dispatch. Options under
+consideration:
+
+- Per-format explicit serializer struct + caller-supplied
+  architectural-choice policy (Decimal precision; DataTable rows-
+  shape; etc.)
+- Tagged-string protocol `{ "$decimal": "1.50" }` for non-format-
+  primitive variants (works for JSON; less applicable to MsgPack)
+- Conservative subset (forbid all 5 architectural-choice variants;
+  serialize the 7 mechanical-yes variants only) per format
+- Format-specific typed sums (YamlValue, TomlValue, MsgpackValue)
+  bidirectional with the parse-side per-format-typed-sums-or-
+  unified-parsed-value workstream
+
+**Status**: queue addition; disposition deferred. **NO migrations
+land in this batch.** All 6 consumers stay legacy bodies pending
+unified architectural decision.
+
+#### N8 — SIGN OFF on `ConcreteReturn::OpaqueTypedObject`
+
+Supervisor sign-off received. Architectural extension authorized:
+add `ConcreteReturn::OpaqueTypedObject(Arc<HeapValue>)` variant +
+`ConcreteType::OpaqueTypedObject` mirror + dispatcher projection arm.
+
+**Verbatim sub-sign-off framing**:
+
+- Body constructs `Arc<HeapValue::TypedObject(...))` with runtime-
+  determined `schema_id`; returns directly.
+- Marshal-layer projects via heap pointer;
+  `NativeKind::Ptr(HeapKind::TypedObject)` is **specific** (TypedObject
+  is a known HeapKind, NOT wildcard). Distinct from N6's refused
+  wildcard NativeKind option.
+- Schema is **data carried by the heap value's existing `schema_id`
+  field**; NOT architectural metadata at the dispatcher.
+- Leaf in ConcreteReturn-recursion sense (`Arc<HeapValue>` is leaf
+  payload); recursive at HeapValue layer (consistent with
+  `ConcreteReturn::HashMapStringHeapValue` precedent).
+
+**Naming**: "Opaque" reflects supervisor-side does not decompose
+the TypedObject's slots; "TypedObject" reflects the known HeapKind
+discriminant. Naming finalized in implementation commit message;
+descriptive over speculative.
+
+**Refused alternatives** (for the on-record):
+
+- `ConcreteReturn::TypedObjectHandle` (Stage D Step 4 STOP-AND-
+  SURFACE Option C refused) — bundling architectural decisions.
+- `ConcreteType::TypedObjectByRef` registration-time variant
+  alongside OpaqueTypedObject — bundling architectural decisions
+  (option (ii) refused).
+- `ConcreteReturn::OpaqueAnyHeapValue` (no specific HeapKind) —
+  wildcard NativeKind defection.
+
+**Confirmed N8 consumer (current)**: `json.__parse_typed(text,
+schema_id) -> Result<any>` at `crates/shape-runtime/src/stdlib/json.rs`
+(deferred at Stage D Step 4 inline comment; lands in this close-out
+batch via Step 3).
+
+**Future consumers (speculative, not locked)**: msgpack typed-decode,
+custom-codec parsers — any future stdlib body that takes a runtime
+`schema_id` and produces a TypedObject conforming to it.
+
+**Status**: SIGN OFF; landing this batch (Step 2 architectural
+extension + Step 3 consumer migration).
+
+#### 3.C — DEFER ENTIRELY (per-format-typed-sums-or-unified-parsed-value workstream)
+
+Supervisor disposition: **defer the per-format-typed-sums-or-
+unified-parsed-value workstream entirely**. The 4 yaml/toml/msgpack
+parse-side consumers return **recursive HeapValue trees** (NOT
+TypedObjects with known schema_id), so N8's `OpaqueTypedObject`
+doesn't fit. The architectural decision (per-format typed sums vs
+unified ParsedValue/SerdeValue vs keep-legacy + adopt N7
+bidirectionally) is its own workstream.
+
+**3.C confirmed consumers (4 functions)**:
+- `yaml.parse(text) -> Result<any>`
+- `toml.parse(text) -> Result<any>`
+- `msgpack.decode(data) -> Result<any>`
+- `msgpack.decode_bytes(data) -> Result<any>`
+
+**Distinguishing from N8**: N8 covers TypedObjects with
+runtime-determined schema_id (json.__parse_typed) — known HeapKind,
+known schema_id field carries the decomposition contract. 3.C
+covers polymorphic HeapValue trees with NO uniform schema discipline
+— the parsed result could be a HashMap, an Array, a String, a number,
+or any nested combination. The HeapKind at the leaf is itself
+unknown until parse-time.
+
+**Status**: queue addition; disposition deferred. **NO migrations
+land in this batch.** All 4 consumers stay legacy bodies pending
+the per-format-vs-unified architectural decision.
+
+#### 3.E — shape-jit-cleanup workstream (consolidated bundle)
+
+Supervisor disposition: **bundle multiple cleanup-tier workstream
+items into a single named workstream** for next-session-or-later
+work. Single workstream covers:
+
+- **Recurrence α-disposition consolidation** (cross-crate-dual-
+  consumer pattern; Dev 1's contribution at `8aa10e2`). Partial-
+  migration via N1; the residual cleanup-and-consolidation work
+  joins this workstream.
+- **bspline2_3d_batch consolidation** (single-consumer-atomic per
+  Dev 1's distinction). Analogous shape to recurrence but on a
+  single-consumer site.
+- **align_tables (N5) ModuleContext.get_current_timeframe()
+  exposure** — Dev 1's prior N5 sub-decision deferred for this
+  workstream.
+- **Q2 dispatcher routing** — intrinsics-typed-CC marshal-fold
+  validation completion.
+- **pop_builtin_args + invoke_typed_module_fn migration** —
+  cleanup of the legacy polymorphic-args invoker path.
+- **N4 serialization residuals** — yaml.stringify / toml.stringify /
+  msgpack.encode / msgpack.encode_bytes (4 consumers) post-N7
+  unified-workstream-disposition.
+- **3.C parse-side residuals** — yaml.parse / toml.parse /
+  msgpack.decode / msgpack.decode_bytes (4 consumers) post-3.C
+  per-format-vs-unified-architectural-decision.
+
+**Why bundled (load-bearing)**: each item is small/cleanup-tier on
+its own but the cumulative cleanup needs cross-item coordination
+(dispatcher routing changes affect both Q2 and pop_builtin_args; N4
+serialization residuals share the unified-N7 helper with HTTP's
+post_json/put_json; 3.C parse residuals share the per-format
+architectural decision with the 4-yaml/toml/msgpack-stringify
+consumers via N7's bidirectional shape). Bundling preserves
+architectural coherence; un-bundling would require ordering coord
+across workstreams.
+
+**Status**: workstream framing only; disposition deferred. **NO
+migrations land in this batch.** Each bundled item retains its
+prior disposition (recurrence partial-migration at `8aa10e2`,
+align_tables N5 deferral, etc.) until the workstream picks up.
+
+#### Forward calibration rules — Stage B+D session
+
+In-place dated subsection per finding #11 symmetry-extension.
+Codifying five forward calibration rules surfaced empirically during
+the Stage B+D session, each with citation to its evidence commit.
+These join the framework's calibration ledger for future
+agent/supervisor calibration.
+
+**Rule A — Cleanup-without-cascade-impact = 0 drop** (Dev 1).
+
+> Commits that delete orphan intrinsics, remove unused imports, or
+> consolidate dead code without touching a consumer-migration site
+> drop 0 errors directly. Cumulative cleanup is valuable but must be
+> measured against post-migration cascades, not in isolation.
+
+Empirical citations: matrix.rs intrinsic deletions; multi_table cleanup
+commits; intrinsics/mod.rs cleanup at `80ca5fa`.
+
+**Rule B — α-disposition-with-retained-body specialization** (Dev 1).
+
+> Partial-migration commits that adopt α-disposition (retain the
+> existing body for one consumer while migrating the marshal layer
+> for another) drop errors corresponding to the migrated marshal
+> arity, NOT the body count. Recurrence cross-crate-dual-consumer
+> migration measured this empirically: marshal arity changed (FromSlot
+> arity), body retained for legacy consumer, error drop matched the
+> arity change not the consumer count.
+
+Empirical citations: recurrence intrinsics partial migration at
+`8aa10e2`; Stage B Phase 2 intrinsics matrix commits.
+
+**Rule C — Pure-additive vs broken-code-migration calibration**
+(Dev 2; this session).
+
+> Predict error drops as ZERO for commits that add NEW typed
+> functionality without removing legacy broken code. Stage D Step 2
+> (HTTP API split) added 4 new typed overloads + replaced inert
+> deferred-section comments — predicted -2 to -3, measured 0.
+> Deferred-section comments don't count as broken-code-migration;
+> they're additive-only and contribute 0 to the error-cleanup axis.
+
+Empirical citation: Stage D Step 2 at `d0a73e7` (commit body codifies
+the diagnosis).
+
+**Rule D — Multi-function-file shared-import calibration heuristic**
+(Dev 2; this session).
+
+> When a multi-function file shares import errors across multiple
+> unmigrated functions, migrating ONE function reduces 0 shared-
+> import errors. The migrated function's contribution to those
+> imports vanishes from the analysis, but the remaining unmigrated
+> functions still cite the same imports. Only when ALL users of an
+> import migrate does the import-error category vanish.
+
+Empirical citation: Stage D Step 4 at `43267c7` (json.parse migration;
+4 distinct error sites in deferred path persist post-migration).
+
+**Rule E — Multi-registration single-file framing rule** (team-lead/
+supervisor-layer; surfaced via Dev 2 Step 4 STOP).
+
+> When a stdlib file registers multiple functions with `Result<...>`
+> return-type-annotations, audit each body shape independently before
+> authorizing migration. Return-type-annotation similarity does NOT
+> imply migration-shape similarity. The body's projection layer
+> (what slot value the dispatcher pushes) is the relevant axis, not
+> the annotation.
+
+Empirical citation: Stage D Step 4 STOP-AND-SURFACE on
+`json.__parse_typed` (TypedObject-keyed-by-dynamic-schema return
+shape; sub-shape (b2) ≠ sub-shape (b1) JsonValue tree). Surfaced as
+N8 architectural sub-decision; this batch lands the disposition.
+
+#### Disposition for this subsection
+
+N7 unified workstream framed (6 consumers; deferred). N8 sign-off
+received (1 consumer migrating in this batch via Step 3). 3.C
+deferred entirely (4 consumers; separate workstream). 3.E shape-
+jit-cleanup workstream consolidated framing (multi-item bundle;
+deferred). Forward calibration rules A-E codified for future
+sessions.
+
+**Stage B+D close-out cluster status**:
+- 5 of 12 HashMap-marshal cluster consumers migrated (csv.parse_records,
+  csv.stringify_records, json.parse, json.__parse_typed, plus 4 HTTP
+  typed overloads counting as a unit) at end of this batch.
+- 7 of 12 deferred pending N7 unified workstream + 3.C per-format
+  workstream + shape-jit-cleanup workstream.
+- 4 architectural workstreams cleanly framed for next-session pickup.
+
+The Stage B+D execution discipline is the framework working as
+designed: surface architectural-adjacent surfaces explicitly via
+multi-concern audit + STOP-AND-SURFACE; refuse defection-shape ad-
+hoc resolutions; document each disposition in finding-#11 dated
+subsections; accept honest 0-direct-delta when architectural
+blockers genuinely gate consumers; codify forward calibration rules
+empirically as they're discovered.
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
