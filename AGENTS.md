@@ -19,7 +19,7 @@ before it's coded.
 | Branch | Worktree | Role | Active cluster | Files owned (rg pattern) | Status | Last update |
 |---|---|---|---|---|---|---|
 | `bulldozer-strictly-typed-intrinsics-dev1` | `../shape-intrinsics-dev1` | Migrator A | — | territory: `crates/shape-runtime/src/{intrinsics,type_schema}/`, `marshal/` | idle (last: N9 close, merged at `ce88425`) | 2026-05-07 |
-| `bulldozer-strictly-typed-stage-c-dev2` | `../shape-stage-c-dev2` | Migrator B | — | territory: `crates/shape-runtime/src/{json_value.rs,stdlib/{io,http,toml,yaml,msgpack,csv}.rs}` | idle (last: N7 close, merged at `7bab206`) | 2026-05-07 |
+| `bulldozer-strictly-typed-stage-c-dev2` | `../shape-stage-c-dev2` | Migrator B | — | territory: `crates/shape-runtime/src/{json_value.rs,stdlib/{io,http,toml,yaml,msgpack,csv}.rs,stdlib_io/network_ops.rs}` | idle (last: sub-cluster 1 (network_ops) verified-already-closed at `820980d`; N7 close at `7bab206`) | 2026-05-07 |
 
 ## Status values
 
