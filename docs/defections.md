@@ -2505,6 +2505,156 @@ diagnostic captured for forward calibration.
 N1 consumer count tracked alongside; batch-4 calibration rows
 appended.
 
+### 2026-05-07 — Sub-decision queue dispositions: N1-α / N3 DELETE / N5 DEFER (supervisor sign-off relayed)
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The nine prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration + partial-migration pattern + sub-decision queue +
+M1-split-and-N1 + N2 marshal arity 4/5/6 + N3 ifft polymorphic-
+input split + N5 ModuleContext access) stay on-record.** This
+subsection records supervisor sign-off dispositions on three
+queued items (N1, N3, N5), relayed via team-lead 2026-05-07.
+
+**N1 → α (use existing NullableX infrastructure)**
+
+`FromSlot<Option<T>>` consumes the existing `NullableFloat64` /
+`NullableInt8` / `NullableInt32` / `NullableInt64` `NativeKind`
+variants at `native_kind.rs:37/41/57/65`. Body sees `Option<T>`
+typed value; null discrimination is at the FromSlot trait impl
+layer, not in body code.
+
+Supervisor reasoning (verbatim from team-lead's relay): "Using
+[the NullableX variants] is consumer-side adoption, NOT new-
+sentinel-introduction. The watchlist refusal targets INTRODUCING
+new sentinels in strict-typing work; reusing existing sentinel-
+encoded NativeKind is consistent with 'use existing
+infrastructure'." Same architectural shape as Cluster #4 Option
+for return values (`FromSlot<Option<T>>` mirrors
+`TypedReturn::Some(T)/None` pattern).
+
+Heap-T (`Option<Arc<HeapValue>>`, `Option<Arc<DataTable>>`, etc.)
+uses `Ptr(HeapKind::*)` with `bits=0` = None per existing
+`v2/typed_option.rs` convention. Primitive (`Option<f64>`,
+`Option<i64>`, `Option<bool>`) uses NullableX kind-specific
+discriminator.
+
+**N1-β refused** (would block primitive Option<T> permanently).
+**N1-γ refused** (annotation unnecessary; α reasoning lives in
+commit message per zero-copy commit `9af2882` precedent).
+
+**Execution (binding for next commits):**
+1. **N1 architectural-extension commit** (predicted 0 ± 3):
+   `FromSlot<Option<T>>` impls reading slot bits, kind-specific
+   null discriminator (NullableX for primitives, Ptr(HeapKind::*)
+   bits=0 for heap-T), returning `Some(T::from_slot(...))` or
+   `None`. Single commit. Codify α-reasoning + watchlist-
+   relationship + Cluster #4 precedent in commit message.
+2. **recurrence.rs migration via N1** (predicted -1 to -2):
+   `intrinsic_linear_recurrence` `initial_value: Option<f64>`
+   third arg uses the new FromSlot impl. Per Stage B follow-on
+   standing.
+
+Watchlist refusals binding throughout N1 implementation:
+- Refuse parametric `NativeKind::Option(T)` variant (defection).
+- Refuse INTRODUCING new sentinels for None encoding (existing
+  NullableX is reuse, not new).
+- Refuse FromSlotMove / FromSlotShared trait split (γ-shape from
+  cluster #3).
+- Refuse "while we're here, also handle Option in M1-split queue"
+  — separate workstream.
+
+**N3 → DELETE-NOW**
+
+ifft deleted entirely as orphan-cleanup (same precedent as
+scan.rs deletion at `663b63a`). Zero stdlib/package consumers
+verified pre-deletion via post-bulldozer `rg`. N3 architectural
+surface (polymorphic-input dispatch via TypedObject FFT-result
+vs (Array<number>, Array<number>) two-array form) is genuinely
+interesting design space, but NOT pending architectural work —
+no consumer demand. Re-confirmed after the relay-loss in a
+prior turn.
+
+**N3 queue entry update (binding):** "ifft deleted as orphan;
+N3 architectural decision deferred pending future consumer with
+similar polymorphic-input shape." Updated retroactively in
+queue documentation.
+
+**Execution:**
+1. **ifft DELETION cleanup commit** (predicted -1): mirror scan.rs
+   deletion shape. Touches `intrinsics/fft.rs` (delete
+   `intrinsic_ifft` function + tests), `intrinsics/mod.rs` (remove
+   `register_fft_intrinsics` / module declaration as appropriate).
+   Commit message references "ifft deleted as orphan; zero stdlib/
+   package consumers verified pre-deletion; N3 architectural
+   decision deferred per supervisor sign-off."
+
+**N5 → γ (DEFER to shape-jit cleanup workstream)**
+
+align_tables stays legacy in `multi_table/functions.rs` until
+shape-jit cleanup workstream lands.
+
+Supervisor reasoning (verbatim from team-lead's relay):
+- "Option (b) refactor-to-drop-ctx is 'semantic regression' per
+  your framing — refused (changes user-visible behavior, behavior
+  break)."
+- "Option (a) extending ModuleContext for single consumer is
+  dead-infrastructure-attractor risk."
+- "Option (c) defer to shape-jit cleanup workstream is consistent
+  with M1-split / N3-α / similar cross-crate deferrals per A3-1
+  binding. Single confirmed consumer doesn't justify M-A scope
+  expansion."
+
+**N5 queue entry update (binding):** "N5 ModuleContext.get_current_timeframe()
+access for align_tables. **DEFERRED to shape-jit cleanup
+workstream's ModuleContext API completion.** Single consumer;
+pattern future-extensible if more consumers surface." Updated
+retroactively in queue documentation.
+
+**Execution:** no commit this round on N5 (deferral is documentation-only).
+
+**Updated sub-decision queue (binding, post-supervisor-sign-off):**
+
+1. **M1-split** (8 functions; validity-aware-return for diff +
+   rolling_sum). Architectural extension; out of M-A scope.
+   (Prior queue item #1.)
+
+2. **char_code multi-input-type dispatch.** (Prior queue item #2.)
+
+3. **bspline2_3d_batch generic-array consumer audit.** (Prior
+   queue item #3.)
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** (Prior queue item #4.)
+
+5. **N1: `FromSlot for Option<T>` typed marshal.** **RESOLVED to α
+   (use existing NullableX infrastructure).** Execution pending —
+   N1 architectural-extension commit + recurrence.rs migration.
+   (Prior queue item #5.)
+
+6. **N2: marshal arity extension to register_typed_fn_4/5/6
+   (+ `_full` variants).** **LANDED at `5dcb1ce`.** (Prior queue
+   item #6, resolved.)
+
+7. **N3: ifft polymorphic-input split.** **RESOLVED to DELETE-NOW
+   (orphan).** Execution pending — ifft cleanup commit. N3
+   architectural decision deferred pending future consumer with
+   similar polymorphic-input shape. (Prior queue item #7.)
+
+8. **N5: ModuleContext access for ExecutionContext-dependent body
+   migrations.** **RESOLVED to γ (DEFER to shape-jit cleanup
+   workstream's ModuleContext API completion).** No execution this
+   stage; align_tables stays legacy. (Prior queue item #8.)
+
+**Disposition for this subsection:** N1-α + N3 DELETE + N5 γ DEFER
+sign-offs recorded. N1 + N3 unblocked for execution. N5 deferred.
+intrinsics-typed-CC migration is **effectively complete for the
+M-A-scope-eligible files** after N1 + N3 land. Remaining deferred:
+rolling::sum/min/max via M1-split (cross-crate; future) + math::sum/
+min/max + array_transforms::diff/cumsum (M1-split) + math::char_code
+(queue item #2) + math::bspline2_3d_batch (queue item #3) +
+align_tables via N5 shape-jit cleanup. Stage B essentially closes.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
