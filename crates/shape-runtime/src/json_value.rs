@@ -375,3 +375,55 @@ pub fn json_value_to_serde_yaml(jv: &JsonValue) -> serde_yaml::Value {
         }
     }
 }
+
+/// Convert a `JsonValue` into a `toml::Value`.
+///
+/// Used by N7 consumer C11 (`toml.stringify`). Pair with
+/// `heap_to_json_value` to round-trip a `HeapValue` tree to a TOML
+/// string via `toml::to_string(&v)?`. **Replaces** the legacy
+/// `nanboxed_to_toml_value` walker (`stdlib/toml_module.rs:67-107`)
+/// entirely; that walker used deleted ValueWord accessors and is
+/// removed by C11.
+///
+/// **TOML constraint**: TOML has no native null. `JsonValue::Null` maps
+/// to `toml::Value::String("null")` — the same lossy sentinel used by
+/// the legacy `nanboxed_to_toml_value` walker (`toml_module.rs:68-70`),
+/// preserved here for round-trip behavior continuity. Reconsidering
+/// this sentinel is a future architectural-choice sub-decision (the
+/// alternative — refusing serialization with Err — would be a behavioral
+/// regression vs the legacy walker; held as future N7 sub-disposition).
+///
+/// **TOML constraint**: TOML's top-level must be a Table. This helper
+/// returns a `toml::Value` of any shape; the consumer (`toml.stringify`
+/// body in C11) is responsible for verifying root-level Table when
+/// passing to `toml::to_string`. Surfacing root-level non-Table as Err
+/// is C11's responsibility, not this helper's.
+///
+/// `JsonValue::Bytes` maps to `Array` of `u8`-as-Integer (TOML has no
+/// native byte type); reserved for future msgpack-binary roundtrip via
+/// 3.C.
+pub fn json_value_to_toml_value(jv: &JsonValue) -> toml::Value {
+    match jv {
+        JsonValue::Null => toml::Value::String("null".to_string()),
+        JsonValue::Bool(b) => toml::Value::Boolean(*b),
+        JsonValue::Int(i) => toml::Value::Integer(*i),
+        JsonValue::Number(f) => toml::Value::Float(*f),
+        JsonValue::String(s) => toml::Value::String(s.clone()),
+        JsonValue::Bytes(bytes) => toml::Value::Array(
+            bytes
+                .iter()
+                .map(|&b| toml::Value::Integer(b as i64))
+                .collect(),
+        ),
+        JsonValue::Array(arr) => {
+            toml::Value::Array(arr.iter().map(json_value_to_toml_value).collect())
+        }
+        JsonValue::Object(pairs) => {
+            let mut map = toml::map::Map::new();
+            for (k, v) in pairs.iter() {
+                map.insert(k.clone(), json_value_to_toml_value(v));
+            }
+            toml::Value::Table(map)
+        }
+    }
+}
