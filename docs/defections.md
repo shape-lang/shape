@@ -62,6 +62,121 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-07 — Phase 2d Array cluster — TypedArrayData::String + TypedArrayData::HeapValue extension (LANDED)
+
+This is **not** a defection. On-record landing of the Phase 2d Array
+cluster leaf decision identified by calibration finding #12 (cluster
+DAG ordering). Extends the cluster #3 `Array<T>` marshal (option β,
+2026-05-06) with the `String` and `HeapValue` element-storage arms
+that the prior session deferred.
+
+**Identified as a leaf cluster** (no open dependencies on B1, B4,
+Cluster #4, or intrinsics-dispatch-table) per finding #12. Multi-
+cluster unblock: process_ops `Array<string>` input, csv_module
+`Array<Array<string>>` rows, arrow_module `Array<DataTable>`,
+B1 sub-decision #1 (`JsonValue::Array` projection), Phase 2d
+sub-cluster #4 path utilities.
+
+**Pre-execution audits (per Phase 2c/2d binding discipline):**
+
+- **Audit 1 (consumer-call-shape):** consumer count clarified —
+  csv_module 4 errors (Array<Array<string>> + Array<HashMap<...>>),
+  arrow_module 3 errors (Array<DataTable>), process_ops 0 visible
+  (stubbed). The vmarray_from_vec users in `json/yaml/toml/msgpack/xml`
+  belong to **B1 JsonValue cluster, not Phase 2d Array** — they build
+  recursive JsonValue arrays and are blocked on B1 sub-decision #1
+  (which itself was found to depend on Phase 2d Array landing). The
+  `intrinsics/{matrix,distributions,...}` and `multi_table/functions`
+  vmarray_from_vec users belong to **B4 / intrinsics-dispatch-table
+  clusters, not Phase 2d Array**. Eighth confirmed instance of the
+  directory-adjacency cluster fallacy avoided.
+- **Audit 2 (marshal-API surface):** revealed that
+  `ConcreteReturn::ArrayString(Vec<String>)` and
+  `ConcreteType::ArrayString` were already present in
+  `typed_module_exports.rs:67/149` from prior partial work (5
+  production sites in `file_ops`/`regex`/`unicode`/`file`), and
+  `wire_conversion.rs:227` was already pre-wired to project
+  `TypedArrayData::String(buf)` to `WireValue::Array` of strings.
+  The runtime-level `TypedArrayData::String` variant + `FromSlot`
+  for `Vec<Arc<String>>` were the missing pieces. For `HeapValue`
+  arrays, all of variant + FromSlot + ToSlot + ConcreteReturn
+  variant + ConcreteType variant were missing.
+- **Audit 3 (cluster DAG):** confirmed leaf status. None of the
+  5-7 B4 sub-decisions, B1's 5 sub-decisions, Cluster #4's
+  prelude-vs-import question, or the intrinsics-dispatch-table
+  IntrinsicFn calling convention has any backwards-edge into
+  Phase 2d Array's storage-shape decision.
+
+**Architectural sub-decisions (3 internal — surfaced before
+execution; user-decided in one round-trip):**
+
+| # | Sub-decision | Resolution |
+|---|---|---|
+| **A** | `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` | Land. Mirrors existing `TypedArrayData::I64`/`F64`/etc. variant shape. Element type `Arc<String>` is the canonical refcounted-string shape. |
+| **B** | `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` | Land. Element-kind discrimination is a body-side type contract (option ε pattern from cluster #3). Per spec: "the kind tells you the arm; HeapValue dispatch is a consistency check, not a probe." |
+| **C** | ConcreteReturn variant for heap-element arrays | **(γ)** Single generic `ConcreteReturn::ArrayHeapValue(Vec<Arc<HeapValue>>)`. Matches cluster #3's option β/ε philosophy: don't carry element-kind in the discriminator; body-side Rust types enforce homogeneity. Rejected (δ): per-element-kind variants (`ArrayDataTable` / `ArrayIoHandle` / etc.) — same parametric-explosion shape as path-2 / option-δ rejected at cluster #3 entry. |
+
+**Watchlist refusals (binding, all sustained):**
+- `ConcreteReturn::Array(Vec<ConcreteReturn>)` recursive — refused
+  (breaks leaf-only invariant; cluster DAG would loop).
+- Per-element-kind `TypedArrayData::DataTable` / `IoHandle` /
+  `String`-of-strings variants — refused (parametric HeapKind
+  explosion, same shape as path 2 rejected at cluster #3).
+- `as_typed_array_string()` helpers on `HeapValue` that hide the
+  typed correspondence — refused (α-shape rejected at cluster #2).
+- "Rename Vec<Arc<X>> to ValueArray" or similar surface rename —
+  refused (CLAUDE.md forbidden pattern).
+
+**Code shape (this commit):**
+
+- `crates/shape-value/src/heap_value.rs`:
+  - `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` variant
+  - `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` variant
+  - `type_name()`, `is_truthy()`, `Display::fmt` arms for both
+- `crates/shape-runtime/src/marshal.rs`:
+  - `FromSlot for Vec<Arc<String>>` / `Vec<Arc<HeapValue>>` —
+    follow `Vec<u8>` template, panic-on-mismatch consistency check
+  - `ToSlot for Vec<Arc<String>>` / `Vec<Arc<HeapValue>>` — wrap
+    into `TypedBuffer` then `Arc<HeapValue>::into_raw` to obtain
+    slot bits
+- `crates/shape-runtime/src/typed_module_exports.rs`:
+  - `ConcreteReturn::ArrayHeapValue(Vec<Arc<HeapValue>>)` variant
+  - `ConcreteType::ArrayHeapValue(String)` variant — caller-provided
+    user-facing type-name string for LSP
+  - `shape_type_name()` arm
+
+**Direct error-drop:** ~0 (consumers not yet migrated; the variants
+add capability without reducing existing error count). The drop
+comes from commits 2-4 (csv_module / arrow_module / process_ops
+migrations). Predicted total -7 to -10 across this round-trip.
+
+**Calibration outlook:** if the architectural extension surfaces
+previously-hidden errors (analog of d716482's wrap_legacy-deletion
+revealing-errors pattern, or finding #9's correctness vs compile
+distinction), the error count may go UP on this commit. That is
+the same diagnostic shape as findings #5/#9 — surface and re-audit
+if it happens, don't suppress. Predicted error-drop window for
+commit 1: 0 ± 3.
+
+**Commit pacing:** per cluster #2 file_ops precedent, per-consumer
+migration commits (2-4) follow this leaf-extension commit. One
+commit per logical unit, all in-session. Bisect-friendly: commit 1
+is the architectural extension; commits 2-4 each migrate a single
+stdlib module to the new shape.
+
+**Cost saved:** prevented forcing per-consumer-kind ConcreteReturn
+variants (option δ) which would have grown linearly with each new
+heap kind that returns through stdlib (DataTable, IoHandle, future
+heap kinds). The single `ArrayHeapValue` variant absorbs all of
+them via body-side type contract, mirroring how cluster #3's
+option β handled the element-width problem at the input side.
+Estimated avoided variant-count growth: 5-8 ConcreteReturn variants
+over the next year. Plus the avoided "should this be ArrayDataTable
+or ArrayHeapValue<DataTable>" follow-up debate if the per-kind path
+had been taken.
+
+---
+
 ## 2026-05-06 — JsonValue marshal extension — deferred (parser cluster blocker)
 
 This is **not** a defection. On-record deferral of the `JsonValue`-return

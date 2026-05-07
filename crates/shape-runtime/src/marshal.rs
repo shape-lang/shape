@@ -396,6 +396,125 @@ impl FromSlot for Vec<i64> {
     }
 }
 
+/// Read a `Vec<Arc<String>>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
+/// whose payload is `TypedArrayData::String`.
+///
+/// Phase 2d Array cluster (2026-05-07). Owns-clone semantics: the body
+/// receives an owned `Vec<Arc<String>>` whose Arcs are individually
+/// retained from the inner buffer. Panics on `TypedArrayData::*`
+/// mismatch — same consistency-check rationale as `Vec<u8>` above.
+impl FromSlot for Vec<Arc<String>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::String(buf)) => {
+                    buf.data.clone()
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                     not String. Body's parameter type Vec<Arc<String>> requires the String \
+                     element-width variant. Marshal kind contract violated by caller.",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::{:?}, \
+                     not TypedArray. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::HeapValue`.
+///
+/// Phase 2d Array cluster (2026-05-07). Each element is an opaque
+/// `Arc<HeapValue>` whose inner kind is a body-side type contract.
+/// E.g. an `Array<DataTable>` body uses this `FromSlot` and then
+/// pattern-matches each element's `HeapValue::DataTable` arm —
+/// homogeneity is enforced by the body, not by the marshal layer.
+///
+/// Panics on `TypedArrayData::*` mismatch — same consistency-check
+/// rationale as `Vec<u8>` above.
+impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(buf)) => {
+                    buf.data.clone()
+                }
+                shape_value::HeapValue::TypedArray(other) => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                     not HeapValue. Body's parameter type Vec<Arc<HeapValue>> requires the \
+                     HeapValue element-width variant. Marshal kind contract violated by caller.",
+                    other.type_name()
+                ),
+                other => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::{:?}, \
+                     not TypedArray. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Project a `Vec<Arc<String>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::String`.
+///
+/// Phase 2d Array cluster (2026-05-07). Used by the dispatcher's
+/// `ConcreteReturn::ArrayString → slot push` step (the body returns
+/// `Vec<String>`; the dispatcher wraps each into `Arc<String>` then
+/// hands the resulting `Vec` to this impl). Yields raw bits suitable
+/// for placement into a typed slot — the slot takes ownership of the
+/// resulting `Arc<HeapValue>` strong reference.
+impl ToSlot for Vec<Arc<String>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let buf = shape_value::TypedBuffer::from_vec(self);
+        let hv = shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::String(
+            Arc::new(buf),
+        ));
+        Arc::into_raw(Arc::new(hv)) as u64
+    }
+}
+
+/// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `TypedArrayData::HeapValue`.
+///
+/// Phase 2d Array cluster (2026-05-07). Used by the dispatcher's
+/// `ConcreteReturn::ArrayHeapValue → slot push` step. Element-kind
+/// homogeneity is the body's responsibility.
+impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    #[inline]
+    fn to_slot(self) -> u64 {
+        let buf = shape_value::TypedBuffer::from_vec(self);
+        let hv = shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(
+            Arc::new(buf),
+        ));
+        Arc::into_raw(Arc::new(hv)) as u64
+    }
+}
+
 // ─────────────────────── per-arity register helpers ───────────────────────
 
 /// Body type stored in the typed registry: takes raw `&[u64]` slots and

@@ -65,6 +65,22 @@ pub enum ConcreteReturn {
     ArrayF64(Vec<f64>),
     /// Array of strings (compiles to `Array<string>`).
     ArrayString(Vec<String>),
+    /// Array whose elements are heap-allocated typed values (Phase 2d
+    /// Array cluster, 2026-05-07). Each element is an opaque
+    /// `Arc<HeapValue>`; the body is responsible for ensuring all
+    /// elements share the same statically-declared element type.
+    /// Used for `Array<DataTable>`, `Array<Array<string>>`,
+    /// `Array<TypedObject>`, etc. — anywhere the element shape is
+    /// itself a heap-resident typed value.
+    ///
+    /// Discriminator-level homogeneity: there is **one**
+    /// `ConcreteReturn::ArrayHeapValue` (matching one
+    /// `TypedArrayData::HeapValue` storage variant). Per-element-kind
+    /// variants (`ArrayDataTable` / `ArrayIoHandle` / etc.) are
+    /// rejected on the same grounds as the parametric-NativeKind
+    /// pattern — see `docs/defections.md` Phase 2d Array cluster
+    /// entry.
+    ArrayHeapValue(Vec<Arc<shape_value::heap_value::HeapValue>>),
     /// Byte array, surfaced as `Array<int>` to user code (each byte
     /// widened to i64 in 0..=255).
     Bytes(Vec<u8>),
@@ -147,6 +163,12 @@ pub enum ConcreteType {
     ArrayInt,
     ArrayNumber,
     ArrayString,
+    /// Array of heap-allocated typed values. The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`Array<DataTable>`, `Array<Array<string>>`, etc.); element-kind
+    /// homogeneity is a body-side type contract per the Phase 2d Array
+    /// cluster decision.
+    ArrayHeapValue(String),
     /// `Array<int>` semantically (each element a u8 widened to i64).
     Bytes,
     HashMapStringString,
@@ -203,6 +225,7 @@ impl ConcreteType {
             ConcreteType::ArrayInt => "Array<int>".to_string(),
             ConcreteType::ArrayNumber => "Array<number>".to_string(),
             ConcreteType::ArrayString => "Array<string>".to_string(),
+            ConcreteType::ArrayHeapValue(s) => s.clone(),
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
             ConcreteType::Object => "object".to_string(),

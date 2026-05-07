@@ -466,6 +466,16 @@ impl IoHandleData {
 
 /// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
 /// I8Array..F32Array, and FloatArraySlice into a single HeapValue variant.
+///
+/// Phase 2d Array cluster (2026-05-07) added the `String` and `HeapValue`
+/// arms. `String` carries `Vec<Arc<String>>` for `Array<string>`. `HeapValue`
+/// carries `Vec<Arc<HeapValue>>` for `Array<X>` where X is itself a heap-
+/// allocated typed value (e.g. `Array<DataTable>`, `Array<Array<string>>`,
+/// `Array<TypedObject>`). Element-kind discrimination at the `HeapValue`
+/// arm is a body-side type contract (option β / option ε pattern from
+/// cluster #3): each `FromSlot for Vec<Arc<X>>` impl pattern-matches the
+/// expected inner `HeapValue::*` variant, panicking on mismatch as a
+/// spec-permitted consistency check (`docs/runtime-v2-spec.md`).
 #[derive(Debug, Clone)]
 pub enum TypedArrayData {
     I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
@@ -480,6 +490,8 @@ pub enum TypedArrayData {
     U32(Arc<crate::typed_buffer::TypedBuffer<u32>>),
     U64(Arc<crate::typed_buffer::TypedBuffer<u64>>),
     F32(Arc<crate::typed_buffer::TypedBuffer<f32>>),
+    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
+    HeapValue(Arc<crate::typed_buffer::TypedBuffer<Arc<crate::heap_value::HeapValue>>>),
     FloatSlice {
         parent: Arc<MatrixData>,
         offset: u32,
@@ -503,6 +515,8 @@ impl TypedArrayData {
             TypedArrayData::U32(_) => "Vec<u32>",
             TypedArrayData::U64(_) => "Vec<u64>",
             TypedArrayData::F32(_) => "Vec<f32>",
+            TypedArrayData::String(_) => "Vec<string>",
+            TypedArrayData::HeapValue(_) => "Vec<heap>",
             TypedArrayData::FloatSlice { .. } => "Vec<number>",
         }
     }
@@ -522,6 +536,8 @@ impl TypedArrayData {
             TypedArrayData::U32(a) => !a.is_empty(),
             TypedArrayData::U64(a) => !a.is_empty(),
             TypedArrayData::F32(a) => !a.is_empty(),
+            TypedArrayData::String(a) => !a.is_empty(),
+            TypedArrayData::HeapValue(a) => !a.is_empty(),
             TypedArrayData::FloatSlice { len, .. } => *len > 0,
         }
     }
@@ -639,6 +655,26 @@ impl fmt::Display for TypedArrayData {
             }
             TypedArrayData::F32(a) => {
                 write!(f, "Vec<f32>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::String(a) => {
+                write!(f, "Vec<string>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\"", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::HeapValue(a) => {
+                write!(f, "Vec<heap>[")?;
                 for (i, v) in a.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
