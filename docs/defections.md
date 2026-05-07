@@ -1043,6 +1043,71 @@ Q2-marshal-fold-heavy deferred. Q2 disposition transitions from
 validation" at the vector.rs migration commit (Commit 6 in the
 post-X4 ordering).
 
+### 2026-05-07 — Q2 lifecycle three-stage transition (M-A reframing)
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The two prior subsections (Q2 evaluation methodology shift +
+Q2-C correction) stay on-record.** This subsection corrects the
+"combined cross-crate per-file commit" framing to a three-stage
+Q2 lifecycle, surfaced during vector.rs migration preparation
+(fifth audit-grounded correction in this session).
+Cross-references the zero-copy entry's fifth-finding addendum on
+its fourth-correction subsection.
+
+**Audit during vector.rs migration preparation revealed:**
+shape-vm's pre-existing ValueWord breakage extends beyond the
+dispatcher arms in `crates/shape-vm/src/executor/builtins/vector_intrinsics.rs:25-39`
+into the supporting infrastructure:
+`pop_builtin_args` (`crates/shape-vm/src/executor/vm_impl/builtins.rs:5`)
+returns `Vec<ValueWord>`; `invoke_typed_module_fn`
+(`crates/shape-vm/src/executor/vm_impl/modules.rs:147`) takes
+`&[ValueWord]`. shape-vm does not compile in isolation — the
+broken-state cascades from shape-runtime's 89 errors through
+shape-vm's ValueWord references. The dispatcher arm changes that
+Q2-marshal-fold-light requires would land alongside shape-vm's
+broader ValueWord cleanup workstream (B4 core-foundation cluster
+or similar), not as a per-file shape-vm change coordinated with
+each shape-runtime intrinsic file migration.
+
+**Implication: combined cross-crate per-file commits are
+infeasible for intrinsics-typed-CC migration.** Each per-file
+migration commit lands the **shape-runtime side only** (intrinsic
+body migration to `register_typed_fn_N`). The shape-vm dispatcher
+routing change (Q2-marshal-fold-light's dispatcher-side
+implementation) is part of shape-vm's broader cleanup workstream.
+
+**Corrected three-stage Q2 lifecycle (binding):**
+
+| Stage | Trigger | Q2 disposition |
+|---|---|---|
+| Pre-vector.rs commit | — | **Tentative** — both options live; sign-off pending |
+| **Stage 1 (architectural disposition)** | At vector.rs commit (Commit 7 in post-X6 ordering) | **Committed-to-marshal-fold-light**; code implementation pending shape-vm cleanup workstream. shape-runtime body migrations land per-file; shape-vm dispatcher arms stay as-is (broken cascade from ValueWord deletion). |
+| **Stage 2 (code resolution)** | At shape-vm cleanup workstream's dispatcher routing implementation | **Code resolution lands** — shape-vm dispatcher arms reroute through `module.typed_exports().functions.get(...)` lookup. |
+| **Stage 3 (validation)** | At first bench-feasibility (`cargo bench -p shape-vm --no-run` succeeds) | **Validated** by gate measurement, OR **failed** — revert all intrinsics commits + fresh surface-and-decide for Q2-separate-path. |
+
+**Sub-option (a) for shape-runtime body migration (binding):**
+DELETE the legacy `pub fn intrinsic_vec_*(args: &[ValueWord], ...)
+-> Result<ValueWord>` functions during shape-runtime body
+migration. Don't keep transitional stubs. shape-vm dispatcher
+arms (in `vector_intrinsics.rs:25-39`) will reference function
+names that no longer exist (broken in a different way than
+before — but shape-vm was already broken; the error category
+just shifts). Cleaner than transitional cruft (which would be
+the W-series rename pattern at the legacy-stub layer).
+
+**Per-file migration shape (binding for all 14 intrinsic files,
+post-X6):** each migration commit lands shape-runtime side only.
+No shape-vm changes per-file. Each commit message references
+"intrinsics-typed-CC migration; Q2 architectural disposition
+committed-to-marshal-fold-light, code resolution pending shape-vm
+cleanup workstream."
+
+**Disposition for this subsection:** M-A scope chosen; three-
+stage Q2 lifecycle committed; combined cross-crate framing
+superseded. Per-file commits are shape-runtime only. shape-vm
+cleanup workstream's natural scope absorbs the dispatcher
+routing implementation.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
