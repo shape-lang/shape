@@ -245,21 +245,13 @@ impl IntrinsicsRegistry {
         // Empty: all 5 distribution intrinsics migrated to typed marshal layer.
     }
 
-    /// Register stochastic process intrinsics
-    fn register_stochastic_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_brownian_motion".to_string(),
-            stochastic::intrinsic_brownian_motion,
-        );
-        functions.insert("__intrinsic_gbm".to_string(), stochastic::intrinsic_gbm);
-        functions.insert(
-            "__intrinsic_ou_process".to_string(),
-            stochastic::intrinsic_ou_process,
-        );
-        functions.insert(
-            "__intrinsic_random_walk".to_string(),
-            stochastic::intrinsic_random_walk,
-        );
+    /// All stochastic intrinsics (brownian_motion, gbm, ou_process, random_walk)
+    /// migrated to typed marshal entries in
+    /// `stochastic::create_stochastic_intrinsics_module`. gbm (arity 5) and
+    /// ou_process (arity 6) use the N2 marshal-API arity extension landed at
+    /// `5dcb1ce`.
+    fn register_stochastic_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: all 4 stochastic intrinsics migrated to typed marshal layer.
     }
 
     /// The single convolution intrinsic (`__intrinsic_stencil`) migrated to a
