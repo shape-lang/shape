@@ -244,6 +244,126 @@ yes top-level + 5 categorically-non-data + 7 architectural-choice
 deferred + TypedObject schema-aware + the 13 mechanical TypedArrayData
 sub-variants) are finalized.
 
+### REFINEMENT-1B-ITEM-A — Matrix + FloatSlice promoted to architectural-choice deferred
+
+In-place dated subsection per finding #11. **The placeholder framing
+above (lines 224-245) stays on-record;** this REFINEMENT-1B-ITEM-A
+subsection supersedes the "pending REFINEMENT-1B supervisor relay"
+disposition on the two TypedArrayData inner-sub-variants.
+
+**Matrix — promoted to architectural-choice deferred (first-landing Err)**:
+2D-layout encoding question (nested array-of-arrays vs flat row-major
+vs `{rows, cols, data}` shape-metadata vs schema-derived) is structurally
+identical to DataTable's row-shape question. Multiple natural encodings;
+no canonical-default; user-visible behavioral commitment. Same precedent
+as REFINEMENT-1A's Instant + NativeScalar promotion. Structural-
+enforcement: forbidden state "locked-in Matrix encoding consumers can't
+override" unrepresentable in first-landing Err.
+
+**FloatSlice — promoted to architectural-choice deferred**:
+structurally inherits Matrix's encoding question via shared MatrixData
+(`heap_value.rs:32` doc-comment confirms "used by TypedArrayData::Matrix
+and FloatSlice"). Two consistent shapes possible per consumer policy —
+(i) materialize-into-Matrix-then-encode, (ii) encode-as-slice-with-
+parent-context. Per binders below: **separate sub-decision from Matrix
+when first consumer needs it; not pre-locked**. Mirrors Instant +
+NativeScalar separation precedent.
+
+### Nesting discipline — load-bearing (binder)
+
+Matrix and FloatSlice are TypedArrayData INNER sub-variants, NOT
+top-level HeapValue variants. The framework extends recursively, NOT
+by promotion to top-level:
+
+- **Top-level**: `HeapValue::TypedArray` STAYS mechanical-yes (walker
+  confidently reaches into TypedArrayData). Top-level mechanical-yes
+  count = 5: Char / TypedArray / HashMap / BigInt / String.
+- **Inner-dispatch**: 15 TypedArrayData sub-variants split as 13
+  mechanical-yes + 2 architectural-choice deferred (Matrix +
+  FloatSlice).
+- **REFINEMENT-1A's labels** (categorically-non-data Reject /
+  architectural-choice deferred / mechanical-yes) extend to sub-
+  variant level via the SAME framework.
+
+**Total architectural-choice deferred policy decisions = 9 distributed
+across two levels** (NOT flattened to 9 top-level):
+- Top-level (7 from REFINEMENT-1A): Decimal / DataTable / Content /
+  Temporal / TableView / Instant / NativeScalar
+- TypedArrayData sub-variant (2 new): Matrix / FloatSlice
+
+Flattening sub-variant architectural-choice up to top-level count is
+refused on sight (binder). The framework extends recursively at any
+level where a sub-enum surface emerges; future framework extensions
+preserve this nesting discipline.
+
+### Audit-grounded consumer-safety verification
+
+Of the 7 N7 consumers (http.post_json/put_json, json.stringify,
+yaml.stringify, toml.stringify, msgpack.encode/encode_bytes), zero
+produce Matrix or FloatSlice in their input-tree shape. MatrixData
+arrival paths are intrinsics-side (vector / matrix / fft / convolution
+intrinsic kernels), NOT stdlib-stringify-side. Class-B Err()
+first-landing for Matrix + FloatSlice is **consumer-safe** for all 7
+N7 consumers — no current call path touches a Matrix or FloatSlice
+arm.
+
+### Refused candidates and binders (REFINEMENT-1B-ITEM-A — binding throughout)
+
+- ❌ Renaming "architectural-choice deferred" labels at sub-variant
+  level (REFINEMENT-1A canonical labels extend recursively; sub-variant
+  level uses same labels)
+- ❌ Bundling Matrix policy with FloatSlice policy when first
+  per-consumer sub-decisions land (separate consumer demands; mirrors
+  Instant + NativeScalar separation precedent)
+- ❌ Partial-mechanical-yes for Matrix or FloatSlice ahead of
+  architectural-choice disposition (consistent with NativeScalar
+  partial-dispatch refusal)
+- ❌ **Flattening sub-variant architectural-choice up to top-level
+  count** (the framework extends recursively at any sub-enum surface;
+  preserve TypedArrayData inner-dispatch nesting; 7 + 2 = 9 across
+  two levels, NOT 9 at top level)
+
+### Restated classification (REFINEMENT-1B-ITEM-A nesting refinement)
+
+The REFINEMENT-1A three-class top-level table (defections.md ~lines
+171-178) stays on-record. REFINEMENT-1B-ITEM-A adds a TypedArrayData
+inner-dispatch sub-table for completeness:
+
+| Sub-variant | Class | Walker semantics |
+|---|---|---|
+| I8/I16/I32/I64/U8/U16/U32/U64 (8) | Mechanical-yes | `Vec<JsonValue::Int>` |
+| F32/F64 (2) | Mechanical-yes | `Vec<JsonValue::Number>` |
+| Bool (1) | Mechanical-yes | `Vec<JsonValue::Bool>` (storage `u8` 0/1 → semantic bool) |
+| String (1) | Mechanical-yes | `Vec<JsonValue::String>` |
+| HeapValue (1) | Mechanical-yes | `Vec<JsonValue>` recursing via `heap_to_json_value` |
+| **Matrix** (1) | **Architectural-choice deferred** | `Err(<Matrix encoding policy not yet decided>)` |
+| **FloatSlice** (1) | **Architectural-choice deferred** | `Err(<FloatSlice encoding policy not yet decided>)` |
+| **Total** | 15 | |
+
+Math checks: 8 + 2 + 1 + 1 + 1 + 1 + 1 = 15.
+
+### Calibration
+
+**This entry (C1.5)**: 0 errors expected. Defections-only, no source
+file changes (Rule A).
+
+**C2 calibration unchanged from REFINEMENT-1A**: 0±2 (Rule C — additive
+helper; no consumers yet). Per-consumer C7-C13 -1 to -3 each per Rule D
++ candidate Rule H (FQ/bare/method-call audit per consumer).
+
+### Disposition
+
+REFINEMENT-1B-ITEM-A signed off: Matrix + FloatSlice promoted to
+architectural-choice deferred at TypedArrayData sub-variant level;
+nesting discipline established as binder; audit-grounded
+consumer-safety verified.
+
+C2 walker now fully unblocked: emits Err() at the TypedArrayData
+inner-dispatch arms for Matrix and FloatSlice (first-landing); all
+other walker arms unchanged from REFINEMENT-1A finalization. Per-
+sub-variant policy sub-decisions deferred until first consumer demand
+(separate sub-decisions; not bundled).
+
 ## Cross-cluster non-overlaps + interlocks
 
 **N9 non-overlap (verified)**: shape-runtime `nb_to_slot` is at
