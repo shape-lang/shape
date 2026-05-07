@@ -568,6 +568,97 @@ production routes through a different code path. Audits against
 ground truth, not against prior framing — symmetric across all
 on-record entries regardless of authorship.
 
+### 2026-05-07 — Third audit-grounded correction: gate infeasibility on bulldozer-strictly-typed
+
+Third finding #11 symmetry-extension applied to this entry. **The
+three prior subsections (lines 226-371 original entry + per-storage-
+variant correction + α-ToSlot-dead-at-marshal correction) stay
+on-record.** This subsection captures the gate-infeasibility
+finding caught during Commit 4 (bench harness) preparation.
+
+**Audit during Q2 marshal-fold trial (Commit 6) bench-harness
+preparation revealed:** the empirical gate as scoped requires
+`shape-vm` benches to compile, which requires `shape-runtime --lib`
+to compile, which is the **end state** of the strict-typing
+reconstruction (currently 89 errors on `bulldozer-strictly-typed`
+by design). Verified independently via `cargo bench -p shape-vm
+--no-run`: fails on the 89 shape-runtime errors. Verified
+specifically via `crates/shape-runtime/src/intrinsics/vector.rs:10`:
+imports the (deleted) `shape_value::{ValueWord, ValueWordExt}`,
+making the legacy `intrinsic_vec_add` body itself non-compiling.
+All 14 intrinsics files have similar errors; **no single-file
+migration unblocks the bench**.
+
+**The gate cannot run pre-migration on this branch.** The original
+gate framing implicitly assumed a workspace where legacy paths
+still compile in parallel with new α impls. That assumption was
+false on `bulldozer-strictly-typed` from day one of strict-typing
+reconstruction. Audit-2 of Stage B pre-work caught body-type vs
+storage-variant; this audit (during gate-prep) caught the
+build-state vs gate-runnability gap that earlier framing missed.
+
+**Correct gate methodology (binding from this subsection):** run
+the gate as soon as bench-feasibility achieves — i.e., after
+intrinsics-typed-CC cluster migration completes (and any cross-
+cluster dependencies that gate `shape-vm` building also land).
+Until then, **Q2 disposition stays "tentative-marshal-fold
+pending empirical validation" — NOT "Q2 = marshal-fold landed."**
+
+**Migration discipline mitigates the deferred-gate risk:**
+
+- Each intrinsic file lands as its own atomically-revertible
+  commit. No bundling. No "while I'm in this file, also
+  migrate Y."
+- Each commit message references "intrinsics-typed-CC migration;
+  Q2 still tentative-marshal-fold pending empirical gate."
+- Bench-feasibility check after each commit (`cargo bench -p
+  shape-vm --no-run`); when it succeeds, gate runs.
+- If the eventual gate fails, all intrinsics commits revert in
+  series (each is atomic, makes this feasible) + Q2 lands as
+  separate-path with a fresh architectural surface-and-decide.
+  Estimated revert cost: 14 small reverts + Q2 redesign +
+  intrinsics re-migration to separate-path shape; multi-day
+  rework but bounded.
+
+**Comparison methodology (binding for the eventual gate):**
+theoretical SIMD-floor + dispatcher-overhead budget, NOT cross-
+branch baseline (rustc/LLVM-version noise above signal floor for
+a 10-25% gate threshold), NOT same-branch legacy baseline (which
+doesn't exist on this branch since legacy intrinsic bodies don't
+compile). For `vec_add` over 10K f64 arrays:
+
+- SIMD compute floor: ~3-7us
+- Body `Vec<f64>` alloc: ~1-2us
+- Output `AlignedTypedBuffer` alloc + memcpy: ~2-3us
+- Total expected if marshal-fold viable: ~5-12us
+
+**Gate threshold:** per-call overhead delta over theoretical
+floor <2us preferred, <3us acceptable, >3us = fail. (Slightly
+relaxed from prior 1us/2us spec because absolute-vs-theoretical
+comparison has more inherent uncertainty than same-branch legacy
+comparison.)
+
+**Meta-finding (finding #11 symmetry-extension, third instance —
+binding-as-baseline for future audits).** Three audit-grounded
+corrections in one session to framing the supervisor authored:
+(1) per-storage-variant body-type map vs uniform `Arc<TypedBuffer<T>>`,
+(2) α `ToSlot` dead at marshal layer vs production path,
+(3) gate-runnability vs build-state on `bulldozer-strictly-typed`.
+Common pattern: scoping architectural decisions without verifying
+they're executable against current build state. **Future audit-1+2+3
+pre-work binding addition: "verify against current build state"
+alongside "verify against current code."** Specifically: any
+empirical gate or measurement-based decision must include a
+`cargo build`/`cargo bench --no-run`/equivalent runnability check
+at scoping time. Captured here per finding #11 symmetry-extension;
+not elevated to a new finding number — the audit-grounded-correction
+discipline is the load-bearing rule, this is its scope clarification
+for measurement-based decisions specifically.
+
+**Disposition for this subsection:** in-place correction logged.
+Q2 disposition explicitly tentative-marshal-fold pending empirical
+gate. Consumer migration proceeds with per-file revert discipline.
+
 ---
 
 ## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
