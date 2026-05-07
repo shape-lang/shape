@@ -124,6 +124,39 @@ pub enum ConcreteReturn {
     /// consumer-expansion subsection (2026-05-07) for the
     /// sub-shape (b) categorization.
     JsonValue(crate::json_value::JsonValue),
+    /// Opaque `Arc<HeapValue::TypedObject>` handle for dynamic-schema
+    /// returns (Stage B+D close-out, N8 sign-off, 2026-05-07).
+    ///
+    /// Used by stdlib bodies that take a runtime `schema_id` parameter
+    /// and produce a `HeapValue::TypedObject{schema_id, slots,
+    /// heap_mask}` conforming to that schema. The dispatcher projects
+    /// the `Arc<HeapValue>` directly into a slot via
+    /// `NativeKind::Ptr(HeapKind::TypedObject)` — `TypedObject` is a
+    /// **specific** `HeapKind`, NOT wildcard. Schema is data carried
+    /// by the heap value's existing `schema_id` field; NOT
+    /// architectural metadata at the dispatcher layer.
+    ///
+    /// Leaf in `ConcreteReturn`-recursion sense (`Arc<HeapValue>` is
+    /// the leaf payload); recursive at `HeapValue` layer (consistent
+    /// with `ConcreteReturn::HashMapStringHeapValue` precedent).
+    /// Naming: "Opaque" reflects supervisor-side does not decompose
+    /// the TypedObject's slots; "TypedObject" reflects the known
+    /// `HeapKind` discriminant.
+    ///
+    /// Distinct from `TypedReturn::TypedObject(Vec<(String,
+    /// ConcreteReturn)>)` which is schemaful at REGISTRATION time and
+    /// requires per-field decomposition. `OpaqueTypedObject` is for
+    /// bodies that have already produced a fully-built
+    /// `Arc<HeapValue::TypedObject>` keyed by a runtime `schema_id`.
+    ///
+    /// Confirmed consumer (current): `json.__parse_typed(text,
+    /// schema_id) -> Result<any>` at
+    /// `crates/shape-runtime/src/stdlib/json.rs`.
+    ///
+    /// See `docs/defections.md` Stage B+D close-out batch dispositions
+    /// (2026-05-07) for the N8 sign-off framing + refused alternatives
+    /// (`TypedObjectHandle`, `TypedObjectByRef`, `OpaqueAnyHeapValue`).
+    OpaqueTypedObject(Arc<shape_value::heap_value::HeapValue>),
     /// `DataTable` heap handle — opaque columnar table from
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
@@ -245,6 +278,14 @@ pub enum ConcreteType {
     /// shape is identical (recursive `JsonValue` sum); the visible
     /// type-name carries the user-API distinction.
     JsonValue(String),
+    /// Opaque `Arc<HeapValue::TypedObject>` for dynamic-schema returns
+    /// (Stage B+D close-out, N8 sign-off, 2026-05-07). Mirror for
+    /// `ConcreteReturn::OpaqueTypedObject`. The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`any` for `json.__parse_typed`'s polymorphic return; in future
+    /// could be a specific Shape type-name when the schema's name is
+    /// statically known).
+    OpaqueTypedObject(String),
     /// Heterogeneous object built from string→typed pairs (materialized
     /// as a `HashMap`).
     Object,
@@ -303,6 +344,7 @@ impl ConcreteType {
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
             ConcreteType::HashMapStringHeapValue(s) => s.clone(),
             ConcreteType::JsonValue(s) => s.clone(),
+            ConcreteType::OpaqueTypedObject(s) => s.clone(),
             ConcreteType::Object => "object".to_string(),
             ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),
