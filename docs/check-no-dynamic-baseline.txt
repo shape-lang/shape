@@ -1,0 +1,31 @@
+# Frozen baseline for `just check-no-dynamic`.
+#
+# Format: <limit><tab><ripgrep PCRE pattern><tab><note>
+#
+# Rules:
+#   - Lower a limit when a count decreases (deletion progress).
+#   - Never raise a limit. Once a row reaches 0 it stays at 0 forever.
+#   - Adding a forbidden pattern is fine — start it at the current count.
+#   - Scope is enforced by scripts/check-no-dynamic.sh: crates bin tools extensions.
+#
+# Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
+
+27	\bsynthesize_value_word_from_raw\b	W-series tag-decode bridge (synthesize)
+0	\blast_program_return_kind\b	W-series runtime return-kind stamp
+5	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
+7	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
+1	\bexec_comparison_dynamic_fallback\b	dynamic comparison fallback handler
+0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
+14	\brebox_native_bits\b	W-series typed->tagged rebox helper
+16	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
+16	\bcapture_as_value\b	closure capture decode bridge
+17	\b(nan_box|NanBox|NanTag)\b	NanBox residuals
+0	\bSlotKind::(Dynamic|Unknown)\b	deleted SlotKind variants
+0	ValueBits shim	rejected rename
+0	FFI-boundary bridge	rejected rename
+0	boundary translation	rejected rename
+0	host-boundary normalization	rejected rename
+0	decode hop	rejected rename
+0	tag normalization	rejected rename
+0	compatibility layer	rejected rename
+0	dynamic-fallback retained	rejected rename

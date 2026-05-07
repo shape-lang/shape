@@ -12,6 +12,8 @@ Rationalizations sound reasonable in the moment. They look obvious in hindsight.
 
 When you (agent or human) consider a fallback / shim / bridge / decode hop / "follow-up" disposition for the strict-typed work, **before** implementing it, log the consideration here. Even if you ultimately reject it. Logging takes 60 seconds; the discipline pays back when the next session reads the log on day one.
 
+**Append new entries at the end of this file.** Do not insert near the top, even when an entry feels "more important" than older ones. Append-only ordering eliminates merge conflicts when multiple agents close clusters in parallel — every prior insert-near-top convention produced a conflict on the first concurrent cluster-close (verified 2026-05-07 on the N7+N9 merge). Cross-references between entries should use stable section anchors (`<a id="..."></a>`), not file position.
+
 Cross-reference: `shape/CLAUDE.md` "Forbidden Patterns" section enumerates the patterns. This log records the *attempts* at those patterns.
 
 ## Format

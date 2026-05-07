@@ -87,3 +87,25 @@ test-crate crate:
 ci-test:
 	cargo test --workspace --all-targets --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
 	cargo run -p xtask -- workspace-smoke
+
+# --- Strict-typing plan gates (~/.claude/plans/stop-native-vs-tagged-tax.md) ---
+
+# Defection guard: per-symbol monotonic-non-increasing check vs frozen baseline.
+# See scripts/check-no-dynamic.sh and docs/check-no-dynamic-baseline.txt.
+check-no-dynamic:
+	bash scripts/check-no-dynamic.sh
+
+# Phase 2 gate: shape-runtime --lib compiles cleanly.
+# Reports the current error count; exits non-zero if > 0.
+verify-phase-2:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	errors=$(cargo check -p shape-runtime --lib 2>&1 | rg -c '^error' || true)
+	echo "shape-runtime --lib errors: ${errors:-0}"
+	[[ "${errors:-0}" == "0" ]]
+
+# Phase 5 gate: defection guard clean + sentinel test passes.
+# (Sentinel test crates/shape-vm/src/executor/tests/no_dynamic.rs is not yet
+# wired up; see CLAUDE.md "Mechanical enforcement". When it lands, add it here.)
+verify-phase-5: check-no-dynamic
+	@echo "TODO: invoke sentinel test when crates/shape-vm/src/executor/tests/no_dynamic.rs lands"
