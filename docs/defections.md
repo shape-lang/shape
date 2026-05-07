@@ -120,6 +120,75 @@ choice and re-touch dispatcher projection" follow-up avoided.
 Acknowledged: 19 errors remain in shape-runtime --lib until the
 extension lands.
 
+### 2026-05-07 — Audit-grounded correction (Phase 2d sub-cluster B1)
+
+The 2026-05-06 entry above framed JsonValue as a single deferred
+extension blocking 5 parser modules. Phase 2d sub-cluster B1
+Audit 1 + Audit 2 (per the now-baseline pre-cluster-execution
+discipline) revealed the framing was incomplete on two axes.
+
+**(a) File count: was 8, audit revealed 5.** Phase 2d's broader
+A/B/C audit lifted 8 files into the JsonValue cluster on the basis
+of shared stale-import shape (csv_module, xml, json, msgpack_module,
+yaml, toml_module, arrow_module, http). Audit 1 (consumer-call-shape)
+on the function bodies revealed three are NOT JsonValue-shaped:
+
+- `csv_module` — body returns `Array<Array<string>>` /
+  `Array<HashMap<string, string>>`. Cluster identity: **cluster #3
+  Array<T> + Array<string>-marshal sub-cluster** (Phase 2d sub-cluster
+  #3 of process_ops). Uses `vmarray_from_vec` + `ArgVec`, not
+  recursive JsonValue.
+- `arrow_module` — body returns `Result<Array<DataTable>, string>`
+  via deleted `TypedReturn::ArrayValueWord`. Cluster identity:
+  **cluster #3 Array<T> (Array<DataTable>) plus
+  ArrayValueWord-cleanup sub-cluster**.
+- `http.rs` — body builds object responses
+  `{status, headers, body, ok}` via `from_hashmap_pairs` and parses
+  options via `as_hashmap`. Cluster identity: **HashMap-marshal +
+  TypedObject-with-recursive-HashMap sub-cluster** (new on-record
+  micro-cluster).
+
+The original 2026-05-06 entry's "five parser modules
+(json/yaml/toml/msgpack/xml)" framing was correct. The 8-file
+expansion was the seventh instance of the directory-adjacency
+cluster fallacy — same imports, different cluster identities.
+
+**(b) Sub-decision count: was 3, audit revealed 5 with interlocks.**
+The 2026-05-06 entry listed three architectural decisions
+(runtime representation, Shape-side enum wiring, dispatcher
+projection). Audit 2 (marshal-API surface) revealed B1 actually
+decomposes into five, two of which interlock with already-on-record
+clusters:
+
+| # | Sub-decision | Interlock |
+|---|---|---|
+| **1** | `TypedArrayData::String` and/or `TypedArrayData::HeapValue` for storing `JsonValue::Array(Vec<JsonValue>)`. Currently `TypedArrayData` (`crates/shape-value/src/heap_value.rs:470`) has 13 numeric/Matrix variants — no String, no HeapValue. | **Interlocks with Phase 2d sub-cluster #3 (process_ops Array<string>)** + the cluster #3 Array<T> family. Single architectural call unblocks JsonValue::Array projection AND Array<string> consumers AND csv_module + arrow_module rows. |
+| **2** | `JsonValue::Object(Vec<(String, JsonValue)>)` runtime shape — two-slot TypedObject `{keys: Array<string>, values: Array<HeapValue>}`? HashMap-shaped `from_hashmap_pairs`? new HeapKind variant? | Net new; depends on (1). Also interlocks with `http.rs`'s response-object micro-cluster. |
+| **3** | Per-variant schemas (8 monomorphized schemas, one per JsonValue arm) vs single schema with discriminant slot. Watchlist (native_kind.rs:88-96) **forbids** single+discriminant — that is the W-series shape at the schema layer. **Effectively forced answer: per-variant schemas.** Open: per-variant schema *registration strategy* (compiler-synthesized at enum-decl time vs stdlib-pre-registered at module init). | Mostly settled by watchlist. The registration-strategy sub-question is real but smaller. |
+| **4** | Shape-side `JsonValue` enum visibility — prelude-bake or `import { JsonValue } from std::core::json`? | **Interlocks with Cluster #4 Option<T>** which has the same prelude-vs-import question. Resolving Cluster #4 first answers (4) for free. |
+| **5** | Recursive marshal-side projection — recursive vs iterative; stack-depth bound for deeply-nested JSON. | Net new. Probably the smallest of the five once (1)+(2) settle. |
+
+**B1 is an INTERIOR node in the cluster DAG, not a leaf.** Two
+sub-decisions (#1 and #4) interlock with leaf clusters that are
+themselves on-record deferred. Resolving the leaves first is the
+correct order — see calibration finding #12.
+
+**Phase 2d B1 disposition:** path β — surface-and-defer. No
+marshal-API extension committed this session. The on-record entry
+above is updated by this correction. Next-session priority is
+re-ordered per the cluster DAG (see finding #12). Predicted error
+drop for B1 residual *after* leaf clusters land: ~-19 (the 5 parser
+modules' errors clear in one go once sub-decisions #1 and #4 are
+resolved upstream).
+
+**Watchlist crystallization (eighth instance):** "audit-grounded
+correction is binding for prior on-record entries." When an audit
+surfaces a framing flaw in an existing entry, update the entry in
+place with a dated correction subsection — don't create a new
+entry that contradicts the old one. The log's value is that future
+sessions can read each entry once and trust its current state.
+Drift-by-amendment-elsewhere defeats that.
+
 ---
 
 ## 2026-05-06 — Option<T> / TypedReturn::SomeObjectPairs marshal extension — deferred
@@ -1608,6 +1677,138 @@ cleanup commits from making inconsistent sub-decisions. Estimate:
 two ValueWord-replacement shapes" reconciliation work avoided across
 the 5-7 sub-decisions, by forcing each to be a single surfaced choice
 applied uniformly.
+
+---
+
+## 2026-05-07 — Calibration finding #12 — clusters form a DAG; leaf-first is the right priority heuristic
+
+This is **not** a defection. On-record calibration finding from
+Phase 2d sub-cluster B1 surface-and-defer.
+
+**Considered (the bad heuristic):** when multiple deferred clusters
+remain, prioritize by "highest leverage per architectural decision"
+— measured as errors-dropped per single decision committed. Pick the
+cluster that knocks out the most errors in one round-trip.
+
+**Rationalization:** "knock out the biggest pile first" is the
+intuitive answer when scope is decision-density-bound. Phase 2d's
+recommendation framing (B1 picked for "highest error-drop per
+decision") used this heuristic.
+
+**Pattern recognized:** clusters are **not** independent leaf
+candidates. They form a DAG with interlock relationships. The
+"highest leverage" heuristic is incorrect because it ignores the
+direction of dependency edges. A high-error-drop cluster that is
+an INTERIOR node — depending on other open clusters — cannot be
+landed in a single decision. Forcing it through the unresolved
+interlocks is the W-series-shape risk: each forced sub-decision
+under unsettled dependencies tempts a "decide later, commit a
+provisional shape now" rationalization. That rationalization is
+the defection-attractor.
+
+**Audit grounding:** B1 was framed as a single-decision cluster.
+Audit 2 (marshal-API surface) revealed it has 5 sub-decisions, of
+which sub-decision #1 (`TypedArrayData::String`/`HeapValue`)
+interlocks with Phase 2d Array (the leaf cluster owning that exact
+decision) and sub-decision #4 (Shape-side enum visibility)
+interlocks with Cluster #4 Option<T> (a leaf cluster owning the
+prelude-vs-import question for sum-types broadly). Trying to land
+B1 in one session would have required taking provisional positions
+on those two sub-decisions before their owning clusters resolved
+them — exactly the W-series shape.
+
+**Cluster DAG (current state, audit-grounded):**
+
+- **Phase 2d Array cluster** (TypedArrayData::String /
+  TypedArrayData::HeapValue extension; per Phase 2d sub-cluster #3
+  process_ops Array<string> entry + this entry's sub-decision #1)
+  — **LEAF.** No open dependencies. Lands independently.
+  Multi-cluster unblock when it lands: process_ops Array<string>
+  consumers, csv_module rows, arrow_module Array<DataTable>,
+  JsonValue::Array projection, plus Phase 2d sub-cluster #4 path
+  utilities `io.join` varargs (related but separable).
+- **Cluster #4 Option<T> + SomeObjectPairs / Shape-side sum-type
+  language-feature representation** — **LEAF.** No open
+  dependencies. Owns the prelude-vs-import question for sum-types
+  generally. When it lands, B1 sub-decision #4 falls out for free.
+- **B1 JsonValue cluster** — **INTERIOR.** Depends on Phase 2d
+  Array (sub-decision #1) and Cluster #4 Option (sub-decision #4).
+  After both leaves land, B1 residual is sub-decisions #2 (Object
+  runtime shape), #3 (registration strategy), #5 (recursive
+  projection). At that point B1 becomes a leaf and lands.
+- **Intrinsics-dispatch-table cluster** (handover-named) —
+  **probable LEAF** (depends on the IntrinsicFn calling-convention
+  decision; no obvious cross-cluster interlock). Audit recommended
+  before declaring leaf-status definitively.
+- **B4 core-foundation ValueWord-removal cluster** (named
+  2026-05-06 in this log) — **ROOT (likely).** 5-7 sub-decisions
+  spanning closure-captures, module-loader-value, plugin-ABI-return,
+  event-payload, snapshot-serialization, content-builder/method,
+  module-exports-core. Several sub-decisions likely depend on
+  Phase 2d Array (TypedArrayData shape) and possibly Cluster #4
+  Option (Some-payload representation in
+  TypedReturn::SomeObjectPairs). Each sub-decision needs its own
+  DAG audit before scheduling.
+- **Cluster #1 type_schema** — **deferred to shape-vm cascade
+  boundary** (2026-05-06 entry). Cross-crate; not a same-crate
+  decision. Last in priority order regardless of leaf/interior
+  classification.
+
+**Right priority heuristic: leaf-first, then interior nodes as
+their dependencies resolve.** The cluster-DAG (not cluster-list) is
+the actual structure. Multi-cluster unblock at leaf nodes is the
+high-leverage outcome — *not* high error-drop at an interior node
+that can't actually be committed without dependency resolution.
+
+**Reordered next-session priority (binding):**
+
+1. **Phase 2d Array cluster** — leaf, multi-cluster unblock.
+2. **Cluster #4 Option<T>** — leaf, dual-cluster interlock
+   resolution (Cluster #4 itself + B1 sub-decision #4).
+3. **B1 JsonValue residual** — interior node now eligible; lands
+   sub-decisions #2/#3/#5 + 5 parser-module migrations.
+4. **B4 core-foundation cluster** — root; audit DAG before each
+   sub-decision execution. Several sub-decisions likely become
+   eligible after (1) and (2) land.
+5. **Intrinsics-dispatch-table cluster** — leaf-or-near-leaf; can
+   parallel-track with (4) once audited.
+6. **Cluster #1 type_schema** — deferred-to-shape-vm-boundary;
+   lands at the cross-crate cascade.
+
+**Watchlist (binding addition):** before predicting scope or
+ordering work for any cluster, **audit cluster dependencies**.
+Asking "what does this cluster depend on" is now a binding
+pre-cluster-execution check alongside Audit 1 (consumer-call-shape)
+and Audit 2 (marshal-API surface).
+
+**Affirm: surface-on-calibration-mismatch is binding pre-work.**
+The discipline that produced findings #5, #9, #10, #11, #12 — the
+"if you start a 'mechanical migration' task and discover within 30
+minutes that it's actually a coupled cluster, surface and write an
+on-record deferral entry" rule from the surface-or-proceed list —
+is **not occasional defensive practice**. It is the now-baseline
+pre-work for any cluster scope or execution decision. Twelve
+calibration findings in this work, all in the same direction,
+makes the pattern unambiguous: the default expectation when a task
+is framed as "mechanical/cleanup/single-decision" is that audit
+will reveal an unsettled architectural surface, and the right
+response is to surface and re-decompose before executing. Past
+sessions' calibration discipline has improved the predict-vs-
+measure success rate from 1-of-8 (Phase 2c) to multiple in-window
+predictions (Phase 2d sub-cluster 1; B1 audit identifying
+interlock instead of executing prematurely). Maintain.
+
+**Cost saved:** prevented forcing 5 sub-decisions through one
+B1 round-trip — which would have either committed provisional
+positions on sub-decisions #1 and #4 (locking out the leaf
+clusters from clean independent landing) or rationalized half-
+landed shapes ("we'll fix the marshal extension later") in the W-
+series defection pattern. Estimated avoided cleanup: 1-2 weeks of
+"untangle B1's interim shape from Phase 2d Array's eventual
+shape" rework across the next year. Plus the meta-cost of
+cluster-DAG awareness now being explicit in the log, which the
+next session can use to schedule (1)+(2) without re-deriving the
+ordering.
 
 ---
 
