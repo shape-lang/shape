@@ -112,6 +112,22 @@ impl FromSlot for f64 {
     }
 }
 
+// NaN-sentinel discrimination matches NullableFloat64's documented contract
+// (native_kind.rs:36). Reusing an already-declared sentinel kind is consumer-side
+// adoption, not a new sentinel introduction.
+impl FromSlot for Option<f64> {
+    const NATIVE_KIND: NativeKind = NativeKind::NullableFloat64;
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let v = f64::from_bits(bits);
+        if v.is_nan() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+}
+
 impl FromSlot for bool {
     const NATIVE_KIND: NativeKind = NativeKind::Bool;
     #[inline]
