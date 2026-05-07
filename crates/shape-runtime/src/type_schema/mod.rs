@@ -260,17 +260,6 @@ mod tests {
 /// to recover field names, then extracts each slot's heap value.
 ///
 /// Returns `None` if the value is not a TypedObject or the schema is not found.
-pub fn typed_object_to_hashmap(value: &ValueWord) -> Option<HashMap<String, ValueWord>> {
-    // Delegate to the ValueWord-native version
-    typed_object_to_hashmap_nb(value)
-}
-
-/// Convert a ValueWord TypedObject to a `HashMap<String, ValueWord>`.
-///
-/// Like `typed_object_to_hashmap` but works directly with ValueWord,
-/// avoiding ValueWord materialization.
-///
-/// Returns `None` if the value is not a TypedObject or the schema is not found.
 pub fn typed_object_to_hashmap_nb(
     value: &shape_value::ValueWord,
 ) -> Option<HashMap<String, shape_value::ValueWord>> {

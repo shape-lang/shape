@@ -78,7 +78,7 @@ fn to_obj_map(err: &ValueWord, vm: &VirtualMachine) -> HashMap<String, ValueWord
             return map;
         }
     }
-    shape_runtime::type_schema::typed_object_to_hashmap(err).expect("Expected object-like value")
+    shape_runtime::type_schema::typed_object_to_hashmap_nb(err).expect("Expected object-like value")
 }
 
 fn assert_any_error_payload(err: &ValueWord, expected_payload: &str, vm: &VirtualMachine) {

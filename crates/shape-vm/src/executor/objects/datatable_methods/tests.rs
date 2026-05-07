@@ -35,8 +35,8 @@ fn to_obj_map(
             return map;
         }
     }
-    // Fall back to typed_object_to_hashmap (for anon-schema objects)
-    shape_runtime::type_schema::typed_object_to_hashmap(val).expect("Expected object-like value")
+    // Fall back to typed_object_to_hashmap_nb (for anon-schema objects)
+    shape_runtime::type_schema::typed_object_to_hashmap_nb(val).expect("Expected object-like value")
 }
 
 fn to_raw_args(args: Vec<ValueWord>) -> Vec<u64> {
