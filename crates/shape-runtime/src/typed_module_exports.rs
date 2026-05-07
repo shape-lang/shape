@@ -133,6 +133,26 @@ pub enum TypedReturn {
     /// Array of typed-object rows. Used by xml/regex/csv where the
     /// function returns `Array<{...}>`.
     ArrayObjectPairs(Vec<Vec<(String, ConcreteReturn)>>),
+    /// `Some(typed_object)` — `Option<{...}>` present constructor whose
+    /// payload is a typed-object pair-list. Phase 2d Cluster #4 (option β,
+    /// 2026-05-07): flat per-wrapper variant rather than recursive
+    /// `ConcreteReturn::TypedObject` (option α), preserving the leaf-only
+    /// invariant of `ConcreteReturn` as unrepresentably-violated by
+    /// Rust's type system. Mirrors the existing `ObjectPairs` /
+    /// `ArrayObjectPairs` variant shape — pattern continuation, not
+    /// pattern invention. Used by `regex.match` / `regex.find`.
+    SomeObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// `Ok(typed_object)` — `Result<{...}, E>` success constructor whose
+    /// payload is a typed-object pair-list. Same Cluster #4 option β
+    /// shape as `SomeObjectPairs`. Used by future stdlib returns whose
+    /// success case is a typed object (e.g. `arrow.metadata` after a
+    /// HashMap-marshal landing rewrites it as a typed object).
+    OkObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// `Err(typed_object)` — `Result<T, {...}>` error constructor whose
+    /// payload is a typed-object pair-list. Same Cluster #4 option β
+    /// shape as `SomeObjectPairs`. Used by future stdlib returns whose
+    /// error case is a structured error object.
+    ErrObjectPairs(Vec<(String, ConcreteReturn)>),
 }
 
 impl From<ConcreteReturn> for TypedReturn {
