@@ -53,5 +53,6 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         arrow_module::create_arrow_module(),
         crate::stdlib_time::create_time_module(),
         crate::stdlib_io::create_io_module(),
+        crate::intrinsics::vector::create_vector_intrinsics_module(),
     ]
 }

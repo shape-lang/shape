@@ -64,7 +64,10 @@ impl IntrinsicsRegistry {
         Self::register_series_intrinsics(&mut functions);
         Self::register_array_intrinsics(&mut functions);
         Self::register_statistical_intrinsics(&mut functions);
-        Self::register_vector_intrinsics(&mut functions);
+        // Vector intrinsics migrated to typed-marshal layer per
+        // intrinsics-typed-CC cluster Q2-marshal-fold-light (M-A scope);
+        // see `vector::create_vector_intrinsics_module` and
+        // `docs/defections.md` 2026-05-07 zero-copy entry.
         Self::register_matrix_intrinsics(&mut functions);
         Self::register_recurrence_intrinsics(&mut functions);
         Self::register_convolution_intrinsics(&mut functions);
@@ -240,33 +243,6 @@ impl IntrinsicsRegistry {
         functions.insert(
             "__intrinsic_median".to_string(),
             statistical::intrinsic_median,
-        );
-    }
-
-    /// Register vector intrinsics
-    fn register_vector_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_vec_abs".to_string(), vector::intrinsic_vec_abs);
-        functions.insert(
-            "__intrinsic_vec_sqrt".to_string(),
-            vector::intrinsic_vec_sqrt,
-        );
-        functions.insert("__intrinsic_vec_ln".to_string(), vector::intrinsic_vec_ln);
-        functions.insert("__intrinsic_vec_exp".to_string(), vector::intrinsic_vec_exp);
-        functions.insert("__intrinsic_vec_add".to_string(), vector::intrinsic_vec_add);
-        functions.insert("__intrinsic_vec_sub".to_string(), vector::intrinsic_vec_sub);
-        functions.insert("__intrinsic_vec_mul".to_string(), vector::intrinsic_vec_mul);
-        functions.insert("__intrinsic_vec_div".to_string(), vector::intrinsic_vec_div);
-        functions.insert("__intrinsic_vec_max".to_string(), vector::intrinsic_vec_max);
-        functions.insert("__intrinsic_vec_min".to_string(), vector::intrinsic_vec_min);
-        functions.insert(
-            "__intrinsic_vec_select".to_string(),
-            vector::intrinsic_vec_select,
-        );
-        // R5.4D: Vec<int> + Vec<int> — element-wise, overflow-checked.
-        // Compiler emission arrives in R5.4E.
-        functions.insert(
-            "__intrinsic_vec_add_i64".to_string(),
-            vector::intrinsic_vec_add_i64,
         );
     }
 
