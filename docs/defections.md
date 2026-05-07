@@ -772,6 +772,83 @@ older entries are not retroactively rewritten (drift-by-amendment-
 elsewhere risk per finding #11); future entries use the correct
 name.
 
+### 2026-05-07 — Q2 evaluation methodology shift (gate-deferred-to-feasibility)
+
+In-place dated subsection per finding #11 symmetry-extension.
+Cross-references the zero-copy entry's third audit-grounded
+correction subsection (the gate-infeasibility subsection,
+`docs/defections.md` 2026-05-07 dated subsection at the
+zero-copy entry).
+
+**Q2 evaluation methodology shift.** Empirical resolution of (Q2)
+"Marshal-layer-folded vs separate-typed-IntrinsicFn-path" shifts
+from "before bulk migration" (the original sub-decision framing)
+to **"as soon as bench is feasible after intrinsics-typed-CC
+migration completes."** Trigger: `bulldozer-strictly-typed` is
+non-buildable until the strict-typing reconstruction reaches its
+end state; the Q2 microbenchmark gate as originally scoped
+required a buildable workspace that doesn't exist on this branch.
+See the zero-copy entry's third correction subsection for the
+build-state gap that surfaced this shift, and the comparison
+methodology (theoretical SIMD-floor + dispatcher-overhead budget,
+not cross-branch or same-branch-legacy baseline since neither is
+viable).
+
+**Q2 disposition (binding until the gate fires):** "tentative-
+marshal-fold pending empirical validation." **Not** "Q2 = marshal-
+fold landed." This distinction is load-bearing — every commit
+during intrinsics-typed-CC migration must reference Q2 as
+tentative, never as resolved.
+
+**Per-file revert discipline absorbs the deferred-gate risk:**
+
+- One commit per intrinsics file. **NO BUNDLING.** No "while I'm
+  in this file, also migrate Y."
+- Each commit message references "intrinsics-typed-CC migration;
+  Q2 still tentative-marshal-fold pending empirical gate."
+- Bench-feasibility check after each commit (`cargo bench -p
+  shape-vm --no-run`); when it succeeds, gate runs.
+- Per-commit error-delta measurement is binding.
+- If the eventual gate fails, all intrinsics commits revert in
+  series. Atomic per-file commits are what enable this.
+
+**Migration ordering (suggested):** vector.rs unary intrinsics
+first (vec_abs / vec_sqrt / vec_ln / vec_exp — smallest, simplest,
+single-input/single-output element-wise), then math.rs, then
+vector.rs binary arithmetic (vec_add / vec_sub / vec_mul / vec_div
+/ vec_max / vec_min / vec_select / vec_add_i64), then more
+complex (matrix.rs, fft.rs, distributions.rs, random.rs,
+rolling.rs, recurrence.rs, scan.rs, statistical.rs, stochastic.rs,
+convolution.rs, array_transforms.rs, multi_table/functions.rs).
+The intra-vector.rs split is a sub-file commit boundary
+(not a "no-bundling" violation — different intrinsic-shape
+sub-clusters within the same file land separately for revert
+granularity).
+
+**Watchlist (binding throughout migration):** the existing
+intrinsics-typed-CC watchlist refusals (above) plus:
+
+- Refuse updating Q2 disposition to "marshal-fold landed"
+  before the gate fires. Keep "tentative" attribution explicit
+  in every commit message until empirical validation.
+- Refuse "the gate would have failed anyway, so skip it" —
+  without measurement you don't know.
+- Refuse "we're X commits in, reverting is too much work, just
+  push through if marginal" — marginal-pass-rationalization.
+  Threshold is the threshold.
+- Refuse "synthetic bench as sanity check" — same shape as G4
+  defection-attractor refused at last sign-off, under softer
+  naming. Rename-to-less-suspicious-name pattern.
+- Refuse bundling intrinsics-typed-CC migration with B1 parsers
+  / B4 cluster work — separate clusters, separate sign-offs.
+
+**Disposition for this subsection:** Q2 evaluation methodology
+shift logged in-place. (Q1) stays resolved by zero-copy α + ε
+landing (Commit 2 = `9af2882`). (Q2) stays tentative-marshal-fold
+pending bench-feasibility gate. (Q3) `IntrinsicsRegistry`
+deletion is unchanged — mechanical commit, can land before /
+during / after migration with no architectural risk.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
