@@ -8,37 +8,57 @@
 //! TypedObject for the supplied schema; nested unknown objects fall back to
 //! the typed `Json` enum rather than an untyped HashMap.
 //!
-//! Phase-2d strict-typing migration deferred-list (Stage C Step 3d):
+//! Phase-2d strict-typing migration status (Stage D Step 4, 2026-05-07):
 //!
-//! - `json.parse(text) -> Result<Json>` — body wraps recursive
-//!   `Arc<HeapValue>` with deleted `TypedReturn::ValueWord(...)` (line 250).
-//!   Blocked on N6 (any-output typed marshal) — `ConcreteReturn` has no
-//!   `Arc<HeapValue>` leaf variant. Sub-shape (b): typed-enum recursive
-//!   return (schema is fixed: `Json::Null/Bool/Number/String/Array/Object`).
-//!   Migrates as part of Stage D post-N6-sign-off batch.
-//! - `json.__parse_typed(text, schema_id) -> Result<any>` — same body
-//!   wrapping (line 307). Same N6 blocker, same sub-shape (b). Schema is
-//!   dynamic at function call boundary but the enum-tree fall-back is
-//!   typed.
-//! - `json.stringify(value: any, pretty?: bool) -> Result<string>` — body
-//!   uses deleted `to_json_value()` (line 341) AND deleted
-//!   `TypedReturn::String(output)` (line 350). Blocked on N4 (any-input
-//!   typed marshal) — `value: any` has no `FromSlot` impl post-bulldozer.
-//! - `json.is_valid(text) -> bool` — body uses deleted
-//!   `TypedReturn::Bool(valid)` (line 374). Migratable in isolation but
-//!   kept deferred for per-file atomicity; lands with parse / __parse_typed
-//!   / stringify when N4 + N6 sign-offs unblock the cohort.
+//! - `json.parse(text) -> Result<Json>` — **MIGRATED.** Body builds the
+//!   strict-typed `JsonValue` enum (`crate::json_value::JsonValue`)
+//!   directly from `serde_json::Value` and wraps with
+//!   `TypedReturn::Ok(ConcreteReturn::JsonValue(...))` per Step 1's
+//!   `ConcreteReturn::JsonValue` variant addition (commit `a022f43` /
+//!   pre-rebase `2f20bf8`). Schema lookup is no longer needed at body
+//!   time — `ConcreteType::JsonValue("Json")` carries the type-name at
+//!   registration-display level only. Closes B1 sub-decision #2 for
+//!   json.parse specifically; Stage D N6 sub-shape (b1) sign-off
+//!   landed here.
+//! - `json.__parse_typed(text, schema_id) -> Result<any>` — DEFERRED
+//!   pending architectural sub-decision **N8 — opaque-TypedObject
+//!   ConcreteReturn variant for dynamic-schema returns.** Body produces
+//!   a `HeapValue::TypedObject{schema_id, slots, heap_mask}` matching
+//!   the user-supplied dynamic `schema_id` (NOT a `JsonValue` tree).
+//!   `ConcreteReturn::JsonValue` is wrong-shape here — JsonValue is the
+//!   typed Json-enum-tree representation; `__parse_typed`'s return is a
+//!   schema-keyed TypedObject. There is no existing `ConcreteReturn`
+//!   variant for opaque `Arc<HeapValue::TypedObject>` handles, and
+//!   adding one ad-hoc would be exactly the architectural-variant-
+//!   addition refused at Step 1 (no team-lead-default; supervisor
+//!   sub-sign-off required, same family as N7's HeapValue→JSON
+//!   serializer refusal). N8 surfaced for supervisor disposition.
+//! - `json.stringify(value: any, pretty?: bool) -> Result<string>` —
+//!   DEFERRED pending **N4** (any-input typed marshal). Body uses
+//!   deleted `to_json_value()` AND would need a HeapValue→JSON
+//!   serializer (architecturally adjacent to **N7**).
+//! - `json.is_valid(text) -> bool` — Migratable in isolation but kept
+//!   deferred for per-file atomicity; lands with stringify /
+//!   __parse_typed when N4 + N7 + N8 sign-offs unblock the residual
+//!   json cohort.
 //!
-//! Both N4 and N6 are supervisor-level; queued for relay batch (see
-//! `docs/defections.md` HashMap-marshal cluster sub-decision queue,
-//! 2026-05-07 N6 consumer-expansion subsection).
+//! N4 / N7 / N8 are supervisor-level; queued for relay batch (see
+//! `docs/defections.md` HashMap-marshal cluster sub-decision queue).
 //!
-//! json.rs is also B1 sub-decision #2's anchor site (cascade -19 across
-//! 5 parser modules); B1 unblocks alongside this migration.
+//! Helpers `make_json_enum`, `json_value_to_enum`,
+//! `json_value_to_typed_json_enum`, `json_object_to_typed`, and
+//! `json_value_to_typed_nb` are kept as private helpers used only by the
+//! deferred `json.__parse_typed` path. They build `ValueWord`-typed
+//! results that the strict-typed marshal layer would reject; their
+//! callers all live in the deferred path. Imports `ValueWord` /
+//! `ValueWordExt` / `ValueSlot` / `nb_to_slot` / `ArgVec` similarly stay
+//! pinned to those helpers.
 
+use crate::json_value::JsonValue;
+use crate::marshal::register_typed_fn_1;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn, register_typed_function};
 use shape_value::heap_value::HeapValue;
 use shape_value::{ArgVec, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
@@ -129,6 +149,40 @@ fn json_value_to_enum(value: serde_json::Value, schema_id: u64) -> ValueWord {
                 JSON_VARIANT_OBJECT,
                 Some(ValueWord::from_hashmap_pairs(keys, values)),
             )
+        }
+    }
+}
+
+/// Convert a `serde_json::Value` into the strict-typed `JsonValue` sum
+/// (`crate::json_value::JsonValue`).
+///
+/// Stage D Step 4 (2026-05-07). Used by `json.parse` to produce an
+/// `Arc<HeapValue>`-free recursive value tree that wraps directly into
+/// `ConcreteReturn::JsonValue`. Same int-vs-number split rule as the
+/// legacy `json_value_to_enum`: integral JSON numbers fitting in `i64`
+/// map to `JsonValue::Int`; all other numbers map to `JsonValue::Number`.
+fn serde_json_to_json_value(value: serde_json::Value) -> JsonValue {
+    match value {
+        serde_json::Value::Null => JsonValue::Null,
+        serde_json::Value::Bool(b) => JsonValue::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if !n.to_string().contains('.') {
+                    return JsonValue::Int(i);
+                }
+            }
+            JsonValue::Number(n.as_f64().unwrap_or(0.0))
+        }
+        serde_json::Value::String(s) => JsonValue::String(s),
+        serde_json::Value::Array(arr) => {
+            JsonValue::Array(arr.into_iter().map(serde_json_to_json_value).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let pairs: Vec<(String, JsonValue)> = map
+                .into_iter()
+                .map(|(k, v)| (k, serde_json_to_json_value(v)))
+                .collect();
+            JsonValue::Object(pairs)
         }
     }
 }
@@ -245,37 +299,26 @@ pub fn create_json_module() -> ModuleExports {
     module.description = "JSON parsing and serialization".to_string();
 
     // json.parse(text: string) -> Result<Json>
-    // Always returns a typed `Json` enum value — sweep phase 4a removed the
-    // legacy untyped fallback. The schema-driven form lives in
-    // `__parse_typed(text, schema_id)`.
-    register_typed_function(
+    // Stage D Step 4 (2026-05-07): migrated to the strict-typed marshal
+    // layer. Body builds `JsonValue` (`crate::json_value::JsonValue`)
+    // directly and wraps with `TypedReturn::Ok(ConcreteReturn::JsonValue(..))`
+    // per Step 1's variant addition. No body-time schema lookup —
+    // `ConcreteType::JsonValue("Json")` carries the type-name at the
+    // registration-display layer.
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse a JSON string into Shape values",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "JSON string to parse".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Result(Box::new(ConcreteType::Named("Json".to_string()))),
-        |args, ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "json.parse() requires a string argument".to_string())?;
+        "text",
+        "string",
+        ConcreteType::Result(Box::new(ConcreteType::JsonValue("Json".to_string()))),
+        |text: Arc<String>, _ctx| {
+            let parsed: serde_json::Value = serde_json::from_str(text.as_str())
+                .map_err(|e| format!("json.parse() failed: {}", e))?;
 
-            let parsed: serde_json::Value =
-                serde_json::from_str(text).map_err(|e| format!("json.parse() failed: {}", e))?;
+            let result = serde_json_to_json_value(parsed);
 
-            let json_schema = ctx.schemas.get("Json").ok_or_else(|| {
-                "json.parse() requires the `Json` enum schema (load std::core::json_value)"
-                    .to_string()
-            })?;
-            let result = json_value_to_enum(parsed, json_schema.id as u64);
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
+            Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(result)))
         },
     );
 
