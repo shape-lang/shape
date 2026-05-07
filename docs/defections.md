@@ -656,6 +656,44 @@ entry that contradicts the old one. The log's value is that future
 sessions can read each entry once and trust its current state.
 Drift-by-amendment-elsewhere defeats that.
 
+### 2026-05-07 — Post-leaves audit: residual reduces 5→1 architectural
+
+After Phase 2d Array (commits `9fc35ac`/`9f6b1d3`/`29d61fa`) and
+Cluster #4 Option (`ed18cb8`/`c07d18e`) landed, two of the five
+B1 sub-decisions self-resolve, two were never architectural to
+begin with, and only one remains as a genuine architectural
+question. Audit-grounded correction per finding #11 in-place
+discipline:
+
+| # | Sub-decision | 2026-05-07 status |
+|---|---|---|
+| **1** | TypedArrayData::String / HeapValue for Json::Array | **RESOLVED** by Phase 2d Array (commit `9fc35ac`). `TypedArrayData::String` and `TypedArrayData::HeapValue` variants live; `FromSlot for Vec<Arc<String>>` and `Vec<Arc<HeapValue>>` impls landed. JsonValue::Array projection is mechanical given those variants. |
+| **2** | `JsonValue::Object(Vec<(String, JsonValue)>)` runtime shape | **STILL OPEN — interior interlock.** Audit 2 of the 2026-05-07 B1 residual session confirmed: current `json_value_to_enum` body uses `ValueWord::from_hashmap_pairs(keys, values)` (deleted) to build the Object payload, and `HeapValue` has no `HashMap` variant. The architectural decision is the **HashMap-marshal micro-cluster** (entry below at the named-in-passing site, expanded 2026-05-07 to a full on-record entry). Three storage-shape options surfaced there. **B1 #2 is unblocked when HashMap-marshal lands**; alternatively, a runtime-shape change (e.g. 2-slot TypedObject `{keys: Array<string>, values: Array<JsonValue>}`) would interlock with shape-vm `__json_object_get`/`as_hashmap` accessors instead. The HashMap-marshal route keeps shape-vm changes minimal; the runtime-shape route avoids waiting on HashMap-marshal but adds cross-crate scope. |
+| **3** | Per-variant schemas vs single+discriminant; registration strategy | **EFFECTIVELY SETTLED.** Audit 2 found the per-variant schemas path is already in production: `stdlib-src/core/json_value.shape` declares the `Json` enum with 7 variant schemas, registered at module load via the registry. The "compiler-synthesized at enum-decl time vs stdlib-pre-registered at module init" sub-question's de-facto answer is **stdlib-pre-registered** — the existing code uses it consistently. No architectural decision pending; the single+discriminant alternative remains forbidden by the watchlist (`native_kind.rs:88-96`). |
+| **4** | Shape-side enum visibility (prelude-bake vs import) | **RESOLVED** by Cluster #4 Option (commit `ed18cb8`'s audit). `Option`/`Some`/`None` are already prelude-baked (`builtin type Option;` at `intrinsics.shape:31`). Cluster #4 audit established the precedent for sum-types-in-prelude generally; B1 follows. JsonValue is prelude-baked when it lands, no separate decision needed. |
+| **5** | Recursive marshal-side projection (stack-depth bound) | **DEMOTED from architectural to runtime concern.** The "recursive vs iterative" question is an implementation choice — current `json_value_to_enum` is recursive; deeply-nested JSON could stack-overflow. This is addressed at landing time with a simple iteration limit or explicit-stack rewrite — no marshal-API change. Not a pre-landing architectural decision. |
+
+**B1 residual cluster identity (post-2026-05-07):** the cluster
+collapses to **one open architectural sub-decision (#2)** plus
+mechanical body migration of the 5 parser modules. Sub-decision #2
+is itself blocked on **HashMap-marshal landing**.
+
+**B1 disposition:** STILL INTERIOR; depends on HashMap-marshal
+cluster landing first. After HashMap-marshal lands, B1 becomes
+mechanical: the 5 parser modules (json/yaml/toml/msgpack/xml,
+~19 errors total) migrate one-file-per-commit using the new
+HashMap shape + already-landed Phase 2d Array variants + Cluster #4
+Option variants.
+
+**Predicted error-drop after HashMap-marshal landing:**
+~-19 (the original 2026-05-06 prediction holds, now with the
+specific blocker named).
+
+**Cost saved by audit reduction:** prevents 4 of the 5 prior
+"sub-decisions" from being re-debated each session. The log
+captures the once-architectural questions as resolved and the one
+remaining question as concretely-blocked.
+
 ---
 
 ## 2026-05-06 — Option<T> / TypedReturn::SomeObjectPairs marshal extension — deferred
