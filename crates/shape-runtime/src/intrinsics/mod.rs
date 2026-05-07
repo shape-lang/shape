@@ -123,38 +123,25 @@ impl IntrinsicsRegistry {
         self.functions.read().keys().cloned().collect()
     }
 
-    /// Register all math intrinsics
+    /// Register the 5 math intrinsics whose migration is deferred pending
+    /// follow-on architectural sub-decisions (sum/min/max polymorphic
+    /// return; char_code multi-input-type dispatch; bspline2_3d_batch
+    /// consumer audit). The other 14 math intrinsics migrated to typed
+    /// marshal entries in `math::create_math_intrinsics_module`.
     fn register_math_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
+        // Polymorphic-return: sum / min / max — pending M1-split sub-decision.
         functions.insert("__intrinsic_sum".to_string(), math::intrinsic_sum);
-        functions.insert("__intrinsic_mean".to_string(), math::intrinsic_mean);
         functions.insert("__intrinsic_min".to_string(), math::intrinsic_min);
         functions.insert("__intrinsic_max".to_string(), math::intrinsic_max);
-        functions.insert("__intrinsic_std".to_string(), math::intrinsic_std);
-        functions.insert("__intrinsic_variance".to_string(), math::intrinsic_variance);
-        // Trigonometric intrinsics
-        functions.insert("__intrinsic_sin".to_string(), math::intrinsic_sin);
-        functions.insert("__intrinsic_cos".to_string(), math::intrinsic_cos);
-        functions.insert("__intrinsic_tan".to_string(), math::intrinsic_tan);
-        functions.insert("__intrinsic_asin".to_string(), math::intrinsic_asin);
-        functions.insert("__intrinsic_acos".to_string(), math::intrinsic_acos);
-        functions.insert("__intrinsic_atan".to_string(), math::intrinsic_atan);
-        functions.insert("__intrinsic_atan2".to_string(), math::intrinsic_atan2);
-        functions.insert("__intrinsic_sinh".to_string(), math::intrinsic_sinh);
-        functions.insert("__intrinsic_cosh".to_string(), math::intrinsic_cosh);
-        functions.insert("__intrinsic_tanh".to_string(), math::intrinsic_tanh);
-        // Interpolation intrinsics
-        functions.insert(
-            "__intrinsic_bspline2_3d_batch".to_string(),
-            math::intrinsic_bspline2_3d_batch,
-        );
-        // Character code intrinsics
+        // Multi-input-type: char_code — pending dispatch sub-decision.
         functions.insert(
             "__intrinsic_char_code".to_string(),
             math::intrinsic_char_code,
         );
+        // Fast-path/slow-path: bspline2_3d_batch — pending consumer audit.
         functions.insert(
-            "__intrinsic_from_char_code".to_string(),
-            math::intrinsic_from_char_code,
+            "__intrinsic_bspline2_3d_batch".to_string(),
+            math::intrinsic_bspline2_3d_batch,
         );
     }
 
