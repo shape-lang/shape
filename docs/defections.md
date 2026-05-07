@@ -444,6 +444,135 @@ cluster's `JsonValue::Object` case once `JsonValue` lands.
 JsonValue's runtime representation is decided. Estimate: 1 day of
 "redo Concrete/Wrapper split" follow-up avoided.
 
+### 2026-05-07 — Audit-grounded correction: β chosen, surface reduced 5→1, LANDED
+
+Per finding #11's audit-grounded-correction discipline: the original
+2026-05-06 framing above was incomplete on three axes. Audits 1+2+3
+ahead of execution (per finding #12 binding pre-work) revealed that
+the original "5-sub-decision interlock with JsonValue" framing
+collapses to a single architectural decision once current code is
+read carefully.
+
+**(a) Architectural decision: β chosen.** Three flat per-wrapper
+variants landed in commit `ed18cb8`:
+- `TypedReturn::SomeObjectPairs(Vec<(String, ConcreteReturn)>)`
+- `TypedReturn::OkObjectPairs(Vec<(String, ConcreteReturn)>)`
+- `TypedReturn::ErrObjectPairs(Vec<(String, ConcreteReturn)>)`
+
+**Structural reasoning** (binding per supervisor sign-off): β
+preserves the leaf-only invariant of `ConcreteReturn` as
+**unrepresentably-violated by Rust's type system**. α would have
+made leaf-only-violation compile-permitted (a `ConcreteReturn`
+variant carrying nested `ConcreteReturn` payloads). β mirrors the
+already-landed `ObjectPairs` (`typed_module_exports.rs:117`) and
+`ArrayObjectPairs` (line 135) precedent — **pattern continuation,
+not pattern invention**. Scope: 3 new variants is bounded; far
+smaller than path-2's ~25 HeapKind variants or option δ's parametric
+NativeKind explosion. Three additional options checked at sign-off
+review and rejected on structural grounds: (δ) single generic
+`TypedReturn::WrappedObjectPairs(WrapperKind, …)` — parallel-
+discriminator drift; (ε) defer indefinitely — Option-layer rename
+of "documented FFI-boundary helper" pattern; (ζ) name-only descriptor
++ separate value lookup — splits value-from-kind, exactly the
+structural-purity gain β provides.
+
+**(b) Audit reduction 5 → 1.** The 2026-05-06 framing implied 5
+interlocked sub-decisions. Audit 2 (marshal-API surface) verified
+4 of them were **already self-resolved** through prior commits:
+
+| # | Sub-decision | Resolution |
+|---|---|---|
+| **1** | Prelude-vs-import for Option/Some/None | **Already prelude-baked.** `builtin type Option;` at `crates/shape-runtime/stdlib-src/core/intrinsics.shape:31`. `BuiltinFunction::SomeCtor` already registered (`shape-vm/.../helpers.rs:3144`). `ValueWord::none()` exists. No decision pending. |
+| **2** | None encoding at slot bits | **Already settled in NativeKind.** Per-numeric `NullableInt8`/`NullableInt16`/`NullableInt32`/`NullableInt64`/`NullableUInt*`/`NullableFloat64`/`NullableIntSize`/`NullableUIntSize` variants exist (`crates/shape-value/src/native_kind.rs:34-77`). Heap types use `NativeKind::Ptr(HeapKind::*)` with bits=0 = None (per `crates/shape-value/src/v2/typed_option.rs`). Watchlist explicitly forbids parametric `NativeKind::Option(T)` at `native_kind.rs:88-96`. |
+| **3** | `Some(leaf-payload)` for I64/F64/Bool/String/etc. | **Already works** via existing `TypedReturn::Some(ConcreteReturn::*)`. No decision pending. |
+| **4** | `FromSlot for Option<T>` (input side) | **No current consumers** require Option<T> as a stdlib FFI input; optional inputs use `_full + default_snippet` per the marshal-optional-args entry. Future-extensible without architectural decision now. |
+| **5** | `Some(TypedObject)` payload | **The actual gap.** Resolved by commit `ed18cb8` (β + 3 variants). |
+
+The 5-sub-decision framing was correct at 2026-05-06's vantage point;
+between then and 2026-05-07 the runtime layer (NativeKind nullable
+variants, prelude type, builtin constructors) had already advanced
+enough that 4 of the 5 sub-decisions self-resolved. Reading current
+code first (Audit 2) caught this.
+
+**(c) Consumer count clarification.** The 2026-05-06 entry's "~5
+errors visible (regex.match deferred already in regex.rs; arrow_module
+3, csv_module 4)" was an over-count by the same shape as cluster #3's
+matrix.rs misclassification. The 2026-05-07 audit-grounded correction
+on the B1 entry (lines 312-379 above) reclassified `arrow_module`
+and `csv_module` typed-row returns to **Phase 2d Array cluster, not
+Cluster #4**. Phase 2d Array landed (commits `9fc35ac`/`9f6b1d3`/
+`29d61fa`). The actual Cluster #4 consumers were: regex.match and
+regex.find — both **commented-out (deferral notes), not error-emitting**.
+Per finding #10, the "~5 errors visible" claim was a stale-import-
+style miscount; the correct figure is **0 currently-blocked
+shape-runtime --lib errors**.
+
+**(d) B1 sub-decision #4 resolved as side-effect.** B1's
+"prelude-vs-import for the JsonValue enum" sub-decision (entry above
+at line 355) interlocked with Cluster #4's prelude-vs-import question
+for sum-types generally. With Option already prelude-baked (per (b)
+sub-decision #1), the precedent for sum-types-in-prelude is
+established. **B1 sub-decision #4 falls out for free** — JsonValue
+follows the Option precedent and is prelude-baked when its runtime
+shape lands. B1 residual sub-decisions reduce from 5 to 3
+(remaining: #2 Object runtime shape, #3 schema registration strategy,
+#5 recursive projection).
+
+**Disposition:** LANDED. Two-commit session at 2026-05-07:
+
+| Commit | Subject | Errors |
+|---|---|---|
+| `ed18cb8` | TypedReturn::SomeObjectPairs/OkObjectPairs/ErrObjectPairs variants | 89 → 89 (0) |
+| `c07d18e` | regex.match + regex.find activation | 89 → 89 (0) |
+
+Predicted 0 ± 3 on commit 1, 0 on commit 2. **Measured 0 on both.**
+Predict-vs-measure 2/2 in window. Third leaf-cluster session at the
+"small direct drop, multi-cluster unblock value" profile (Phase 2d
+Array architectural commit + B1 audit-and-defer + this).
+
+**Multi-cluster unblock value:**
+- regex.match / regex.find activated — feature restoration for
+  Shape user code.
+- B1 sub-decision #4 self-resolved by Option precedent.
+- B1 residual reduces 5 → 3 sub-decisions; B1 closer to leaf
+  eligibility.
+- Future stdlib `Some(TypedObject)` / `Ok(TypedObject)` /
+  `Err(TypedObject)` returns can now land mechanically (e.g. table
+  lookup returning `Option<{...}>`, structured error responses,
+  HashMap-marshal sub-cluster's typed-object surface).
+
+**Watchlist refusals (binding through implementation, none re-litigated):**
+- `NativeKind::Option(T)` parametric variant — confirmed forbidden
+  at `native_kind.rs:88-96`.
+- Sentinel values for None inline in typed bits — None encoding is
+  discriminator-level (NullableInt64) or null-pointer (heap), not
+  sentinel-bits-in-Some.
+- `as_some()` / `as_none()` helpers on HeapValue — same shape as
+  cluster #2 α-rejection.
+- Recursive `ConcreteReturn::Option(Box<ConcreteReturn>)` — α applied
+  to wrapper itself; same leaf-only break.
+- "Smaller subset enum of NativeKind for Option-only" — parallel-
+  discriminator drift.
+- "None is rare, fallback for now" — softening.
+- "Rename Option→Maybe to avoid the parametric question" —
+  rename-to-less-suspicious-name.
+
+**Watchlist library additions (FYI for future sessions):**
+- (δ) Single generic `TypedReturn::WrappedObjectPairs(WrapperKind, …)`
+  — parallel-discriminator drift; refused on sight.
+- (ε) Indefinite deferral of architecturally-bounded extensions —
+  Option-layer rename of "documented FFI-boundary helper"; cluster
+  never closes; refused on sight.
+- (ζ) Splitting value-from-kind via name-only descriptor + separate
+  lookup — exactly the structural-purity gain β provides; net
+  negative; refused on sight.
+
+**Cost saved:** prevented α's leaf-only-invariant break (would have
+required either reverting later or accepting a permanently-weaker
+ConcreteReturn invariant). Estimated 1-2 weeks of "ConcreteReturn
+recursive payloads breeding W-series-shape consumer rationalization"
+avoided over the next year.
+
 ---
 
 ## 2026-05-06 — marshal-optional-args extension — register_typed_fn_N_full
