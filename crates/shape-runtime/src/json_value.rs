@@ -335,3 +335,43 @@ pub fn json_value_to_serde_json(jv: &JsonValue) -> serde_json::Value {
         }
     }
 }
+
+/// Convert a `JsonValue` into a `serde_yaml::Value`.
+///
+/// Used by N7 consumer C10 (`yaml.stringify`). Pair with
+/// `heap_to_json_value` to round-trip a `HeapValue` tree to a YAML
+/// string via `serde_yaml::to_string(&v)?`.
+///
+/// Lossy mapping shape parallels parse-side yaml.rs precedent
+/// (yaml.rs:75-78 unwraps `serde_yaml::Value::Tagged`); on the encode
+/// side, we never produce Tagged, so no lossy path. `JsonValue::Bytes`
+/// maps to `Value::Sequence` of `u8` numbers (YAML has no native byte
+/// type); reserved for future msgpack-binary roundtrip via 3.C.
+pub fn json_value_to_serde_yaml(jv: &JsonValue) -> serde_yaml::Value {
+    match jv {
+        JsonValue::Null => serde_yaml::Value::Null,
+        JsonValue::Bool(b) => serde_yaml::Value::Bool(*b),
+        JsonValue::Int(i) => serde_yaml::Value::Number((*i).into()),
+        JsonValue::Number(f) => serde_yaml::Value::Number((*f).into()),
+        JsonValue::String(s) => serde_yaml::Value::String(s.clone()),
+        JsonValue::Bytes(bytes) => serde_yaml::Value::Sequence(
+            bytes
+                .iter()
+                .map(|&b| serde_yaml::Value::Number((b as u64).into()))
+                .collect(),
+        ),
+        JsonValue::Array(arr) => {
+            serde_yaml::Value::Sequence(arr.iter().map(json_value_to_serde_yaml).collect())
+        }
+        JsonValue::Object(pairs) => {
+            let mut map = serde_yaml::Mapping::with_capacity(pairs.len());
+            for (k, v) in pairs.iter() {
+                map.insert(
+                    serde_yaml::Value::String(k.clone()),
+                    json_value_to_serde_yaml(v),
+                );
+            }
+            serde_yaml::Value::Mapping(map)
+        }
+    }
+}
