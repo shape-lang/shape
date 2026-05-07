@@ -102,6 +102,28 @@ pub enum ConcreteReturn {
     /// pattern — see `docs/defections.md` HashMap-marshal entry's
     /// audit-grounded correction subsection.
     HashMapStringHeapValue(Vec<(String, Arc<shape_value::heap_value::HeapValue>)>),
+    /// Strict-typed parsed-data tree (Stage D N6 sub-shape (b),
+    /// 2026-05-07). Replaces the deleted
+    /// `TypedReturn::Ok(Box::new(TypedReturn::ValueWord(arc)))` body
+    /// pattern that pre-bulldozer JSON parsing used. The payload is the
+    /// recursive [`crate::json_value::JsonValue`] sum
+    /// (`Null/Bool/Int/Number/String/Bytes/Array/Object`); recursion is
+    /// at the `JsonValue` payload layer, NOT at `ConcreteReturn`.
+    /// `ConcreteReturn::JsonValue` itself is a leaf variant — its
+    /// payload is independently recursive in the same way that
+    /// `ConcreteReturn::HashMapStringHeapValue`'s payload is recursive
+    /// at the `HeapValue` layer. The leaf-only invariant of
+    /// `ConcreteReturn` is preserved.
+    ///
+    /// Used by `json.parse(text) -> Result<Json>` and
+    /// `json.__parse_typed(text, schema) -> Result<any>` body
+    /// projection. Cross-cluster precedent at the user-facing Shape
+    /// API: `crates/shape-runtime/stdlib-src/core/json_value.shape`
+    /// already declares the `Json` enum with matching variants.
+    /// See `docs/defections.md` HashMap-marshal cluster N6
+    /// consumer-expansion subsection (2026-05-07) for the
+    /// sub-shape (b) categorization.
+    JsonValue(crate::json_value::JsonValue),
     /// `DataTable` heap handle — opaque columnar table from
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
@@ -215,6 +237,14 @@ pub enum ConcreteType {
     /// element-kind homogeneity is a body-side type contract per the
     /// option ε pattern.
     HashMapStringHeapValue(String),
+    /// Strict-typed parsed-data tree (Stage D N6 sub-shape (b),
+    /// 2026-05-07). Mirror for `ConcreteReturn::JsonValue`. The displayed
+    /// type-name is caller-provided so the LSP can surface either
+    /// `Json` (for `json.parse`'s typed return) or `any` (for
+    /// `json.__parse_typed`'s polymorphic return). The actual payload
+    /// shape is identical (recursive `JsonValue` sum); the visible
+    /// type-name carries the user-API distinction.
+    JsonValue(String),
     /// Heterogeneous object built from string→typed pairs (materialized
     /// as a `HashMap`).
     Object,
@@ -272,6 +302,7 @@ impl ConcreteType {
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
             ConcreteType::HashMapStringHeapValue(s) => s.clone(),
+            ConcreteType::JsonValue(s) => s.clone(),
             ConcreteType::Object => "object".to_string(),
             ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),
