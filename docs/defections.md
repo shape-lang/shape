@@ -62,6 +62,266 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
+
+This is **not** a defection. On-record promotion of a previously-
+adjacency-deferred follow-up to a fully-named cluster, triggered by
+the intrinsics-typed-CC audit surfacing a perf-sensitive consumer.
+
+**Provenance: cluster #3 forward-compatibility door** (defections.md
+lines 1075-1091, "Array<T> marshal extension" entry). When option β
+(owned-clone) was chosen for the byte/numeric `FromSlot` family, the
+entry explicitly anticipated:
+
+> "Option β is forward-compatible: when a perf consumer arrives, the
+> additional `Arc<TypedBuffer<T>>` impls land as their own round-trip
+> with the consumer driving design choices."
+
+**The trigger has fired.** The intrinsics-typed-CC audit (separate
+entry below) identified the perf consumer: SIMD-optimized `vec_abs`,
+`vec_sqrt`, `vec_ln`, `vec_exp`, `vec_add`, `vec_sub`, `vec_mul`,
+`vec_div`, `vec_max`, `vec_min`, `vec_select`, `vec_add_i64` (and
+the matrix / convolution / fft / scan / rolling / recurrence /
+distributions / random intrinsic families). These are hot-path
+numeric kernels operating on `Vec<f64>` / `Vec<i64>` arrays of
+typically 10K-1M elements. Migrating them through option β's
+owned-clone marshal layer would impose a ~10-100× regression per
+call (one full element-by-element data copy on input, one on
+output, dwarfing the SIMD inner loop).
+
+**On-record trigger justification (load-bearing):** the user's
+constraint is **perf-non-negotiable** — 10-100× regression is not
+acceptable for the strict-typing migration. Deferring zero-copy
+again would be the rename-pattern applied at the cluster-priority
+layer: "next session, every session forever." Cluster #3's
+forward-compat door was a deliberate "land β now, α when needed"
+deal. The trigger condition has materialized; promoting to a named
+cluster captures that explicitly.
+
+**Anticipated architectural shape: α + ε in parallel with β.**
+
+- **α (`Arc<TypedBuffer<T>>` zero-data-copy `FromSlot`/`ToSlot`)** —
+  one `Arc::clone` (single atomic op) per `from_slot` call, **zero
+  data clone**. Body declares `arr: Arc<TypedBuffer<f64>>` and
+  accesses `&arr.data[..]` via `Arc::deref` — zero indirection in
+  hot loops. Returns wrap `Arc<TypedBuffer<f64>>` into the slot via
+  `Arc::into_raw(Arc<HeapValue>)` after wrapping in
+  `HeapValue::TypedArray(TypedArrayData::F64(arc))` — same shape as
+  β's owned-clone returns, just without the per-element copy.
+
+- **ε (per-element-type parallel impls)** — distinct
+  `impl FromSlot for Arc<TypedBuffer<i64>>`,
+  `impl FromSlot for Arc<TypedBuffer<u8>>`,
+  `impl FromSlot for Arc<TypedBuffer<f64>>`, etc., all declaring
+  `NATIVE_KIND = NativeKind::Ptr(HeapKind::TypedArray)`. Body's
+  declared parameter type selects which impl is monomorphized.
+  Element-width discrimination is via the **Rust type system**
+  (compile-time), not via a parametric `NativeKind`. This is
+  identical to β's existing per-element-type impl shape — same
+  precedent (cluster #3 entry, defections.md:1056-1066) directly
+  reused, no new pattern invention.
+
+- **β stays in production parallel with α.** Existing β consumers
+  (`compress`, `archive`, `byte_utils`, `csv`, etc.) keep
+  owned-clone semantics — they aren't perf-critical and don't
+  benefit from zero-copy. The two impl families coexist, each
+  selected by the body's declared parameter type.
+
+**Already-rejected options (refuse on sight, no re-litigation):**
+
+- **(γ) `FromSlotRef<'a>` trait variant.** Trait-family-proliferation
+  risk. Rejected at cluster #3 entry (defections.md ~1060-1063).
+  Two parallel traits (`FromSlot` + `FromSlotRef<'a>`) splits the
+  marshal-API into a borrow-vs-own dichotomy that every future
+  consumer has to navigate. Refused.
+- **(δ) Parametric `NativeKind::TypedArrayI64` / `TypedArrayF64`
+  variants.** Discriminator-level parametric explosion. Already
+  refused on the `native_kind.rs:88-96` watchlist; carries the same
+  shape rejection across α as it did across β. Refused.
+- **(path 2) Per-element `HeapKind` split** —
+  `HeapValue::TypedArrayI64` / `HeapValue::TypedArrayF64` etc. as
+  fully-discriminative top-level variants. ~25-variant scope
+  explosion. Rejected at cluster #3 entry on scope grounds. Same
+  rejection applies for α.
+
+**Open sub-decisions (for the architectural-extension commit when
+sign-off relays):**
+
+- Element-type coverage at first landing — `f64` + `i64` + `u8`
+  cover the dominant intrinsic surface. `bool`, `i8`/`i16`/`i32` /
+  `u16`/`u32`/`u64`/`f32` could land alongside or follow
+  consumer-driven. Audit 1 of Stage B determines the minimum
+  necessary set.
+- Mutable-access shape — does any intrinsic need to *write* into
+  a shared typed buffer (vs producing a new buffer on output)? If
+  yes, that's a separate architectural sub-question (Arc-shared
+  data is read-only without `Arc::get_mut`). Audit 1 of Stage B
+  surfaces this.
+
+**Explicit interlock with intrinsics-typed-CC cluster (named below):**
+zero-copy must land **before** intrinsics migration. The intrinsics-
+typed-CC entry's `(Q1)` sub-decision is fully resolved by zero-copy
+landing — once `Arc<TypedBuffer<T>>` impls are in production, intrinsic
+bodies migrate one file at a time using the existing marshal-layer
+shape (`register_typed_fn_N`), no new architectural decisions per
+file. Intrinsics-typed-CC's `(Q2)` calling-convention question
+remains, but it becomes a yes-fold-to-marshal-layer answer once the
+perf concern is resolved.
+
+**Does not displace `move-semantics-marshal` (defections.md:1242).**
+On-record disambiguation, BINDING:
+
+| Workstream | Problem domain | Trigger |
+|---|---|---|
+| **Arc<TypedBuffer<T>> zero-copy (this entry)** | Shared **read** access to typed buffers without per-call data clone. Single atomic op, zero data copy. | Perf-sensitive consumer reading a typed array (intrinsics SIMD kernels). |
+| **move-semantics-marshal (deferred)** | **Owned** data move at FFI boundary using `LoadLocalMove`/`LoadLocalClone` bytecode opcodes — eliminates a clone when the caller's local goes out of scope. | Different — consumer would need OWNED data, not shared read. |
+
+The two workstreams are **complementary, not competitive**. Both
+land independently against their own perf-trigger conditions.
+Don't conflate.
+
+**Performance characteristic re-confirms `no-dynamic-types` and
+`Rust-like let` invariants:** α stays leaf-typed at the body's
+parameter type — `Arc<TypedBuffer<f64>>` is a strict-typed Rust
+type (no `dyn`, no `Box<dyn Any>`, no `ValueWord`). The marshal-
+boundary discriminator is `NativeKind::Ptr(HeapKind::TypedArray)` —
+unchanged from β. The element-width contract is at the body-side
+Rust type level (per option ε pattern), not in slot bits. At the
+FFI boundary specifically, α achieves the perf-equivalent of
+move-semantics for shared immutable data (single atomic op + zero
+data copy). The `Rust-like let` performance goal is achieved
+end-to-end for intrinsic call paths once α lands.
+
+**Disposition:** named cluster on-record. Stage B of the supervisor's
+three-stage plan (sign-off granted on plan structure; architectural-
+extension commits await per-stage sign-off relay). Audit 1+2+3
+binding pre-work pending — see Stage B description above this entry's
+landing window.
+
+**Cost saved by promotion:** prevents the rename-at-cluster-priority
+defection. Without a named cluster on-record, every subsequent
+session's audit would re-encounter the cluster #3 forward-compat
+door and re-defer "until a perf consumer arrives" — but the consumer
+HAS arrived. Promotion cements the trigger. Estimated avoided
+"perf-cost-deferred-indefinitely" rationalization: 4-8 weeks of
+intrinsic-by-intrinsic perf regressions disguised as "small
+migration cost we can profile later."
+
+---
+
+## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
+
+This is **not** a defection. On-record cluster naming with
+**rename**: previously referenced as "intrinsics-dispatch-table" in
+prior session handovers; that framing was wrong.
+
+**Audit-grounded rename rationale.** The 2026-05-07 audit (this
+session) traced `IntrinsicsRegistry` (`intrinsics/mod.rs:41`) to
+zero external consumers. shape-vm bypasses the registry entirely:
+`BuiltinFunction::IntrinsicVec*` opcodes dispatch via a direct
+match-on-builtin call into `shape_runtime::intrinsics::vector::*`
+functions (`crates/shape-vm/src/executor/builtins/vector_intrinsics.rs:25-39`).
+The "dispatch table" half of the cluster name was load-bearing in
+the original handover framing; the audit confirms it is dead code.
+Per finding #11 audit-grounded-correction discipline: name the
+cluster by what it actually is, not by the dead-infrastructure
+that was assumed to define it.
+
+**The actual cluster surface** is the `IntrinsicFn` calling-
+convention signature at `intrinsics/mod.rs:34`:
+
+```rust
+pub type IntrinsicFn = fn(&[ValueWord], &mut ExecutionContext)
+    -> Result<ValueWord>;
+```
+
+`ValueWord` is deleted from shape-runtime; every body using this
+signature fails to compile. 18 errors across 14 intrinsics files
+(`array_transforms`, `convolution`, `distributions`, `fft`,
+`math`, `matrix`, `random`, `recurrence`, `rolling`, `scan`,
+`statistical`, `stochastic`, `vector`, plus `mod.rs`). Plus 4
+errors in `multi_table/functions.rs` which uses the same
+calling-convention shape (originally clustered with intrinsics
+by handover-naming; audit-1 confirms the same architectural fate).
+
+**Sub-decisions (open):**
+
+- **(Q1) Owns-clone vs zero-copy for `Vec<f64>` / `Vec<i64>` /
+  `Vec<bool>` `FromSlot`.** Cluster #3's option β chose owns-clone
+  for byte/intrinsic arrays explicitly because no current consumer
+  needed zero-copy. Intrinsics ARE the perf-sensitive consumer;
+  per-call clone of 10K-1M-element f64 arrays would regress 10-100×
+  vs the SIMD inner loop. **Resolution: blocked on `Arc<TypedBuffer<T>>`
+  zero-copy cluster (entry above) landing first.** Zero-copy lands;
+  (Q1) becomes "use Arc<TypedBuffer<T>>" mechanically.
+
+- **(Q2) Marshal-layer-folded vs separate-typed-IntrinsicFn-path.**
+  After (Q1) resolves via zero-copy, do intrinsics still need a
+  separate calling-convention surface, or do they fold into
+  `register_typed_fn_N`? Folding gains schema/LSP integration and
+  uniform dispatch; a separate path could shave the dispatcher
+  round-trip. Audit 2 of Stage C-or-after determines which.
+
+- **(Q3) `IntrinsicsRegistry` deletion.** Confirmed dead code
+  (zero external consumers). Mechanical deletion commit; no
+  architectural choice. Can land before/during/after the
+  calling-convention migration.
+
+**DAG dependencies:**
+
+- **`Arc<TypedBuffer<T>>` zero-copy cluster (above)** — blocking.
+  Intrinsics migration cannot start until zero-copy lands.
+- **B4 module-exports-core sub-decision** (defections.md:1644-1648)
+  — `module_exports.rs` registry types still take `&[ValueWord]`,
+  the same calling-convention shape. (Q2)'s resolution should be
+  coherent with B4's answer. **Interlock confirmed**, but not
+  blocking — (Q2) can land first if zero-copy is the only blocker
+  and B4 module-exports-core agrees to follow the same answer.
+
+**Predicted error-drop (Stage C-or-after, post-zero-copy landing):**
+
+- Architectural extension (calling-convention migration of
+  `IntrinsicFn`-shaped functions to typed marshal entries):
+  0 ± 3 (consumer-fixing follow-on commits drop the actual errors).
+- Per-file consumer migration: -1 to -3 per file × ~14 files =
+  -14 to -42 total. The wide range reflects per-file size
+  variability (matrix.rs has 5 errors, others have 1 each).
+- `IntrinsicsRegistry` deletion: 0 errors (dead code; deletion
+  is mechanical).
+
+**Watchlist (binding when this lands):**
+
+- Refuse "use β owned-clone for cold-path intrinsics, zero-copy
+  for hot ones only" — splits the calling convention into hot/cold
+  buckets, defection-attractor. All intrinsics use one shape.
+- Refuse "extend `IntrinsicFn` to take typed slot bits without
+  threading through marshal layer" — recreates a parallel
+  calling-convention surface. The (Q2) decision should fold into
+  marshal layer or commit to a separately-named typed-IntrinsicFn
+  shape, not "IntrinsicFn but with typed bits."
+- Refuse "register `IntrinsicsRegistry` on-load and dispatch via
+  it" — dead-code-revival. The audit confirmed shape-vm bypasses
+  it entirely; revival would re-attach a code path that nothing
+  reads.
+- Refuse "split intrinsics into shape-vm internal builtins" —
+  cross-crate boundary violation; intrinsics live in shape-runtime
+  per the workspace structure (`crates/shape-runtime/src/intrinsics/`).
+
+**Disposition:** named cluster on-record, blocked on zero-copy
+cluster landing first. Stage C of the supervisor's three-stage
+plan covers this once Stage B (zero-copy) lands.
+
+**Prior-handover-framing correction:** the "intrinsics-dispatch-table"
+name appeared in the Phase 2c and Phase 2d handover documents and in
+multiple prior defections.md entries as a sixth-named-cluster (e.g.
+defections.md ~115 and elsewhere). **Going forward, the correct
+name is "intrinsics-typed-CC" cluster.** Existing references in
+older entries are not retroactively rewritten (drift-by-amendment-
+elsewhere risk per finding #11); future entries use the correct
+name.
+
+---
+
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
 
 This is **not** a defection. On-record calibration outcome from
