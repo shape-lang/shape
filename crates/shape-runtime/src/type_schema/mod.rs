@@ -212,7 +212,31 @@ pub fn typed_object_from_pairs(fields: &[(&str, ValueWord)]) -> ValueWord {
                     field_def.name
                 )
             });
-        let (slot, is_heap) = nb_to_slot(value);
+        // Inlined from former `nb_to_slot` (N9 C4, refined α): convert
+        // ValueWord to ValueSlot, returning `(slot, is_heap)`. Inline
+        // ValueWord types (f64, i48, bool, none, unit, function, module_fn)
+        // are stored as raw ValueWord bits in the slot. Heap types are
+        // cloned into a heap-allocated ValueSlot. The `is_heap` flag
+        // indicates whether the heap_mask bit should be set.
+        let (slot, is_heap) = if value.is_heap() {
+            // Handle unified heap values (bit-47): materialize to HeapValue.
+            if shape_value::ValueBits::from_raw(value.raw_bits()).is_unified_heap() {
+                if let Some(view) = value.as_any_array() {
+                    let hv = shape_value::heap_value::HeapValue::Array(view.to_generic());
+                    (shape_value::slot::ValueSlot::from_heap(hv), true)
+                } else {
+                    // For other unified types, store raw bits.
+                    (shape_value::slot::ValueSlot::from_raw(value.raw_bits()), false)
+                }
+            } else {
+                // cold-path: as_heap_ref retained — generic heap-to-slot clone
+                let hv = value.as_heap_ref().unwrap().clone(); // cold-path
+                (shape_value::slot::ValueSlot::from_heap(hv), true)
+            }
+        } else {
+            // Store raw ValueWord bits — reconstructible via ValueWord::from_raw_bits()
+            (shape_value::slot::ValueSlot::from_raw(value.raw_bits()), false)
+        };
         slots.push(slot);
         if is_heap {
             heap_mask |= 1u64 << i;
@@ -286,35 +310,3 @@ pub fn typed_object_to_hashmap_nb(
     Some(map)
 }
 
-/// Convert a ValueWord to a ValueSlot, returning `(slot, is_heap)`.
-///
-/// Inline ValueWord types (f64, i48, bool, none, unit, function, module_fn)
-/// are stored as raw ValueWord bits in the slot. Heap types are cloned into a
-/// heap-allocated ValueSlot. The `is_heap` flag indicates whether the
-/// heap_mask bit should be set.
-///
-/// For non-heap slots, use `slot_to_nb_inline(slot)` to reconstruct the
-/// ValueWord from raw bits.
-pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::ValueSlot, bool) {
-    use shape_value::slot::ValueSlot;
-
-    if nb.is_heap() {
-        {
-            // Handle unified heap values (bit-47): materialize to HeapValue.
-            if shape_value::ValueBits::from_raw(nb.raw_bits()).is_unified_heap() {
-                if let Some(view) = nb.as_any_array() {
-                    let hv = shape_value::heap_value::HeapValue::Array(view.to_generic());
-                    return (ValueSlot::from_heap(hv), true);
-                }
-                // For other unified types, store raw bits.
-                return (ValueSlot::from_raw(nb.raw_bits()), false);
-            }
-            // cold-path: as_heap_ref retained — generic heap-to-slot clone
-            let hv = nb.as_heap_ref().unwrap().clone(); // cold-path
-            (ValueSlot::from_heap(hv), true)
-        }
-    } else {
-        // Store raw ValueWord bits — reconstructible via ValueWord::from_raw_bits()
-        (ValueSlot::from_raw(nb.raw_bits()), false)
-    }
-}
