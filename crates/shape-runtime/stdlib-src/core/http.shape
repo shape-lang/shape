@@ -38,12 +38,14 @@
 /// ```
 pub builtin fn get(url: string, options: _) -> Result<_, string>;
 
-/// Perform an HTTP POST request.
+/// Perform an HTTP POST request with a text body.
+///
+/// Sets `Content-Type: text/plain; charset=utf-8` automatically.
 ///
 /// # Arguments
 ///
 /// * `url` - URL to request
-/// * `body` - Request body (string or value to serialize as JSON)
+/// * `body` - Request body as a string (sent verbatim)
 /// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
 ///
 /// # Returns
@@ -53,16 +55,18 @@ pub builtin fn get(url: string, options: _) -> Result<_, string>;
 /// # Example
 ///
 /// ```shape
-/// let r = http.post("https://api.example.com/users", { name: "Alice" })
+/// let r = http.post_text("https://api.example.com/notes", "hello")
 /// ```
-pub builtin fn post(url: string, body: _, options: _) -> Result<_, string>;
+pub builtin fn post_text(url: string, body: string, options: _) -> Result<_, string>;
 
-/// Perform an HTTP PUT request.
+/// Perform an HTTP POST request with a binary body.
+///
+/// Sets `Content-Type: application/octet-stream` automatically.
 ///
 /// # Arguments
 ///
 /// * `url` - URL to request
-/// * `body` - Request body (string or value to serialize as JSON)
+/// * `body` - Request body as a byte array (`Array<int>`, each element 0..=255)
 /// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
 ///
 /// # Returns
@@ -72,9 +76,59 @@ pub builtin fn post(url: string, body: _, options: _) -> Result<_, string>;
 /// # Example
 ///
 /// ```shape
-/// let r = http.put("https://api.example.com/users/1", { name: "Bob" })
+/// let r = http.post_bytes("https://api.example.com/upload", [0x48, 0x69])
 /// ```
-pub builtin fn put(url: string, body: _, options: _) -> Result<_, string>;
+pub builtin fn post_bytes(url: string, body: Array<int>, options: _) -> Result<_, string>;
+
+/// Perform an HTTP PUT request with a text body.
+///
+/// Sets `Content-Type: text/plain; charset=utf-8` automatically.
+///
+/// # Arguments
+///
+/// * `url` - URL to request
+/// * `body` - Request body as a string (sent verbatim)
+/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+///
+/// # Returns
+///
+/// `Ok({ status, headers, body, ok })` with the response, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let r = http.put_text("https://api.example.com/notes/1", "hello")
+/// ```
+pub builtin fn put_text(url: string, body: string, options: _) -> Result<_, string>;
+
+/// Perform an HTTP PUT request with a binary body.
+///
+/// Sets `Content-Type: application/octet-stream` automatically.
+///
+/// # Arguments
+///
+/// * `url` - URL to request
+/// * `body` - Request body as a byte array (`Array<int>`, each element 0..=255)
+/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+///
+/// # Returns
+///
+/// `Ok({ status, headers, body, ok })` with the response, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let r = http.put_bytes("https://api.example.com/files/1", [0x48, 0x69])
+/// ```
+pub builtin fn put_bytes(url: string, body: Array<int>, options: _) -> Result<_, string>;
+
+// `http.post_json(url, body: object, options)` and the matching
+// `http.put_json` overload are NOT yet declared. They are queued as part
+// of the Stage D batch awaiting supervisor sign-off on architectural
+// sub-decision N7 (HeapValue→JSON serializer for HTTP / object-output
+// marshal contexts). See `crates/shape-runtime/src/stdlib/http.rs`'s
+// deferred-list comment + `docs/defections.md` HashMap-marshal cluster
+// queue for details.
 
 /// Perform an HTTP DELETE request.
 ///

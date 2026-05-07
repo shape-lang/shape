@@ -1,7 +1,7 @@
 //! Native `http` module for making HTTP requests.
 //!
-//! Exports: http.get, http.delete (migrated to typed marshal layer in
-//! Stage C).
+//! Exports: http.get, http.delete (Stage C); http.post_text,
+//! http.post_bytes, http.put_text, http.put_bytes (Stage D).
 //!
 //! All functions are async. Uses reqwest under the hood.
 //! Policy gated: requires NetConnect permission.
@@ -16,20 +16,37 @@
 //!   FromSlot impl from Step 1 P1(b) infrastructure
 //!   (`crates/shape-runtime/src/marshal.rs`, Stage C commit `36519f6`).
 //!
-//! `http.post` and `http.put` remain DEFERRED pending the **N4 — any-input
-//! typed marshal** architectural surface. The `body: any` parameter
-//! cannot be typed-marshaled cleanly without either (a) the N4 any-input
-//! shape landing OR (b) the Shape API splitting into
-//! `http.post_json(url, body: HashMap)` / `http.post_text(url, body: string)`
-//! overloads (eliminating the any-input). Both are supervisor-level
-//! decisions; surfaced via team-lead's relay batch alongside Dev 1's
-//! N1/N2/N3 cascade. Deferral pattern mirrors `csv_module.rs:7-8/183-189`'s
-//! `parse_records`/`stringify_records` breadcrumb.
+//! Stage D N4 partial sign-off (2026-05-07; supervisor relay):
+//! - `http.post`/`http.put` legacy shape (single fn with `body: any`)
+//!   replaced by typed overloads via Shape API split
+//!   (`stdlib-src/core/http.shape`):
+//!     - `post_text(url, body: string, options)` — sets
+//!       `Content-Type: text/plain; charset=utf-8`
+//!     - `post_bytes(url, body: Array<int>, options)` — sets
+//!       `Content-Type: application/octet-stream`
+//!     - `put_text(url, body: string, options)` — same content-type as
+//!       post_text
+//!     - `put_bytes(url, body: Array<int>, options)` — same as post_bytes
+//! - Body types map directly to existing `FromSlot` impls
+//!   (`Arc<String>` at `marshal.rs:129`, `Vec<u8>` at `marshal.rs:330`)
+//!   per supervisor's "mechanical typed marshal" framing.
+//! - `http.post_json(url, body: object, options)` and `http.put_json`
+//!   remain DEFERRED pending architectural sub-decision **N7 —
+//!   HeapValue→JSON serializer for HTTP / object-output marshal
+//!   contexts.** The `body: object` shape requires walking the
+//!   polymorphic `Vec<(Arc<String>, Arc<HeapValue>)>` tree and producing
+//!   a JSON string; per-variant serialization choices for Decimal,
+//!   DataTable, Content, Temporal, TableView each represent a
+//!   user-visible behavioral commitment that needs supervisor sign-off
+//!   (architectural-adjacent helper, refused as bundled with Step 2 per
+//!   the "no bundling architectural decisions" watchlist refusal).
+//!   Surfaced via team-lead's relay batch.
 //!
 //! Tests deleted along with the legacy ValueWord-based fixtures, mirroring
 //! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
 //! harness arrives with the shape-vm cleanup workstream.
 
+use crate::marshal::register_typed_async_fn_3_full;
 use crate::marshal::register_typed_async_fn_2_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
@@ -213,28 +230,297 @@ pub fn create_http_module() -> ModuleExports {
         },
     );
 
-    // Deferred: http.post, http.put.
+    // Stage D N4 partial sign-off: 4 typed overloads via Shape API
+    // split. Each body type is a fixed-arity register_typed_async_fn_3
+    // with one specific body type per overload, per supervisor's
+    // "mechanical typed marshal" framing. Reuses build_response_pairs +
+    // extract_headers + extract_timeout from the get/delete path.
+
+    let url_param_3 = ModuleParam {
+        name: "url".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "URL to request".to_string(),
+        ..Default::default()
+    };
+    let options_param_3 = ModuleParam {
+        name: "options".to_string(),
+        type_name: "HashMap<string, any>".to_string(),
+        required: false,
+        description: "Request options: { headers?: HashMap, timeout?: int }"
+            .to_string(),
+        default_snippet: Some("{}".to_string()),
+        ..Default::default()
+    };
+    let body_text_param = ModuleParam {
+        name: "body".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "Request body as a string (sent verbatim)".to_string(),
+        ..Default::default()
+    };
+    let body_bytes_param = ModuleParam {
+        name: "body".to_string(),
+        type_name: "Array<int>".to_string(),
+        required: true,
+        description: "Request body as a byte array".to_string(),
+        ..Default::default()
+    };
+    let response_ty_3 =
+        ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
+
+    // http.post_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_text",
+        "Perform an HTTP POST request with a text body",
+        [
+            url_param_3.clone(),
+            body_text_param.clone(),
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )
+                .body(body.as_str().to_string());
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_text() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_text() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.post_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<u8>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_bytes",
+        "Perform an HTTP POST request with a binary body",
+        [
+            url_param_3.clone(),
+            body_bytes_param.clone(),
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Vec<u8>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/octet-stream",
+                )
+                .body(body);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_bytes() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_bytes() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_text",
+        "Perform an HTTP PUT request with a text body",
+        [
+            url_param_3.clone(),
+            body_text_param,
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )
+                .body(body.as_str().to_string());
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_text() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_text() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<u8>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_bytes",
+        "Perform an HTTP PUT request with a binary body",
+        [url_param_3, body_bytes_param, options_param_3],
+        response_ty_3,
+        |url: Arc<String>,
+         body: Vec<u8>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/octet-stream",
+                )
+                .body(body);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_bytes() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_bytes() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // Deferred: http.post_json, http.put_json.
     //
-    // Both functions take a `body: any` parameter that maps to the
-    // post-bulldozer typed marshal layer's not-yet-existing any-input
-    // shape (N4 architectural sub-decision). Currently:
-    // - There is no `FromSlot` impl for an `any`-typed input.
-    //   `ConcreteType::Any` exists as a RETURN type (json/msgpack
-    //   returns) but has no input side at the marshal layer.
-    // - The legacy body code did
-    //   `body_arg.is_none() / .as_str() / .to_json_value()` —
-    //   all four are deleted ValueWord methods.
+    // Both functions would take a `body: object` parameter that maps to
+    // `Vec<(Arc<String>, Arc<HeapValue>)>` at the runtime body-type
+    // boundary. The marshal layer for that input shape already exists
+    // (FromSlot impl at `marshal.rs:608`); the BLOCKER is the body-side
+    // serialization step: walking the polymorphic HeapValue tree and
+    // producing a JSON string for `reqwest`'s `Content-Type:
+    // application/json` body.
     //
-    // Resolution requires either:
-    //   (a) N4 lands `Vec<(Arc<String>, Arc<HeapValue>)>`-equivalent
-    //       discriminated body shape, OR
-    //   (b) Shape API splits into
-    //       `http.post_json(url, body: HashMap)` and
-    //       `http.post_text(url, body: string)` overloads.
+    // The legacy http.post body called `body_arg.to_json_value()` —
+    // a deleted ValueWord method. The strict-typed equivalent must
+    // classify all 18 HeapValue variants per JSON-serializability and
+    // define semantics for the 5 architectural-choice variants
+    // (Decimal precision; DataTable rows-as-array shape; Content;
+    // Temporal; TableView). Each represents a user-visible behavioral
+    // commitment that needs supervisor sign-off, NOT team-lead-default.
     //
-    // Held until supervisor sign-off via team-lead's relay batch.
-    // Mirrors the deferral pattern from `csv_module.rs`'s
-    // `parse_records`/`stringify_records` (lines 7-8 / 183-189).
+    // Surfaced as architectural sub-decision **N7 — HeapValue→JSON
+    // serializer for HTTP / object-output marshal contexts** alongside
+    // the per-format-typed-sums-or-unified-parsed-value workstream.
+    // See `docs/defections.md` HashMap-marshal cluster sub-decision
+    // queue (the N7 entry will be added when Dev 2's defections.md
+    // slot frees from Dev 1's N1/N3/N5 batch).
+    //
+    // Held until N7 sign-off via team-lead's relay batch. Deferral
+    // pattern mirrors `csv_module.rs:7-8/183-189`'s `parse_records`/
+    // `stringify_records` breadcrumb.
 
     module
 }
