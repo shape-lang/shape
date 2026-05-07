@@ -758,6 +758,102 @@ Q2-C correction subsection (cross-referenced). Migration
 proceeds as cross-crate per-file commits with combined
 shape-runtime + shape-vm changes.
 
+### 2026-05-07 — Fifth audit catch + supervisor-side discipline addition
+
+Addendum to the fourth-correction subsection above, surfaced
+during vector.rs migration preparation. **Both prior framings
+in the fourth-correction subsection — "shape-vm: 0 to -1 errors
+per file" and "combined cross-crate per-file commits" —
+overestimated the coherence of shape-vm's compile state on
+this branch.**
+
+**Fifth audit finding (specifics).** Verifying shape-vm against
+ground truth (`rg "ValueWord" crates/shape-vm/`, `cargo check
+-p shape-vm --lib`) revealed shape-vm's pre-existing ValueWord
+breakage extends beyond the dispatcher arms in
+`vector_intrinsics.rs:25-39` into the supporting infrastructure:
+
+- `pop_builtin_args` (`crates/shape-vm/src/executor/vm_impl/builtins.rs:5`)
+  returns `Vec<ValueWord>` (broken — `ValueWord` is deleted from
+  `shape_value`).
+- `invoke_typed_module_fn`
+  (`crates/shape-vm/src/executor/vm_impl/modules.rs:147`) takes
+  `args: &[ValueWord]` (broken — same root cause).
+- shape-vm does not compile in isolation. The 89 shape-runtime
+  errors cascade into a larger shape-vm error set; only
+  shape-runtime's count is currently visible because shape-vm
+  fails to compile at the dependency edge.
+
+**Implication: combined cross-crate per-file commits are
+infeasible.** The dispatcher routing change Q2-marshal-fold-light
+requires would land alongside shape-vm's broader ValueWord
+cleanup workstream (B4 core-foundation cluster or similar), not
+as a per-file shape-vm change coordinated with each shape-runtime
+intrinsic file migration. Per the intrinsics-typed-CC entry's
+Q2 lifecycle three-stage transition subsection (cross-referenced;
+M-A reframing), per-file migration commits land **shape-runtime
+side only**. shape-vm dispatcher arms remain broken (cascade-
+state) until shape-vm cleanup workstream runs; the
+"shape-vm: 0 to -1 errors per file" estimate from the fourth-
+correction subsection is structurally correct in the absolute
+(no errors fixed) but the framing was misleading — shape-vm
+won't measurably improve until its own broader cleanup converges.
+
+**Supervisor-side calibration finding extension (binding-as-
+baseline, fifth finding-#11-symmetry-extension instance in this
+session — the discipline pattern is now incontrovertibly
+established).** The first four instances added documented
+disciplines to defections.md (verify against current code +
+build state + cross-crate call graph). The fifth instance
+happened anyway. Diagnosis: **documenting disciplines retro-
+actively does not prevent the next instance unless the
+disciplines are applied prospectively at sign-off time.** The
+pattern "add discipline to log → next instance happens anyway"
+is five instances in one session. The corrective is **APPLICATION
+at sign-off time, not just DOCUMENTATION in the log.**
+
+**Concrete operational change (supervisor-side, binding):**
+Before signing off on any multi-crate or cross-crate
+architectural decision, the supervisor (acting via the user's
+relay) runs:
+
+- `cargo check -p <each-affected-crate> --lib` — confirms
+  build state of each affected crate independently.
+- `rg "<symbol>" crates/` — enumerates cross-crate consumers of
+  any moved/modified function/type/trait.
+- Read of affected dispatch tables, public APIs, serialization
+  formats — verifies the architectural assumption against
+  current ground truth.
+
+The supervisor brief (`~/.claude/plans/strict-typing-supervisor-
+brief.md`) gives Bash access; supervisor uses it for verifying
+own proposals at sign-off time, not just for verifying agent
+reports. **Verify EVERY architectural assumption against current
+ground truth before sign-off, not after agent catches a flaw.**
+
+**Not a new finding number** — extension of finding #11
+symmetry-extension. The audit-grounded-correction discipline is
+the load-bearing rule; the prospective-verification clarification
+is its operational application.
+
+**Pattern reckoning (binding for the rest of this session AND
+forward sessions):** five instances of the same supervisor-side
+omission in one session is a meta-pattern that justifies explicit
+calibration. The agent's stop-and-surface discipline has been
+working through all five; the failure mode is on the supervisor
+side. With the prospective-verification discipline now baseline,
+future sign-offs should produce fewer execution-time corrections.
+If the pattern recurs at a sixth instance, the next layer of
+calibration is examining whether the supervisor brief itself
+needs structural revision rather than additional in-place
+clarifications.
+
+**Disposition for this addendum:** fifth instance logged.
+Migration proceeds per the intrinsics-typed-CC entry's Q2
+lifecycle three-stage transition (M-A reframing): shape-runtime-
+only per-file commits; shape-vm dispatcher routing deferred to
+shape-vm cleanup workstream's natural scope.
+
 ---
 
 ## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
