@@ -62,6 +62,78 @@ These were not logged at the time. Reconstructed from commit history and plan ar
 
 ---
 
+## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
+
+This is **not** a defection. On-record calibration outcome from
+the Phase 2d Array cluster landing across 4 commits.
+
+**Predict-before-measure (per finding #12 binding discipline):**
+
+| Commit | Predicted | Measured | Delta vs prediction |
+|---|---|---|---|
+| 1 (architectural extension) | 0 ± 3 | 96 → 96 (0) | exact |
+| 2 (csv_module migration) | -2 to -4 | 96 → 92 (-4) | exact (upper bound) |
+| 3 (arrow_module migration) | -3 | 92 → 89 (-3) | exact |
+| 4 (process_ops migration) | 0 to -2 | 89 → 89 (0) | exact (lower bound) |
+| **Total** | **-7 to -10** | **96 → 89 (-7)** | **within window (lower bound)** |
+
+Predict-vs-measure success rate: **4/4 in window** (Phase 2c was
+1/8). The audit-1+2+3 pre-execution discipline introduced in finding
+#12 + Phase 2c continues to pay off. This is the second consecutive
+session with all sub-cluster predictions in window after audits.
+
+**Calibration sub-finding (small):** the audit-2 surfacing of "17
+files have `match TypedArrayData::*` sites — all need new arms"
+was a slight over-count. Actual: **only 1 file (heap_value.rs
+itself) needed exhaustiveness updates**. The other 16 files use
+specific-arm patterns (e.g. `HeapValue::TypedArray(TypedArrayData::I64(arr)) =>
+{...}`) inside outer matches with wildcard fallback, which adding
+new variants does NOT break. The prediction baseline assumed
+"variant addition implies exhaustiveness churn"; reality is
+"variant addition only churns _exhaustive_ match sites, not
+specific-arm-with-wildcard sites." Same diagnostic shape as
+finding #10's stale-import miscount: the audit lookup was at the
+wrong granularity.
+
+**Cost saved by leaf-first DAG ordering** (per finding #12):
+
+- Each consumer migration was a clean per-file commit (csv_module
+  92→92, arrow_module 92→89, process_ops 89→89). No cross-cutting
+  rebases or interim shapes.
+- B1 sub-decision #1 is now resolved (the JsonValue::Array runtime
+  shape uses the same `TypedArrayData::HeapValue` variant). B1 is
+  one step closer to leaf eligibility.
+- Process_ops, csv_module, arrow_module are no longer cluster-#2
+  / cluster-#3 / cluster-#5 blockers. The main remaining clusters
+  (B4 core-foundation, Cluster #4 Option, B1 JsonValue residual,
+  intrinsics-dispatch-table) are eligible to land in the order
+  finding #12 suggested.
+
+**Watchlist refusals (all sustained, none re-litigated):**
+
+- `ConcreteReturn::Array(Vec<ConcreteReturn>)` recursive: not
+  introduced. Maintained leaf-only invariant.
+- Per-element-kind `TypedArrayData::DataTable` / `IoHandle` /
+  `String`-of-strings variants: not introduced. Maintained
+  unparametric-NativeKind constraint.
+- `as_typed_array_string()` helpers on HeapValue: not introduced.
+  Body-side monomorphization via `FromSlot for Vec<Arc<String>>`
+  was the path, mirroring cluster #2's option γ.
+- "Rename Vec<Arc<X>> to ValueArray": not entertained. Each
+  `FromSlot`/`ToSlot` impl declared its concrete element type at
+  the trait-impl level.
+
+**Pacing observation:** Phase 2c's "architectural cluster work is
+decision-heavy, not code-heavy" framing held this session — the
+surfacing-and-deciding (audits + 3 sub-decisions) consumed about
+half the session; the 4 commits (1 architectural + 3 mechanical)
+landed in the other half. Total session: ~7 errors dropped, plus
+multi-cluster unblock. The unblock value is structural and will
+be measured in subsequent sessions when B1 / B4 / Cluster #4
+sub-decisions can land cleanly.
+
+---
+
 ## 2026-05-07 — Phase 2d Array cluster — TypedArrayData::String + TypedArrayData::HeapValue extension (LANDED)
 
 This is **not** a defection. On-record landing of the Phase 2d Array
