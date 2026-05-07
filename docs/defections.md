@@ -221,6 +221,213 @@ shape options are surfaced with structural reasoning so Stage C's
 audit can read once and trust the framing — same model as the
 zero-copy entry above.
 
+### 2026-05-07 — Audit-grounded correction: consumer-body-case enumeration (3→9), P4 considered + rejected, calibration tightened
+
+In-place dated subsection per finding #11 symmetry-extension. **The
+prior entry text (lines 65-222 above) stays on-record.** This
+subsection captures findings surfaced during the Stage C
+pre-architectural-decision audit (audit-1 + audit-2 + audit-3 with
+cross-crate verification), conducted on worktree
+`bulldozer-strictly-typed-stage-c-dev2` at HEAD `44f0c07` (later
+fast-forwarded to `05ab158` for Dev 1's intrinsics-typed-CC
+sub-decision queue extension).
+
+**Audit-1 finding A1 — consumer count under-stated (3 → 9 body
+cases across 7 stdlib files).** Entry above frames "Three confirmed
+consumer sites." Cross-crate `rg "from_hashmap_pairs|as_hashmap"
+crates/shape-runtime/src/` finds **6 current stdlib files**
+(`http`, `json`, `yaml`, `toml_module`, `msgpack_module`, `xml`)
+plus **`csv_module`** with the deferred-stub breadcrumb at
+`crates/shape-runtime/src/stdlib/csv_module.rs:7-8` and `:183-189`
+(the csv functions `parse_records`/`stringify_records` were
+deferred-out at commit `9f6b1d3` with explicit "HashMap-marshal
+micro-cluster" reference in the deferred-list comment — the file
+itself stays at 192 lines as the in-source breadcrumb). Per-body-
+case granularity is **9** because `http.rs` carries 3 distinct
+shapes and `xml.rs` carries 2:
+
+| # | Consumer body case | File | Shape | Insertion-order load-bearing | O(1) lookup needed |
+|---|---|---|---|---|---|
+| 1 | http outer response | `stdlib/http.rs:15-37` | `HashMap<string, *>` (mixed: f64/HashMap/string/bool) — schemaful 4-field | YES | NO at body |
+| 2 | http inner headers | `stdlib/http.rs:15-37,40-58` | `HashMap<string, string>` — user-keyed | YES | NO at body |
+| 3 | http options arg parsing | `stdlib/http.rs:40-74` | `HashMap<string, *>` — input arg | YES | NO at body |
+| 4 | csv.parse_records (deferred) | `stdlib/csv_module.rs:183-189` (deferred-list) | `Array<HashMap<string, string>>` — header-keyed rows | YES | NO at body |
+| 5 | csv.stringify_records (deferred) | same | `Array<HashMap<string, string>>` (input) | YES | NO at body |
+| 6 | json Json::Object payload | `stdlib/json.rs:92-104` | `HashMap<string, *>` recursive Json::* enum | YES | YES at shape-vm consumer |
+| 7 | yaml.parse + yaml.stringify | `stdlib/yaml.rs:42,206,250,292` | `HashMap<string, *>` polymorphic | YES | NO at body |
+| 8 | toml.parse + toml.stringify | `stdlib/toml_module.rs:30,60` | `HashMap<string, *>` polymorphic | YES | NO at body |
+| 9 | msgpack.decode + xml attributes/node | `stdlib/msgpack_module.rs:43`; `stdlib/xml.rs:38,101,124,137,447-503,143,170,342,363-404,555` | `HashMap<string, *>` (msgpack); attributes `HashMap<string, string>` and node `HashMap<string, *>` (xml) | YES | NO at body |
+
+**Audit-1 finding A2 — consumer pattern invariant.** All 9
+consumer bodies use the same primitives: build via
+`from_hashmap_pairs(keys: Vec<ValueWord>, values: Vec<ValueWord>)`;
+read via `as_hashmap()` returning `(keys, values, index)` triple
+where **all 9 consumers ignore the third element (`_index`)**;
+access via linear scan `for (i, k) in keys.iter().enumerate() { values[i] }`.
+**No stdlib body uses the hash index.** All 9 preserve insertion
+order — load-bearing for serialization round-trip semantics.
+
+**Audit-1 finding A3 — two structurally different cases.**
+Consumers split into:
+
+- **Schemaful "object" cases (static field set):** http.rs outer
+  response (`{status, headers, body, ok}`), xml.rs node
+  (`{name, attributes, children, text?}`). These do NOT need a
+  HashMap variant — they fit existing
+  `TypedReturn::ObjectPairs(Vec<(String, ConcreteReturn)>)` at
+  `crates/shape-runtime/src/typed_module_exports.rs:117` (doc:
+  "Insertion order preserved"). Cluster #4 already added
+  `OkObjectPairs`/`SomeObjectPairs`/`ErrObjectPairs` at
+  `:144,:150,:155` for wrapper composition. **Exemplar:**
+  `arrow.metadata` at `crates/shape-runtime/src/stdlib/arrow_module.rs`
+  already uses `ConcreteReturn::HashMapStringString` via
+  `TypedReturn::Ok(...)` — the structural precedent.
+- **Dynamic-keys cases (runtime-determined keys):** http.rs inner
+  headers, csv.parse_records, csv.stringify_records, json.rs
+  Json::Object, yaml.rs, toml_module.rs, msgpack_module.rs,
+  xml.rs attributes. These need a real HashMap-shape marshal
+  pathway.
+
+**Audit-2 finding A2-1 — schemaful refactor reuses existing
+infrastructure.** No new HeapValue variant needed for cases #1 and
+xml.rs node — body-side refactor to `TypedReturn::ObjectPairs` /
+`OkObjectPairs` follows the `arrow.metadata` precedent verbatim.
+
+**Audit-2 finding A2-3 — P4 option discovered (NEW).**
+`crates/shape-value/src/v2/typed_map.rs` (760 LoC) provides a
+fully-implemented `#[repr(C)]` open-addressing `TypedMap<K, V>`
+with `HEAP_KIND_V2_TYPED_MAP` (defined at line 12, used at line
+93). Concrete monomorphizations exist at lines 54-56:
+`TypedMapStringF64`, `TypedMapStringI64`, `TypedMapStringPtr`
+(plus i64-keyed variants at lines 59-61). **REJECTED** for
+HashMap-marshal:
+
+- (a) **Insertion order NOT preserved** (open-addressing). Per
+  Audit-1, all 9 consumer bodies are insertion-order-load-
+  bearing → load-bearing disqualification.
+- (b) **Per-element-kind-variant explosion** at the HeapValue
+  layer (one variant per K-V monomorphization). On the supervisor-
+  brief watchlist verbatim: "Per-element-kind variants of
+  typed-array discriminators (TypedArrayData::DataTable / IoHandle
+  / per-X) — scope-explosion at the array layer." Same family
+  refusal applies at the `HeapValue::TypedMap*` layer.
+
+**Disposition for P4:** considered-but-rejected on (a) + (b).
+TypedMap remains forward-compatibility infrastructure for a
+future workstream (perf-critical pure-Shape user-code typed-key
+HashMap, distinct from stdlib FFI body shape) — analogous to how
+Arc<TypedBuffer<T>> zero-copy was the fwd-compat door for SIMD
+intrinsics. Refused for HashMap-marshal because consumer
+requirement is order-preserving, not perf-on-lookup.
+
+**Audit-3 finding A3-1 — cross-crate consumer scope larger than
+entry frames; per fifth-audit binding, shape-runtime-only.** Entry
+above lists shape-vm `__json_object_get` / `__json_array_at` /
+`as_hashmap` accessors as the cross-crate interlock for P2.
+Ground-truth `rg` finds **>20 shape-vm files + 4 shape-jit files**
+touching HashMap-marshal-relevant symbols. Most-load-bearing:
+`crates/shape-vm/src/executor/objects/hashmap_methods.rs` (688
+LoC, 31 user-facing HashMap methods including `v2_get` at line 43
+which does O(1) via `data.index.get(&hash)` then bucket scan);
+`crates/shape-vm/src/executor/builtins/json_helpers.rs`
+(`__json_object_get` etc.); `crates/shape-jit/src/ffi/v2/typed_map.rs`
+(559 LoC). **Per fifth-audit (defections.md:760-860) binding:
+HashMap-marshal architectural-extension + consumer migration is
+shape-runtime-side ONLY**; shape-vm hashmap_methods.rs and
+shape-jit FFI remain in cascade-broken state, cleaned up by the
+shape-vm cleanup workstream (post-stage-C). Same M-A scope as
+intrinsics-typed-CC, binding regardless of P1/P2/P3.
+
+**Audit-3 finding A3-4 — intrinsics-typed-CC interlock NONE.**
+`rg "HashMap|hashmap" crates/shape-runtime/src/intrinsics/`
+returns zero matches. Dev 1's workstream and HashMap-marshal are
+structurally independent; can land in parallel with no
+coordination beyond defections.md serialization (which the team-
+lead manages).
+
+**Build-state verification (per finding #11 verify-against-current-
+build-state).** `cargo check -p shape-runtime --lib --keep-going`
+on worktree at HEAD `44f0c07` (and again post-FF at `05ab158`):
+**88 errors total, unchanged.** Per-stdlib-consumer import-error
+counts:
+
+| Consumer | Observed import errors | Notes |
+|---|---|---|
+| stdlib/http.rs | 2 | entry above said "5+" — the 5+ is the body-rewrite scope (call sites), not import-layer count |
+| stdlib/csv_module.rs | 0 | bodies already deferred-out; no compile-fail surface today |
+| stdlib/json.rs | 4 | |
+| stdlib/yaml.rs | 3 | |
+| stdlib/toml_module.rs | 5 | |
+| stdlib/msgpack_module.rs | 3 | |
+| stdlib/xml.rs | 4 | |
+| stdlib/arrow_module.rs | 0 | structural precedent (uses `HashMapStringString` already) |
+| **All 7 HashMap-marshal consumers, combined** | **21** | direct compile-drop for the dynamic-keys consumer-migration commit family |
+
+The "5+ shape-runtime --lib errors blocked here" framing for
+`http.rs` in the entry above conflated import-layer compile-block
+(observed: 2) with body-rewrite correctness work (5+ legacy
+ValueWord call sites). Per finding #9 distinguishing
+correctness-work from compile-work, both numbers are right in
+different frames — the calibration tightening below uses
+import-layer counts because those move the error counter.
+
+**Calibration tightening — Stage C error-drop window.** Entry
+above predicts "-2 to -4 errors directly" for Stage C. Revised
+prediction based on observed-not-stated import-layer counts:
+
+| Phase | Prior | Revised | Notes |
+|---|---|---|---|
+| Architectural-extension commit | 0 ± 3 | 0 ± 3 | unchanged; pure additive |
+| Schemaful refactor (http.rs + xml.rs → ObjectPairs) | (not surfaced) | -6 ± 4 | http.rs 2 import + body sites; xml.rs 4 import + body sites |
+| Dynamic-keys consumer migrations | -2 to -4 | -15 ± 5 | 21 import errors total across 7 consumers minus 6 attributable to schemaful refactor |
+| **Stage C total** | -2 to -4 | **-21 ± 8** | observed-not-stated calibration |
+| B1 cascade post-Stage-C | -19 (entry) | -19 | entry stands |
+
+**AUDIT RECOMMENDATION (pending supervisor sign-off):** **P1(b)**
+— `HeapValue::HashMap(HashMapData)` with two-buffer storage
+reusing Phase 2d Array shapes (`Arc<TypedBuffer<Arc<String>>>`
+keys + `Arc<TypedBuffer<Arc<HeapValue>>>` values). Reasoning:
+
+1. P2 disqualified by user-facing O(1) requirement at
+   `executor/objects/hashmap_methods.rs:43` (`v2_get`).
+2. P4 disqualified by insertion-order requirement (Audit-1: all 9
+   consumers).
+3. P1(b) over P1(a): all 9 consumers iterate parallel keys/values
+   arrays (Audit-1 A2); two-buffer storage matches iteration shape
+   natively, reuses Phase 2d Array shapes verbatim, enables zero-
+   copy `.keys()`/`.values()` Shape methods.
+4. Schemaful cases (cases #1 + xml.rs node) refactor body-side to
+   `TypedReturn::ObjectPairs` / `OkObjectPairs` per arrow.metadata
+   precedent — NOT routed through HashMap-marshal.
+
+**Within-P1 sub-questions surface as supervisor's next-tier
+decision space if P1(b) is approved (NOT decided here):**
+
+- Storage shape: (a) single Vec<(Arc<String>, Arc<HeapValue>)>
+  vs (b) two Phase-2d-Array buffers. Audit recommends (b).
+- Hash-index strategy: eager / lazy / none. Audit-1 finding:
+  stdlib bodies don't use hash index, but
+  `executor/objects/hashmap_methods.rs:v2_get` does — so the
+  index must exist. Audit recommends lazy (build at first
+  `.get()` call).
+- Element-type coverage at first landing:
+  `HashMap<string, string>` only vs `HashMap<string, *>`
+  polymorphic-value. Audit recommends both
+  (`HashMapStringString` already exists; `HashMapStringHeapValue`
+  added for the polymorphic case which covers 8 of 9 consumers).
+- ConcreteReturn variant naming: explicit per-shape variants
+  vs parametric `HashMap(K, V)` (REFUSE per watchlist) vs
+  `HashMapPolymorphic` escape-hatch (REFUSE).
+
+**Disposition for this subsection:** prior entry text stays
+on-record. Audit-1 + audit-2 + audit-3 findings logged. P4
+considered + rejected per Per-element-kind variants of typed-
+array discriminators watchlist refusal + insertion-order
+requirement. Calibration tightened from "-2 to -4" to "-21 ± 8"
+based on observed import-layer counts. AUDIT RECOMMENDATION
+P1(b) surfaced; **supervisor sign-off relay pending** before any
+architectural-extension commit. No code changes pending sign-off.
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
