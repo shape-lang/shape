@@ -838,6 +838,358 @@ commit's variant + ConcreteReturn variant addition stays valid;
 N6 sign-off will add a new `ConcreteReturn::*` leaf orthogonal
 to the existing HashMap-marshal infrastructure.
 
+### 2026-05-07 — Stage D dispositions: N4 + N6 mixed sign-offs; N7 + N8 queue additions (supervisor relay)
+
+In-place dated subsection per finding #11 symmetry-extension. **The
+prior N4 + N6 entry text + sub-shape categorization + consumer-
+expansion subsection all stay on-record.** This subsection captures
+the **Stage D supervisor relay** dispositions on N4 + N6 and adds two
+new architectural sub-decisions (**N7** + **N8**) to the queue,
+plus two new follow-on workstream entries.
+
+Per supervisor's "tightly-cross-referencing log entries into one
+commit" allowance (relay batch from team-lead, 2026-05-07): four
+sub-entries bundled here.
+
+#### N4 — any-input typed marshal: MIXED sign-off
+
+Confirmed disposition from supervisor: **(b) Shape API split via typed
+overloads for HTTP**, deferred for serialization-style consumers.
+
+**Verbatim from supervisor**:
+
+> Refactor http.post(url, body: any) to typed overloads:
+>   - http.post_json(url, body: object) → object content-type
+>   - http.post_text(url, body: string) → text/plain content-type
+>   - http.post_bytes(url, body: Array<int>) → octet-stream content-type
+> Same shape for http.put.
+>
+> Each typed at the Shape language layer. Compiler emits the right
+> intrinsic based on body type. Shape-runtime side becomes mechanical
+> typed marshal (each overload is a fixed-arity register_typed_fn_3
+> with one specific body type per overload).
+
+> yaml.stringify + toml.stringify + msgpack.encode + msgpack.encode_bytes:
+> DEFER to future any-typed-marshal-for-serialization workstream.
+> These genuinely need any-input (serialize-anything-to-bytes). Shape
+> API split doesn't work (yaml.stringify_int / yaml.stringify_object
+> would be absurd; user code expects yaml.stringify(config) where
+> config is any structure). Keep as legacy bodies until unified
+> any-typed-marshal solution lands.
+
+**Refused (a) wildcard NativeKind variant** — single-element
+`FromSlot<Arc<HeapValue>>` requires a "wildcard" `NativeKind`
+variant which would be parametric/dynamic at the dispatcher layer.
+Phase 2d Array's `Vec<Arc<HeapValue>>` precedent doesn't extend
+cleanly: arrays-of-any have an OUTER specifically-typed container
+(`TypedArray`) that anchors the slot kind; single-any has no outer
+container. Adding the wildcard `NativeKind` would be a defection-
+shape.
+
+**N4 mixed-disposition split (6 confirmed consumers)**:
+
+| Function | Disposition | Stage D Step |
+|---|---|---|
+| `http.post_text(url, body: string, options)` | ✅ landed | Step 2 (`d0a73e7`) |
+| `http.post_bytes(url, body: Array<int>, options)` | ✅ landed | Step 2 (`d0a73e7`) |
+| `http.put_text(url, body: string, options)` | ✅ landed | Step 2 (`d0a73e7`) |
+| `http.put_bytes(url, body: Array<int>, options)` | ✅ landed | Step 2 (`d0a73e7`) |
+| `http.post_json(url, body: object, options)` | ❌ deferred (N7) | — |
+| `http.put_json(url, body: object, options)` | ❌ deferred (N7) | — |
+| `yaml.stringify(value: any)` | ❌ deferred (any-typed-marshal-for-serialization workstream) | — |
+| `toml.stringify(value: any)` | ❌ deferred (same workstream) | — |
+| `msgpack.encode(value: any)` | ❌ deferred (same workstream) | — |
+| `msgpack.encode_bytes(value: any)` | ❌ deferred (same workstream) | — |
+
+**Net N4 partial sign-off**: 4 typed HTTP overloads landed via Shape
+API split + 2 HTTP overloads (post_json/put_json) deferred pending
+N7 + 4 serialization functions deferred pending the new
+any-typed-marshal-for-serialization workstream.
+
+#### N6 — any-output typed marshal: MIXED sign-off
+
+Confirmed disposition: **N6 sub-shape (b1) — typed Json-enum-tree
+return — mechanical migration via `ConcreteReturn::JsonValue`**;
+**N6 sub-shape (a) — recursive any-typed tree returns — DEFERRED to
+future per-format-typed-sums-or-unified-parsed-value workstream**;
+**N6 sub-shape (b2) — opaque-TypedObject dynamic-schema return —
+SURFACED as new architectural sub-decision N8** (see below).
+
+**Verbatim from supervisor**:
+
+> JsonValue exists at json_value.rs:17 (verified at supervisor layer).
+> Current json.parse body uses ValueWord (json.rs:81 fn
+> json_value_to_enum returning ValueWord). Migration is mechanical —
+> refactor body to build JsonValue instead.
+
+> Sub-sign-off (architectural extension): JsonValue's recursive
+> structure (Array(Vec<JsonValue>), Object(Vec<(String, JsonValue)>))
+> is at the JsonValue layer, NOT at ConcreteReturn — so leaf-only
+> invariant of ConcreteReturn is preserved. ConcreteReturn::JsonValue(JsonValue)
+> is a leaf variant whose payload is independently recursive. Same
+> shape as ConcreteReturn::HashMap*StringHeapValue.
+
+> yaml.parse + toml.parse + msgpack.decode + msgpack.decode_bytes:
+> DEFER to future per-format-typed-sums-or-unified-parsed-value
+> workstream. These don't have typed sum equivalents to JsonValue.
+> Architectural decision: per-format typed sums (YamlValue/TomlValue/
+> MsgpackValue) vs unified ParsedValue/SerdeValue vs keep legacy. Out
+> of M-A scope; needs its own surface-and-decide round-trip.
+
+**Refused alternatives**:
+- `ConcreteReturn::Any(Arc<HeapValue>)` — wildcard-dispatcher-
+  capability defection.
+- `ConcreteReturn::TypedObjectHandle(Arc<HeapValue>)` ad-hoc variant
+  for `__parse_typed` (Stage D Step 4 STOP-AND-SURFACE Option C
+  refused; same family as N7's HeapValue→JSON serializer refusal).
+- TypedObject schema lookup at runtime — dynamic-dispatch defection-
+  shape.
+- Caller-side shape narrowing — pushes architectural decision to
+  user code.
+
+**N6 mixed-disposition split (6 confirmed consumers; sub-shape (b)
+further split into b1 + b2 per Stage D Step 4 audit)**:
+
+| Function | Sub-shape | Disposition | Stage D Step |
+|---|---|---|---|
+| `json.parse(text) -> Result<Json>` | (b1) typed Json-enum-tree | ✅ landed | Step 4 (`43267c7`) |
+| `json.__parse_typed(text, schema_id) -> Result<any>` | (b2) opaque-TypedObject dynamic-schema | ❌ deferred (N8) | — |
+| `yaml.parse(text) -> Result<any>` | (a) recursive any-typed tree | ❌ deferred (per-format-typed-sums-or-unified-parsed-value workstream) | — |
+| `toml.parse(text) -> Result<any>` | (a) | ❌ deferred (same workstream) | — |
+| `msgpack.decode(data) -> Result<any>` | (a) | ❌ deferred (same workstream) | — |
+| `msgpack.decode_bytes(data) -> Result<any>` | (a) | ❌ deferred (same workstream) | — |
+
+**Net N6 partial sign-off**: 1 function migrated (json.parse via
+sub-shape (b1) — Step 1 + Step 4) + 1 function newly N8-surfaced
+(json.__parse_typed sub-shape (b2)) + 4 functions deferred to the
+new per-format workstream.
+
+**Architectural-extension landing**: `ConcreteReturn::JsonValue(JsonValue)` +
+`ConcreteType::JsonValue(String)` + `shape_type_name()` arm landed at
+Stage D Step 1 (commit `a022f43` / pre-rebase `2f20bf8`). Per
+supervisor's sub-sign-off framing, this is a **leaf** variant of
+ConcreteReturn whose payload is independently recursive at the
+JsonValue layer — same shape as `ConcreteReturn::HashMapStringHeapValue`'s
+payload-layer recursion at HeapValue. The leaf-only invariant of
+ConcreteReturn is preserved.
+
+#### N7 — HeapValue→JSON serializer for HTTP / object-output marshal contexts (NEW)
+
+Surfaced during Stage D Step 2 multi-concern audit pre-commit on
+`crates/shape-runtime/src/stdlib/http.rs` (STOP-AND-SURFACE before
+Step 2 commit). The supervisor's "mechanical typed marshal" framing
+for the HTTP API split assumed body-type contracts mapped directly
+to JSON-on-the-wire shapes. They DO for `body: string` (Arc<String>
+direct send) and `body: Array<int>` (Vec<u8> direct send). They do
+NOT for `body: object`: the body still needs to walk the polymorphic
+`Vec<(Arc<String>, Arc<HeapValue>)>` tree and produce a JSON string
+for `Content-Type: application/json` body.
+
+**Surface**: 18 `HeapValue` variants, each requiring per-variant
+JSON-serialization disposition:
+
+| Class | Variants | Disposition shape |
+|---|---|---|
+| Mechanical-yes (7) | `String`, `BigInt`, `Char`, `Instant`, `NativeScalar`, `TypedArray`, `HashMap` | Direct or recursive sub-walk |
+| Reject (5) | `Future`, `IoHandle`, `NativeView`, `ClosureRaw`, `TaskGroup` | Error: cannot serialize |
+| Architectural-choice (5) | `Decimal`, `DataTable`, `Content`, `Temporal`, `TableView` | Each represents a user-visible behavioral commitment |
+| TypedObject (1) | `TypedObject` | Schema-aware tree walk; intersects N8's opaque-TypedObject question |
+
+**Confirmed N7 consumers (current)**: `http.post_json` +
+`http.put_json` (2 functions; deferred at Stage D Step 2 inline
+comment).
+
+**Future consumers (speculative, not locked)**: any future "object →
+external string format" boundary outside the per-format-typed-sums
+workstream.
+
+**REFUSED on sight**:
+- Implementing the helper ad-hoc with per-variant judgment calls
+  (bundling architectural decisions; supervisor watchlist refusal).
+- Implementing the helper for the 7 mechanical-yes variants only
+  with rejects-on-the-rest soft-fail pattern (W-series shape — users
+  expect `post_json(obj)` to work, discover behavior change later).
+- Pre-naming the helper signature or projection mechanism — open
+  for supervisor disposition.
+
+**N7 architectural-shape options (open; NOT yet ranked)**:
+- Per-variant explicit serializer struct with caller-supplied
+  Decimal-precision policy + DataTable-row-shape policy + ...
+- Tagged-string protocol `{ "$decimal": "1.50" }` for non-JSON-
+  primitive variants
+- Conservative subset (forbid all 5 architectural-choice variants;
+  serialize the 7 mechanical-yes variants only)
+- Reject the architectural surface entirely; force user to call
+  `obj.to_typed_payload()` first (pushes serialization to
+  per-format workstream)
+
+**Status**: queue addition. Disposition deferred pending supervisor
+architectural review.
+
+#### N8 — opaque-TypedObject ConcreteReturn variant for dynamic-schema returns (NEW)
+
+Surfaced during Stage D Step 4 multi-concern audit pre-commit on
+`crates/shape-runtime/src/stdlib/json.rs` (STOP-AND-SURFACE before
+Step 4 commit; team-lead authorized Option A migrate-json.parse-only).
+
+**Surface**: When a stdlib body produces a TypedObject whose schema
+is determined by a runtime `schema_id` parameter (vs registration-
+time-static schema), there is no existing `ConcreteReturn` variant
+that fits. The TypedObject IS the slot value — no per-field
+decomposition needed at the projection layer — but no variant exists
+for "opaque `Arc<HeapValue::TypedObject>` handle".
+
+**Distinguishing from existing variants**:
+- `ConcreteReturn::HashMapStringHeapValue` — wrong shape (HashMap, not
+  TypedObject).
+- `TypedReturn::TypedObject(Vec<(String, ConcreteReturn)>)` —
+  schemaful at REGISTRATION time, requires field decomposition to
+  build. Doesn't fit dynamic-schema body output where the body
+  already produced a fully-built `Arc<HeapValue::TypedObject>`.
+
+**Concrete consumer (current)**: `json.__parse_typed(text, schema_id)`
+at `crates/shape-runtime/src/stdlib/json.rs` (deferred at Step 4
+inline comment per Option A).
+
+**Future consumers (speculative, not locked)**: any extension/parser
+body that takes a runtime schema-id parameter and produces a
+TypedObject conforming to it (msgpack typed-decode, custom-codec
+parsers, etc.).
+
+**REFUSED on sight**:
+- Naming the variant pre-emptively (e.g., `TypedObjectHandle` —
+  refused at Stage D Step 4 STOP-AND-SURFACE Option C).
+- Locking the projection mechanism (Arc-handle vs field-
+  decomposition vs intermediate kind tag).
+- Deciding whether the architectural shape is a new
+  `ConcreteReturn` variant OR a different layer (e.g.
+  `ConcreteType::TypedObjectByRef("MyType")` registration-time
+  approach).
+
+**Status**: queue addition. Disposition deferred pending supervisor
+architectural review. No body migrations dependent on N8 land in
+this batch (json.__parse_typed deferred with N8-referencing inline
+comment).
+
+#### Two new follow-on workstream entries
+
+**any-typed-marshal-for-serialization workstream** (N4 sub-cluster
+deferral): 4 stdlib body consumers genuinely need an any-input
+marshal contract that cannot be split into Shape-API typed overloads
+(yaml.stringify_int is absurd). Options open: unified `Vec<HeapValue>`
+input shape vs per-format-specific input wrappers vs polymorphic
+walker-pattern at body layer. Distinct from N4 because the Shape
+API split DOES work for HTTP (where users pass typed payloads) but
+does NOT work for serialization (where users pass arbitrary user-
+domain values). Confirmed consumers: yaml.stringify, toml.stringify,
+msgpack.encode, msgpack.encode_bytes.
+
+**per-format-typed-sums-or-unified-parsed-value workstream** (N6
+sub-cluster (a) deferral): 4 stdlib body consumers each produce
+recursive any-typed tree returns (`Result<any>`) for which there is
+no typed sum equivalent shipping today (no YamlValue/TomlValue/
+MsgpackValue analog to the existing JsonValue at
+`crates/shape-runtime/src/json_value.rs`). Options open: per-format
+typed sums (mirror JsonValue per format), unified ParsedValue or
+SerdeValue (single sum across all four formats), keep-legacy +
+adopt the eventual N7 helper bidirectionally. Confirmed consumers:
+yaml.parse, toml.parse, msgpack.decode, msgpack.decode_bytes.
+
+#### Updated HashMap-marshal cluster sub-decision queue (binding)
+
+Combining all queue items in current state:
+
+1. **Storage shape: P1(b) two-buffer reusing Phase 2d Array shapes.**
+   ✅ LANDED at `6cd9181` (rebased to `a022f43` post-Stage-D-Step-1).
+2. **HashMap structural_eq/equals.** Deferred to shape-vm cleanup
+   workstream's HashMap user-API completion.
+3. **shape_id hidden-class fast-path optimization.** Deferred to
+   separate optimization workstream.
+4. **N4 — any-input typed marshal.** ✅ MIXED sign-off received. 4
+   HTTP typed overloads landed (Stage D Step 2). 2 HTTP overloads
+   (post_json/put_json) deferred pending N7. 4 serialization
+   functions deferred to any-typed-marshal-for-serialization
+   workstream.
+5. **N6 — any-output typed marshal.** ✅ MIXED sign-off received. 1
+   function (json.parse) migrated via sub-shape (b1) (Stage D
+   Steps 1 + 4). 1 function (json.__parse_typed) newly surfaced as
+   sub-shape (b2) → N8. 4 functions deferred to per-format-typed-
+   sums-or-unified-parsed-value workstream.
+6. **N7 — HeapValue→JSON serializer for HTTP / object-output
+   marshal contexts.** NEW. Queue addition; disposition deferred.
+   2 confirmed consumers (http.post_json, http.put_json).
+7. **N8 — opaque-TypedObject ConcreteReturn variant for dynamic-
+   schema returns.** NEW. Queue addition; disposition deferred. 1
+   confirmed consumer (json.__parse_typed).
+
+#### Stage D end-state (so far)
+
+| Step | Hash | Description | Δ |
+|---|---|---|---|
+| 1 | `a022f43` | ConcreteReturn::JsonValue + ConcreteType::JsonValue | 0 |
+| 2 | `d0a73e7` | HTTP API split (4 typed overloads); post_json/put_json deferred per N7 | 0 |
+| 4 | `43267c7` | json.parse migrated via JsonValue + ConcreteReturn::JsonValue | 0 |
+| 3 | THIS COMMIT | defections.md mixed dispositions + N7 + N8 | doc-only |
+
+**Stage D net so far: 0 errors directly** (json.parse migrated cleanly
+but didn't reduce existing error count due to multi-function-file
+shared-import pattern; see Step 4 commit message for the fifth
+calibration heuristic codification).
+
+Cumulative Stage C + D: -6 errors (Stage C net) + Stage D direct
+deltas (0 from Step 1 + Step 2 + Step 4) — all driven by Stage C's
+http.rs (-2) + xml.rs (-4) migrations.
+
+The 0-delta in Stage D is honest data: B1 sub-decision #2 closes for
+json.parse specifically; the residual cohort + Stage D follow-on
+batch (post-N7+N8 sign-offs + per-format workstream + any-typed-
+marshal-for-serialization workstream) will pick up the rest of the
+B1 cascade (-15 across 4 still-blocked parser modules) when those
+architectural surfaces resolve.
+
+#### Calibration ledger update
+
+Sixth finding-#11 self-correction this session, second at the
+team-lead/supervisor framing layer (first was Step 2's HeapValue→
+JSON serialization helper missing from the "mechanical marshal"
+framing). Codified as a forward calibration rule (per team-lead's
+sign-off message):
+
+> **Multi-registration single-file framing rule**: When a stdlib file
+> registers multiple functions with `Result<...>` return-type-
+> annotations, audit each body shape independently before authorizing
+> migration. Return-type-annotation similarity does NOT imply
+> migration-shape similarity. The body's projection layer (what slot
+> value the dispatcher pushes) is the relevant axis, not the
+> annotation.
+
+Plus the seventh self-correction codified at Step 4 commit message
+(multi-function-file partial-migration calibration heuristic):
+
+> **Multi-function-file partial-migration calibration heuristic**:
+> when a multi-function file shares import errors across multiple
+> unmigrated functions, migrating one function reduces 0 shared-
+> import errors. The migrated function's contribution to those
+> imports vanishes from the analysis, but the remaining unmigrated
+> functions still cite the same imports. Only when ALL users of an
+> import migrate does the import error vanish.
+
+#### Disposition for this subsection
+
+N4 + N6 mixed-disposition outcomes recorded. N7 + N8 architectural
+sub-decisions added to the queue. Two follow-on workstream entries
+recorded. Stage C + D HashMap-marshal cluster status: 4 of 12
+confirmed consumers migrated (csv.parse_records + csv.stringify_records
+in Stage C Step 3a + json.parse in Stage D Step 4 + 4 HTTP overloads
+in Stage D Step 2 = arguably 7 if we count HTTP overloads as 4 distinct
+consumers). 8 of 12 deferred pending N7 + N8 + 2 workstreams.
+
+The cluster's Stage C + D execution pattern matches the framework's
+intended discipline: surface architectural-adjacent surfaces
+explicitly, refuse defection-shape ad-hoc resolutions, document each
+disposition in finding-#11 dated subsections, accept honest 0-delta
+when architectural blockers genuinely gate consumers.
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
