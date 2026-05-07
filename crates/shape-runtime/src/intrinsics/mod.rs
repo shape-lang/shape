@@ -64,7 +64,6 @@ impl IntrinsicsRegistry {
         Self::register_rolling_intrinsics(&mut functions);
         Self::register_series_intrinsics(&mut functions);
         Self::register_recurrence_intrinsics(&mut functions);
-        Self::register_fft_intrinsics(&mut functions);
 
         Self {
             functions: Arc::new(RwLock::new(functions)),
@@ -185,17 +184,6 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register the 1 fft intrinsic (`__intrinsic_ifft`) whose migration is
-    /// deferred pending the N3 sub-decision (polymorphic input: TypedObject
-    /// FFT-result vs (real_arr, imag_arr) two-array form). The other 4 fft
-    /// intrinsics (fft, psd, dominant_frequency, bandpass, harmonics)
-    /// migrated to typed marshal entries in
-    /// `fft::create_fft_intrinsics_module`.
-    fn register_fft_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        // Polymorphic-input: ifft — pending N3 sub-decision (N3-β = defer
-        // permanent legacy at first landing per supervisor 2026-05-07).
-        functions.insert("__intrinsic_ifft".to_string(), fft::intrinsic_ifft);
-    }
 }
 
 impl Default for IntrinsicsRegistry {

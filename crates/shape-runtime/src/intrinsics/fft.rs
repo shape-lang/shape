@@ -1,37 +1,34 @@
-//! FFT (Fast Fourier Transform) intrinsics — partial migration to typed marshal layer.
+//! FFT (Fast Fourier Transform) intrinsics — full migration to typed marshal layer.
 //!
-//! Per the intrinsics-typed-CC migration's per-file table, 4 of 5 fft
+//! Per the intrinsics-typed-CC migration's per-file table, all 5 surviving fft
 //! intrinsics (`fft`, `psd`, `dominant_frequency`, `bandpass`, `harmonics`)
 //! migrate to `register_typed_fn_N` typed entries via
-//! [`create_fft_intrinsics_module`]. `intrinsic_ifft` remains as legacy
-//! `IntrinsicFn` body pending the **N3 sub-decision** (polymorphic input:
-//! TypedObject FFT-result vs (real_arr, imag_arr) two-array form). N3
-//! disposition per supervisor relay (2026-05-07): N3-β (defer permanent
-//! legacy) at first landing — ifft is a real DSP primitive; deletion
-//! preserved as fallback only if no consumer surfaces.
+//! [`create_fft_intrinsics_module`]. The 6th legacy `intrinsic_ifft` was
+//! deleted as orphan-cleanup per supervisor sign-off relayed 2026-05-07
+//! (N3 → DELETE-NOW): zero stdlib/package consumers verified pre-deletion;
+//! N3 architectural decision (polymorphic-input dispatch via TypedObject
+//! FFT-result vs (real_arr, imag_arr) two-array form) deferred pending
+//! future consumer with similar polymorphic-input shape. Same precedent
+//! as scan.rs deletion at `663b63a`.
 //!
 //! Migrated entries take `Arc<AlignedTypedBuffer>` (series + kernel)
 //! and scalars (frequencies, sample_rate, num_harmonics); outputs project
 //! through `ConcreteReturn::ArrayF64` (psd, bandpass) or
 //! `TypedReturn::TypedObject(...)` (fft, dominant_frequency, harmonics).
 //!
-//! Provides FFT, IFFT, and related spectral analysis functions for:
+//! Provides FFT and related spectral analysis functions for:
 //! - Medical signal processing (ECG, EEG)
 //! - Power electronics (harmonic analysis)
 //! - Audio/vibration analysis
 //! - General frequency domain analysis
 
-use super::{extract_f64_array, f64_vec_to_nb_array};
-use crate::context::ExecutionContext;
 use crate::marshal::{
     register_typed_fn_1, register_typed_fn_2_full, register_typed_fn_4_full,
 };
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::type_schema::typed_object_from_nb_pairs;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use rustfft::{FftPlanner, num_complex::Complex};
-use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, ValueWord, ValueWordExt};
+use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (4 typed entries) ─────────────────────
@@ -320,81 +317,3 @@ fn empty_fft_pairs() -> Vec<(String, ConcreteReturn)> {
     ]
 }
 
-// ───────────────────── Legacy body (1 polymorphic-input intrinsic) ─────────────────────
-
-/// IFFT intrinsic - compute inverse Fast Fourier Transform.
-///
-/// **Migration deferred** pending N3 sub-decision (polymorphic input:
-/// TypedObject FFT-result vs (real_arr, imag_arr) two-array form). N3-β
-/// (defer permanent legacy) chosen at first landing per supervisor relay
-/// (2026-05-07): "ifft is a real DSP primitive users would expect; deletion
-/// preserved as fallback only if no consumer surfaces."
-///
-/// Usage: ifft(fft_result) -> series
-/// Or:    ifft(real_series, imag_series) -> series
-pub fn intrinsic_ifft(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "ifft() requires FFT result or (real, imag) series".to_string(),
-            location: None,
-        });
-    }
-    // Try to extract real/imag from a TypedObject (FFT result) or from two separate arrays
-    let (real, imag) = if let Some(obj) = crate::type_schema::typed_object_to_hashmap_nb(&args[0]) {
-        let real_nb = obj.get("real").ok_or_else(|| ShapeError::RuntimeError {
-            message: "ifft(): FFT result missing 'real' field".to_string(),
-            location: None,
-        })?;
-        let imag_nb = obj.get("imag").ok_or_else(|| ShapeError::RuntimeError {
-            message: "ifft(): FFT result missing 'imag' field".to_string(),
-            location: None,
-        })?;
-        let real = extract_f64_array(real_nb, "Real series")?;
-        let imag = extract_f64_array(imag_nb, "Imag series")?;
-        (real, imag)
-    } else {
-        if args.len() < 2 {
-            return Err(ShapeError::RuntimeError {
-                message: "ifft() requires FFT result object or (real, imag) series".to_string(),
-                location: None,
-            });
-        }
-        let real = extract_f64_array(&args[0], "Real series")?;
-        let imag = extract_f64_array(&args[1], "Imag series")?;
-        (real, imag)
-    };
-
-    if real.len() != imag.len() {
-        return Err(ShapeError::RuntimeError {
-            message: "ifft(): real and imag series must have same length".to_string(),
-            location: None,
-        });
-    }
-
-    let n = real.len();
-    if n == 0 {
-        return Ok(f64_vec_to_nb_array(vec![]));
-    }
-
-    let mut buffer: Vec<Complex<f64>> = real
-        .iter()
-        .zip(imag.iter())
-        .map(|(&r, &i)| Complex::new(r, i))
-        .collect();
-
-    let mut planner = FftPlanner::new();
-    let ifft = planner.plan_fft_inverse(n);
-    ifft.process(&mut buffer);
-
-    let scale = 1.0 / n as f64;
-    let result: Vec<f64> = buffer.iter().map(|c| c.re * scale).collect();
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
-// Suppress unused-import warning for typed_object_from_nb_pairs (legacy ifft
-// helper; new typed entries use TypedReturn::TypedObject directly).
-#[allow(dead_code)]
-fn _suppress_unused() -> ValueWord {
-    typed_object_from_nb_pairs(&[])
-}
