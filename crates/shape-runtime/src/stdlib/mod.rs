@@ -56,5 +56,6 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         crate::intrinsics::vector::create_vector_intrinsics_module(),
         crate::intrinsics::math::create_math_intrinsics_module(),
         crate::intrinsics::array_transforms::create_array_transforms_module(),
+        crate::intrinsics::rolling::create_rolling_intrinsics_module(),
     ]
 }

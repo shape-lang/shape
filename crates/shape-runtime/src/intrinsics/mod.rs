@@ -145,19 +145,17 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register all rolling window intrinsics
+    /// Register the 3 rolling intrinsics whose migration is deferred pending
+    /// the M1-split sub-decision extension (polymorphic input: `Vec<int>` fast
+    /// path vs `Vec<number>`). The other 3 rolling intrinsics
+    /// (`rolling_mean`, `rolling_std`, `ema`) migrated to typed marshal
+    /// entries in `rolling::create_rolling_intrinsics_module`.
     fn register_rolling_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
+        // Polymorphic-input — pending M1-split sub-decision extension.
+        // rolling_sum additionally needs validity-aware-return for its i64 fast path.
         functions.insert(
             "__intrinsic_rolling_sum".to_string(),
             rolling::intrinsic_rolling_sum,
-        );
-        functions.insert(
-            "__intrinsic_rolling_mean".to_string(),
-            rolling::intrinsic_rolling_mean,
-        );
-        functions.insert(
-            "__intrinsic_rolling_std".to_string(),
-            rolling::intrinsic_rolling_std,
         );
         functions.insert(
             "__intrinsic_rolling_min".to_string(),
@@ -167,7 +165,6 @@ impl IntrinsicsRegistry {
             "__intrinsic_rolling_max".to_string(),
             rolling::intrinsic_rolling_max,
         );
-        functions.insert("__intrinsic_ema".to_string(), rolling::intrinsic_ema);
     }
 
     /// Register the 2 array-transform intrinsics whose migration is deferred
