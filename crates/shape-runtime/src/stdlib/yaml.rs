@@ -1,6 +1,37 @@
 //! Native `yaml` module for YAML parsing and serialization.
 //!
 //! Exports: yaml.parse(text), yaml.parse_all(text), yaml.stringify(value), yaml.is_valid(text)
+//!
+//! NOTE: yaml.parse / yaml.parse_all / yaml.stringify REMAIN DEFERRED
+//! pending the **N4** (any-input typed marshal) and **N6** (any-output
+//! typed marshal) architectural decisions per `docs/defections.md`
+//! HashMap-marshal cluster's sub-decision queue extension subsection
+//! (commit `d3411a7`).
+//!
+//! - `yaml.parse(text) -> Result<any>` and `yaml.parse_all(text) -> Result<Array<any>>`
+//!   return polymorphic recursive `serde_yaml::Value`-equivalent trees
+//!   projected via the deleted `TypedReturn::ValueWord` escape-hatch
+//!   wrapper. Mapping to the N6 architectural surface.
+//! - `yaml.stringify(value: any)` takes a polymorphic `value: any`
+//!   input parameter that maps to the N4 architectural surface.
+//!
+//! `yaml.is_valid(text)` is independent and could in principle migrate
+//! standalone; held as a batch with the others for clean per-file
+//! atomicity.
+//!
+//! Both N4 + N6 are supervisor-level decisions queued in the
+//! HashMap-marshal cluster's sub-decision queue. After both land, the
+//! yaml module migrates as a batch (Stage D or equivalent). Mirrors
+//! the deferral pattern from `csv_module.rs:7-8/183-189`'s
+//! `parse_records`/`stringify_records` breadcrumb (now activated at
+//! commit `fbe6155` once HashMap-marshal P1(b) landed).
+//!
+//! Tests use the deleted ValueWord API; deletable per `csv_module.rs`
+//! migration precedent (commit `9f6b1d3`) once the bodies migrate.
+//!
+//! Current state: legacy bodies retained as cascade-broken pending
+//! N4+N6 sign-off; import errors at lines 6+8 + body errors remain
+//! on-record in the cascade.
 
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
