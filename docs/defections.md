@@ -483,6 +483,91 @@ is not infallible against ground truth either. Verify against
 current code, don't trust prior framing, even framing the
 supervisor signed off on.
 
+### 2026-05-07 — Second audit-grounded correction: α ToSlot impls dead at marshal layer
+
+Second finding #11 symmetry-extension applied to this entry. **The
+two prior subsections (lines 226-371 original entry + lines 372-484
+"per-storage-variant body-type map" correction) stay on-record.**
+This subsection captures the ToSlot-dead-at-marshal-layer finding
+caught during Commit 5 (Q2 marshal-fold trial) preparation.
+
+**Audit during Commit 5 prep (2026-05-07).** Verifying the
+supervisor's sketched Commit 5 body against current code surfaced
+that **Commit 2's α ToSlot impls (`Arc<AlignedTypedBuffer>`,
+`Arc<TypedBuffer<i64>>`, `Arc<TypedBuffer<u8>>`) exist as trait
+impls but are NOT consumed by the dispatcher's `TypedReturn → slot
+push` path.** The dispatcher is at
+`crates/shape-vm/src/executor/vm_impl/modules.rs:144-210`
+(`invoke_typed_module_fn`); body returns are projected via
+`typed_result.map(|t| t.into_value_word())` at line 208, which
+pattern-matches on `TypedReturn` / `ConcreteReturn` variants
+internally rather than dispatching through `ToSlot::to_slot()`.
+The existing β `ToSlot` impls for `Vec<Arc<String>>` /
+`Vec<Arc<HeapValue>>` (`marshal.rs:485-516`) sit alongside the
+trait but are likewise not on the dispatcher's return-projection
+call graph.
+
+The original entry text wrote (lines 264-271):
+
+> "Returns wrap `Arc<TypedBuffer<f64>>` into the slot via
+> `Arc::into_raw(Arc<HeapValue>)` after wrapping in
+> `HeapValue::TypedArray(TypedArrayData::F64(arc))` — same shape as
+> β's owned-clone returns, just without the per-element copy."
+
+That described the `ToSlot` trait's *logical operation* but elided
+that production wrapping happens via the dispatcher's
+`TypedReturn → ValueWord` projection, NOT via direct
+`ToSlot::to_slot()` invocation. The α `ToSlot` impls land in
+`marshal.rs` as the FromSlot pair-mate, but they don't reach the
+production return path until a follow-on architectural extension
+adds a `ConcreteReturn::ArrayAlignedF64(Arc<AlignedTypedBuffer>)`-
+class variant *plus* a corresponding dispatcher projection arm.
+
+**Implication for Stage B (binding for Commit 5 onwards):** the
+Q2 marshal-fold trial (Commit 6 vec_add migration) lands with
+**input-side zero-copy** (`FromSlot<Arc<AlignedTypedBuffer>>`
+consumed at `register_typed_fn_2:851`) but **output-side
+owned-clone** (body returns `ConcreteReturn::ArrayF64(Vec<f64>)`;
+dispatcher allocates `AlignedTypedBuffer` from the `Vec<f64>`).
+Mirrors β's owned-clone shape on the return side. The C5-B
+architectural extension to add `ConcreteReturn::ArrayAlignedF64`
++ dispatcher projection is **deferred as a separate workstream**,
+contingent on Q2 = marshal-fold passing the Commit 7 gate. If Q2
+passes, C5-B becomes a follow-on optimization activating Commit
+2's currently-marshal-dead α `ToSlot` impls and saving one
+allocation + memcpy per output-bound intrinsic call.
+
+**Why land Stage B's α `ToSlot` impls now if they're dead at the
+marshal layer?** Cluster #3's option β chose owned-clone for input
+deliberately; α's perf-non-negotiable trigger fired specifically
+for input zero-copy on hot-path SIMD intrinsic *reads* (the
+dominant cost for 78 of 92 intrinsic functions per Audit 1). The
+Commit 2 architectural-extension commit lands the FromSlot half
+that production *does* consume, plus the matched ToSlot impls as
+pattern-completion (`FromSlot` and `ToSlot` are paired traits;
+omitting one creates an asymmetric API surface). The ToSlot impls
+also become live when C5-B lands. Calling them "dead" today is
+correct for the marshal-layer projection path; calling them
+"premature" would be wrong — they're load-bearing for C5-B's
+follow-on, and adding them now keeps the Stage B `marshal.rs`
+section internally consistent.
+
+**Disposition for this subsection:** in-place correction logged.
+Commit 6's Q2 trial proceeds with C5-A (input-zero-copy +
+output-owned-clone). C5-B deferred as separate workstream — its
+own architectural surface-and-decide round-trip after Q2 = marshal-
+fold validates.
+
+**Lesson re-asserted (finding #11 symmetry-extension, second
+instance):** verifying against current code, not trusting prior
+framing — the original entry was reviewed and signed off twice
+(once at write-time, then implicitly when the per-storage-variant
+correction landed). Both reviews missed that "wrap via
+`Arc::into_raw(Arc<HeapValue>)`" describes a logical operation that
+production routes through a different code path. Audits against
+ground truth, not against prior framing — symmetric across all
+on-record entries regardless of authorship.
+
 ---
 
 ## 2026-05-07 — intrinsics-typed-CC cluster (renamed from intrinsics-dispatch-table) — named on-record
