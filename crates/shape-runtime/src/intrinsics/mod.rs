@@ -13,7 +13,6 @@ use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub mod array;
 pub mod array_transforms;
 pub mod convolution;
 pub mod distributions;
@@ -54,22 +53,17 @@ impl IntrinsicsRegistry {
     pub fn new() -> Self {
         let mut functions = HashMap::new();
 
-        // Register all intrinsics by category
+        // Register polymorphic-shape legacy intrinsic bodies still pending
+        // their architectural sub-decision sign-offs. Migrated intrinsics live
+        // in their respective `create_*_intrinsics_module` factories wired into
+        // `crates/shape-runtime/src/stdlib/mod.rs::all_stdlib_modules` per
+        // intrinsics-typed-CC cluster Q2-marshal-fold-light (M-A scope). See
+        // `docs/defections.md` 2026-05-07 intrinsics-typed-CC entry's sub-
+        // decision queue subsections for the per-fn deferral rationale.
         Self::register_math_intrinsics(&mut functions);
-        Self::register_random_intrinsics(&mut functions);
-        Self::register_distributions_intrinsics(&mut functions);
-        Self::register_stochastic_intrinsics(&mut functions);
         Self::register_rolling_intrinsics(&mut functions);
         Self::register_series_intrinsics(&mut functions);
-        Self::register_array_intrinsics(&mut functions);
-        Self::register_statistical_intrinsics(&mut functions);
-        // Vector intrinsics migrated to typed-marshal layer per
-        // intrinsics-typed-CC cluster Q2-marshal-fold-light (M-A scope);
-        // see `vector::create_vector_intrinsics_module` and
-        // `docs/defections.md` 2026-05-07 zero-copy entry.
-        Self::register_matrix_intrinsics(&mut functions);
         Self::register_recurrence_intrinsics(&mut functions);
-        Self::register_convolution_intrinsics(&mut functions);
         Self::register_fft_intrinsics(&mut functions);
 
         Self {
@@ -183,70 +177,12 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register array operation intrinsics
-    /// Note: map/filter/reduce are now handled directly by the VM via call_value_immediate_nb.
-    fn register_array_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Previously registered intrinsic_map, intrinsic_filter, intrinsic_reduce here.
-        // These are now handled by the VM executor directly (array_transform.rs, array_aggregation.rs).
-    }
-
-    /// All statistical intrinsics (correlation, covariance, percentile, median)
-    /// migrated to typed marshal entries in
-    /// `statistical::create_statistical_intrinsics_module`.
-    fn register_statistical_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: all 4 statistical intrinsics migrated to typed marshal layer.
-    }
-
     /// Register recurrence intrinsics
     fn register_recurrence_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
         functions.insert(
             "__intrinsic_linear_recurrence".to_string(),
             recurrence::intrinsic_linear_recurrence,
         );
-    }
-
-    /// All matrix intrinsics (matmul_vec, matmul_mat, mat_add, mat_sub)
-    /// migrated to typed marshal entries in
-    /// `matrix::create_matrix_intrinsics_module`. Inputs use Phase 2d Array's
-    /// `Vec<Arc<HeapValue>>` FromSlot for nested-array matrices and
-    /// `Arc<AlignedTypedBuffer>` for vectors; outputs project through
-    /// `ConcreteReturn::ArrayHeapValue(...)` for nested-array returns and
-    /// `ConcreteReturn::ArrayF64(...)` for flat returns.
-    fn register_matrix_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: all 4 matrix intrinsics migrated to typed marshal layer.
-    }
-
-    /// All random intrinsics (random, random_int, random_seed, random_normal,
-    /// random_array) migrated to typed marshal entries in
-    /// `random::create_random_intrinsics_module`.
-    fn register_random_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: all 5 random intrinsics migrated to typed marshal layer.
-    }
-
-    /// All distribution intrinsics (dist_uniform, dist_lognormal,
-    /// dist_exponential, dist_poisson, dist_sample_n) migrated to typed
-    /// marshal entries in `distributions::create_distributions_intrinsics_module`.
-    /// `dist_sample_n`'s body delegates to shared sampling helpers
-    /// (`sample_uniform`/`sample_lognormal`/etc.) so both per-call typed
-    /// entries and `dist_sample_n` share the math without going through
-    /// the marshal layer twice.
-    fn register_distributions_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: all 5 distribution intrinsics migrated to typed marshal layer.
-    }
-
-    /// All stochastic intrinsics (brownian_motion, gbm, ou_process, random_walk)
-    /// migrated to typed marshal entries in
-    /// `stochastic::create_stochastic_intrinsics_module`. gbm (arity 5) and
-    /// ou_process (arity 6) use the N2 marshal-API arity extension landed at
-    /// `5dcb1ce`.
-    fn register_stochastic_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: all 4 stochastic intrinsics migrated to typed marshal layer.
-    }
-
-    /// The single convolution intrinsic (`__intrinsic_stencil`) migrated to a
-    /// typed marshal entry in `convolution::create_convolution_intrinsics_module`.
-    fn register_convolution_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Empty: __intrinsic_stencil migrated to typed marshal layer.
     }
 
     /// Register the 1 fft intrinsic (`__intrinsic_ifft`) whose migration is
