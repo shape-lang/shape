@@ -192,24 +192,11 @@ impl IntrinsicsRegistry {
         // These are now handled by the VM executor directly (array_transform.rs, array_aggregation.rs).
     }
 
-    /// Register statistical intrinsics
-    fn register_statistical_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_correlation".to_string(),
-            statistical::intrinsic_correlation,
-        );
-        functions.insert(
-            "__intrinsic_covariance".to_string(),
-            statistical::intrinsic_covariance,
-        );
-        functions.insert(
-            "__intrinsic_percentile".to_string(),
-            statistical::intrinsic_percentile,
-        );
-        functions.insert(
-            "__intrinsic_median".to_string(),
-            statistical::intrinsic_median,
-        );
+    /// All statistical intrinsics (correlation, covariance, percentile, median)
+    /// migrated to typed marshal entries in
+    /// `statistical::create_statistical_intrinsics_module`.
+    fn register_statistical_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: all 4 statistical intrinsics migrated to typed marshal layer.
     }
 
     /// Register recurrence intrinsics

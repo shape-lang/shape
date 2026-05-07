@@ -1,127 +1,130 @@
-//! Statistical intrinsics - Advanced statistical functions
+//! Statistical intrinsics — full migration to typed marshal layer.
+//!
+//! Per the intrinsics-typed-CC migration's per-file table (see
+//! `docs/defections.md` 2026-05-07 intrinsics-typed-CC entry's predicted
+//! error-drop calibration subsection), all 4 statistical intrinsics
+//! (`correlation`, `covariance`, `percentile`, `median`) migrate to
+//! `register_typed_fn_N` typed entries via [`create_statistical_intrinsics_module`].
+//!
+//! `percentile` and `median` mutate an owned f64 copy — the marshal layer's
+//! always-clone semantics for owned-data input ensure this is safe (per
+//! the let-vs-var Rust-like-lifetime analysis at `docs/defections.md`
+//! 2026-05-07 zero-copy entry lines 281-291).
 //!
 //! Provides efficient implementations of correlation, covariance,
 //! percentiles, and other statistical measures.
 
-use super::{extract_f64, extract_f64_array};
-use crate::context::ExecutionContext;
-use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
+use crate::module_exports::ModuleExports;
+use crate::simd_statistics;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::AlignedTypedBuffer;
+use std::sync::Arc;
 
-/// Intrinsic: Pearson correlation coefficient
-pub fn intrinsic_correlation(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_correlation requires 2 arguments (series_a, series_b)"
-                .to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Module factory (4 typed entries) ─────────────────────
 
-    let data_a = extract_f64_array(&args[0], "First argument")?;
-    let data_b = extract_f64_array(&args[1], "Second argument")?;
+/// Create the statistical intrinsics module with 4 typed-marshal entry points.
+pub fn create_statistical_intrinsics_module() -> ModuleExports {
+    let mut module = ModuleExports::new("std::core::intrinsics::statistical");
+    module.description = "Statistical intrinsics (correlation, covariance, percentile, median)"
+        .to_string();
 
-    if data_a.len() != data_b.len() {
-        return Err(ShapeError::RuntimeError {
-            message: format!(
-                "Column lengths must match: {} != {}",
-                data_a.len(),
-                data_b.len()
-            ),
-            location: None,
-        });
-    }
+    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+        &mut module,
+        "__intrinsic_correlation",
+        "Pearson correlation coefficient between two Vec<number>",
+        [("series_a", "Array<number>"), ("series_b", "Array<number>")],
+        ConcreteType::Number,
+        |a, b, _ctx| {
+            let data_a = a.as_slice();
+            let data_b = b.as_slice();
+            if data_a.len() != data_b.len() {
+                return Err(format!(
+                    "Column lengths must match: {} != {}",
+                    data_a.len(),
+                    data_b.len()
+                ));
+            }
+            if data_a.is_empty() {
+                return Ok(TypedReturn::Concrete(ConcreteReturn::F64(f64::NAN)));
+            }
+            let result = simd_statistics::correlation(data_a, data_b);
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(result)))
+        },
+    );
 
-    if data_a.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
+    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+        &mut module,
+        "__intrinsic_covariance",
+        "Covariance between two Vec<number>",
+        [("series_a", "Array<number>"), ("series_b", "Array<number>")],
+        ConcreteType::Number,
+        |a, b, _ctx| {
+            let data_a = a.as_slice();
+            let data_b = b.as_slice();
+            if data_a.len() != data_b.len() {
+                return Err("Column lengths must match".to_string());
+            }
+            if data_a.is_empty() {
+                return Ok(TypedReturn::Concrete(ConcreteReturn::F64(f64::NAN)));
+            }
+            let result = simd_statistics::covariance(data_a, data_b);
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(result)))
+        },
+    );
 
-    use crate::simd_statistics;
-    let result = simd_statistics::correlation(&data_a, &data_b);
-    Ok(ValueWord::from_f64(result))
+    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, f64>(
+        &mut module,
+        "__intrinsic_percentile",
+        "Percentile (0-100) of a Vec<number> via O(n) average-case quickselect",
+        [("series", "Array<number>"), ("percentile", "number")],
+        ConcreteType::Number,
+        |series, percentile, _ctx| {
+            if !(0.0..=100.0).contains(&percentile) {
+                return Err("Percentile must be between 0 and 100".to_string());
+            }
+            let data = series.as_slice();
+            if data.is_empty() {
+                return Ok(TypedReturn::Concrete(ConcreteReturn::F64(f64::NAN)));
+            }
+            let mut values = data.to_vec();
+            let n = values.len();
+            let k = ((percentile / 100.0) * (n - 1) as f64).round() as usize;
+            let result = quickselect(&mut values, k);
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(result)))
+        },
+    );
+
+    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+        &mut module,
+        "__intrinsic_median",
+        "Median (50th percentile) of a Vec<number>",
+        "series",
+        "Array<number>",
+        ConcreteType::Number,
+        |series, _ctx| {
+            let slice = series.as_slice();
+            if slice.is_empty() {
+                return Ok(TypedReturn::Concrete(ConcreteReturn::F64(f64::NAN)));
+            }
+            let mut data = slice.to_vec();
+            data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = data.len();
+            let result = if n % 2 == 0 {
+                (data[n / 2 - 1] + data[n / 2]) / 2.0
+            } else {
+                data[n / 2]
+            };
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(result)))
+        },
+    );
+
+    module
 }
 
-/// Intrinsic: Covariance
-pub fn intrinsic_covariance(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_covariance requires 2 arguments (series_a, series_b)".to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Helpers (used by typed bodies) ─────────────────────
 
-    let data_a = extract_f64_array(&args[0], "First argument")?;
-    let data_b = extract_f64_array(&args[1], "Second argument")?;
-
-    if data_a.len() != data_b.len() {
-        return Err(ShapeError::RuntimeError {
-            message: "Column lengths must match".to_string(),
-            location: None,
-        });
-    }
-
-    if data_a.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    use crate::simd_statistics;
-    let result = simd_statistics::covariance(&data_a, &data_b);
-    Ok(ValueWord::from_f64(result))
-}
-
-/// Intrinsic: Percentile calculation
-pub fn intrinsic_percentile(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_percentile requires 2 arguments (series, percentile)".to_string(),
-            location: None,
-        });
-    }
-
-    let data = extract_f64_array(&args[0], "First argument")?;
-    let percentile = extract_f64(&args[1], "Percentile")?;
-
-    if !(0.0..=100.0).contains(&percentile) {
-        return Err(ShapeError::RuntimeError {
-            message: "Percentile must be between 0 and 100".to_string(),
-            location: None,
-        });
-    }
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    let mut values = data.to_vec();
-    let n = values.len();
-    let k = ((percentile / 100.0) * (n - 1) as f64).round() as usize;
-    let result = quickselect(&mut values, k);
-    Ok(ValueWord::from_f64(result))
-}
-
-/// Intrinsic: Median (50th percentile)
-pub fn intrinsic_median(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_median requires 1 argument (series)".to_string(),
-            location: None,
-        });
-    }
-    let mut data = extract_f64_array(&args[0], "Argument")?;
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = data.len();
-    let result = if n % 2 == 0 {
-        (data[n / 2 - 1] + data[n / 2]) / 2.0
-    } else {
-        data[n / 2]
-    };
-    Ok(ValueWord::from_f64(result))
-}
-
-/// Quickselect algorithm for O(n) average case percentile calculation
+/// Quickselect algorithm for O(n) average case percentile calculation.
 fn quickselect(arr: &mut [f64], k: usize) -> f64 {
     if arr.len() == 1 {
         return arr[0];
@@ -173,5 +176,3 @@ fn partition(arr: &mut [f64], left: usize, right: usize, pivot_idx: usize) -> us
     arr.swap(store_idx, right);
     store_idx
 }
-
-// ===== Tests =====
