@@ -1717,6 +1717,123 @@ sub-question to evaluate at N1 sign-off time.
 extended; N1 added as item #5; rolling.rs partial migration
 landed; scan.rs and recurrence.rs full-defer pending N1.
 
+### 2026-05-07 — Sub-decision queue extension: N2 marshal arity 4/5/6
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The six prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration + partial-migration pattern + sub-decision queue +
+M1-split-inventory-and-N1 extension) stay on-record.** This
+subsection adds **item #6 (N2 marshal arity extension to 4/5/6)**,
+surfaced during the stochastic.rs / convolution.rs batched-2 audit
+at Commit X14-pending.
+
+**Audit during stochastic.rs / convolution.rs batched-2
+preparation revealed:**
+
+`marshal.rs` defines `register_typed_fn_N` for arities 0, 1, 2, 3
+(plus `_full` variants with per-arg `required: false` +
+`default_snippet` for arities 1, 2, 3) — verified via
+`grep -nE "^pub fn register_typed_fn_[0-9]" crates/shape-runtime/src/marshal.rs`
+returning 7 matches at lines 754, 782, 827, 876, 944, 982, 1022.
+**No `register_typed_fn_4` / `_5` / `_6` exist.**
+
+stochastic.rs is the first migration consumer to need arity > 3:
+
+| Function | Args | Migratable today |
+|---|---|---|
+| `intrinsic_brownian_motion` | 3 (n, dt, sigma) | ✅ via `register_typed_fn_3<i64, f64, f64>` |
+| `intrinsic_random_walk` | 2 (n, step_size) | ✅ via `register_typed_fn_2<i64, f64>` |
+| `intrinsic_gbm` | **5** (n, dt, mu, sigma, s0) | ❌ **needs `register_typed_fn_5`** |
+| `intrinsic_ou_process` | **6** (n, dt, theta, mu, sigma, x0) | ❌ **needs `register_typed_fn_6`** |
+
+All four are scalar-args + `Vec<f64>` return (`Ok(f64_vec_to_nb_array(path))`).
+No body-shape blockers. Stdlib consumers (`core/stochastic.shape:8/13/18/23`)
+pass arities matching the declared signature 1:1.
+
+**N2 architectural shape**: extend `marshal.rs` to add
+`register_typed_fn_4`, `register_typed_fn_5`, `register_typed_fn_6`
+(and matching `_full` variants for completeness — keeping the
+parallel-impl coverage symmetric across the surface). Mechanical
+per-arity parallel-impl pattern — exact mirror of how arities 0..3
+are structured at `marshal.rs:754-1066`. **Why this is parallel-
+impl-additions and not a defection-shape:**
+
+- Per-arity parallel impls is an **established pattern** at this
+  layer (lines 754-924 are exactly that). Same precedent as the
+  per-element-type FromSlot impls (cluster #3 option ε).
+- No new architectural surface: each `register_typed_fn_N` is a
+  thin wrapper that monomorphizes via Rust types and slot-decode.
+  Nothing new at the discriminator level, no `dyn`, no parametric
+  NativeKind, no rename-to-less-suspicious-name.
+- The only design choice within N2 is: extend up to arity 6
+  (consumer-driven, what stochastic needs) or extend further as
+  forward-compat. Reserved arity 4 keeps coverage continuous.
+
+**Why N2 is on the architectural-checkpoint side, not within M-A
+standing sign-off:** the intrinsics handover's
+"Architectural-checkpoint discipline (binding)" lists "parallel
+impl additions" as one of the explicit gates needing supervisor
+sign-off. Mechanical-shape extension does not waive the
+discipline; the gate is on category, not on novelty. The
+sub-decision-queue framing is the right home (alongside N1, M1-
+split inventory) — N2 takes a sign-off round-trip, then lands as
+its own atomic commit, then unblocks stochastic.rs full migration.
+
+**Updated sub-decision queue (binding):**
+
+1. **M1-split** (8 functions per the prior subsection's update;
+   validity-aware-return for `diff` + `rolling_sum`). Architectural
+   extension; out of M-A scope. (Prior queue item #1.)
+
+2. **char_code multi-input-type dispatch.** (Prior queue item #2.)
+
+3. **bspline2_3d_batch generic-array consumer audit.** (Prior
+   queue item #3.)
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** (Prior queue item #4.)
+
+5. **N1: `FromSlot for Option<T>` typed marshal.** Confirmed
+   consumers: scan.rs::intrinsic_scan, recurrence.rs::intrinsic_linear_recurrence.
+   Architectural extension; out of M-A scope. (Prior queue item
+   #5 from the prior subsection.)
+
+6. **N2: marshal arity extension to register_typed_fn_4/5/6
+   (+ `_full` variants).** Per-arity parallel-impl pattern
+   mirroring lines 754-1066 of `marshal.rs`. **AUDIT
+   RECOMMENDATION (pending supervisor sign-off):** extend to
+   arity 6 inclusive, covering both confirmed consumer needs
+   (stochastic::gbm at arity 5 + stochastic::ou_process at arity
+   6) plus reserved arity 4 for forward continuity. Confirmed
+   consumers needing N2: stochastic::gbm (arity 5),
+   stochastic::ou_process (arity 6). Architectural-checkpoint per
+   the parallel-impl-additions gate; out of M-A scope; needs
+   surface-and-decide round-trip.
+
+**Sub-decision queue items remain on-record-only.** Adding to the
+queue ≠ approval to execute. Each item requires its own surface-
+and-decide round-trip with audit-1+2+3 binding pre-work +
+supervisor sign-off + structural reasoning.
+
+**Batch-3 disposition (binding for this round):**
+
+- **convolution.rs full migration LANDS (Commit X14-pending)**:
+  1 typed entry via `register_typed_fn_3_full<Arc<AlignedTypedBuffer>,
+  Arc<AlignedTypedBuffer>, Arc<String>>` with `default_snippet:
+  Some("\"same\"")` for the optional `mode` arg. Predicted -1.
+  Stencil flagged as zero-stdlib-consumer per post-bulldozer rg
+  (deletion-candidate flag for shape-vm cleanup workstream;
+  full-migrate-anyway maintains consumer-surface parity for any
+  in-flight Shape consumer).
+- **stochastic.rs full-defer pending N2.** No commit lands for
+  this file until N2 round-trip resolves.
+
+**Disposition for this subsection:** N2 added as queue item #6;
+batch-3 disposition documented (convolution full-migrate; stochastic
+full-defer). Calibration row for batch-3 will be appended at
+batch-3 close.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
