@@ -205,26 +205,15 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register matrix intrinsics
-    fn register_matrix_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_matmul_vec".to_string(),
-            matrix::intrinsic_matmul_vec,
-        );
-        functions.insert(
-            "__intrinsic_matmul_mat".to_string(),
-            matrix::intrinsic_matmul_mat,
-        );
-        // R5.4D: Mat<number> + Mat<number> / Mat<number> - Mat<number>.
-        // Compiler emission arrives in R5.4E.
-        functions.insert(
-            "__intrinsic_mat_add".to_string(),
-            matrix::intrinsic_mat_add,
-        );
-        functions.insert(
-            "__intrinsic_mat_sub".to_string(),
-            matrix::intrinsic_mat_sub,
-        );
+    /// All matrix intrinsics (matmul_vec, matmul_mat, mat_add, mat_sub)
+    /// migrated to typed marshal entries in
+    /// `matrix::create_matrix_intrinsics_module`. Inputs use Phase 2d Array's
+    /// `Vec<Arc<HeapValue>>` FromSlot for nested-array matrices and
+    /// `Arc<AlignedTypedBuffer>` for vectors; outputs project through
+    /// `ConcreteReturn::ArrayHeapValue(...)` for nested-array returns and
+    /// `ConcreteReturn::ArrayF64(...)` for flat returns.
+    fn register_matrix_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
+        // Empty: all 4 matrix intrinsics migrated to typed marshal layer.
     }
 
     /// All random intrinsics (random, random_int, random_seed, random_normal,
