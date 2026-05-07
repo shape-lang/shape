@@ -7,6 +7,34 @@
 //! Schema-driven parsing (`__parse_typed`) coerces JSON directly into a
 //! TypedObject for the supplied schema; nested unknown objects fall back to
 //! the typed `Json` enum rather than an untyped HashMap.
+//!
+//! Phase-2d strict-typing migration deferred-list (Stage C Step 3d):
+//!
+//! - `json.parse(text) -> Result<Json>` — body wraps recursive
+//!   `Arc<HeapValue>` with deleted `TypedReturn::ValueWord(...)` (line 250).
+//!   Blocked on N6 (any-output typed marshal) — `ConcreteReturn` has no
+//!   `Arc<HeapValue>` leaf variant. Sub-shape (b): typed-enum recursive
+//!   return (schema is fixed: `Json::Null/Bool/Number/String/Array/Object`).
+//!   Migrates as part of Stage D post-N6-sign-off batch.
+//! - `json.__parse_typed(text, schema_id) -> Result<any>` — same body
+//!   wrapping (line 307). Same N6 blocker, same sub-shape (b). Schema is
+//!   dynamic at function call boundary but the enum-tree fall-back is
+//!   typed.
+//! - `json.stringify(value: any, pretty?: bool) -> Result<string>` — body
+//!   uses deleted `to_json_value()` (line 341) AND deleted
+//!   `TypedReturn::String(output)` (line 350). Blocked on N4 (any-input
+//!   typed marshal) — `value: any` has no `FromSlot` impl post-bulldozer.
+//! - `json.is_valid(text) -> bool` — body uses deleted
+//!   `TypedReturn::Bool(valid)` (line 374). Migratable in isolation but
+//!   kept deferred for per-file atomicity; lands with parse / __parse_typed
+//!   / stringify when N4 + N6 sign-offs unblock the cohort.
+//!
+//! Both N4 and N6 are supervisor-level; queued for relay batch (see
+//! `docs/defections.md` HashMap-marshal cluster sub-decision queue,
+//! 2026-05-07 N6 consumer-expansion subsection).
+//!
+//! json.rs is also B1 sub-decision #2's anchor site (cascade -19 across
+//! 5 parser modules); B1 unblocks alongside this migration.
 
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
