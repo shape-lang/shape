@@ -512,6 +512,170 @@ binding sketch. Same parallel deferral as `shape_id` hidden-class
 optimization workstream (HashMap-marshal entry's eager-bucket-only
 disposition).
 
+### 2026-05-07 — Sub-decision queue extension: N4 any-input + N6 any-output typed marshal
+
+In-place dated subsection per finding #11 symmetry-extension. **The
+prior entry text + the consumer-body-case audit-grounded correction
++ structural_eq/equals follow-on subsections all stay on-record.**
+This subsection adds **two architectural sub-decisions** to the
+HashMap-marshal cluster's queue, surfaced during Stage C Step 2b
+(http.rs migration at `b89d754`) and Step 3b multi-concern audit
+pre-commit on msgpack.rs.
+
+**N4 — any-input typed marshal.** Surfaced during Step 2b when
+http.post + http.put bodies (`crates/shape-runtime/src/stdlib/http.rs`
+deferred section) revealed that the legacy `body: any` parameter
+shape has no `FromSlot` impl in the post-bulldozer typed marshal
+layer. `ConcreteType::Any` exists as a RETURN type only; no input-
+side equivalent. Step 3b multi-concern audit on msgpack.rs +
+yaml.rs + toml.rs (cross-checked at the `value: any`-shaped
+parameter sites) expanded confirmed consumer count.
+
+**Confirmed N4 consumers (6 functions):**
+- `http.post(url, body: any, options?)` — `crates/shape-runtime/src/stdlib/http.rs` deferred
+- `http.put(url, body: any, options?)` — same
+- `yaml.stringify(value: any)` — `crates/shape-runtime/src/stdlib/yaml.rs:115-122` (legacy bodies pending Step 3c deferral commit)
+- `toml.stringify(value: any)` — `crates/shape-runtime/src/stdlib/toml_module.rs:110-117` (legacy bodies pending Step 3e deferral commit)
+- `msgpack.encode(value: any)` — `crates/shape-runtime/src/stdlib/msgpack_module.rs:54-77` (legacy bodies pending Step 3b deferral commit)
+- `msgpack.encode_bytes(value: any)` — same module, lines 116-140
+
+**N4 architectural shape (three options for supervisor sign-off):**
+
+- **N4-α (FromSlot for ValueWord-equivalent that decodes any HeapValue dynamically):**
+  add a body parameter type that receives polymorphic Arc<HeapValue> and
+  the body pattern-matches on the inner HeapValue::* variant. The
+  closest analog to legacy ValueWord behavior; preserves stdlib body
+  ergonomics. **Refused-on-watchlist consideration:** this re-
+  introduces dynamic-tag-decode at the body layer and is on the
+  defection-shape watchlist (`renamed dynamic dispatch`). Surface
+  for supervisor review with structural-purity argument:
+  Arc<HeapValue> at the body type IS the HeapValue enum, not a
+  ValueWord shim — the body's pattern match against `HeapValue::String /
+  HashMap / TypedArray / etc.` is structurally typed enum dispatch,
+  not dynamic-tag-decode.
+- **N4-β (Shape API split — separate typed overloads):**
+  `http.post_json(url, body: HashMap<string, any>)` +
+  `http.post_text(url, body: string)` overloads, each with statically-
+  typed body parameter. Eliminates the any-input shape entirely at
+  the user-facing API. Preserves strict typing; loses the
+  polymorphic-overload ergonomics that Shape user code currently
+  has. Cross-cuts user-API surface; impacts `packages/` consumers
+  if any rely on `http.post(url, anyValue)`.
+- **N4-γ (Discriminator-based input via tagged-payload struct):**
+  `body: { kind: "json", value: HashMap } | { kind: "text", value: string }`
+  — typed sum/discriminator at the input shape. Preserves single
+  function signature with explicit input-tagging. Adds boilerplate
+  at user-API; preserves typing throughout.
+
+**N6 — any-output typed marshal.** Surfaced during Step 3b multi-
+concern audit on msgpack.rs. The decode body builds a recursive
+`serde_json::Value`-equivalent tree and projects via
+`TypedReturn::Ok(Box::new(TypedReturn::ValueWord(...)))` (legacy
+escape-hatch wrapper, DELETED). `ConcreteReturn::Any` variant
+doesn't exist — the polymorphic-return shape has no leaf
+representation in the strict-typed return enum. Distinct from N4
+(input-side); related family but different architectural moves.
+
+**Confirmed N6 consumers (4 functions):**
+- `yaml.parse(text) -> Result<any>` — `crates/shape-runtime/src/stdlib/yaml.rs:67-79`
+- `toml.parse(text) -> Result<any>` — `crates/shape-runtime/src/stdlib/toml_module.rs:78-106`
+- `msgpack.decode(data) -> Result<any>` — `crates/shape-runtime/src/stdlib/msgpack_module.rs:81-113`
+- `msgpack.decode_bytes(data) -> Result<any>` — same module, lines 142-185
+
+**N6 architectural shape (four options for supervisor sign-off):**
+
+- **N6-α (ConcreteReturn::Any(Arc<HeapValue>) variant):**
+  add a polymorphic-leaf variant that holds an opaque
+  `Arc<HeapValue>` payload. The dispatcher's `ConcreteReturn → slot push`
+  path projects the Arc<HeapValue> into the slot bits. Body returns
+  `TypedReturn::Ok(ConcreteReturn::Any(arc))` where `arc` carries
+  the recursive HeapValue tree. **Refused-on-watchlist
+  consideration:** same shape as N4-α — re-introduces polymorphic-
+  payload-at-the-leaf. Structural argument is identical: the Arc<HeapValue>
+  is the HeapValue enum, not a ValueWord shim, and consumers
+  (Shape user code reading the Result) pattern-match against
+  HeapValue variants which IS strict-typed.
+- **N6-β (Shape API split — separate typed parse functions):**
+  `msgpack.decode_to_json(data) -> Result<Json>` (typed Json enum,
+  same shape as `json.parse` already returns), replacing the
+  polymorphic `decode(): Result<any>`. Same strategy for yaml /
+  toml. Eliminates any-output entirely at the user-facing API.
+  Preserves strict typing; loses the "decode whatever the input is
+  natively" generality.
+- **N6-γ (Type-erase via TypedObject schema lookup at runtime):**
+  decode result is wrapped in a `TypedObject` with a synthetic
+  schema that mirrors the discovered shape. Adds runtime schema
+  registration cost; preserves user-side pattern matching by
+  schema_id. Mid-complexity option.
+- **N6-δ (Force callers to know specific shape):**
+  `msgpack.decode_object(): Result<HashMap<string, any>>` for
+  object payloads, `msgpack.decode_array(): Result<Array<any>>`
+  for array payloads, etc. Splits API by anticipated payload
+  shape. Loses generality; API explosion.
+
+**Cross-N4/N6 family observation (load-bearing for supervisor
+batch sign-off):** N4 + N6 are tightly coupled architecturally.
+β-style options (Shape API split) for both N4 and N6 require
+coordinated user-API redesign. α-style options (polymorphic
+Arc<HeapValue> at leaf) for both N4 and N6 share the watchlist
+question of "is this dynamic-tag-decode or strict-typed enum
+dispatch?". Supervisor will likely address as a coordinated
+cluster decision — recommended to surface together rather than
+sign off independently.
+
+**Updated HashMap-marshal cluster sub-decision queue (binding):**
+
+1. **Storage shape: P1(b) two-buffer reusing Phase 2d Array shapes.**
+   **LANDED at `6cd9181`** (Step 1 architectural extension; eager-
+   bucket-only refinement; shape_id deferred). (Stage C P-choice.)
+
+2. **HashMap structural_eq/equals.** Deferred to shape-vm cleanup
+   workstream's HashMap user-API completion. (See prior follow-on
+   subsection.)
+
+3. **shape_id hidden-class fast-path optimization.** Deferred to
+   separate optimization workstream. (See HashMap-marshal entry's
+   audit-grounded correction subsection.)
+
+4. **N4: any-input typed marshal.** Confirmed consumers: 6 (this
+   subsection's enumeration). **AUDIT RECOMMENDATION (pending
+   supervisor sign-off):** N4-β (Shape API split) preferred on
+   structural-purity grounds — eliminates the any-input shape
+   entirely rather than reintroducing polymorphic-payload at the
+   body type. N4-α reconsidered if the user-API split is judged
+   too disruptive at user-API layer. N4-γ (discriminator) third
+   choice. Coordinate with N6.
+
+5. **N6: any-output typed marshal.** Confirmed consumers: 4 (this
+   subsection's enumeration). **AUDIT RECOMMENDATION (pending
+   supervisor sign-off):** N6-β (Shape API split — separate typed
+   parse functions returning Json or per-shape concrete types)
+   preferred on structural-purity grounds — eliminates the any-
+   output shape entirely. N6-α reconsidered if the user-API split
+   is judged too disruptive. Coordinate with N4. **Cross-cluster
+   dependency on shape-runtime-side json.rs typed Json enum
+   precedent (already shipping at `crates/shape-runtime/stdlib-src/core/json_value.shape`)
+   — supports N6-β feasibility.**
+
+**Sub-decision queue items remain on-record-only.** Adding to the
+queue ≠ approval to execute. Each item requires its own surface-
+and-decide round-trip with audit-1+2+3 binding pre-work +
+supervisor sign-off + structural reasoning.
+
+**Cross-cluster note (intrinsics-typed-CC interlock):** the prior
+N5 subsection (`crates/shape-runtime/src/stdlib/multi_table/functions.rs`
+ModuleContext access) has a footnote identifying N4 as cross-
+cluster-dependent. This N4 + N6 subsection makes that explicit:
+**N4 + N6 belong to HashMap-marshal cluster's queue**;
+intrinsics-typed-CC's N1/N2/N3/N5 stay in that cluster's queue.
+Cross-cluster cluster-decomposition-DAG (per finding #12) preserved.
+
+**Disposition for this subsection:** N4 + N6 added to HashMap-
+marshal cluster queue. Step 3b/3c/3e (msgpack/yaml/toml) deferred
+inline pending N4 + N6 sign-offs. Step 3a csv (LANDED at `fbe6155`,
+csv stub-activation) and Step 3d json (post-re-audit migration)
+unblocked since neither has any-input or any-output concerns.
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
