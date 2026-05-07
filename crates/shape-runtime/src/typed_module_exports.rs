@@ -86,6 +86,22 @@ pub enum ConcreteReturn {
     Bytes(Vec<u8>),
     /// HashMap with string keys and string values.
     HashMapStringString(Vec<(String, String)>),
+    /// HashMap with string keys and heap-allocated values (Stage C
+    /// HashMap-marshal P1(b), 2026-05-07). Polymorphic-value form
+    /// covering 8 of 9 stdlib body consumers (json/yaml/toml/msgpack/
+    /// xml-attributes/http-headers/http-options + xml-node-attributes).
+    /// Each element is an opaque `Arc<HeapValue>`; the body is
+    /// responsible for ensuring all values share the same statically-
+    /// declared element type.
+    ///
+    /// Discriminator-level homogeneity per option ε pattern: there is
+    /// **one** `ConcreteReturn::HashMapStringHeapValue` matching the
+    /// `HeapValue::HashMap(HashMapData)` storage variant.
+    /// Per-element-kind variants (`HashMapStringDataTable` etc.) are
+    /// rejected on the same grounds as the parametric-NativeKind
+    /// pattern — see `docs/defections.md` HashMap-marshal entry's
+    /// audit-grounded correction subsection.
+    HashMapStringHeapValue(Vec<(String, Arc<shape_value::heap_value::HeapValue>)>),
     /// `DataTable` heap handle — opaque columnar table from
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
@@ -192,6 +208,13 @@ pub enum ConcreteType {
     /// `Array<int>` semantically (each element a u8 widened to i64).
     Bytes,
     HashMapStringString,
+    /// `HashMap<string, *>` with heap-allocated values (Stage C
+    /// HashMap-marshal P1(b), 2026-05-07). The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`HashMap<string, Json>`, `HashMap<string, any>`, etc.);
+    /// element-kind homogeneity is a body-side type contract per the
+    /// option ε pattern.
+    HashMapStringHeapValue(String),
     /// Heterogeneous object built from string→typed pairs (materialized
     /// as a `HashMap`).
     Object,
@@ -248,6 +271,7 @@ impl ConcreteType {
             ConcreteType::ArrayHeapValue(s) => s.clone(),
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
+            ConcreteType::HashMapStringHeapValue(s) => s.clone(),
             ConcreteType::Object => "object".to_string(),
             ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),

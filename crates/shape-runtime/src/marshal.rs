@@ -515,6 +515,124 @@ impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     }
 }
 
+// ────── HashMap FromSlot impls (Stage C P1(b), 2026-05-07) ──────
+//
+// Stage C HashMap-marshal P1(b) per supervisor sign-off
+// (`docs/defections.md` 2026-05-07 HashMap-marshal entry +
+// audit-grounded correction subsection).
+//
+// Two `FromSlot` impls cover the dynamic-keys consumer surface (8 of 9
+// stdlib body cases per Audit-1):
+//
+//   `Vec<(Arc<String>, Arc<String>)>`     — string-string maps (csv.parse_records,
+//                                            csv.stringify_records, http inner
+//                                            headers, xml attributes)
+//   `Vec<(Arc<String>, Arc<HeapValue>)>`  — polymorphic-value maps (json
+//                                            Json::Object, yaml, toml, msgpack,
+//                                            xml node, http options arg)
+//
+// `NATIVE_KIND` stays `Ptr(HeapKind::HashMap)` for both — the value-element
+// width discriminator lives in the body-side Rust type (option ε pattern),
+// not in slot bits or `NativeKind`. Same consistency-check residual as
+// Phase 2d Array's `Vec<Arc<String>>`/`Vec<Arc<HeapValue>>` impls: the
+// in-body pattern match panics on a wrong inner-element shape (currently
+// any HashMap stores `Arc<HeapValue>` values; the string-string variant
+// pattern-matches each value as `HeapValue::String(_)` and unwraps).
+//
+// **No `ToSlot` impls in this commit** per supervisor instruction. Body
+// returns of `ConcreteReturn::HashMapStringString` /
+// `ConcreteReturn::HashMapStringHeapValue` are projected via the
+// shape-vm dispatcher's `ConcreteReturn → slot push` path (shape-vm
+// cleanup workstream territory, not Stage C scope). Adding `ToSlot`
+// impls now would create dead-at-marshal-layer trait surface (per X4
+// finding) AND specifically refused for `HashMapData` per supervisor
+// sign-off ("no direct ToSlot for HashMapData; route through
+// ConcreteReturn::HashMapStringHeapValue dispatch").
+
+/// Read a `Vec<(Arc<String>, Arc<String>)>` from a
+/// `NativeKind::Ptr(HeapKind::HashMap)` slot.
+///
+/// Body-type pattern: bodies declaring `args: Vec<(Arc<String>, Arc<String>)>`
+/// receive an owned pair-list with insertion order preserved. Each value is
+/// expected to be `HeapValue::String(_)`; mismatch panics as the
+/// spec-permitted consistency check (`docs/runtime-v2-spec.md`).
+impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::HashMap);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above — slot bits were proven by
+        // the dispatcher to point to a valid `Arc<HeapValue>`.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::HashMap(d) => {
+                    d.keys
+                        .data
+                        .iter()
+                        .zip(d.values.data.iter())
+                        .map(|(k, v)| match &**v {
+                            shape_value::HeapValue::String(s) => (Arc::clone(k), Arc::clone(s)),
+                            other => panic!(
+                                "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap value at \
+                                 key '{}' is HeapValue::{:?}, not String. Body's parameter \
+                                 type Vec<(Arc<String>, Arc<String>)> requires string-typed \
+                                 values. Marshal kind contract violated by caller.",
+                                k,
+                                other.kind()
+                            ),
+                        })
+                        .collect()
+                }
+                other => panic!(
+                    "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
+                     HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
+/// Read a `Vec<(Arc<String>, Arc<HeapValue>)>` from a
+/// `NativeKind::Ptr(HeapKind::HashMap)` slot.
+///
+/// Body-type pattern: bodies declaring
+/// `args: Vec<(Arc<String>, Arc<HeapValue>)>` receive an owned pair-list
+/// with insertion order preserved and polymorphic-typed values. Each
+/// element is an opaque `Arc<HeapValue>`; the body is responsible for
+/// pattern-matching the inner kind per the option ε contract. No
+/// element-kind constraint at the marshal boundary.
+impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
+    const NATIVE_KIND: NativeKind =
+        NativeKind::Ptr(shape_value::HeapKind::HashMap);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::HeapValue;
+        // SAFETY: see Vec<u8>::from_slot above.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            let arc_hv = Arc::from_raw(ptr);
+            match &*arc_hv {
+                shape_value::HeapValue::HashMap(d) => d
+                    .keys
+                    .data
+                    .iter()
+                    .zip(d.values.data.iter())
+                    .map(|(k, v)| (Arc::clone(k), Arc::clone(v)))
+                    .collect(),
+                other => panic!(
+                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \
+                     HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",
+                    other.kind()
+                ),
+            }
+        }
+    }
+}
+
 // ────── typed-array Arc<TypedBuffer<T>> zero-copy FromSlot/ToSlot (option α + ε) ──────
 //
 // Stage B (`docs/defections.md` 2026-05-07 — Arc<TypedBuffer<T>> zero-copy

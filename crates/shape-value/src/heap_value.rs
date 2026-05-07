@@ -462,6 +462,142 @@ impl IoHandleData {
     }
 }
 
+// ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
+
+/// HashMap storage — two parallel Phase 2d Array buffers (string keys +
+/// heap-allocated values) plus an eager bucket-index for O(1) lookup.
+///
+/// Stage C HashMap-marshal P1(b) per supervisor sign-off. Reuses Phase
+/// 2d Array's `TypedBuffer<Arc<String>>` and `TypedBuffer<Arc<HeapValue>>`
+/// shapes verbatim — no new buffer-storage type. Insertion order is the
+/// canonical storage; the `index` is a sidecar acceleration structure for
+/// `executor/objects/hashmap_methods.rs`-style O(1) lookup.
+///
+/// **Eager bucket-only at first landing** (per supervisor sign-off):
+/// `index` is built at construction and maintained incrementally on
+/// insert/remove. The `shape_id` hidden-class fast-path that the
+/// pre-bulldozer arch used for ≤64-string-keyed-maps is **deferred to a
+/// separate optimization workstream** — refused here as
+/// architectural-decision-bundling per supervisor watchlist.
+///
+/// Element-type discrimination is body-side via Rust types: `FromSlot`
+/// impls for `Vec<(Arc<String>, Arc<String>)>` (string-string) and
+/// `Vec<(Arc<String>, Arc<HeapValue>)>` (polymorphic-value) both decode
+/// the same `HeapValue::HashMap` slot, with the Vec element type pinning
+/// which payload pattern the body expects. Same option ε pattern as
+/// Phase 2d Array's `Vec<Arc<String>>` / `Vec<Arc<HeapValue>>` impls.
+#[derive(Debug)]
+pub struct HashMapData {
+    /// Insertion-ordered keys (string-typed buffer).
+    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
+    /// Insertion-ordered values (heap-allocated, polymorphic at the
+    /// HeapValue arm — body-side `FromSlot` impl pins the element shape).
+    pub values: Arc<crate::typed_buffer::TypedBuffer<Arc<HeapValue>>>,
+    /// Eager bucket-index: hash → list of indices into `keys`/`values`
+    /// arrays. Enables O(1) lookup at the user-facing `map.get(key)`
+    /// path. Hash is computed via FNV-1a over the key string bytes.
+    pub index: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl HashMapData {
+    /// Build an empty HashMapData with no entries.
+    pub fn new() -> Self {
+        Self {
+            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            values: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Build from parallel `Vec`s of keys and values, computing the
+    /// bucket index eagerly. Panics if `keys.len() != values.len()`.
+    pub fn from_pairs(keys: Vec<Arc<String>>, values: Vec<Arc<HeapValue>>) -> Self {
+        assert_eq!(
+            keys.len(),
+            values.len(),
+            "HashMapData::from_pairs: keys/values length mismatch"
+        );
+        let mut index: std::collections::HashMap<u64, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (i, k) in keys.iter().enumerate() {
+            index
+                .entry(fnv1a_hash(k.as_bytes()))
+                .or_default()
+                .push(i as u32);
+        }
+        Self {
+            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(keys)),
+            values: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(values)),
+            index,
+        }
+    }
+
+    /// Number of entries.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.keys.data.len()
+    }
+
+    /// Whether the map is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.keys.data.is_empty()
+    }
+
+    /// Look up a value by string key. O(1) via the bucket index plus a
+    /// short bucket scan for collision disambiguation.
+    pub fn get(&self, key: &str) -> Option<&Arc<HeapValue>> {
+        let hash = fnv1a_hash(key.as_bytes());
+        let bucket = self.index.get(&hash)?;
+        for &idx in bucket {
+            let i = idx as usize;
+            if self.keys.data[i].as_str() == key {
+                return Some(&self.values.data[i]);
+            }
+        }
+        None
+    }
+
+    /// Whether the map contains the given key.
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl Default for HashMapData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for HashMapData {
+    fn clone(&self) -> Self {
+        // Arc::clone on the buffers (shared structural sharing is fine —
+        // HashMapData is treated as immutable at the marshal boundary;
+        // mutation goes through Arc::make_mut on the shape-vm side, out
+        // of this crate's scope).
+        Self {
+            keys: Arc::clone(&self.keys),
+            values: Arc::clone(&self.values),
+            index: self.index.clone(),
+        }
+    }
+}
+
+/// FNV-1a hash for byte slices. Matches the `v2/typed_map.rs` hash
+/// function so that key-hash semantics are consistent across the
+/// HashMap-marshal layer and any future cross-cluster perf path.
+#[inline]
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 // ── TypedArray buckets ──────────────────────────────────────────────────────
 
 /// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
@@ -867,6 +1003,7 @@ impl Clone for HeapValue {
             HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
             HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
             HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
+            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
         }
     }
 }
@@ -969,6 +1106,16 @@ impl fmt::Display for HeapValue {
                 v.ptr
             ),
             HeapValue::TypedArray(ta) => write!(f, "{}", ta),
+            HeapValue::HashMap(d) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in d.keys.data.iter().zip(d.values.data.iter()).enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\": {}", k, v)?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }

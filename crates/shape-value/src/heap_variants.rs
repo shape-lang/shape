@@ -71,6 +71,7 @@ macro_rules! define_heap_types {
             NativeScalar,  // 14
             NativeView,    // 15
             Char,          // 16
+            HashMap,       // 17  (Stage C P1(b), 2026-05-07)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -122,6 +123,15 @@ macro_rules! define_heap_types {
             TypedArray($crate::heap_value::TypedArrayData),
             Temporal($crate::heap_value::TemporalData),
             TableView($crate::heap_value::TableViewData),
+            // ===== Stage C HashMap-marshal P1(b) =====
+            /// HashMap with string keys + heap-allocated values.
+            /// Two-buffer storage reusing Phase 2d Array shapes (keys via
+            /// `TypedArrayData::String`-equivalent buffer; values via
+            /// `TypedArrayData::HeapValue`-equivalent buffer) plus an eager
+            /// bucket-index for O(1) `map.get(key)`. See
+            /// `$crate::heap_value::HashMapData` for the storage shape.
+            /// Stage C P1(b), 2026-05-07.
+            HashMap(std::sync::Arc<$crate::heap_value::HashMapData>),
         }
 
         impl HeapValue {
@@ -146,6 +156,7 @@ macro_rules! define_heap_types {
                     HeapValue::TypedArray(..) => HeapKind::TypedArray,
                     HeapValue::Temporal(..) => HeapKind::Temporal,
                     HeapValue::TableView(..) => HeapKind::TableView,
+                    HeapValue::HashMap(..) => HeapKind::HashMap,
                 }
             }
 
@@ -170,6 +181,7 @@ macro_rules! define_heap_types {
                     HeapValue::TypedArray(ta) => ta.is_truthy(),
                     HeapValue::Temporal(td) => td.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
+                    HeapValue::HashMap(d) => !d.is_empty(),
                 }
             }
 
@@ -200,6 +212,7 @@ macro_rules! define_heap_types {
                     HeapValue::TypedArray(ta) => ta.type_name(),
                     HeapValue::Temporal(td) => td.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
+                    HeapValue::HashMap(_) => "hashmap",
                 }
             }
         }
