@@ -1393,6 +1393,123 @@ on-record; sub-decision queue established. Forward intrinsic file
 migrations follow the same pattern: audit per file, migrate clean
 intrinsics, queue polymorphic ones.
 
+### 2026-05-07 — Sub-decision queue extension: M1-split inventory + N1 Option<T> marshal
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The five prior subsections (Q2 evaluation methodology shift +
+Q2-C correction + Q2 lifecycle three-stage + predicted error-drop
+calibration + partial-migration pattern + sub-decision queue) stay
+on-record.** This subsection extends the sub-decision queue
+inventory and adds **item #5 (N1 Option<T> typed marshal)**,
+surfaced during the rolling.rs / scan.rs / recurrence.rs batched-3
+audit (Commit X10 = `1f920ca`).
+
+**Audit during rolling.rs / scan.rs / recurrence.rs batched-3
+preparation revealed:**
+
+1. **M1-split inventory under-counted.** The original queue item #1
+   listed `sum`/`min`/`max` as the polymorphic-return cases. The
+   forward audit on `rolling.rs` revealed `intrinsic_rolling_sum`,
+   `intrinsic_rolling_min`, `intrinsic_rolling_max` carry the
+   identical polymorphic-input shape (`try_extract_i64_slice` fast
+   path → `option_i64_vec_to_nb` validity-bitmap return for sum;
+   raw `Vec<i64>` for min/max — but min/max use `option_i64_vec_to_nb`
+   for window-overrun pad cases too, see `rolling.rs:151,201`).
+   **Inventory extended from 5 to 8 functions:** math `sum`/`min`/
+   `max` + array_transforms `diff`/`cumsum` + rolling `sum`/`min`/
+   `max`. Validity-aware-return-variant sub-question now has two
+   confirmed consumers (`array_transforms::diff` and
+   `rolling::rolling_sum`); `rolling_min`/`max` need verification at
+   M1-split execution time whether their pad-case use of
+   `option_i64_vec_to_nb` requires the same validity treatment or
+   can use a default-value fallback.
+
+2. **A new architectural sub-decision: N1 Option<T> typed marshal.**
+   Three intrinsic bodies (scan.rs's `intrinsic_scan` initial-value
+   third arg; recurrence.rs's `intrinsic_linear_recurrence`
+   initial_value third arg; potentially future intrinsics with
+   nullable-scalar-Shape-side optional args) take an optional value
+   that is either a number or null at the Shape-side language level.
+   Body code uses `args[i].is_none()` to discriminate. Current
+   marshal-API surface has no `FromSlot for Option<T>` impl
+   (verified via `rg "impl FromSlot for"
+   crates/shape-runtime/src/marshal.rs`: only `i64`, `f64`, `bool`,
+   `Arc<String>`, `Arc<DataTable>`, `Arc<IoHandleData>`, `Vec<u8>`,
+   `Vec<i64>`, `Vec<Arc<String>>`, `Vec<Arc<HeapValue>>`,
+   `Arc<AlignedTypedBuffer>`, `Arc<TypedBuffer<i64>>`,
+   `Arc<TypedBuffer<u8>>`). `register_typed_fn_N_full`'s `required:
+   false` + `default_snippet` synthesizes a typed default at compiler
+   emission time (per `marshal.rs:933-935` "Bodies stay typed — the
+   dispatcher always sees N typed args because the compiler
+   synthesizes any missing trailing optional before emitting the
+   call"); that solves arity-optional but not value-nullable.
+
+**Updated sub-decision queue (binding):**
+
+1. **M1-split: per-element-type intrinsics for polymorphic-input
+   intrinsics (now 8 functions).** Math `sum`/`min`/`max` +
+   array_transforms `diff`/`cumsum` + rolling `sum`/`min`/`max`.
+   Cross-crate change to shape-vm compiler emission +
+   classification logic + new opcode discriminants. Validity-aware-
+   return-variant sub-question for `diff` + `rolling_sum` (and
+   possibly `rolling_min`/`max`). Architectural extension; out of
+   M-A scope. (Prior queue item #1, inventory extended.)
+
+2. **char_code multi-input-type dispatch (`Char` vs `String`).**
+   Unchanged. (Prior queue item #2.)
+
+3. **bspline2_3d_batch generic-array consumer audit.** Unchanged.
+   (Prior queue item #3.)
+
+4. **Possible others discovered during subsequent intrinsic file
+   migrations.** (Prior queue item #4.)
+
+5. **N1: `FromSlot for Option<T>` typed marshal.** Marshal-API
+   extension to add `Option<T>` `FromSlot` for at-minimum
+   `Option<f64>` (and likely `Option<i64>`, `Option<bool>`).
+   Architectural shape: `from_slot()` checks `slot.is_none()` at
+   decode time and returns `Option::None` if so, `Some(T::from_slot(slot))`
+   otherwise. **NATIVE_KIND must remain a single value** —
+   discriminator on null-vs-value at the slot decode layer, NOT a
+   sentinel within `T`'s value space (NaN-as-null, Infinity-as-null,
+   etc. all on watchlist as "Sentinel values for absent optional
+   args"). Confirmed consumers: `scan.rs::intrinsic_scan`'s
+   third arg (initial value, with additional bool-or-number 3-way
+   polymorphism that even N1 alone doesn't resolve), and
+   `recurrence.rs::intrinsic_linear_recurrence`'s third arg
+   (initial_value, plain `Option<f64>`). scan.rs has zero
+   stdlib/package consumers per post-bulldozer rg
+   (`__intrinsic_scan` registered at `intrinsics/mod.rs:320` with
+   no callers in `stdlib-src/` or `packages/`); deletion-candidate
+   for shape-vm cleanup workstream, which may reduce N1's
+   urgency. Architectural extension; out of M-A scope; surface-
+   and-decide round-trip needed.
+
+**Sub-decision queue items remain on-record-only.** Adding to the
+queue ≠ approval to execute. Each item requires its own surface-
+and-decide round-trip with audit-1+2+3 binding pre-work +
+supervisor sign-off + structural reasoning. The queue is
+documentation of known forward sub-decisions, not a work plan.
+
+**rolling.rs commit landed (Commit X10 = `1f920ca`):** 3 of 6
+intrinsics migrated to typed marshal (`__intrinsic_rolling_mean`,
+`__intrinsic_rolling_std`, `__intrinsic_ema`); 3 deferred
+(`__intrinsic_rolling_sum`/`min`/`max`). Predicted error drop:
+0 ± 1 (partial-migration pattern; legacy bodies retain ValueWord
+import). Measured: 0. **Within window.** Decision-heavy pacing
+pattern is binding baseline; per-file 0-drop is normal not anomaly.
+
+**scan.rs and recurrence.rs full-defer:** both blocked on N1
+(architectural sub-decision; out of M-A scope). No commits land
+for these files until N1 round-trip resolves. scan.rs additionally
+has a bool-or-number 3-way polymorphism on its initial-value
+third arg that even N1 alone may not resolve; second-order
+sub-question to evaluate at N1 sign-off time.
+
+**Disposition for this subsection:** sub-decision queue inventory
+extended; N1 added as item #5; rolling.rs partial migration
+landed; scan.rs and recurrence.rs full-defer pending N1.
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
