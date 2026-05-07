@@ -292,6 +292,228 @@ duplication finding (3 functions, ~50 lines) is captured before
 the cleanup commits land; without this entry the rename pattern
 risks recurring at later type_schema/mod.rs work.
 
+### 2026-05-07 — N9 cluster close: refined α landed; Rule G corollary codified; supervisor binder-set self-correction recorded
+
+In-place dated subsection per finding #11 in-place-update discipline.
+**The original C1 disposition entry (above) stays on-record verbatim.**
+This subsection captures the cluster-close on-record record:
+empirical citations from C2/C3/C4, the Rule G corollary codification,
+the supervisor's binder-set self-correction, refined α landing, and
+forward-discipline implications for cluster #1.
+
+#### 1. C2 measured -4 + Rule G primary case empirical citation
+
+`typed_object_from_nb_pairs` deletion (commit `2f78994`). The deleted
+function's body had **4 fully-qualified `shape_value::ValueWord`
+citations** at lines 235-237, 245, 267 (signature: 2 lines for
+`fields: &[(&str, shape_value::ValueWord)]) -> shape_value::ValueWord`;
+HashMap type at 245; `shape_value::ValueWord::from_heap_value`
+callsite at 267). All 4 were distinct E0425/E0433 error sites in the
+67-error baseline. Deletion cleared all 4.
+
+**Predicted: 0 (Rule A pure-additive deletion of dead-code duplicate).**
+**Measured: -4.** Calibration miss out-of-window vs original framing.
+
+**Self-diagnosis (audit-time-pre-commit-cargo-check; catch-layer #10
+in supervisor ledger)**: Rule A's framing applies to deletion of unused
+functions whose bodies don't reference deleted symbols. When the
+deletion target's body cites deleted symbols via fully-qualified path,
+each usage is a distinct E0425/E0433 site, and deletion clears
+proportionally. This is broken-code-deletion (Rule C-class), not
+pure-additive-deletion (Rule A-class).
+
+**Rule G primary case CODIFIED**:
+> When deletion target cites deleted symbols via FULLY-QUALIFIED path
+> (e.g., `shape_value::ValueWord`, `shape_value::ValueBits::from_raw`),
+> each usage is a distinct error site; deletion clears proportionally
+> to citation count.
+
+#### 2. C3 measured 0 + Rule G null case empirical citation (FQ-vs-bare distinction)
+
+`typed_object_to_hashmap` delegate deletion (commit `0a55c9c`). The
+deleted delegate had a single signature line citing **bare `ValueWord`**
+twice: `pub fn typed_object_to_hashmap(value: &ValueWord) -> Option<HashMap<String, ValueWord>>`.
+Bare-name `ValueWord` is brought in by `use shape_value::{ValueWord, ValueWordExt}`
+at line 22, which itself is E0432-failing (the imported symbols are
+deleted from shape_value crate root).
+
+**Predicted: -2 (Rule G applied to delegate's signature: 2 ValueWord
+citations).**
+**Measured: 0.** Calibration miss out-of-window vs revised Rule G
+framing.
+
+**Self-diagnosis (audit-time-pre-commit-cargo-check; catch-layer #11
+in supervisor ledger; second consecutive audit-time catch in N9)**:
+when the import itself is E0432-failing, all bare-name uses of the
+imported symbol are absorbed into the single E0432 site at the import
+line. They do NOT produce distinct E0425/E0433 errors. Deleting
+bare-name uses doesn't reduce the cargo error count.
+
+**Rule G null case CODIFIED**:
+> When deletion target cites deleted symbols via UNRESOLVED-IMPORTED
+> bare name (the bare name brought in by an E0432-failing `use`),
+> bare-name uses are absorbed into the import error; deletion clears
+> 0 distinct sites.
+
+Both Rule G primary + null case empirically grounded by C2 (`2f78994`)
+and C3 (`0a55c9c`) respectively.
+
+#### 3. C4 audit-time STOP-AND-SURFACE on binder conflict
+
+C4 attempted (option β) per the original supervisor PB 2/4 scope:
+inline `nb_to_slot` body + delete `pub(crate) fn nb_to_slot` + delete
+stale import at line 22. Attempted FQ-conversion of 4 bare-name uses
+in `typed_object_from_pairs` (line 192 ×2 signature, line 200 HashMap
+type, line 222 `from_heap_value` callsite) to preserve the public
+signature after import deletion.
+
+**Pre-commit cargo check measured +3 net (catastrophic; out-of-window).**
+
+The supervisor's PB 2/4 sub-actions ("delete stale import" + "preserve
+public signature") were mutually exclusive while the public signature
+used bare-name resolution from the to-be-deleted import. Deleting the
+import + FQ-converting the bare-name uses converted previously-absorbed
+errors into distinct FQ errors.
+
+**STOP-AND-SURFACE invoked** (catch-layer at audit-time-pre-commit; the
+binder conflict was caught BEFORE commit, not after). Reverted to clean
+HEAD `0a55c9c` (C3); C4 WIP preserved at stash@{0} as Rule G corollary
+empirical citation reference.
+
+4 options surfaced to team-lead → supervisor (α/β/γ/δ); supervisor
+disposed REFINEMENT-2A.
+
+#### 4. Supervisor's PB 2/4 Rule F miss self-correction + struck sub-action
+
+Verbatim from REFINEMENT-2A:
+> Honest binder correction: my PB 2/4 'delete stale import at line 22'
+> sub-action was a Rule F miss. The honest framing IS: 'stale-import
+> deletion is cluster #1 territory; preserve until cluster #1 picks up
+> signature migration.' Strike that sub-action from PB 2/4's C4 scope.
+> Updated C4: inline nb_to_slot body + delete the fn definition only.
+> Import line 22 stays.
+
+This is a significant on-record event: the supervisor explicitly self-
+corrected at the binder-set layer; the catch-layer-flip allowed audit-
+time pre-commit catch (mine, #11) of supervisor-side framing flaw
+before it caused damage to the cluster's error trajectory. The
+framework working as designed.
+
+**Cluster scope after correction**: source-side execution = inline
++ delete fn (only). Stale import + public signature migration both
+deferred to cluster #1 territory.
+
+#### 5. Refined α landing at -1 measured
+
+C4 commit `b77c75b`. Per supervisor REFINEMENT-2A disposition:
+- Inlined `nb_to_slot` body verbatim at the call site in
+  `typed_object_from_pairs` (preserving is_heap branch +
+  unified-heap-bit-47 + cold-path `as_heap_ref` + raw-bits fallback
+  verbatim)
+- Deleted `pub(crate) fn nb_to_slot(...)` (former lines 297-319)
+- KEPT `use shape_value::{ValueWord, ValueWordExt}` at line 22
+- Used existing `value` binding inside the inlined body without
+  introducing any new FQ-typed annotation (Rust auto-deref handles
+  method calls)
+
+**Predicted: -1** (function signature FQ cleared by deletion; ValueBits
+FQ moves to inline location, error site re-emerges at new line; no
+new FQ bindings introduced; import retained).
+**Measured: -1.** **In window** [-1, ±0]. Structural derivation
+matched empirical result exactly.
+
+#### 6. Rule G corollary CODIFIED (+N-1 formula; structural derivation; 22+ file systemic property)
+
+Verbatim from REFINEMENT-2A:
+> When a stale import provides bare-name resolution for downstream
+> uses citing deleted-symbol types, deleting the import + FQ-
+> converting the bare-name uses converts previously-absorbed errors
+> into distinct FQ errors. Net change = **+N-1** where N is bare-name
+> use count.
+
+**Empirical citation**: my failed C4 β attempt (preserved at
+stash@{0}) — N=4 bare-name uses in `typed_object_from_pairs`;
+import deletion + FQ conversion measured +3 net = +N-1 = 3.
+
+**Naming**: "Rule G corollary" (parallel-letters; corollary signals
+strict-superset relationship to Rule G primary + null case).
+
+**Empirical strength**: 1 citation across 1 shape; sufficient for
+codification because structural derivation from the compile-error-
+model is explicit (E0432 absorption → E0425 distinct sites; clean
+compile-error reasoning).
+
+**Systemic application**: 22+ files in shape-runtime confirm post-
+W-series codebase property (every file with `use shape_value::{ValueWord,
+ValueWordExt}` import + bare-name uses in module-level functions is
+subject to the corollary). This is not a typed_object_from_pairs
+localized issue.
+
+#### 7. NEW binder added by supervisor (Rule F application; bare-name-resolution-via-import dependency check)
+
+Verbatim:
+> ❌ Authorizing "delete stale import" + "preserve public signature"
+> as paired sub-actions in any future cluster scope without explicit
+> bare-name-resolution-via-import-dependency check (Rule F application;
+> the two are binder-conflicting whenever the public signature uses
+> bare-name resolution from the to-be-deleted import)
+
+Forward-discipline binder. Future clusters touching public signatures
++ import cleanup must reconcile bare-name-resolution-via-import
+dependency before authorizing both sub-actions.
+
+#### 8. Cluster total -5 within window
+
+| Commit | Action | Predicted | Measured | Delta from baseline |
+|---|---|---|---|---|
+| C1 (`a78ff8f`) | defections.md disposition entry | 0 | 0 | 67 → 67 |
+| C2 (`2f78994`) | delete typed_object_from_nb_pairs duplicate | 0 (Rule A) | -4 (Rule G primary) | 67 → 63 |
+| C3 (`0a55c9c`) | delete typed_object_to_hashmap delegate | -2 (Rule G applied incorrectly to bare-name signature) | 0 (Rule G null case) | 63 → 63 |
+| C4 (`b77c75b`) | inline nb_to_slot body + delete fn (refined α) | -1 | -1 | 63 → 62 |
+| **Cluster total** | | -3 to -6 (supervisor original) | **-5** | **67 → 62** |
+
+Cluster total -5 lands at the favorable end of the original supervisor
+window [-3, -6]. Three audit-time catches (#10 + #11 in this cluster;
+catch-layer-flip framework fully validated for the N9 workstream).
+
+#### 9. Forward-discipline implications for cluster #1
+
+Cluster #1 type_schema territory will inherit:
+- **Stale import at line 22**: deletion deferred from N9 per
+  supervisor's binder-set self-correction. Cluster #1 absorbs when
+  the public signature migration lands (the bare-name uses in
+  `typed_object_from_pairs` either FQ-convert or migrate to a typed
+  alternative simultaneously with import deletion).
+- **Public signature migration**: `typed_object_from_pairs` keeps
+  `&[(&str, ValueWord)]` for now. Cluster #1 decides whether to migrate
+  to `&[(&str, Arc<HeapValue>)]` (option A from N9 audit) or keep as-is
+  with FQ conversion. **Both decisions must be paired** per the new
+  Rule F application binder.
+- **Readback path migration**: `typed_object_to_hashmap_nb` body still
+  has the raw-bits-as-ValueWord-representation invariant
+  (`unsafe { ValueWord::clone_from_bits(slots[i].raw()) }` at line 281).
+  Schema-driven readback (mirror of shape-vm's `read_slot_nb`) is the
+  cluster #1 architectural shape; ε option from N9 audit.
+- **Twin parallel-impls in shape-vm** (`object_creation.rs:317`,
+  `exceptions/mod.rs:26`): unchanged. Move with shape-vm cascade
+  (separate workstream, post-cluster-#1).
+- **Ghost methods** (`from_value_word`, `as_heap_nb`): unchanged. Out
+  of N9 scope; pre-existing compile failures upstream of shape-runtime
+  --lib's 67-error baseline.
+
+The N9 cluster's leftover state for cluster #1 is **explicitly tracked
+here** so the next session can read once and trust the framing (mirror
+of the HashMap-marshal full-entry pattern).
+
+#### Cluster-close summary
+
+N9 type_schema-slot-construction-cleanup workstream COMPLETE for this
+session. Source-side execution: 4 commits (C1 defections + C2 + C3 +
+C4); cluster total -5; all supervisor refusals honored; 3 forward-
+calibration codifications (Rule G primary, Rule G null case, Rule G
+corollary) anchored by empirical citations. Catch-layer #10 + #11
+both audit-time-pre-commit-cargo-check rank.
+
 ---
 
 ## 2026-05-07 — HashMap-marshal micro-cluster — named on-record (full entry)
