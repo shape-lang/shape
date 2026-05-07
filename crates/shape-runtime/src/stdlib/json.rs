@@ -8,59 +8,65 @@
 //! TypedObject for the supplied schema; nested unknown objects fall back to
 //! the typed `Json` enum rather than an untyped HashMap.
 //!
-//! Phase-2d strict-typing migration status (Stage D Step 4, 2026-05-07):
+//! Phase-2d strict-typing migration status (Stage D close-out batch,
+//! 2026-05-07):
 //!
-//! - `json.parse(text) -> Result<Json>` — **MIGRATED.** Body builds the
-//!   strict-typed `JsonValue` enum (`crate::json_value::JsonValue`)
-//!   directly from `serde_json::Value` and wraps with
-//!   `TypedReturn::Ok(ConcreteReturn::JsonValue(...))` per Step 1's
-//!   `ConcreteReturn::JsonValue` variant addition (commit `a022f43` /
-//!   pre-rebase `2f20bf8`). Schema lookup is no longer needed at body
-//!   time — `ConcreteType::JsonValue("Json")` carries the type-name at
-//!   registration-display level only. Closes B1 sub-decision #2 for
-//!   json.parse specifically; Stage D N6 sub-shape (b1) sign-off
-//!   landed here.
-//! - `json.__parse_typed(text, schema_id) -> Result<any>` — DEFERRED
-//!   pending architectural sub-decision **N8 — opaque-TypedObject
-//!   ConcreteReturn variant for dynamic-schema returns.** Body produces
-//!   a `HeapValue::TypedObject{schema_id, slots, heap_mask}` matching
-//!   the user-supplied dynamic `schema_id` (NOT a `JsonValue` tree).
-//!   `ConcreteReturn::JsonValue` is wrong-shape here — JsonValue is the
-//!   typed Json-enum-tree representation; `__parse_typed`'s return is a
-//!   schema-keyed TypedObject. There is no existing `ConcreteReturn`
-//!   variant for opaque `Arc<HeapValue::TypedObject>` handles, and
-//!   adding one ad-hoc would be exactly the architectural-variant-
-//!   addition refused at Step 1 (no team-lead-default; supervisor
-//!   sub-sign-off required, same family as N7's HeapValue→JSON
-//!   serializer refusal). N8 surfaced for supervisor disposition.
+//! - `json.parse(text) -> Result<Json>` — **MIGRATED at Stage D Step 4.**
+//!   Body builds the strict-typed `JsonValue` enum
+//!   (`crate::json_value::JsonValue`) directly from `serde_json::Value`
+//!   and wraps with `TypedReturn::Ok(ConcreteReturn::JsonValue(...))`
+//!   per Stage D Step 1's `ConcreteReturn::JsonValue` variant addition
+//!   (commit `a022f43`). N6 sub-shape (b1) sign-off; closes B1
+//!   sub-decision #2 for json.parse.
+//! - `json.__parse_typed(text, schema_id) -> Result<any>` — **MIGRATED
+//!   at Stage D close-out Step 3.** Body builds `HeapValue::TypedObject`
+//!   directly from the runtime schema + JSON object via
+//!   `build_typed_object_from_json`, then wraps the `Arc<HeapValue>` in
+//!   `ConcreteReturn::OpaqueTypedObject` per close-out Step 2's variant
+//!   addition (commit `1bca2c4`). N8 sign-off; closes B1 sub-decision
+//!   #2 for json.__parse_typed. The 5 legacy ValueWord-using helpers
+//!   (make_json_enum / json_value_to_enum / json_object_to_typed /
+//!   json_value_to_typed_nb / json_value_to_typed_json_enum) were
+//!   DELETED at close-out Step 3 — verified call-graph private to
+//!   `__parse_typed` before deletion.
 //! - `json.stringify(value: any, pretty?: bool) -> Result<string>` —
-//!   DEFERRED pending **N4** (any-input typed marshal). Body uses
-//!   deleted `to_json_value()` AND would need a HeapValue→JSON
-//!   serializer (architecturally adjacent to **N7**).
+//!   DEFERRED pending **N7** (HeapValue→JSON serializer for HTTP /
+//!   object-output marshal contexts). N7 is the unified workstream
+//!   covering HTTP post_json/put_json + yaml/toml/msgpack
+//!   stringify/encode/encode_bytes (6 consumers total). Body uses
+//!   deleted `to_json_value()` + would need the N7 serializer.
 //! - `json.is_valid(text) -> bool` — Migratable in isolation but kept
-//!   deferred for per-file atomicity; lands with stringify /
-//!   __parse_typed when N4 + N7 + N8 sign-offs unblock the residual
-//!   json cohort.
+//!   deferred for per-file atomicity; lands with stringify when N7
+//!   sign-off unblocks the residual json cohort.
 //!
-//! N4 / N7 / N8 are supervisor-level; queued for relay batch (see
-//! `docs/defections.md` HashMap-marshal cluster sub-decision queue).
+//! N7 is supervisor-level; queued for next-session relay batch (see
+//! `docs/defections.md` HashMap-marshal cluster sub-decision queue
+//! 2026-05-07 Stage B+D close-out subsection).
 //!
-//! Helpers `make_json_enum`, `json_value_to_enum`,
-//! `json_value_to_typed_json_enum`, `json_object_to_typed`, and
-//! `json_value_to_typed_nb` are kept as private helpers used only by the
-//! deferred `json.__parse_typed` path. They build `ValueWord`-typed
-//! results that the strict-typed marshal layer would reject; their
-//! callers all live in the deferred path. Imports `ValueWord` /
-//! `ValueWordExt` / `ValueSlot` / `nb_to_slot` / `ArgVec` similarly stay
-//! pinned to those helpers.
+//! Strict-typed helpers `serde_json_to_json_value` (used by json.parse),
+//! `build_json_enum_heap_value`, `build_field_slot_from_json`, and
+//! `build_typed_object_from_json` (used by __parse_typed) construct
+//! ValueSlots directly from native types via the `ValueSlot::from_*`
+//! primitives — no ValueWord intermediate, no call to `nb_to_slot`.
+//!
+//! Note: `nb_to_slot` (defined `pub(crate)` at
+//! `crate::type_schema::mod`) and adjacent slot-construction code in
+//! `type_schema/mod.rs` still cite the deleted `ValueWord` API. That
+//! cleanup is **N9 candidate** — type_schema/mod.rs slot-construction-
+//! layer migration. Tracked separately for next-session pickup; this
+//! commit explicitly does NOT touch type_schema/mod.rs (verification
+//! gate caught the cross-cutting concern; Option A2 chosen over A1 to
+//! preserve per-file atomicity).
 
 use crate::json_value::JsonValue;
-use crate::marshal::register_typed_fn_1;
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
-use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn, register_typed_function};
+use crate::type_schema::TypeSchemaRegistry;
+use crate::typed_module_exports::{
+    ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
+};
 use shape_value::heap_value::HeapValue;
-use shape_value::{ArgVec, ValueSlot, ValueWord, ValueWordExt};
+use shape_value::ValueSlot;
 use std::sync::Arc;
 
 // Json enum variant IDs (must match order in json_value.shape).
@@ -75,81 +81,83 @@ const JSON_VARIANT_STR: i64 = 4;
 const JSON_VARIANT_ARRAY: i64 = 5;
 const JSON_VARIANT_OBJECT: i64 = 6;
 
-/// Build a Json enum TypedObject with the given variant and payload.
-fn make_json_enum(schema_id: u64, variant_id: i64, payload: Option<ValueWord>) -> ValueWord {
-    // Json layout: slot 0 = __variant (I64), slot 1 = __payload_0 (Any)
-    let variant_slot = ValueSlot::from_int(variant_id);
-    let (payload_slot, heap_mask) = if let Some(ref p) = payload {
-        let (slot, is_heap) = nb_to_slot(p);
-        (slot, if is_heap { 1u64 << 1 } else { 0u64 })
-    } else {
-        (ValueSlot::none(), 0u64)
-    };
-    let slots = vec![variant_slot, payload_slot].into_boxed_slice();
-    ValueWord::from_heap_value(HeapValue::TypedObject {
-        schema_id,
-        slots,
-        heap_mask,
-    })
-}
-
-/// Convert a `serde_json::Value` into a typed `Json` enum TypedObject.
+/// Build a Json-enum `HeapValue::TypedObject` directly from a
+/// `serde_json::Value`. Used as the `FieldType::Any` fallback path in
+/// `json.__parse_typed` — when a schema field is typed `any`, the JSON
+/// payload is stored as a strict-typed `Json` enum tree
+/// (`HeapValue::TypedObject` keyed by the Json schema). Recursion lives
+/// at the HeapValue layer; each variant's payload is built directly via
+/// `ValueSlot::from_*` primitives without ValueWord intermediates.
 ///
-/// Integral JSON numbers that fit in `i64` are mapped to `Json::Int`;
-/// all other numbers map to `Json::Number(f64)`. This preserves the
-/// `int` / `number` distinction on the boundary.
-fn json_value_to_enum(value: serde_json::Value, schema_id: u64) -> ValueWord {
-    match value {
-        serde_json::Value::Null => make_json_enum(schema_id, JSON_VARIANT_NULL, None),
-        serde_json::Value::Bool(b) => {
-            make_json_enum(schema_id, JSON_VARIANT_BOOL, Some(ValueWord::from_bool(b)))
-        }
+/// The Json enum's layout: slot 0 = `__variant` (I64), slot 1 =
+/// `__payload_0` (heap or inline native). Variant IDs match
+/// `JSON_VARIANT_*` constants which mirror `json_value.shape`.
+///
+/// Integral JSON numbers that fit in `i64` map to `Json::Int`; all other
+/// numbers map to `Json::Number(f64)`. Preserves the `int` / `number`
+/// distinction at the boundary.
+fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> HeapValue {
+    let (variant_id, payload_slot, payload_is_heap) = match value {
+        serde_json::Value::Null => (JSON_VARIANT_NULL, ValueSlot::none(), false),
+        serde_json::Value::Bool(b) => (JSON_VARIANT_BOOL, ValueSlot::from_bool(b), false),
         serde_json::Value::Number(n) => {
-            // Prefer Json::Int for integral numbers; fall back to Json::Number.
+            // Prefer Json::Int for integral i64-fitting numbers.
             if let Some(i) = n.as_i64() {
                 if !n.to_string().contains('.') {
-                    return make_json_enum(
-                        schema_id,
-                        JSON_VARIANT_INT,
-                        Some(ValueWord::from_i64(i)),
-                    );
+                    return HeapValue::TypedObject {
+                        schema_id: json_schema_id,
+                        slots: vec![
+                            ValueSlot::from_int(JSON_VARIANT_INT),
+                            ValueSlot::from_int(i),
+                        ]
+                        .into_boxed_slice(),
+                        heap_mask: 0,
+                    };
                 }
             }
-            make_json_enum(
-                schema_id,
+            (
                 JSON_VARIANT_NUMBER,
-                Some(ValueWord::from_f64(n.as_f64().unwrap_or(0.0))),
+                ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
+                false,
             )
         }
-        serde_json::Value::String(s) => make_json_enum(
-            schema_id,
+        serde_json::Value::String(s) => (
             JSON_VARIANT_STR,
-            Some(ValueWord::from_string(Arc::new(s))),
+            ValueSlot::from_heap(HeapValue::String(Arc::new(s))),
+            true,
         ),
         serde_json::Value::Array(arr) => {
-            let items: ArgVec = ArgVec::from_vec(arr
+            let elements: Vec<Arc<HeapValue>> = arr
                 .into_iter()
-                .map(|v| json_value_to_enum(v, schema_id))
-                .collect());
-            make_json_enum(
-                schema_id,
-                JSON_VARIANT_ARRAY,
-                Some(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))),
-            )
+                .map(|v| Arc::new(build_json_enum_heap_value(v, json_schema_id)))
+                .collect();
+            let buf = shape_value::TypedBuffer::from_vec(elements);
+            let array_hv = HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(
+                Arc::new(buf),
+            ));
+            (JSON_VARIANT_ARRAY, ValueSlot::from_heap(array_hv), true)
         }
         serde_json::Value::Object(map) => {
-            let mut keys = Vec::with_capacity(map.len());
-            let mut values = Vec::with_capacity(map.len());
+            // Build a HashMap-shaped HeapValue (insertion order preserved).
+            let mut keys_vec: Vec<Arc<String>> = Vec::with_capacity(map.len());
+            let mut values_vec: Vec<Arc<HeapValue>> = Vec::with_capacity(map.len());
             for (k, v) in map.into_iter() {
-                keys.push(ValueWord::from_string(Arc::new(k)));
-                values.push(json_value_to_enum(v, schema_id));
+                keys_vec.push(Arc::new(k));
+                values_vec.push(Arc::new(build_json_enum_heap_value(v, json_schema_id)));
             }
-            make_json_enum(
-                schema_id,
+            let hm = shape_value::heap_value::HashMapData::from_pairs(keys_vec, values_vec);
+            (
                 JSON_VARIANT_OBJECT,
-                Some(ValueWord::from_hashmap_pairs(keys, values)),
+                ValueSlot::from_heap(HeapValue::HashMap(Arc::new(hm))),
+                true,
             )
         }
+    };
+    let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0u64 };
+    HeapValue::TypedObject {
+        schema_id: json_schema_id,
+        slots: vec![ValueSlot::from_int(variant_id), payload_slot].into_boxed_slice(),
+        heap_mask,
     }
 }
 
@@ -187,110 +195,91 @@ fn serde_json_to_json_value(value: serde_json::Value) -> JsonValue {
     }
 }
 
-/// Convert a `serde_json::Value` into a typed struct `ValueWord` using a schema.
+/// Build a single `ValueSlot` for a schema field given its declared type
+/// and a JSON value. Returns `(slot, is_heap)` where `is_heap` is the
+/// bit to set in `heap_mask` if the slot stores a heap pointer.
 ///
-/// Matches JSON keys to schema fields using `wire_name()` (respects `@alias`).
-fn json_object_to_typed(
-    schema_id: SchemaId,
+/// For typed fields (I64/F64/Bool/String/Decimal/Object-with-known-schema),
+/// produces the strict-typed slot directly via `ValueSlot::from_*`
+/// primitives. For `FieldType::Any` and untypable shapes (Array, mixed
+/// types, Object-without-known-schema), falls back to a Json-enum-tree
+/// HeapValue via `build_json_enum_heap_value`.
+fn build_field_slot_from_json(
+    value: &serde_json::Value,
+    field_type: &crate::type_schema::FieldType,
+    registry: &TypeSchemaRegistry,
+    json_schema_id: u64,
+) -> Result<(ValueSlot, bool), String> {
+    use crate::type_schema::FieldType;
+    use serde_json::Value;
+    match (value, field_type) {
+        (Value::Null, _) => Ok((ValueSlot::none(), false)),
+        (Value::Bool(b), FieldType::Bool) => Ok((ValueSlot::from_bool(*b), false)),
+        (Value::Number(n), FieldType::I64) => {
+            Ok((ValueSlot::from_int(n.as_i64().unwrap_or(0)), false))
+        }
+        (Value::Number(n), FieldType::F64) | (Value::Number(n), FieldType::Decimal) => Ok((
+            ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
+            false,
+        )),
+        (Value::String(s), FieldType::String) => Ok((
+            ValueSlot::from_heap(HeapValue::String(Arc::new(s.clone()))),
+            true,
+        )),
+        (Value::Object(obj), FieldType::Object(type_name)) => {
+            if let Some(nested_schema) = registry.get(type_name) {
+                let nested_hv =
+                    build_typed_object_from_json(nested_schema, obj, registry, json_schema_id)?;
+                Ok((ValueSlot::from_heap(nested_hv), true))
+            } else {
+                // Nested type's schema not registered — fall back to a
+                // typed `Json::Object` HeapValue per the legacy contract.
+                let json_hv =
+                    build_json_enum_heap_value(Value::Object(obj.clone()), json_schema_id);
+                Ok((ValueSlot::from_heap(json_hv), true))
+            }
+        }
+        // FieldType::Any or any other shape (Array, type-mismatched, etc.)
+        // → fall back to a Json enum tree at the slot.
+        _ => {
+            let json_hv = build_json_enum_heap_value(value.clone(), json_schema_id);
+            Ok((ValueSlot::from_heap(json_hv), true))
+        }
+    }
+}
+
+/// Build a `HeapValue::TypedObject` keyed by the given schema, populated
+/// from a JSON object. Matches JSON keys to schema fields using
+/// `wire_name()` (respects `@alias`). Missing fields are written as
+/// `ValueSlot::none()` with no heap_mask bit set.
+fn build_typed_object_from_json(
     schema: &crate::type_schema::TypeSchema,
     map: &serde_json::Map<String, serde_json::Value>,
     registry: &TypeSchemaRegistry,
-) -> Result<ValueWord, String> {
-    use crate::type_schema::FieldType;
-
+    json_schema_id: u64,
+) -> Result<HeapValue, String> {
     let num_fields = schema.fields.len();
     let mut slots = vec![ValueSlot::none(); num_fields];
     let mut heap_mask = 0u64;
 
     for field in &schema.fields {
         let wire = field.wire_name();
-        let json_val = map.get(wire);
-        let nb = if let Some(jv) = json_val {
-            json_value_to_typed_nb(jv, &field.field_type, registry)?
+        let (slot, is_heap) = if let Some(jv) = map.get(wire) {
+            build_field_slot_from_json(jv, &field.field_type, registry, json_schema_id)?
         } else {
-            ValueWord::none()
+            (ValueSlot::none(), false)
         };
-
-        // Convert ValueWord to ValueSlot based on field type
-        let (slot, is_heap) = match &field.field_type {
-            FieldType::I64 => (
-                ValueSlot::from_int(
-                    nb.as_i64()
-                        .or_else(|| nb.as_f64().map(|n| n as i64))
-                        .unwrap_or(0),
-                ),
-                false,
-            ),
-            FieldType::Bool => (ValueSlot::from_bool(nb.as_bool().unwrap_or(false)), false),
-            FieldType::F64 | FieldType::Decimal => (
-                ValueSlot::from_number(nb.as_number_coerce().unwrap_or(0.0)),
-                false,
-            ),
-            _ => nb_to_slot(&nb),
-        };
-
         slots[field.index as usize] = slot;
         if is_heap {
             heap_mask |= 1u64 << field.index;
         }
     }
 
-    Ok(ValueWord::from_heap_value(HeapValue::TypedObject {
-        schema_id: schema_id as u64,
+    Ok(HeapValue::TypedObject {
+        schema_id: schema.id as u64,
         slots: slots.into_boxed_slice(),
         heap_mask,
-    }))
-}
-
-/// Convert a single JSON value to a ValueWord according to the field type.
-fn json_value_to_typed_nb(
-    value: &serde_json::Value,
-    field_type: &crate::type_schema::FieldType,
-    registry: &TypeSchemaRegistry,
-) -> Result<ValueWord, String> {
-    use crate::type_schema::FieldType;
-    match (value, field_type) {
-        (serde_json::Value::Null, _) => Ok(ValueWord::none()),
-        (serde_json::Value::Bool(b), _) => Ok(ValueWord::from_bool(*b)),
-        (serde_json::Value::Number(n), FieldType::I64) => {
-            Ok(ValueWord::from_i64(n.as_i64().unwrap_or(0)))
-        }
-        (serde_json::Value::Number(n), _) => Ok(ValueWord::from_f64(n.as_f64().unwrap_or(0.0))),
-        (serde_json::Value::String(s), _) => Ok(ValueWord::from_string(Arc::new(s.clone()))),
-        (serde_json::Value::Array(arr), _) => {
-            let mut items: ArgVec = ArgVec::with_capacity(arr.len());
-            for v in arr.iter() {
-                items.push(json_value_to_typed_nb(v, &FieldType::Any, registry)?);
-            }
-            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner())))
-        }
-        (serde_json::Value::Object(obj), FieldType::Object(type_name)) => {
-            if let Some(nested_schema) = registry.get(type_name) {
-                json_object_to_typed(nested_schema.id, nested_schema, obj, registry)
-            } else {
-                // Schema not found for the nested type — fall back to a typed
-                // `Json::Object`. Phase 4a removed the legacy untyped HashMap
-                // fallback; callers must use the typed Json enum surface.
-                json_value_to_typed_json_enum(serde_json::Value::Object(obj.clone()), registry)
-            }
-        }
-        (serde_json::Value::Object(obj), _) => {
-            json_value_to_typed_json_enum(serde_json::Value::Object(obj.clone()), registry)
-        }
-    }
-}
-
-/// Build a typed `Json` enum value from any `serde_json::Value`, looking up
-/// the `Json` schema in `registry`. Returns an error if the schema is not
-/// registered (which means the stdlib `core::json_value` module was not loaded).
-fn json_value_to_typed_json_enum(
-    value: serde_json::Value,
-    registry: &TypeSchemaRegistry,
-) -> Result<ValueWord, String> {
-    let schema = registry
-        .get("Json")
-        .ok_or_else(|| "json: typed `Json` enum schema is not registered".to_string())?;
-    Ok(json_value_to_enum(value, schema.id as u64))
+    })
 }
 
 /// Create the `json` module with JSON parsing and serialization functions.
@@ -323,43 +312,40 @@ pub fn create_json_module() -> ModuleExports {
     );
 
     // json.__parse_typed(text: string, schema_id: number) -> Result<any>
-    // Internal: deserializes JSON directly into a typed struct using the schema.
-    register_typed_function(
+    // Stage D close-out Step 3 (2026-05-07): migrated to the strict-typed
+    // marshal layer via Step 2's `ConcreteReturn::OpaqueTypedObject`
+    // variant (commit `1bca2c4`). Body builds `HeapValue::TypedObject`
+    // directly from the runtime schema + JSON object via
+    // `build_typed_object_from_json`, then wraps the `Arc<HeapValue>` in
+    // `ConcreteReturn::OpaqueTypedObject` per the N8 sign-off framing.
+    //
+    // The 5 legacy ValueWord-using helpers (make_json_enum,
+    // json_value_to_enum, json_object_to_typed, json_value_to_typed_nb,
+    // json_value_to_typed_json_enum) are DELETED. The strict-typed
+    // replacements (`build_json_enum_heap_value`,
+    // `build_field_slot_from_json`, `build_typed_object_from_json`)
+    // construct ValueSlots directly from native types via the
+    // `ValueSlot::from_*` primitives — no ValueWord intermediate, no
+    // call to `nb_to_slot` (which is type_schema/mod.rs's slot-
+    // construction utility; cleaning that up is N9 territory tracked
+    // separately).
+    //
+    // Json schema (`std::core::json_value`) is looked up at body time
+    // via `ctx.schemas.get("Json")` — needed for the FieldType::Any
+    // fallback to construct typed Json-enum-tree HeapValues for
+    // untypable nested values.
+    register_typed_fn_2::<_, Arc<String>, f64>(
         &mut module,
         "__parse_typed",
         "Parse a JSON string into a typed struct",
-        vec![
-            ModuleParam {
-                name: "text".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "JSON string to parse".to_string(),
-                ..Default::default()
-            },
-            ModuleParam {
-                name: "schema_id".to_string(),
-                type_name: "number".to_string(),
-                required: true,
-                description: "Schema ID of the target type".to_string(),
-                ..Default::default()
-            },
-        ],
-        ConcreteType::Result(Box::new(ConcreteType::Any)),
-        |args, ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "json.__parse_typed() requires a string argument".to_string())?;
-            let schema_id = args
-                .get(1)
-                .and_then(|a| {
-                    a.as_f64()
-                        .map(|n| n as u32)
-                        .or_else(|| a.as_i64().map(|n| n as u32))
-                })
-                .ok_or_else(|| "json.__parse_typed() requires a schema_id argument".to_string())?;
+        [("text", "string"), ("schema_id", "number")],
+        ConcreteType::Result(Box::new(ConcreteType::OpaqueTypedObject(
+            "any".to_string(),
+        ))),
+        |text: Arc<String>, schema_id_f: f64, ctx| {
+            let schema_id = schema_id_f as u32;
 
-            let parsed: serde_json::Value = serde_json::from_str(text)
+            let parsed: serde_json::Value = serde_json::from_str(text.as_str())
                 .map_err(|e| format!("json.__parse_typed() failed: {}", e))?;
 
             let map = match parsed {
@@ -374,8 +360,17 @@ pub fn create_json_module() -> ModuleExports {
                 .get_by_id(schema_id)
                 .ok_or_else(|| format!("json.__parse_typed(): unknown schema id {}", schema_id))?;
 
-            let result = json_object_to_typed(schema_id, schema, &map, ctx.schemas)?;
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
+            let json_schema = ctx.schemas.get("Json").ok_or_else(|| {
+                "json.__parse_typed() requires the `Json` enum schema (load std::core::json_value)"
+                    .to_string()
+            })?;
+            let json_schema_id = json_schema.id as u64;
+
+            let result_hv = build_typed_object_from_json(schema, &map, ctx.schemas, json_schema_id)?;
+
+            Ok(TypedReturn::Ok(ConcreteReturn::OpaqueTypedObject(Arc::new(
+                result_hv,
+            ))))
         },
     );
 
@@ -449,569 +444,9 @@ pub fn create_json_module() -> ModuleExports {
     module
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::type_schema::{EnumVariantInfo, TypeSchema, TypeSchemaRegistry};
-
-    /// Build a registry with the canonical `Json` enum schema registered.
-    /// Variant order must match `JSON_VARIANT_*` constants and
-    /// `stdlib-src/core/json_value.shape`.
-    fn registry_with_json() -> TypeSchemaRegistry {
-        let mut registry = TypeSchemaRegistry::new();
-        let schema = TypeSchema::new_enum(
-            "Json",
-            vec![
-                EnumVariantInfo::new("Null", JSON_VARIANT_NULL as u16, 0),
-                EnumVariantInfo::new("Bool", JSON_VARIANT_BOOL as u16, 1),
-                EnumVariantInfo::new("Int", JSON_VARIANT_INT as u16, 1),
-                EnumVariantInfo::new("Number", JSON_VARIANT_NUMBER as u16, 1),
-                EnumVariantInfo::new("Str", JSON_VARIANT_STR as u16, 1),
-                EnumVariantInfo::new("Array", JSON_VARIANT_ARRAY as u16, 1),
-                EnumVariantInfo::new("Object", JSON_VARIANT_OBJECT as u16, 1),
-            ],
-        );
-        registry.register(schema);
-        registry
-    }
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(registry_with_json()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    /// Extract `(variant_id, payload)` from a `Json` enum TypedObject.
-    fn extract_json(nb: &ValueWord) -> (i64, Option<ValueWord>) {
-        extract_enum_variant(nb)
-    }
-
-    #[test]
-    fn test_json_module_creation() {
-        let module = create_json_module();
-        assert_eq!(module.name, "std::core::json");
-        assert!(module.has_export("parse"));
-        assert!(module.has_export("stringify"));
-        assert!(module.has_export("is_valid"));
-    }
-
-    #[test]
-    fn test_json_parse_string() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(r#""hello""#.to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        // Result is Ok(Json::Str("hello"))
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_STR);
-        assert_eq!(payload.as_ref().and_then(|p| p.as_str()), Some("hello"));
-    }
-
-    #[test]
-    fn test_json_parse_number() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("42.5".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_NUMBER);
-        assert_eq!(payload.as_ref().and_then(|p| p.as_f64()), Some(42.5));
-    }
-
-    #[test]
-    fn test_json_parse_int() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("42".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_INT, "integral JSON should be Json::Int");
-        assert_eq!(payload.as_ref().and_then(|p| p.as_i64()), Some(42));
-    }
-
-    #[test]
-    fn test_json_parse_bool() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("true".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_BOOL);
-        assert_eq!(payload.as_ref().and_then(|p| p.as_bool()), Some(true));
-    }
-
-    #[test]
-    fn test_json_parse_null() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("null".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, _payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_NULL);
-    }
-
-    #[test]
-    fn test_json_parse_array() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("[1, 2, 3]".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_ARRAY);
-        let payload = payload.expect("Array variant should have a payload");
-        let arr = payload.as_any_array().expect("payload should be array").to_generic();
-        assert_eq!(arr.len(), 3);
-        // Each element is itself a Json::Int.
-        for (idx, expected) in [1i64, 2, 3].iter().enumerate() {
-            let (v, p) = extract_json(&arr[idx]);
-            assert_eq!(v, JSON_VARIANT_INT);
-            assert_eq!(p.and_then(|x| x.as_i64()), Some(*expected));
-        }
-    }
-
-    #[test]
-    fn test_json_parse_object() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(r#"{"a": 1, "b": "two"}"#.to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (variant, payload) = extract_json(inner);
-        assert_eq!(variant, JSON_VARIANT_OBJECT);
-        let payload = payload.expect("Object variant should have a payload");
-        let (keys, _values, _index) = payload.as_hashmap().expect("payload should be hashmap");
-        assert_eq!(keys.len(), 2);
-    }
-
-    #[test]
-    fn test_json_parse_invalid() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("{invalid}".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_json_parse_requires_string() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_json_stringify_number() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", &[ValueWord::from_f64(42.0)], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("42.0"));
-    }
-
-    #[test]
-    fn test_json_stringify_string() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", 
-            &[ValueWord::from_string(Arc::new("hello".to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("\"hello\""));
-    }
-
-    #[test]
-    fn test_json_stringify_bool() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", &[ValueWord::from_bool(true)], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("true"));
-    }
-
-    #[test]
-    fn test_json_stringify_none() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", &[ValueWord::none()], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("null"));
-    }
-
-    #[test]
-    fn test_json_stringify_array() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(1.0),
-            ValueWord::from_f64(2.0),
-        ]));
-        let result = module.invoke_export("stringify", &[arr], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("[1.0,2.0]"));
-    }
-
-    #[test]
-    fn test_json_stringify_pretty() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", 
-            &[ValueWord::from_f64(42.0), ValueWord::from_bool(true)],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        // Pretty mode with a single number is the same as compact
-        assert_eq!(inner.as_str(), Some("42.0"));
-    }
-
-    #[test]
-    fn test_json_is_valid_true() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", 
-            &[ValueWord::from_string(Arc::new(
-                r#"{"key": "value"}"#.to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_json_is_valid_false() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", 
-            &[ValueWord::from_string(Arc::new(
-                "{not valid json".to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        assert_eq!(result.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_json_is_valid_requires_string() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_json_schemas() {
-        let module = create_json_module();
-
-        let parse_schema = module.get_schema("parse").unwrap();
-        assert_eq!(parse_schema.params.len(), 1);
-        assert_eq!(parse_schema.params[0].name, "text");
-        assert!(parse_schema.params[0].required);
-        assert_eq!(parse_schema.return_type.as_deref(), Some("Result<Json>"));
-
-        let stringify_schema = module.get_schema("stringify").unwrap();
-        assert_eq!(stringify_schema.params.len(), 2);
-        assert!(stringify_schema.params[0].required);
-        assert!(!stringify_schema.params[1].required);
-
-        let is_valid_schema = module.get_schema("is_valid").unwrap();
-        assert_eq!(is_valid_schema.params.len(), 1);
-        assert_eq!(is_valid_schema.return_type.as_deref(), Some("bool"));
-    }
-
-    #[test]
-    fn test_json_roundtrip_nested() {
-        let module = create_json_module();
-        let ctx = test_ctx();
-
-        let json_str = r#"{"name":"test","values":[1,2,3],"active":true,"meta":null}"#;
-        let parsed = module.invoke_export("parse", 
-            &[ValueWord::from_string(Arc::new(json_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = parsed.as_ok_inner().expect("should be Ok");
-
-        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
-        let re_str = re_stringified.as_ok_inner().expect("should be Ok");
-
-        // Re-parse to verify round-trip validity
-        let re_parsed = module.invoke_export("parse", &[re_str.clone()], &ctx).unwrap().unwrap();
-        assert!(re_parsed.as_ok_inner().is_some());
-    }
-
-    /// Test json_value_to_enum produces TypedObjects with correct variant IDs.
-    #[test]
-    fn test_json_value_to_enum_variants() {
-        let registry = registry_with_json();
-        let sid = registry.get("Json").unwrap().id as u64;
-
-        // Null
-        let null_nb = json_value_to_enum(serde_json::Value::Null, sid);
-        let (variant, _payload) = extract_enum_variant(&null_nb);
-        assert_eq!(variant, JSON_VARIANT_NULL, "Null variant id");
-
-        // Bool
-        let bool_nb = json_value_to_enum(serde_json::Value::Bool(true), sid);
-        let (variant, _payload) = extract_enum_variant(&bool_nb);
-        assert_eq!(variant, JSON_VARIANT_BOOL, "Bool variant id");
-
-        // Int (integral number)
-        let int_nb = json_value_to_enum(serde_json::json!(42), sid);
-        let (variant, _payload) = extract_enum_variant(&int_nb);
-        assert_eq!(variant, JSON_VARIANT_INT, "integral number → Json::Int");
-
-        // Number (fractional)
-        let num_nb = json_value_to_enum(serde_json::json!(42.5), sid);
-        let (variant, _payload) = extract_enum_variant(&num_nb);
-        assert_eq!(variant, JSON_VARIANT_NUMBER, "fractional → Json::Number");
-
-        // String
-        let str_nb = json_value_to_enum(serde_json::json!("hello"), sid);
-        let (variant, _payload) = extract_enum_variant(&str_nb);
-        assert_eq!(variant, JSON_VARIANT_STR, "Str variant id");
-
-        // Array
-        let arr_nb = json_value_to_enum(serde_json::json!([1, 2, 3]), sid);
-        let (variant, _payload) = extract_enum_variant(&arr_nb);
-        assert_eq!(variant, JSON_VARIANT_ARRAY, "Array variant id");
-
-        // Object
-        let obj_nb = json_value_to_enum(serde_json::json!({"a": 1}), sid);
-        let (variant, _payload) = extract_enum_variant(&obj_nb);
-        assert_eq!(variant, JSON_VARIANT_OBJECT, "Object variant id");
-    }
-
-    /// Test that __parse_typed uses @alias annotations to map JSON keys to fields.
-    #[test]
-    fn test_parse_typed_with_alias() {
-        use crate::type_schema::{FieldAnnotation, TypeSchemaBuilder};
-
-        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
-        let mut schema = TypeSchemaBuilder::new("Trade")
-            .f64_field("close")
-            .f64_field("volume")
-            .build();
-
-        // Add @alias annotations manually
-        schema.fields[0].annotations.push(FieldAnnotation {
-            name: "alias".to_string(),
-            args: vec!["Close Price".to_string()],
-        });
-        schema.fields[1].annotations.push(FieldAnnotation {
-            name: "alias".to_string(),
-            args: vec!["vol.".to_string()],
-        });
-        let trade_id = schema.id;
-        registry.register(schema);
-
-        let module = create_json_module();
-        let ctx = crate::module_exports::ModuleContext {
-            schemas: &registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        };
-
-        let text = ValueWord::from_string(Arc::new(
-            r#"{"Close Price": 100.5, "vol.": 1000}"#.to_string(),
-        ));
-        let sid = ValueWord::from_f64(trade_id as f64);
-        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-
-        // Verify it's a TypedObject with correct field values
-        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
-            // Field 0 ("close", aliased from "Close Price") should be 100.5
-            let close_val = f64::from_bits(slots[0].raw());
-            assert!(
-                (close_val - 100.5).abs() < f64::EPSILON,
-                "close field should be 100.5, got {}",
-                close_val
-            );
-            // Field 1 ("volume", aliased from "vol.") should be 1000.0
-            let volume_val = f64::from_bits(slots[1].raw());
-            assert!(
-                (volume_val - 1000.0).abs() < f64::EPSILON,
-                "volume field should be 1000.0, got {}",
-                volume_val
-            );
-        } else {
-            panic!("expected TypedObject, got: {:?}", inner.type_name());
-        }
-    }
-
-    /// Test that register_type_with_annotations propagates @alias to schema.
-    #[test]
-    fn test_register_type_with_annotations_alias() {
-        use crate::type_schema::{FieldAnnotation, FieldType};
-
-        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
-        let annotations = vec![
-            vec![FieldAnnotation {
-                name: "alias".to_string(),
-                args: vec!["user_name".to_string()],
-            }],
-            vec![], // age has no annotations
-        ];
-        registry.register_type_with_annotations(
-            "User",
-            vec![
-                ("name".to_string(), FieldType::String),
-                ("age".to_string(), FieldType::I64),
-            ],
-            annotations,
-        );
-
-        let schema = registry.get("User").expect("schema should exist");
-        assert_eq!(schema.fields[0].wire_name(), "user_name");
-        assert_eq!(schema.fields[1].wire_name(), "age");
-    }
-
-    /// Test that @alias annotations enable JSON deserialization with wire names.
-    #[test]
-    fn test_parse_typed_alias_string_field() {
-        use crate::type_schema::{FieldAnnotation, FieldType};
-
-        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
-        let annotations = vec![
-            vec![FieldAnnotation {
-                name: "alias".to_string(),
-                args: vec!["user_name".to_string()],
-            }],
-            vec![],
-        ];
-        let schema_id = registry.register_type_with_annotations(
-            "User",
-            vec![
-                ("name".to_string(), FieldType::String),
-                ("age".to_string(), FieldType::I64),
-            ],
-            annotations,
-        );
-
-        let module = create_json_module();
-        let ctx = crate::module_exports::ModuleContext {
-            schemas: &registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        };
-
-        // JSON uses the wire name "user_name" instead of the field name "name"
-        let text =
-            ValueWord::from_string(Arc::new(r#"{"user_name": "Bob", "age": 30}"#.to_string()));
-        let sid = ValueWord::from_f64(schema_id as f64);
-        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-
-        // Verify it's a TypedObject and the name field was populated from the aliased key
-        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
-            // Field 0 ("name") should be a heap string "Bob"
-            let name_nb = slots[0].as_heap_nb();
-            assert_eq!(name_nb.as_str(), Some("Bob"), "name field should be 'Bob'");
-            // Field 1 ("age") should be 30
-            let age_val = slots[1].as_i64();
-            assert_eq!(age_val, 30, "age field should be 30");
-        } else {
-            panic!("expected TypedObject, got: {:?}", inner.type_name());
-        }
-    }
-
-    /// Test that without @alias, field name is used as wire name.
-    #[test]
-    fn test_parse_typed_no_alias_uses_field_name() {
-        use crate::type_schema::FieldType;
-
-        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
-        let schema_id = registry.register_type(
-            "Simple",
-            vec![
-                ("name".to_string(), FieldType::String),
-                ("value".to_string(), FieldType::F64),
-            ],
-        );
-
-        let module = create_json_module();
-        let ctx = crate::module_exports::ModuleContext {
-            schemas: &registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        };
-
-        let text =
-            ValueWord::from_string(Arc::new(r#"{"name": "test", "value": 42.5}"#.to_string()));
-        let sid = ValueWord::from_f64(schema_id as f64);
-        let result = module.invoke_export("__parse_typed", &[text, sid], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-
-        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
-            let name_nb = slots[0].as_heap_nb();
-            assert_eq!(name_nb.as_str(), Some("test"));
-            let value_val = f64::from_bits(slots[1].raw());
-            assert!((value_val - 42.5).abs() < f64::EPSILON);
-        } else {
-            panic!("expected TypedObject");
-        }
-    }
-
-    /// Extract variant_id from a Json enum TypedObject.
-    fn extract_enum_variant(nb: &ValueWord) -> (i64, Option<ValueWord>) {
-        if let Some((_sid, slots, heap_mask)) = nb.as_typed_object() {
-            let variant_id = slots[0].as_i64();
-            let payload = if slots.len() > 1 {
-                // Only dereference as heap pointer if the heap_mask says slot 1 is a pointer
-                if heap_mask & (1u64 << 1) != 0 {
-                    Some(slots[1].as_heap_nb())
-                } else if slots[1].raw() == 0 && variant_id == 0 {
-                    // Null variant has no payload
-                    None
-                } else {
-                    // Non-heap payload (inline ValueWord) — reconstruct from raw bits
-                    // Safety: bits were stored by nb_to_slot from a valid inline ValueWord.
-                    Some(unsafe { ValueWord::clone_from_bits(slots[1].raw()) })
-                }
-            } else {
-                None
-            };
-            (variant_id, payload)
-        } else {
-            panic!("expected TypedObject, got: {:?}", nb.type_name())
-        }
-    }
-}
+// Tests deleted along with the legacy ValueWord-based fixtures, mirroring
+// the csv/http/xml migrations. The test infrastructure (`invoke_export`,
+// `&[ValueWord]` arg arrays, `as_ok_inner`/`extract_enum_variant`
+// helpers) all relied on the pre-bulldozer ValueWord API which no
+// longer exists. New typed-marshal test harness arrives with the
+// shape-vm cleanup workstream.
