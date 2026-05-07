@@ -676,6 +676,168 @@ inline pending N4 + N6 sign-offs. Step 3a csv (LANDED at `fbe6155`,
 csv stub-activation) and Step 3d json (post-re-audit migration)
 unblocked since neither has any-input or any-output concerns.
 
+### 2026-05-07 — N6 consumer expansion: json.* added to scope (audit-grounded correction)
+
+In-place dated subsection per finding #11 symmetry-extension. **The
+prior N4 + N6 entry text + consumer-count enumerations stay
+on-record.** This subsection captures the audit-grounded correction
+surfaced during Stage C Step 3d (json.rs re-audit pre-migration):
+**N6 consumer count expands from 4 to 6, adding `json.parse` and
+`json.__parse_typed`.** The architectural shape is unchanged; the
+consumer scope was under-stated in the prior subsection and the
+HashMap-marshal-cluster Stage C migration disposition for json.rs
+was over-optimistic ("post-re-audit migration unblocked").
+
+**Audit-time conflation diagnosis (load-bearing for calibration
+ledger).** At `5a9f900` (the prior consumer-body-case enumeration
+correction) and at the N6-introduction subsection (`d3411a7`), I
+framed json.rs as "probably migratable" based on the
+`Result<Json>` typed-enum return shape. The Stage C Step 3d
+multi-concern audit pre-commit on `crates/shape-runtime/src/stdlib/json.rs`
+revealed I had **conflated return-type-annotation (the user-facing
+Shape function shape `Result<Json>`) with body-projection-wrapper
+(the `TypedReturn::*` variant the body uses to project into the
+slot)**. They are at different layers:
+
+- **Return-type-annotation layer:** `Result<Json>` is a typed
+  enum return — `Json` is a recursive sum type with
+  variants `Json::Null / Bool / Number / String / Array / Object`,
+  each strict-typed. This layer is structurally clean.
+- **Body-projection-wrapper layer:** the body builds an
+  `Arc<HeapValue>` recursively (the runtime representation of
+  the `Json` enum) and wraps with
+  `TypedReturn::Ok(Box::new(TypedReturn::ValueWord(arc)))`. The
+  inner `TypedReturn::ValueWord(...)` is the
+  legacy escape-hatch wrapper, **DELETED in the bulldozer**.
+  Post-bulldozer, the only available leaf wrapper is
+  `TypedReturn::Concrete(ConcreteReturn::*)` — and
+  `ConcreteReturn` has no `Arc<HeapValue>` recursive variant.
+
+**The two layers are independent.** The return-type-annotation
+being typed-clean does NOT imply the body-projection-wrapper is
+post-bulldozer-available. json.rs's `Result<Json>` shape and
+yaml.rs's `Result<any>` shape **share the same architectural
+blocker at the body-projection-wrapper layer** despite differing
+at the return-type-annotation layer.
+
+**Confirmed N6 consumer expansion (4 → 6 functions):**
+
+Prior 4 (carried forward from `d3411a7`):
+- `yaml.parse(text) -> Result<any>` — `crates/shape-runtime/src/stdlib/yaml.rs:67-79`
+- `toml.parse(text) -> Result<any>` — `crates/shape-runtime/src/stdlib/toml_module.rs:78-106`
+- `msgpack.decode(data) -> Result<any>` — `crates/shape-runtime/src/stdlib/msgpack_module.rs:81-113`
+- `msgpack.decode_bytes(data) -> Result<any>` — same module, lines 142-185
+
+**Added 2** (this subsection's correction):
+- `json.parse(text) -> Result<Json>` — `crates/shape-runtime/src/stdlib/json.rs:250` (body wraps with `TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result)))` — N6-blocked)
+- `json.__parse_typed(text, schema_id) -> Result<any>` — `crates/shape-runtime/src/stdlib/json.rs:307` (same wrapping shape — literally the polymorphic-output case)
+
+**N6 architectural-shape sub-categorization (refinement, not
+expansion of options).** The prior subsection's α/β/γ/δ options
+remain valid; this subsection clarifies that **N6 covers two
+sub-shapes that share the body-projection-wrapper architectural
+blocker**:
+
+- **N6 sub-shape (a) — recursive any-typed tree returns:**
+  yaml.parse, toml.parse, msgpack.decode, msgpack.decode_bytes.
+  Body builds an `Arc<HeapValue>` recursively from a
+  `serde_yaml::Value` / `toml::Value` / `rmpv::Value` source.
+  Return-type-annotation is `Result<any>`. Polymorphic at the
+  user-facing Shape API.
+- **N6 sub-shape (b) — typed-enum recursive returns where
+  schema is fixed:** json.parse, json.__parse_typed. Body
+  builds an `Arc<HeapValue>` recursively where the discriminant
+  variants are statically known (Json::Null/Bool/Number/String/Array/Object).
+  Return-type-annotation is `Result<Json>` (or
+  `Result<any>` for __parse_typed which carries dynamic schema).
+  Schemaful at the user-facing Shape API.
+
+**Both sub-shapes share the same body-projection-wrapper blocker:**
+`ConcreteReturn` has no `Arc<HeapValue>` leaf variant. N6-α
+(adding `ConcreteReturn::Any(Arc<HeapValue>)`) addresses both
+sub-shapes uniformly. N6-β (Shape API split — separate typed
+parse functions returning `Json` or per-shape concrete types)
+**already aligns with sub-shape (b)**: `json.parse` already returns
+`Result<Json>`; the architectural lift for sub-shape (b) is
+projecting the typed `Json` enum tree through a `ConcreteReturn`
+representation (e.g., `ConcreteReturn::JsonValue(Arc<HeapValue>)`
+with the strict-typed `Json` enum semantics). Sub-shape (a)
+under N6-β requires adding new `*_to_json` overloads (or per-shape
+concrete returns) at the Shape user-API layer, whereas sub-shape
+(b) under N6-β is a body-side projection refactor only.
+
+**This sub-categorization sharpens the N6-β feasibility argument:**
+the json.rs precedent at the user-facing Shape API
+(`stdlib-src/core/json_value.shape` typed `Json` enum) IS the
+N6-β shape for sub-shape (b) — already shipping. The Stage D
+post-N6-sign-off batch's first migration target is
+**json.parse + json.__parse_typed** (sub-shape (b), unblocks
+B1 sub-decision #2's cascade across 5 parser modules at -19
+errors). Sub-shape (a) yaml/toml/msgpack migrations follow once
+the N6-β user-API split is finalized for those modules.
+
+**Updated HashMap-marshal cluster sub-decision queue (binding,
+correction to item 5):**
+
+5. **N6: any-output typed marshal.** Confirmed consumers:
+   **6** (this subsection's expansion). Sub-shape split: (a)
+   recursive any-typed tree returns — 4 consumers; (b) typed-
+   enum recursive returns — 2 consumers. **AUDIT
+   RECOMMENDATION (pending supervisor sign-off):** N6-β (Shape
+   API split) preferred per prior subsection's structural-
+   purity grounds. **Cross-cluster dependency on json.rs typed
+   `Json` enum precedent** (`crates/shape-runtime/stdlib-src/core/json_value.shape`)
+   strengthened — supports N6-β feasibility for **sub-shape
+   (b) directly** (json.parse / __parse_typed body-projection
+   refactor only); sub-shape (a) yaml/toml/msgpack requires
+   user-API split at Shape layer. Coordinate with N4.
+
+**Stage C Step 3d disposition (correction to prior
+subsection's "Step 3d unblocked since neither has any-input or
+any-output concerns"):** json.rs **IS N6-blocked** (parse +
+__parse_typed) and **IS N4-blocked** (stringify carries
+`value: any` body parameter at line 341). is_valid is
+migratable in isolation but kept deferred for per-file
+atomicity. Step 3d collapses to a deferred-list comment
+commit mirroring yaml/toml/msgpack pattern; full migration
+defers to Stage D post-N4 + N6 sign-offs.
+
+**Calibration ledger update:** this is the third audit-grounded
+self-correction in the Step 3 cohort:
+
+1. **3 → 9 consumer correction at `5a9f900`** (consumer-body-case
+   enumeration miss).
+2. **xml.rs -4 vs predicted -8/-15 at `b965778`** (rg-hits vs
+   import-error-count conflation; Step 2c).
+3. **json.rs N4 + N6-blocked vs "probably migratable" at this
+   subsection** (return-type-annotation vs body-projection-
+   wrapper layer conflation; Step 3d).
+
+All three share the same finding-#11 in-place-correction shape:
+prior framing stays on-record, dated correction subsection
+appended, audit-time conflation diagnosed at the layer where it
+occurred. The pattern is the multi-concern audit pre-commit
+discipline catching conflation at execution time rather than
+at supervisor-relay time.
+
+**Stage C Step 3 net total: 0 errors** (csv stub-activation 0
++ msgpack defer 0 + yaml defer 0 + toml defer 0 + json defer 0).
+The 0-delta is honest data: N4 + N6 architectural blockers
+genuinely gate 6 consumers. The Stage D post-N4+N6 batch will
+pick up all 6 deferred consumers + B1 cascade (-19 across 5
+parser modules) cleanly when supervisor sign-offs land. **Total
+HashMap-marshal cluster impact (Stage C + post-N4+N6 + B1) will
+exceed -25** when the architectural family resolves.
+
+**Disposition for this subsection:** N6 consumer count corrected
+4 → 6. Sub-shape (a)/(b) categorization added. json.rs Stage C
+disposition corrected to deferred-list-comment-only (no body
+migration). Step 3d sealed; Step 3 batch closeable. No
+architectural-extension impact on Step 1 (`6cd9181`) — that
+commit's variant + ConcreteReturn variant addition stays valid;
+N6 sign-off will add a new `ConcreteReturn::*` leaf orthogonal
+to the existing HashMap-marshal infrastructure.
+
 ---
 
 ## 2026-05-07 — Arc<TypedBuffer<T>> zero-copy marshal variants — named cluster (trigger fired)
