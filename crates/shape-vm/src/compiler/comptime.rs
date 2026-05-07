@@ -601,7 +601,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     }
 
     // Keep comptime ctx structured so annotations can grow into richer APIs.
-    let ctx_nb = shape_runtime::type_schema::typed_object_from_nb_pairs(&[]);
+    let ctx_nb = shape_runtime::type_schema::typed_object_from_pairs(&[]);
 
     // Wrap the handler body in a function that takes the target parameter.
     let func_name = "__comptime_handler_fn__".to_string();
@@ -745,11 +745,11 @@ fn execute_in_runtime_with_module_bindings(
 /// TypedObjects that live in the module_binding anonymous schema registry.
 ///
 /// The comptime VM's schema IDs are only valid within its own registry.
-/// We extract the fields and rebuild via `typed_object_from_nb_pairs`, which
+/// We extract the fields and rebuild via `typed_object_from_pairs`, which
 /// registers an anonymous schema in the module_binding registry so the result can
 /// be consumed by the outer compiler.
 fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
-    use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
+    use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_pairs};
     use shape_value::heap_value::HeapValue;
 
     // Handle unified arrays.
@@ -798,7 +798,7 @@ fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
                 pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
             let field_names: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
             let _ = register_predeclared_any_schema(&field_names);
-            typed_object_from_nb_pairs(&pair_refs)
+            typed_object_from_pairs(&pair_refs)
         }
         Some(HeapValue::Array(arr)) => {
             let normalized: Vec<ValueWord> = arr

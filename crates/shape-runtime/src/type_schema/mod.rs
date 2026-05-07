@@ -226,59 +226,14 @@ pub fn typed_object_from_pairs(fields: &[(&str, ValueWord)]) -> ValueWord {
     })
 }
 
-/// Create an anonymous `TypedObject` from ValueWord field pairs.
-///
-/// Like `typed_object_from_pairs` but takes `ValueWord` values directly,
-/// avoiding ValueWord construction.
-///
-/// Returns a `ValueWord` wrapping the TypedObject on the heap.
-pub fn typed_object_from_nb_pairs(
-    fields: &[(&str, shape_value::ValueWord)],
-) -> shape_value::ValueWord {
-    let field_names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
-    let schema = lookup_schema_for_fields(&field_names).unwrap_or_else(|| {
-        panic!(
-            "Missing predeclared schema for fields [{}]. Runtime schema synthesis is disabled.",
-            field_names.join(", ")
-        )
-    });
-    let value_by_name: HashMap<&str, &shape_value::ValueWord> =
-        fields.iter().map(|(name, value)| (*name, value)).collect();
-
-    // Build slots — inline types as inline ValueSlots, heap types as heap pointers
-    let mut slots = Vec::with_capacity(schema.fields.len());
-    let mut heap_mask: u64 = 0;
-    for (i, field_def) in schema.fields.iter().enumerate() {
-        let nb = value_by_name
-            .get(field_def.name.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Missing field '{}' while materializing typed object",
-                    field_def.name
-                )
-            });
-        let (slot, is_heap) = nb_to_slot(nb);
-        slots.push(slot);
-        if is_heap {
-            heap_mask |= 1u64 << i;
-        }
-    }
-
-    shape_value::ValueWord::from_heap_value(shape_value::heap_value::HeapValue::TypedObject {
-        schema_id: schema.id as u64,
-        slots: slots.into_boxed_slice(),
-        heap_mask,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use shape_value::{ValueWord, ValueWordExt};
 
     #[test]
-    fn typed_object_from_nb_pairs_is_order_insensitive_for_builtin_schema() {
-        let obj = typed_object_from_nb_pairs(&[
+    fn typed_object_from_pairs_is_order_insensitive_for_builtin_schema() {
+        let obj = typed_object_from_pairs(&[
             (
                 "function",
                 ValueWord::from_string(std::sync::Arc::new("f".to_string())),

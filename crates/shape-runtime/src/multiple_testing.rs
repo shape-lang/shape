@@ -86,7 +86,7 @@ impl MultipleTestingStats {
             .map(|s| ValueWord::from_string(Arc::new(s)))
             .unwrap_or(ValueWord::none());
 
-        crate::type_schema::typed_object_from_nb_pairs(&[
+        crate::type_schema::typed_object_from_pairs(&[
             ("n_tests", ValueWord::from_f64(self.n_tests as f64)),
             ("alpha", ValueWord::from_f64(self.alpha)),
             ("adjusted_alpha", ValueWord::from_f64(self.adjusted_alpha)),

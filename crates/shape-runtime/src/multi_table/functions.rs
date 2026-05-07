@@ -134,13 +134,13 @@ pub fn align_tables(ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<Va
                     .iter()
                     .map(|(k, v)| (k.as_str(), ValueWord::from_f64(*v)))
                     .collect();
-                crate::type_schema::typed_object_from_nb_pairs(&pairs)
+                crate::type_schema::typed_object_from_pairs(&pairs)
             })
             .collect();
         aligned_data_val.push(ValueWord::from_array(shape_value::vmarray_from_vec(rows_val)));
     }
 
-    Ok(crate::type_schema::typed_object_from_nb_pairs(&[
+    Ok(crate::type_schema::typed_object_from_pairs(&[
         ("ids", ids_val),
         ("data", ValueWord::from_array(shape_value::vmarray_from_vec(aligned_data_val))),
     ]))

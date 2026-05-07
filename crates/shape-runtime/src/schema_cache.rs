@@ -5,7 +5,7 @@
 
 use crate::package_lock::{ArtifactDeterminism, LockedArtifact, PackageLock};
 use crate::type_schema::{
-    TypeSchema, TypeSchemaBuilder, typed_object_from_nb_pairs, typed_object_to_hashmap_nb,
+    TypeSchema, TypeSchemaBuilder, typed_object_from_pairs, typed_object_to_hashmap_nb,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,7 +87,7 @@ pub fn source_schema_to_nb(schema: &SourceSchema) -> ValueWord {
                 .columns
                 .iter()
                 .map(|column| {
-                    typed_object_from_nb_pairs(&[
+                    typed_object_from_pairs(&[
                         (
                             "name",
                             ValueWord::from_string(Arc::new(column.name.clone())),
@@ -101,7 +101,7 @@ pub fn source_schema_to_nb(schema: &SourceSchema) -> ValueWord {
                 })
                 .collect::<Vec<_>>();
 
-            let entity_nb = typed_object_from_nb_pairs(&[
+            let entity_nb = typed_object_from_pairs(&[
                 (
                     "name",
                     ValueWord::from_string(Arc::new(entity.name.clone())),
@@ -118,9 +118,9 @@ pub fn source_schema_to_nb(schema: &SourceSchema) -> ValueWord {
         .iter()
         .map(|(name, value)| (name.as_str(), value.clone()))
         .collect();
-    let tables_nb = typed_object_from_nb_pairs(&table_refs);
+    let tables_nb = typed_object_from_pairs(&table_refs);
 
-    typed_object_from_nb_pairs(&[
+    typed_object_from_pairs(&[
         ("uri", ValueWord::from_string(Arc::new(schema.uri.clone()))),
         ("tables", tables_nb),
         (

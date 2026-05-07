@@ -162,7 +162,7 @@ impl ConstEvaluator {
                 }
                 let ref_pairs: Vec<(&str, ValueWord)> =
                     pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                Ok(crate::type_schema::typed_object_from_nb_pairs(&ref_pairs))
+                Ok(crate::type_schema::typed_object_from_pairs(&ref_pairs))
             }
 
             // Array literals - recursively evaluate all elements

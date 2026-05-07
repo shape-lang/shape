@@ -16,7 +16,7 @@ use shape_ast::ast::functions::Annotation;
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
-use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
+use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_pairs};
 use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -214,7 +214,7 @@ impl ComptimeTarget {
                     .map(|(aname, aargs)| {
                         let args_arr: ArgVec = ArgVec::from_vec(
                             aargs.iter().map(|a| nb_string(a.clone())).collect());
-                        typed_object_from_nb_pairs(&[
+                        typed_object_from_pairs(&[
                             ("name", nb_string(aname.clone())),
                             ("args", ValueWord::from_array(shape_value::vmarray_from_vec(args_arr.into_inner()))),
                         ])
@@ -227,7 +227,7 @@ impl ComptimeTarget {
                 } else {
                     ftype.clone()
                 };
-                typed_object_from_nb_pairs(&[
+                typed_object_from_pairs(&[
                     ("name", nb_string(fname.clone())),
                     ("type", nb_string(effective_type)),
                     ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(anns_arr.into_inner()))),
@@ -241,7 +241,7 @@ impl ComptimeTarget {
             .params
             .iter()
             .map(|(pname, ptype, is_const)| {
-                typed_object_from_nb_pairs(&[
+                typed_object_from_pairs(&[
                     ("name", nb_string(pname.clone())),
                     ("type", nb_string(ptype.clone())),
                     ("const", ValueWord::from_bool(*is_const)),
@@ -267,7 +267,7 @@ impl ComptimeTarget {
         let captures_arr: ArgVec = ArgVec::from_vec(
             self.captures.iter().map(|c| nb_string(c.clone())).collect());
 
-        typed_object_from_nb_pairs(&[
+        typed_object_from_pairs(&[
             ("kind", nb_str(kind_str)),
             ("name", nb_string(self.name.clone())),
             ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(fields_arr.into_inner()))),
