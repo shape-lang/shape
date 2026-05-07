@@ -1204,6 +1204,95 @@ superseded. Per-file commits are shape-runtime only. shape-vm
 cleanup workstream's natural scope absorbs the dispatcher
 routing implementation.
 
+### 2026-05-07 — Predicted error-drop calibration correction (vector.rs empirical)
+
+In-place dated subsection per finding #11 symmetry-extension.
+**The original "Predicted error-drop" subsection above stays
+on-record.** This subsection corrects the per-file estimate
+based on vector.rs's measured outcome and per-file-histogram
+inspection. Cross-references the zero-copy entry's fifth-finding
+addendum (supervisor-side prospective-verification discipline,
+`docs/defections.md` 2026-05-07 zero-copy entry, commit
+`1688b91`).
+
+**vector.rs empirical (Commit 7 = `9a0c574`):** measured -1
+error. Predicted -3 to -8 (per the original subsection's
+"-1 to -3 per file × ~14 files = -14 to -42 total" framing).
+Outside the prediction window (>25% miss).
+
+**Calibration mechanism (verified by per-file error histogram
+inspection during the post-Commit-7 audit):** E0432
+unresolved-import errors **cascade-suppress at file
+granularity**, not per-symbol. When a file imports a deleted
+symbol (`use shape_value::{ValueWord, ValueWordExt};`), Rust
+emits one E0432 root error and treats subsequent references to
+those symbols within that file as resolved-via-error-recovery.
+Per-symbol cascade does NOT happen for these files. **Most
+intrinsic files emit 1 root error from the import line; deleting
+the import + bodies that depend on it drops 1 error.**
+
+**Outliers exist:** files with ValueWord references at non-import
+sites (function signatures using `&[ValueWord]` outside the
+import-cascade scope, struct fields, etc.) emit additional
+distinct E0425/E0433 errors that aren't suppressed by the import
+cascade.
+
+**Refined per-file expectation (binding for forward calibration):**
+
+| File | Expected error drop | Notes |
+|---|---|---|
+| `vector.rs` | -1 (LANDED, `9a0c574`) | measured |
+| `math.rs` | -1 | single-import-cascade |
+| `fft.rs` | -1 | single-import-cascade |
+| `scan.rs` | -1 | single-import-cascade |
+| `rolling.rs` | -1 | single-import-cascade |
+| `recurrence.rs` | -1 | single-import-cascade |
+| `convolution.rs` | -1 | single-import-cascade |
+| `array_transforms.rs` | -1 | single-import-cascade |
+| `statistical.rs` | -1 | single-import-cascade |
+| `stochastic.rs` | -1 | single-import-cascade |
+| `random.rs` | -1 | single-import-cascade |
+| `intrinsics/mod.rs` | -1 | single-import-cascade (after all 14 file migrations land, this becomes mechanical cleanup) |
+| `distributions.rs` | -2 | non-import-cascade outlier |
+| `matrix.rs` | -5 | non-import-cascade outlier; **architectural-adjacent surface required** at migration time (non-primitive `Arc<MatrixData>` storage, may need `ConcreteReturn::Matrix` extension) |
+| `multi_table/functions.rs` | -4 | non-import-cascade outlier; **architectural-adjacent surface required** at migration time (last in migration order; flag any architectural surprise) |
+| **Total intrinsics-typed-CC migration** | **~22-25 errors across 14 commits** | NOT the original -14 to -42 framing |
+
+**Original "-14 to -42" estimate diagnosis:** the lower bound
+(-14) was correct, derived from "1 per file × 14 files." The
+upper bound (-42) was based on assuming per-symbol cascade where
+the histogram shows file-level cascade. Without per-file
+histogram inspection at scoping time, the upper bound was a
+calibration over-estimate.
+
+**Predict-vs-measure tally update (intrinsics-typed-CC
+migration):** vector.rs 1/1 with the *refined* per-file estimate
+(refined to -1 expected; measured -1 = exact). 0/1 with the
+*original* -3 to -8 estimate (measured -1 = outside window).
+Forward predictions use the refined per-file expectation.
+
+**Cross-reference with zero-copy entry's fifth-finding addendum
+(commit `1688b91`).** That subsection added the supervisor-side
+prospective-verification discipline ("verify against current
+build state + cross-crate call graph + per-file ground-truth
+inspection at sign-off time"). The original predicted-error-drop
+estimate above would have been refined at scoping time if the
+per-file error histogram had been inspected — `cargo check -p
+shape-runtime --lib --message-format=short --keep-going 2>&1 |
+awk -F: '{print $1}' | sort | uniq -c` cleanly reveals the file-
+granularity cascade pattern. Going forward, scope predictions
+include per-file error-histogram inspection up front. This is
+the discipline working applied retrospectively to update an
+on-record entry, exactly the finding #11 symmetry-extension
+shape.
+
+**Disposition for this subsection:** in-place correction logged.
+Forward per-file migration commits use the refined expectation.
+matrix.rs and multi_table/functions.rs flagged for architectural-
+adjacent surfacing BEFORE writing code (non-primitive return
+shapes likely require `ConcreteReturn` extensions, an
+architectural extension not consumer migration).
+
 ---
 
 ## 2026-05-07 — Phase 2d Array cluster post-mortem — predict-vs-measure within window (-7 of -7..-10)
