@@ -24,7 +24,6 @@ pub mod matrix_kernels;
 pub mod random;
 pub mod recurrence;
 pub mod rolling;
-pub mod scan;
 pub mod statistical;
 pub mod stochastic;
 pub mod vector;
@@ -71,7 +70,6 @@ impl IntrinsicsRegistry {
         Self::register_matrix_intrinsics(&mut functions);
         Self::register_recurrence_intrinsics(&mut functions);
         Self::register_convolution_intrinsics(&mut functions);
-        Self::register_scan_intrinsics(&mut functions);
         Self::register_fft_intrinsics(&mut functions);
 
         Self {
@@ -268,11 +266,6 @@ impl IntrinsicsRegistry {
     /// typed marshal entry in `convolution::create_convolution_intrinsics_module`.
     fn register_convolution_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
         // Empty: __intrinsic_stencil migrated to typed marshal layer.
-    }
-
-    /// Register scan intrinsics
-    fn register_scan_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_scan".to_string(), scan::intrinsic_scan);
     }
 
     /// Register FFT (Fast Fourier Transform) intrinsics
