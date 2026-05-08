@@ -10,7 +10,6 @@ use shape_value::tag_bits::PAYLOAD_MASK;
 // ============================================================================
 
 pub const HK_JIT_FUNCTION: u16 = 128;
-pub const HK_JIT_SIGNAL_BUILDER: u16 = 129;
 pub const HK_JIT_TABLE_REF: u16 = 130;
 /// Plain HashMap<String, u64> objects (JIT-only, distinct from TypedObject).
 pub const HK_JIT_OBJECT: u16 = 131;

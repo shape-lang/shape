@@ -428,47 +428,6 @@ impl JITRange {
     }
 }
 
-/// JIT-compatible SignalBuilder structure
-/// Represents a signal builder for method chaining (series.where().then().capture())
-#[repr(C)]
-pub struct JITSignalBuilder {
-    pub series: u64,                  // NaN-boxed TAG_TABLE
-    pub conditions: Vec<u64>,         // Array of (condition_type, condition_series) pairs
-    pub captures: Vec<(String, u64)>, // (name, value) pairs for captured values
-}
-
-impl JITSignalBuilder {
-    pub fn new(series: u64) -> Box<Self> {
-        Box::new(JITSignalBuilder {
-            series,
-            conditions: Vec::new(),
-            captures: Vec::new(),
-        })
-    }
-
-    pub fn add_where(&mut self, condition_series: u64) {
-        // 0 = WHERE condition
-        self.conditions.push(0);
-        self.conditions.push(condition_series);
-    }
-
-    pub fn add_then(&mut self, condition_series: u64, max_gap: u64) {
-        // 1 = THEN condition
-        self.conditions.push(1);
-        self.conditions.push(condition_series);
-        self.conditions.push(max_gap);
-    }
-
-    pub fn add_capture(&mut self, name: String, value: u64) {
-        self.captures.push((name, value));
-    }
-
-    pub fn box_builder(builder: Box<JITSignalBuilder>) -> u64 {
-        use crate::ffi::jit_kinds::{HK_JIT_SIGNAL_BUILDER, jit_box};
-        jit_box(HK_JIT_SIGNAL_BUILDER, *builder)
-    }
-}
-
 /// JIT-compatible data reference structure
 /// Represents a reference to a specific data row in time
 #[repr(C)]

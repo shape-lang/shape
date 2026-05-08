@@ -25,7 +25,6 @@ pub mod matrix;
 pub mod number;
 pub mod object;
 pub mod result;
-pub mod signal_builder;
 pub mod string;
 pub mod time;
 
@@ -36,7 +35,6 @@ pub use matrix::call_matrix_method;
 pub use number::call_number_method;
 pub use object::call_object_method;
 pub use result::call_result_method;
-pub use signal_builder::call_signalbuilder_method;
 pub use string::call_string_method;
 pub use time::call_time_method;
 
@@ -547,9 +545,6 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                 Some(HK_COLUMN_REF) => TAG_NULL, // Series type removed
                 Some(HK_MATRIX) => call_matrix_method(receiver_bits, &method_name, &args),
                 Some(HK_TIME) => call_time_method(receiver_bits, &method_name, &args),
-                Some(HK_JIT_SIGNAL_BUILDER) => {
-                    call_signalbuilder_method(receiver_bits, &method_name, &args)
-                }
                 _ => TAG_NULL,
             }
         };
