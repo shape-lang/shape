@@ -258,6 +258,121 @@ commits that introduced `from_heap_arc` will be partially salvaged
 (steps 1, 4, 6, 8, 9 keep their core logic; step 2 is rewritten without
 `from_heap_arc`).
 
+### 2.7 Caller-side runtime-value abstraction — `KindedSlot`
+
+Phase 1.A established `ValueSlot` as the slot foundation, but the
+deletion of `ValueWord` (commit `fdd5205`, before Phase 1.A) left a
+caller-side gap: ~95 sites across `crates/shape-runtime/` use values
+where the `NativeKind` is not statically available locally. The deleted
+`ValueWord` carried its kind in tag bits; `ValueSlot` does not. Phase
+1.B's audit (2026-05-08, `/tmp/phase-1b-audit.md`) ground-truthed the
+shape of this gap across 60 files and ~658 references.
+
+**Decision (Q7 ruling):** Introduce `KindedSlot` in `shape-value`:
+
+```rust
+// crates/shape-value/src/slot.rs (new addition; ValueSlot stays 8 bytes)
+#[derive(Debug, Copy, Clone)]
+#[repr(C)]
+pub struct KindedSlot {
+    pub slot: ValueSlot,
+    pub kind: NativeKind,
+}
+```
+
+**This is a carrier, not a discriminator.** It does not violate
+ADR-005 §1 (single-discriminator discipline) because:
+
+- `KindedSlot` is a `struct`, not a sum type. ADR-005 §1 forbids
+  parallel *sum types* whose variants project 1:1 to `HeapKind`.
+- `NativeKind` is a broader taxonomy than `HeapKind` — it includes
+  raw scalars (`Int64`, `Float64`, `Bool`) with no `HeapValue` arm.
+  The kind→heap mapping is many-to-one (heap arms only), not 1:1.
+- The struct introduces no new dispatch surface; `KindedSlot::kind`
+  is the *same* `NativeKind` already tracked elsewhere in the type
+  system. It co-locates information already present in the data
+  model.
+
+`KindedSlot` carries explicit `Drop` and `Clone` impls that dispatch
+on `kind` to handle heap retain/release. Without these, `Vec<KindedSlot>`
+push/pop/clone would alias-copy heap pointers — the WB2.4 / WB2.5 bug
+class the typed-slot ABI was designed to prevent. The reference
+discipline pattern lives at `module_exports.rs:42-88` (`FrameInfo`)
+and `event_queue.rs:226-243` (`Cache::set/remove`); both must preserve
+their refcount semantics across the `Vec<ValueWord> → Vec<KindedSlot>`
+migration.
+
+#### 2.7.1 Per-site usage policy
+
+Three site shapes, applied per call site (audit-grounded counts in
+parentheses):
+
+1. **STATIC_KIND** (~30 files dominated by this shape, ~400 sites).
+   Use `ValueSlot` directly. `NativeKind` is statically determined by
+   the surrounding `FieldType` / schema / typed dispatch. Per-FieldType
+   `ValueSlot::from_*` constructors give kind by construction. **No
+   `KindedSlot`.** Examples: `content_builders.rs`, `content_methods.rs`,
+   `stdlib/{msgpack,toml,yaml}_module.rs`, `multiple_testing.rs`,
+   `module_exports_tests.rs`, `intrinsics/math.rs` (typed entries).
+
+2. **GENERIC_CARRIER — single value** (~6 files, ~15 sites). Use
+   `KindedSlot`. Examples: `Variable.value: KindedSlot`,
+   `Export::Value(KindedSlot)`, `OutputAdapter::print -> KindedSlot`,
+   `const_eval::eval -> Result<KindedSlot>`. The static-kind from
+   `Literal::*` arms is preserved by construction at the boundary.
+
+3. **GENERIC_CARRIER — vector storage** (~3 files, ~25 sites driving
+   ~80% of the cluster). Use `Vec<KindedSlot>`. Examples:
+   `ModuleBindingRegistry::values: Vec<KindedSlot>`,
+   `FrameInfo::{locals,upvalues,args}: Vec<KindedSlot>`,
+   `SuspensionState::{saved_locals,saved_stack}: Vec<KindedSlot>`.
+   Pre-existing parallel arrays (`is_const: Vec<bool>`,
+   `index_to_name: Vec<String>`) stay — those track unrelated
+   metadata.
+
+4. **Dispatch slices** (~3 files: `intrinsics/mod.rs`, `module_exports.rs`,
+   `stdlib_time.rs`). Use `&[KindedSlot]`. Examples:
+   `IntrinsicFn = fn(&[KindedSlot], &mut ExecutionContext) -> Result<KindedSlot>`,
+   `ModuleFn = Arc<dyn for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<KindedSlot, String> + Send + Sync>`.
+
+#### 2.7.2 Forbidden uses
+
+- Do not use `KindedSlot` where `NativeKind` is statically known
+  (would re-introduce kind-tag latency the slot ABI just removed).
+- Do not introduce `KindedSlot` *variants* (sum-type form).
+  `KindedSlot` is a carrier, not a discriminator.
+- Do not migrate `ValueSlot` itself to a 16-byte form. ADR-006 §2.1
+  fixes the slot at 8 bytes; the runtime-value carrier is a separate
+  type.
+- Do not let `KindedSlot` leak into the typed VM↔JIT slot ABI
+  (`docs/runtime-v2-spec.md`). The hot stack/JIT path stays
+  `ValueSlot`-only with kind threaded through opcode operands and
+  per-frame slot-kind metadata. `KindedSlot` is a *runtime-tier*
+  carrier (`shape-runtime` module bindings, frame snapshots,
+  intrinsic dispatch) — not a VM stack carrier.
+
+#### 2.7.3 Migration roadmap interaction
+
+Phase 1.B's caller migration (per §12) targets:
+- 9 cleanup-only files (pure `use` removal, zero non-trivial uses).
+- 16 DEPRECATED-comment files (no functional change, comment cleanup).
+- ~30 STATIC_KIND-dominated files (mechanical sed-shape rewrite).
+- ~9 files with real GENERIC_CARRIER sites needing `KindedSlot`
+  introduction. Top 3: `module_bindings.rs`,
+  `event_queue.rs`, `context/variables.rs` — resolving these three
+  closes ~80% of the carrier cluster.
+- 2 files with cross-crate ABI surface (`module_exports.rs`
+  `RawCallableInvoker`/`ModuleFn` extension contract;
+  `multi_table/functions.rs` shape-jit consumer at
+  `crates/shape-jit/src/ffi_symbols/data_access/mod.rs:95`).
+  Coordinate with shape-vm/shape-jit/extensions migrations rather
+  than unilaterally changing the trait-object signatures.
+
+The N9 cleanup hotspot (`type_schema/mod.rs:255-290` doing forbidden
+tag-decode hops via `value.as_heap_ref()` / `value.raw_bits()`) is
+in-scope for Phase 1.B and pre-flagged as needing audit-grounded
+cleanup, not pure-mechanical.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
@@ -704,7 +819,8 @@ Following ADR-005's convention:
 
 ## 17. Resolved questions
 
-Answers below were reached during the ADR-006 review on 2026-05-08.
+Answers below were reached during the ADR-006 review on 2026-05-08
+(Q1-Q6) and the Phase 1.B carrier-shape decision on 2026-05-08 (Q7).
 Q5 remains predicted-pending-audit; the rest are decisions binding for
 Phase 1 onward.
 
@@ -788,6 +904,45 @@ shared structure.
 
 **Status:** Phase 4 audit (~2 weeks) is the actual decision-maker. This
 is a prediction.
+
+### Q7 — Carrier shape for kind-erased call sites (Phase 1.B surface)
+
+**Decision:** Introduce `KindedSlot { slot: ValueSlot, kind: NativeKind }`
+carrier struct in `shape-value` (Option B). Used for the GENERIC_CARRIER
+call sites identified by the Phase 1.B audit (2026-05-08); not used for
+STATIC_KIND sites where `NativeKind` is locally available. Spec lives
+at §2.7.
+
+**Rationale:** The Phase 1.B audit found three call-site patterns —
+STATIC_KIND (mechanical, no carrier needed), GENERIC_CARRIER
+single-value, GENERIC_CARRIER vector storage. All three are served by
+one `KindedSlot` shape. Alternatives considered and rejected:
+
+- **Option A (raw `(ValueSlot, NativeKind)` tuples)** — rejected for
+  vector sites: `Vec<(ValueSlot, NativeKind)>` and
+  `Vec<ValueSlot>` + `Vec<NativeKind>` both lose the lockstep guarantee.
+  One indexing bug separates them and the type system stops catching it.
+
+- **Option C (parallel `Vec<NativeKind>` track)** — rejected for the
+  same reason: adds one more slot to every storage struct that must be
+  hand-maintained on every push/pop/swap. The `WB2.4` / `WB2.5`
+  retain-on-read pattern already had to be hand-maintained on `Vec<u64>`;
+  doubling that surface area is exactly where bugs hide.
+
+- **Re-extend `ValueSlot` to 16 bytes with embedded kind** — rejected:
+  breaks the slot ABI invariant in §2.1 (the typed-VM↔JIT slot is 8 bytes,
+  dispatching on external kind). A 16-byte `ValueSlot` would also expand
+  the `TypedObjectStorage::slots: Vec<ValueSlot>` storage by 2× and force
+  the JIT codegen to load/store 16 bytes per slot.
+
+- **New `RuntimeValue` enum with HeapKind-aligned variants** — rejected:
+  parallel-discriminator anti-pattern explicitly named in ADR-005 §1 and
+  the N9 close-out as a defection-attractor.
+
+**Status:** Binding for Phase 1.B onward. Audit-grounded site catalog
+is at `/tmp/phase-1b-audit.md` (2026-05-08; preserved by Phase 1.B
+commit history once the cluster closes). Cluster of 60 files / 658
+references / ~95 GENERIC_CARRIER sites.
 
 ### Q6 — String SSO threshold
 

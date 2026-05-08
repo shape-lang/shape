@@ -276,6 +276,7 @@ Key rules:
 - **Refcount on escape, not on mutability.** `let mut x = 0` is a stack scalar, not `Arc<Mutex<int>>`. RC is reached only when escape (closure capture, cross-task share, store-into-shared) requires it.
 - **HeapValue payloads carry typed `Arc<T>` directly.** `HeapValue::TypedArray(Arc<TypedArrayData>)`, `HeapValue::TypedObject(Arc<TypedObjectStorage>)`, etc. The slot stores typed pointers; `Box<HeapValue>` wrapping is forbidden in new code.
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all.** Per-FieldType constructors only (`from_string_arc`, `from_typed_array`, `from_typed_object`, ...). The Q6 ruling stands.
+- **Caller-side runtime-value carrier is `KindedSlot { slot: ValueSlot, kind: NativeKind }`** (ADR-006 §2.7 / Q7), used only at GENERIC_CARRIER sites where `NativeKind` is not locally available — module bindings, frame info, suspension state, intrinsic dispatch, output-adapter return. STATIC_KIND sites use `ValueSlot` directly. `KindedSlot` must NOT leak into the typed VM↔JIT slot ABI (`docs/runtime-v2-spec.md`); it is a runtime-tier carrier, not a stack slot.
 - **No new modal-types subsystem.** The existing borrow solver, MIR storage planner, and `BindingStorageClass` vocabulary (`type_tracking.rs:286`) are extended by two variants (`SharedAtomic`, `SharedAtomicMut`) for cross-task sharing — not replaced.
 - **LSDS** is the primary diagnostic format. Renderers consume it.
 
