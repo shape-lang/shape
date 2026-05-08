@@ -117,8 +117,9 @@ fn extract_timeout(
     for (k, v) in options.iter() {
         if k.as_str() == "timeout" {
             if let HeapValue::BigInt(ms) = &**v {
-                if *ms > 0 {
-                    return Some(std::time::Duration::from_millis(*ms as u64));
+                let n = **ms;
+                if n > 0 {
+                    return Some(std::time::Duration::from_millis(n as u64));
                 }
             }
         }

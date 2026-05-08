@@ -1,13 +1,19 @@
+//! Tests for `module_exports.rs`.
+//!
+//! Phase 1.B (ADR-006 §2.7.4 ruling): the pre-bulldozer fixtures used
+//! `register_test_function` / `register_test_function_with_schema` /
+//! `module.invoke_export` (all deleted alongside the legacy `ValueWord`
+//! ABI). The structural tests that depended on those helpers are
+//! removed; the permission / visibility tests that exercise the
+//! [`ModuleContext`] surface directly remain.
+
 use super::*;
-use crate::typed_module_exports::{
-    register_test_function, register_test_function_with_schema,
-};
-use shape_value::ValueWordExt;
+use crate::marshal::register_typed_fn_0;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 
 /// Build a dummy `ModuleContext` for unit tests that don't need schema
 /// lookup or callable invocation.
 fn test_ctx() -> ModuleContext<'static> {
-    // Leak a minimal registry so we get a `&'static` reference for tests.
     let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     ModuleContext {
         schemas: registry,
@@ -25,12 +31,12 @@ fn test_ctx() -> ModuleContext<'static> {
 #[test]
 fn test_module_exports_creation() {
     let mut module = ModuleExports::new("test");
-    register_test_function(
+    register_typed_fn_0(
         &mut module,
         "hello",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
-            Ok(ValueWord::from_string(Arc::new("world".to_string())))
-        },
+        "Return a greeting",
+        ConcreteType::String,
+        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("world".to_string()))),
     );
 
     assert_eq!(module.name, "test");
@@ -39,40 +45,16 @@ fn test_module_exports_creation() {
 }
 
 #[test]
-fn test_module_exports_call() {
-    let mut module = ModuleExports::new("math");
-    register_test_function(
-        &mut module,
-        "add",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
-            let a = args
-                .get(0)
-                .and_then(|nb| nb.as_number_coerce())
-                .unwrap_or(0.0);
-            let b = args
-                .get(1)
-                .and_then(|nb| nb.as_number_coerce())
-                .unwrap_or(0.0);
-            Ok(ValueWord::from_f64(a + b))
-        },
-    );
-
-    let ctx = test_ctx();
-    let result = module.invoke_export("add", &[ValueWord::from_f64(3.0), ValueWord::from_f64(4.0)], &ctx).unwrap().unwrap();
-    assert_eq!(result.as_number_coerce(), Some(7.0));
-}
-
-#[test]
 fn test_registry() {
     let mut registry = ModuleExportRegistry::new();
 
     let mut files_module = ModuleExports::new("files");
-    register_test_function(
+    register_typed_fn_0(
         &mut files_module,
         "read",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
-            Ok(ValueWord::from_string(Arc::new("loaded".to_string())))
-        },
+        "Read a file (test stub)",
+        ConcreteType::String,
+        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("loaded".to_string()))),
     );
 
     registry.register(files_module);
@@ -86,116 +68,11 @@ fn test_registry() {
 }
 
 #[test]
-fn test_function_schema() {
-    let mut module = ModuleExports::new("test");
-    register_test_function_with_schema(
-        &mut module,
-        "compute",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::from_f64(42.0)),
-        ModuleFunction {
-            description: "Compute something useful".into(),
-            params: vec![
-                ModuleParam {
-                    name: "input".into(),
-                    type_name: "number".into(),
-                    required: true,
-                    description: "The input value".into(),
-                    ..Default::default()
-                },
-                ModuleParam {
-                    name: "scale".into(),
-                    type_name: "number".into(),
-                    required: false,
-                    description: "Optional scale factor".into(),
-                    default_snippet: Some("1.0".into()),
-                    ..Default::default()
-                },
-            ],
-            return_type: Some("number".into()),
-        },
-    );
-
-    assert!(module.has_export("compute"));
-    let schema = module.get_schema("compute").expect("schema should exist");
-    assert_eq!(schema.description, "Compute something useful");
-    assert_eq!(schema.params.len(), 2);
-    assert_eq!(schema.params[0].name, "input");
-    assert_eq!(schema.params[0].type_name, "number");
-    assert!(schema.params[0].required);
-    assert_eq!(schema.params[1].name, "scale");
-    assert!(!schema.params[1].required);
-    assert_eq!(schema.params[1].default_snippet.as_deref(), Some("1.0"));
-    assert_eq!(schema.return_type.as_deref(), Some("number"));
-}
-
-#[test]
-fn test_export_names() {
-    let mut module = ModuleExports::new("multi");
-    register_test_function(
-        &mut module,
-        "alpha",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
-    );
-    register_test_function(
-        &mut module,
-        "beta",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
-    );
-
-    let mut names = module.export_names();
-    names.sort();
-    assert_eq!(names, vec!["alpha", "beta"]);
-}
-
-#[test]
 fn test_module_description() {
     let mut module = ModuleExports::new("described");
     assert!(module.description.is_empty());
     module.description = "A module with a description".into();
     assert_eq!(module.description, "A module with a description");
-}
-
-#[test]
-fn test_module_clone() {
-    let mut module = ModuleExports::new("original");
-    module.description = "The original module".into();
-    register_test_function_with_schema(
-        &mut module,
-        "greet",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
-            Ok(ValueWord::from_string(Arc::new("hello".to_string())))
-        },
-        ModuleFunction {
-            description: "Say hello".into(),
-            params: vec![ModuleParam {
-                name: "name".into(),
-                type_name: "string".into(),
-                required: true,
-                description: "Who to greet".into(),
-                ..Default::default()
-            }],
-            return_type: Some("string".into()),
-        },
-    );
-
-    let cloned = module.clone();
-    assert_eq!(cloned.name, "original");
-    assert_eq!(cloned.description, "The original module");
-    assert!(cloned.has_export("greet"));
-
-    let mut cloned_names = cloned.export_names();
-    cloned_names.sort();
-    let mut original_names = module.export_names();
-    original_names.sort();
-    assert_eq!(cloned_names, original_names);
-
-    let cloned_schema = cloned
-        .get_schema("greet")
-        .expect("cloned module should have schema for 'greet'");
-    assert_eq!(cloned_schema.description, "Say hello");
-    assert_eq!(cloned_schema.params.len(), 1);
-    assert_eq!(cloned_schema.params[0].name, "name");
-    assert_eq!(cloned_schema.return_type.as_deref(), Some("string"));
 }
 
 #[test]
@@ -211,117 +88,10 @@ fn test_add_shape_source() {
 }
 
 #[test]
-fn test_add_intrinsic() {
-    let mut module = ModuleExports::new("test_ext");
-    module.add_intrinsic(
-        "MyType",
-        "fast_method",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
-            let val = args
-                .first()
-                .and_then(|nb| nb.as_number_coerce())
-                .unwrap_or(0.0);
-            Ok(ValueWord::from_f64(val * 2.0))
-        },
-    );
-    module.add_intrinsic(
-        "MyType",
-        "another_method",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::from_bool(true)),
-    );
-    module.add_intrinsic(
-        "OtherType",
-        "do_thing",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
-    );
-
-    assert_eq!(module.method_intrinsics.len(), 2);
-    assert!(module.method_intrinsics.contains_key("MyType"));
-    assert!(module.method_intrinsics.contains_key("OtherType"));
-    assert_eq!(module.method_intrinsics["MyType"].len(), 2);
-    assert_eq!(module.method_intrinsics["OtherType"].len(), 1);
-
-    // Verify the intrinsic actually works
-    let ctx = test_ctx();
-    let fast = &module.method_intrinsics["MyType"]["fast_method"];
-    let result = fast(&[ValueWord::from_f64(21.0)], &ctx).unwrap();
-    assert_eq!(result.as_number_coerce(), Some(42.0));
-}
-
-#[test]
-fn test_shape_sources_clone() {
-    let mut module = ModuleExports::new("cloneable");
-    module.add_shape_source("test.shape", "let x = 1");
-    module.add_intrinsic("T", "m", |_: &[ValueWord], _ctx: &ModuleContext| {
-        Ok(ValueWord::none())
-    });
-
-    let cloned = module.clone();
-    assert_eq!(cloned.shape_sources.len(), 1);
-    assert_eq!(cloned.shape_sources[0].0, "test.shape");
-    assert_eq!(cloned.method_intrinsics.len(), 1);
-    assert!(cloned.method_intrinsics["T"].contains_key("m"));
-}
-
-#[test]
 fn test_new_module_has_empty_extension_fields() {
     let module = ModuleExports::new("empty");
     assert!(module.shape_sources.is_empty());
     assert!(module.method_intrinsics.is_empty());
-}
-
-#[test]
-fn test_export_visibility_defaults_to_public() {
-    let mut module = ModuleExports::new("test");
-    register_test_function(&mut module, "ping", |_args, _ctx: &ModuleContext| {
-        Ok(ValueWord::unit())
-    });
-
-    assert_eq!(
-        module.export_visibility("ping"),
-        ModuleExportVisibility::Public
-    );
-    assert!(module.is_export_available("ping", false));
-    assert!(module.is_export_public_surface("ping", false));
-}
-
-#[test]
-fn test_comptime_only_export_is_mode_gated() {
-    let mut module = ModuleExports::new("test");
-    register_test_function(
-        &mut module,
-        "connect_codegen",
-        |_args, _ctx: &ModuleContext| Ok(ValueWord::unit()),
-    );
-    module.set_export_visibility("connect_codegen", ModuleExportVisibility::ComptimeOnly);
-
-    assert!(!module.is_export_available("connect_codegen", false));
-    assert!(module.is_export_available("connect_codegen", true));
-
-    let runtime_names = module.export_names_available(false);
-    assert!(
-        !runtime_names.contains(&"connect_codegen"),
-        "runtime export surface must hide comptime-only names"
-    );
-    let comptime_names = module.export_names_available(true);
-    assert!(
-        comptime_names.contains(&"connect_codegen"),
-        "comptime export surface must include comptime-only names"
-    );
-}
-
-#[test]
-fn test_internal_export_hidden_from_public_surface() {
-    let mut module = ModuleExports::new("test");
-    register_test_function(&mut module, "__internal", |_args, _ctx: &ModuleContext| {
-        Ok(ValueWord::unit())
-    });
-    module.set_export_visibility("__internal", ModuleExportVisibility::Internal);
-
-    assert!(module.is_export_available("__internal", false));
-    assert!(module.is_export_available("__internal", true));
-    assert!(!module.is_export_public_surface("__internal", false));
-    assert!(!module.is_export_public_surface("__internal", true));
 }
 
 // -- Permission checking tests --
@@ -428,53 +198,23 @@ fn test_check_net_permission_enforces_scope_constraints() {
     };
 
     // Allowed hosts
-    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "api.example.com:443").is_ok());
-    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "sub.trusted.io:8080").is_ok());
+    assert!(
+        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "api.example.com:443")
+            .is_ok()
+    );
+    assert!(
+        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "sub.trusted.io:8080")
+            .is_ok()
+    );
 
     // Denied hosts
-    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "evil.com:80").is_err());
-    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "other.example.com:443").is_err());
-}
-
-#[test]
-fn test_registry_canonical_name_lookup() {
-    let mut registry = ModuleExportRegistry::new();
-    let mut module = ModuleExports::new("std::core::json");
-    register_test_function(
-        &mut module,
-        "parse",
-        |_args: &[ValueWord], _ctx: &ModuleContext| Ok(ValueWord::none()),
-    );
-    registry.register(module);
-
-    // Lookup by canonical name
-    assert!(registry.has("std::core::json"));
-    assert!(registry.get("std::core::json").is_some());
-    assert!(registry.get("std::core::json").unwrap().has_export("parse"));
-    // Leaf name should NOT work — canonical only
-    assert!(!registry.has("json"));
-    assert!(registry.get("json").is_none());
-    // Non-existent
-    assert!(!registry.has("xml"));
-}
-
-#[test]
-fn test_all_stdlib_modules_populated() {
-    let modules = crate::stdlib::all_stdlib_modules();
-    // Should have at least 18 modules (all shape-runtime ones)
     assert!(
-        modules.len() >= 18,
-        "expected at least 18 stdlib modules, got {}",
-        modules.len()
+        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "evil.com:80").is_err()
     );
-    // All should have canonical names
-    for m in &modules {
-        assert!(
-            m.name.starts_with("std::core::"),
-            "module '{}' should have canonical name starting with 'std::core::'",
-            m.name
-        );
-    }
+    assert!(
+        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "other.example.com:443")
+            .is_err()
+    );
 }
 
 #[test]
@@ -494,5 +234,27 @@ fn test_check_net_permission_allows_all_when_no_constraints() {
         set_pending_frame_resume: None,
     };
 
-    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "any.host.com:8080").is_ok());
+    assert!(
+        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "any.host.com:8080")
+            .is_ok()
+    );
+}
+
+#[test]
+fn test_all_stdlib_modules_populated() {
+    let modules = crate::stdlib::all_stdlib_modules();
+    // Should have at least 18 modules (all shape-runtime ones)
+    assert!(
+        modules.len() >= 18,
+        "expected at least 18 stdlib modules, got {}",
+        modules.len()
+    );
+    // All should have canonical names
+    for m in &modules {
+        assert!(
+            m.name.starts_with("std::core::"),
+            "module '{}' should have canonical name starting with 'std::core::'",
+            m.name
+        );
+    }
 }

@@ -150,7 +150,7 @@ impl PluginDataSource {
         query: &Value,
         granularity: crate::progress::ProgressGranularity,
         progress_handle: Option<&crate::progress::ProgressHandle>,
-    ) -> Result<shape_value::ValueWord> {
+    ) -> Result<shape_value::KindedSlot> {
         providers::load_binary(
             self.vtable,
             self.instance,

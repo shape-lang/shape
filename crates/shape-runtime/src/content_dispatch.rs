@@ -76,7 +76,6 @@ pub fn datatable_to_content_node(dt: &DataTable, max_rows: Option<usize>) -> Con
         column_types: Some(column_types),
         total_rows: if total > limit { Some(total) } else { None },
         sortable: true,
-        type_name: dt.type_name().map(|s| s.to_string()),
     })
 }
 

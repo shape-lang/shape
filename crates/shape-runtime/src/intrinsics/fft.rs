@@ -55,9 +55,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
             let data = series.as_slice();
             let n = data.len();
             if n == 0 {
-                return Ok(TypedReturn::Concrete(ConcreteReturn::TypedObject(
-                    empty_fft_pairs(),
-                )));
+                return Ok(TypedReturn::TypedObject(empty_fft_pairs()));
             }
             let mut buffer: Vec<Complex<f64>> =
                 data.iter().map(|&x| Complex::new(x, 0.0)).collect();

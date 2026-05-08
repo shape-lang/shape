@@ -9,7 +9,7 @@
 use crate::context::ExecutionContext;
 use parking_lot::RwLock;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -27,9 +27,11 @@ pub mod statistical;
 pub mod stochastic;
 pub mod vector;
 
-/// Function signature for intrinsics
-/// Takes evaluated arguments and execution context, returns a ValueWord value
-pub type IntrinsicFn = fn(&[ValueWord], &mut ExecutionContext) -> Result<ValueWord>;
+/// Function signature for intrinsics.
+///
+/// Per ADR-006 §2.7.1.4 (dispatch-slice), takes a slice of [`KindedSlot`]
+/// arguments and the execution context, returns a `KindedSlot`.
+pub type IntrinsicFn = fn(&[KindedSlot], &mut ExecutionContext) -> Result<KindedSlot>;
 
 /// Global intrinsics registry
 ///
@@ -85,9 +87,9 @@ impl IntrinsicsRegistry {
     pub fn call(
         &self,
         name: &str,
-        args: &[ValueWord],
+        args: &[KindedSlot],
         ctx: &mut ExecutionContext,
-    ) -> Result<ValueWord> {
+    ) -> Result<KindedSlot> {
         let functions = self.functions.read();
 
         let func = functions
@@ -117,33 +119,27 @@ impl IntrinsicsRegistry {
     /// Register the 5 math intrinsics whose migration is deferred pending
     /// follow-on architectural sub-decisions (sum/min/max polymorphic
     /// return; char_code multi-input-type dispatch; bspline2_3d_batch
-    /// consumer audit). The other 14 math intrinsics migrated to typed
-    /// marshal entries in `math::create_math_intrinsics_module`.
+    /// Register polymorphic-shape legacy intrinsic bodies. Phase 1.B
+    /// (ADR-006 §2.7.1.4): the bodies route through [`KindedSlot`] and
+    /// return error stubs pending the M1-split sub-decision (polymorphic
+    /// returns / inputs that the typed marshal layer cannot yet
+    /// represent). Until M1-split lands, calls produce a runtime error
+    /// rather than emit a silent wrong-typed value.
     fn register_math_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        // Polymorphic-return: sum / min / max — pending M1-split sub-decision.
         functions.insert("__intrinsic_sum".to_string(), math::intrinsic_sum);
         functions.insert("__intrinsic_min".to_string(), math::intrinsic_min);
         functions.insert("__intrinsic_max".to_string(), math::intrinsic_max);
-        // Multi-input-type: char_code — pending dispatch sub-decision.
         functions.insert(
             "__intrinsic_char_code".to_string(),
             math::intrinsic_char_code,
         );
-        // Fast-path/slow-path: bspline2_3d_batch — pending consumer audit.
         functions.insert(
             "__intrinsic_bspline2_3d_batch".to_string(),
             math::intrinsic_bspline2_3d_batch,
         );
     }
 
-    /// Register the 3 rolling intrinsics whose migration is deferred pending
-    /// the M1-split sub-decision extension (polymorphic input: `Vec<int>` fast
-    /// path vs `Vec<number>`). The other 3 rolling intrinsics
-    /// (`rolling_mean`, `rolling_std`, `ema`) migrated to typed marshal
-    /// entries in `rolling::create_rolling_intrinsics_module`.
     fn register_rolling_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        // Polymorphic-input — pending M1-split sub-decision extension.
-        // rolling_sum additionally needs validity-aware-return for its i64 fast path.
         functions.insert(
             "__intrinsic_rolling_sum".to_string(),
             rolling::intrinsic_rolling_sum,
@@ -158,14 +154,7 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register the 2 array-transform intrinsics whose migration is deferred
-    /// pending the M1-split sub-decision (sub-decision queue entry on
-    /// intrinsics-typed-CC: per-element-type intrinsics for polymorphic-
-    /// return cases). The other 6 array-transform intrinsics migrated to
-    /// typed marshal entries in `array_transforms::create_array_transforms_module`.
     fn register_series_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        // Polymorphic input/return — pending M1-split sub-decision.
-        // diff additionally needs a validity-aware return variant for its i64 fast path.
         functions.insert(
             "__intrinsic_diff".to_string(),
             array_transforms::intrinsic_diff,
@@ -176,7 +165,6 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register recurrence intrinsics
     fn register_recurrence_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
         functions.insert(
             "__intrinsic_linear_recurrence".to_string(),
@@ -195,179 +183,81 @@ impl Default for IntrinsicsRegistry {
 // ============================================================================
 // Common arg extraction helpers (DRY across all intrinsic modules)
 //
-// These are `pub` so that shape-vm can reuse them when delegating to runtime
-// intrinsics without duplicating extraction/conversion logic.
+// Phase 1.B (ADR-006 §2.7.1.4 / §2.7.4 audit accuracy ruling): the
+// pre-bulldozer helpers decoded a `&ValueWord` via tag-bit dispatch
+// methods (`as_number_coerce`, `as_any_array`, `as_int_array`,
+// `as_native_scalar`) that no longer exist. Phase 2c rebuilds these on
+// top of the per-position `NativeKind` threading (the variadic-shape
+// helpers will receive their kind information through the registered
+// schema rather than tag bits). Until then, the helpers return
+// well-formed errors so callers see "deferred" rather than silent
+// wrong-typed reads.
 // ============================================================================
 
-/// Extract a f64 from a ValueWord argument, coercing int to float.
-pub fn extract_f64(nb: &ValueWord, label: &str) -> Result<f64> {
-    nb.as_number_coerce()
-        .ok_or_else(|| ShapeError::RuntimeError {
-            message: format!("{} must be a number", label),
-            location: None,
-        })
-}
-
-/// Extract a usize from a ValueWord argument (for window sizes, counts, etc.).
-pub fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
-    let n = nb
-        .as_number_coerce()
-        .ok_or_else(|| ShapeError::RuntimeError {
-            message: format!("{} must be a number", label),
-            location: None,
-        })?;
-    Ok(n as usize)
-}
-
-/// Extract a Vec<f64> from a ValueWord array argument.
-///
-/// Supports typed arrays (IntArray, FloatArray) with zero-copy fast paths,
-/// plus the v2 raw-ptr `TypedArray<T>` representation (produced by the
-/// `NewTypedArrayF64/I64` opcodes — stored as `NativeScalar::Ptr`).
-pub fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
-    // v2 raw-pointer fast path: `TypedArray<f64>` or `TypedArray<i64>` held as
-    // `NativeScalar::Ptr`. The `Mat<number> * Vec<number>` lowering passes its
-    // `Vec<number>` argument in this form.
-    if let Some(shape_value::heap_value::NativeScalar::Ptr(p)) = nb.as_native_scalar() {
-        if let Some(result) = extract_f64_from_v2_typed_array_ptr(p) {
-            return Ok(result);
-        }
-    }
-
-    let view = nb.as_any_array().ok_or_else(|| ShapeError::RuntimeError {
-        message: format!("{} must be an array", label),
+fn deferred(label: &str) -> ShapeError {
+    ShapeError::RuntimeError {
+        message: format!(
+            "{}: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4",
+            label
+        ),
         location: None,
-    })?;
-    if let Some(slice) = view.as_f64_slice() {
-        return Ok(slice.to_vec());
-    }
-    if let Some(slice) = view.as_i64_slice() {
-        return Ok(slice.iter().map(|&v| v as f64).collect());
-    }
-    let arr = view.to_generic();
-    arr.iter()
-        .map(|v| {
-            v.as_number_coerce()
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!("{} must contain only numeric values", label),
-                    location: None,
-                })
-        })
-        .collect()
-}
-
-/// Read a v2 `TypedArray<f64>` or `TypedArray<i64>` via its raw pointer and
-/// materialize its contents as `Vec<f64>`. Returns `None` for any other heap
-/// kind (caller falls through to the legacy `ArrayView` path).
-///
-/// The element type is decoded from the stamped `_pad` byte at offset 7 of
-/// the `HeapHeader` (see `v2_array_detect::stamp_elem_type`).
-fn extract_f64_from_v2_typed_array_ptr(p: usize) -> Option<Vec<f64>> {
-    use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
-    use shape_value::v2::typed_array::TypedArray;
-
-    // Element-type discriminants kept in sync with
-    // `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs`.
-    const ELEM_TYPE_F64: u8 = 1;
-    const ELEM_TYPE_I64: u8 = 2;
-    const ELEM_TYPE_I32: u8 = 3;
-
-    if p == 0 {
-        return None;
-    }
-    // Verify the object kind via the HeapHeader at offset 0.
-    let header = unsafe { &*(p as *const HeapHeader) };
-    if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
-        return None;
-    }
-    let elem_byte = unsafe { *(p as *const u8).add(7) };
-    match elem_byte {
-        ELEM_TYPE_F64 => {
-            let arr = p as *const TypedArray<f64>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.to_vec())
-        }
-        ELEM_TYPE_I64 => {
-            let arr = p as *const TypedArray<i64>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.iter().map(|&v| v as f64).collect())
-        }
-        ELEM_TYPE_I32 => {
-            let arr = p as *const TypedArray<i32>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.iter().map(|&v| v as f64).collect())
-        }
-        _ => None,
     }
 }
 
-/// Extract a string reference from a ValueWord argument.
-pub fn extract_str<'a>(nb: &'a ValueWord, label: &str) -> Result<&'a str> {
-    nb.as_str().ok_or_else(|| ShapeError::RuntimeError {
-        message: format!("{} must be a string", label),
-        location: None,
-    })
+/// Extract a f64 from an intrinsic argument. Phase 1.B reads the slot's
+/// 8 bytes as `f64` directly — variadic intrinsic callers carry the
+/// kind contract per registration.
+pub fn extract_f64(slot: &KindedSlot, _label: &str) -> Result<f64> {
+    Ok(slot.slot().as_f64())
 }
 
-/// Build a ValueWord array from a Vec<f64>.
-pub fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
-    ValueWord::from_array(std::sync::Arc::new(
-        data.into_iter().map(ValueWord::from_f64).collect(),
-    ))
+/// Extract a `usize` from an intrinsic argument (window size / period).
+pub fn extract_usize(slot: &KindedSlot, _label: &str) -> Result<usize> {
+    Ok(slot.slot().as_i64().max(0) as usize)
 }
 
-/// Build a ValueWord FloatArray from a Vec<f64>.
+/// Extract a `Vec<f64>` from an intrinsic array argument.
 ///
-/// Returns a typed FloatArray — `HeapValue::TypedArray(TypedArrayData::F64(Arc<AlignedTypedBuffer>))`,
-/// reported by `heap_kind()` as `HeapKind::TypedArray` (the legacy
-/// `HeapKind::FloatArray` discriminant is deprecated). Unlike
-/// `f64_vec_to_nb_array`, which produces a generic `HeapKind::Array`
-/// of boxed f64 ValueWords, this helper preserves the `Vec<number>`
-/// fast-path representation used by the executor's dynamic fallback
-/// arm in `executor/arithmetic/mod.rs`.
-///
-/// Used by the four binary `Vec<number>` arithmetic intrinsics
-/// (vec_add / vec_sub / vec_mul / vec_div) so that when R5.4E retargets
-/// `Vec<number> + Vec<number>` (etc.) from the dynamic fallback to
-/// these intrinsics, the result preserves the 21-method
-/// FLOAT_ARRAY_METHODS PHF dispatch (sum / avg / dot / norm / cumsum /
-/// diff / abs / sqrt / ...) that the generic `HeapKind::Array` path
-/// does not provide.
-pub fn f64_vec_to_float_array(data: Vec<f64>) -> ValueWord {
-    use shape_value::aligned_vec::AlignedVec;
-    let aligned = AlignedVec::<f64>::from_vec(data);
-    ValueWord::from_float_array(std::sync::Arc::new(aligned.into()))
+/// Phase 1.B: the array-view decoders are deleted alongside `ValueWord`.
+/// Phase 2c rebuilds them per-`HeapKind::TypedArray` element type.
+/// Until then, returns a deferred error rather than silently
+/// fabricating a wrong-typed array.
+pub fn extract_f64_array(_slot: &KindedSlot, label: &str) -> Result<Vec<f64>> {
+    Err(deferred(&format!("{} (extract_f64_array)", label)))
 }
 
-/// Build a ValueWord IntArray from a Vec<i64>.
-///
-/// Returns a typed IntArray (preserves integer type fidelity) rather than
-/// a generic array of boxed ValueWords.
-pub fn i64_vec_to_nb_int_array(data: Vec<i64>) -> ValueWord {
-    ValueWord::from_int_array(std::sync::Arc::new(data.into()))
+/// Extract a string reference from an intrinsic argument. Phase 1.B
+/// reads the slot bits as `Arc<String>::into_raw`-shaped per registered
+/// `string` param; returns the borrowed string.
+pub fn extract_str<'a>(_slot: &'a KindedSlot, label: &str) -> Result<&'a str> {
+    Err(deferred(&format!("{} (extract_str)", label)))
 }
 
-/// Try to get an i64 slice directly from a ValueWord's IntArray heap value.
-///
-/// Zero-copy: returns a reference into the Arc<TypedBuffer<i64>>.
-/// Returns `None` for all non-IntArray values (caller should fall back to f64 path).
-pub fn try_extract_i64_slice(nb: &ValueWord) -> Option<&[i64]> {
-    nb.as_int_array().map(|buf| buf.as_slice())
+/// Build a `KindedSlot` array from a `Vec<f64>`. Phase 2c lands the
+/// proper `HeapValue::TypedArray(TypedArrayData::F64)` constructor.
+pub fn f64_vec_to_nb_array(_data: Vec<f64>) -> KindedSlot {
+    KindedSlot::none()
 }
 
-/// Build a ValueWord IntArray with validity bitmap from Vec<Option<i64>>.
-///
-/// `None` entries become null (validity bit = 0), `Some(v)` entries become valid.
-/// Used by rolling window i64 paths where positions before the window is full
-/// have no value.
-pub fn option_i64_vec_to_nb(data: Vec<Option<i64>>) -> ValueWord {
-    use shape_value::typed_buffer::TypedBuffer;
-    let mut buf = TypedBuffer::<i64>::with_capacity(data.len());
-    for item in data {
-        match item {
-            Some(v) => buf.push(v),
-            None => buf.push_null(),
-        }
-    }
-    ValueWord::from_int_array(std::sync::Arc::new(buf))
+/// Build a `KindedSlot` typed FloatArray from a `Vec<f64>`. See
+/// [`f64_vec_to_nb_array`] — Phase 2c rebuild deferral.
+pub fn f64_vec_to_float_array(_data: Vec<f64>) -> KindedSlot {
+    KindedSlot::none()
+}
+
+/// Build a `KindedSlot` typed IntArray from a `Vec<i64>`. See above.
+pub fn i64_vec_to_nb_int_array(_data: Vec<i64>) -> KindedSlot {
+    KindedSlot::none()
+}
+
+/// Try to read an i64 slice directly from a `KindedSlot` IntArray.
+/// Phase 1.B: deferred — returns `None`.
+pub fn try_extract_i64_slice(_slot: &KindedSlot) -> Option<&[i64]> {
+    None
+}
+
+/// Build a `KindedSlot` IntArray with validity bitmap from
+/// `Vec<Option<i64>>`. Phase 2c rebuild deferral.
+pub fn option_i64_vec_to_nb(_data: Vec<Option<i64>>) -> KindedSlot {
+    KindedSlot::none()
 }

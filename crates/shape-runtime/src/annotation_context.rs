@@ -35,7 +35,7 @@
 //! - `emit(event, data)` - Event emission for alerts, logging
 //! - `data` - Data range manipulation (extend/restore for warmup)
 
-use shape_value::{ValueMap, ValueWord};
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -136,7 +136,7 @@ impl AnnotationContext {
     }
 
     /// Emit an event (for alerts, logging, etc.)
-    pub fn emit(&mut self, event_type: &str, data: ValueWord) {
+    pub fn emit(&mut self, event_type: &str, data: KindedSlot) {
         self.events.push(EmittedEvent {
             event_type: event_type.to_string(),
             data,
@@ -185,7 +185,7 @@ pub struct AnnotationCache {
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
-    pub value: ValueWord,
+    pub value: KindedSlot,
     pub created_at: std::time::Instant,
 }
 
@@ -196,8 +196,8 @@ impl AnnotationCache {
         }
     }
 
-    /// Get a cached value by key as ValueWord reference
-    pub fn get(&self, key: &str) -> Option<&ValueWord> {
+    /// Get a cached value by key as KindedSlot reference
+    pub fn get(&self, key: &str) -> Option<&KindedSlot> {
         self.entries.get(key).map(|e| &e.value)
     }
 
@@ -207,7 +207,7 @@ impl AnnotationCache {
     }
 
     /// Set a cached value
-    pub fn set(&mut self, key: String, value: ValueWord) {
+    pub fn set(&mut self, key: String, value: KindedSlot) {
         self.entries.insert(
             key,
             CacheEntry {
@@ -223,7 +223,7 @@ impl AnnotationCache {
     }
 
     /// Remove a cached value
-    pub fn remove(&mut self, key: &str) -> Option<ValueWord> {
+    pub fn remove(&mut self, key: &str) -> Option<KindedSlot> {
         self.entries.remove(key).map(|e| e.value)
     }
 
@@ -244,22 +244,22 @@ impl AnnotationCache {
 pub struct AnnotationState {
     /// `ValueMap` ensures each per-annotation persistent value's heap ref
     /// is released when the state is cleared or dropped.
-    values: ValueMap,
+    values: HashMap<String, KindedSlot>,
 }
 
 impl AnnotationState {
     pub fn new() -> Self {
         Self {
-            values: ValueMap::new(),
+            values: HashMap::new(),
         }
     }
 
-    /// Get a state value as ValueWord reference
-    pub fn get(&self, key: &str) -> Option<&ValueWord> {
+    /// Get a state value as KindedSlot reference
+    pub fn get(&self, key: &str) -> Option<&KindedSlot> {
         self.values.get(key)
     }
 
-    pub fn set(&mut self, key: String, value: ValueWord) {
+    pub fn set(&mut self, key: String, value: KindedSlot) {
         self.values.insert(key, value);
     }
 
@@ -267,7 +267,7 @@ impl AnnotationState {
         self.values.contains_key(key)
     }
 
-    pub fn remove(&mut self, key: &str) -> Option<ValueWord> {
+    pub fn remove(&mut self, key: &str) -> Option<KindedSlot> {
         self.values.remove(key)
     }
 
@@ -287,22 +287,22 @@ impl AnnotationState {
 pub struct NamedRegistry {
     /// `ValueMap` releases each registered heap ref when the registry is
     /// dropped or a key is overwritten.
-    entries: ValueMap,
+    entries: HashMap<String, KindedSlot>,
 }
 
 impl NamedRegistry {
     pub fn new() -> Self {
         Self {
-            entries: ValueMap::new(),
+            entries: HashMap::new(),
         }
     }
 
-    /// Get a registry value as ValueWord reference
-    pub fn get(&self, key: &str) -> Option<&ValueWord> {
+    /// Get a registry value as KindedSlot reference
+    pub fn get(&self, key: &str) -> Option<&KindedSlot> {
         self.entries.get(key)
     }
 
-    pub fn set(&mut self, key: String, value: ValueWord) {
+    pub fn set(&mut self, key: String, value: KindedSlot) {
         self.entries.insert(key, value);
     }
 
@@ -310,7 +310,7 @@ impl NamedRegistry {
         self.entries.contains_key(key)
     }
 
-    pub fn remove(&mut self, key: &str) -> Option<ValueWord> {
+    pub fn remove(&mut self, key: &str) -> Option<KindedSlot> {
         self.entries.remove(key)
     }
 
@@ -318,8 +318,8 @@ impl NamedRegistry {
         self.entries.keys()
     }
 
-    /// Iterate over values as ValueWord references
-    pub fn values(&self) -> impl Iterator<Item = &ValueWord> {
+    /// Iterate over values as KindedSlot references
+    pub fn values(&self) -> impl Iterator<Item = &KindedSlot> {
         self.entries.values()
     }
 
@@ -342,7 +342,7 @@ impl NamedRegistry {
 #[derive(Debug, Clone)]
 pub struct EmittedEvent {
     pub event_type: String,
-    pub data: ValueWord,
+    pub data: KindedSlot,
     pub timestamp: std::time::Instant,
 }
 

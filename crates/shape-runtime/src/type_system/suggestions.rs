@@ -150,7 +150,6 @@ pub fn suggest_property(
 #[cfg(test)]
 mod tests {
     use super::*;
-use shape_value::ValueWordExt;
 
     #[test]
     fn test_levenshtein_same_string() {

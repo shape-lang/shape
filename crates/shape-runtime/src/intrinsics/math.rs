@@ -31,13 +31,10 @@
 use crate::context::ExecutionContext;
 use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
 use crate::module_exports::ModuleExports;
-use crate::simd_i64;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, ValueWord, ValueWordExt};
+use shape_value::{AlignedTypedBuffer, KindedSlot};
 use std::sync::Arc;
-
-use super::{extract_f64_array, try_extract_i64_slice};
 
 // ───────────────────── Module factory (14 typed entries) ─────────────────────
 
@@ -185,22 +182,11 @@ fn register_unary_f64_op(
 /// **Migration deferred** pending M1-split sub-decision (polymorphic return:
 /// `i64` for `Vec<int>` fast path vs `f64` for `Vec<number>`). Cross-crate
 /// change required to shape-vm compiler emission for type-driven dispatch.
-pub fn intrinsic_sum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_sum requires 1 argument (series)".to_string(),
-            location: None,
-        });
-    }
-
-    // i64 fast path: skip f64 conversion for integer arrays
-    if let Some(slice) = try_extract_i64_slice(&args[0]) {
-        return Ok(ValueWord::from_i64(simd_i64::simd_sum_i64(slice)));
-    }
-
-    let data = extract_f64_array(&args[0], "Argument")?;
-    let sum: f64 = data.iter().sum();
-    Ok(ValueWord::from_f64(sum))
+pub fn intrinsic_sum(_args: &[KindedSlot], _ctx: &mut ExecutionContext) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_sum: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
+        location: None,
+    })
 }
 
 /// Intrinsic: Minimum value in a series or among multi-scalar arguments.
@@ -208,58 +194,9 @@ pub fn intrinsic_sum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<
 /// **Migration deferred** pending M1-split sub-decision (polymorphic return
 /// + polymorphic input shape). Multi-scalar branches are dead code from
 /// stdlib emission per audit but kept until the architectural decision lands.
-pub fn intrinsic_min(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "min requires at least 1 argument".to_string(),
-            location: None,
-        });
-    }
-
-    // Handle two-argument min(a, b) for scalar comparison
-    if args.len() >= 2 {
-        let mut all_numbers = true;
-        let mut min_val = f64::INFINITY;
-        for arg in args {
-            match arg.as_number_coerce() {
-                Some(n) => min_val = min_val.min(n),
-                None => {
-                    all_numbers = false;
-                    break;
-                }
-            }
-        }
-        if all_numbers {
-            return Ok(ValueWord::from_f64(min_val));
-        }
-    }
-
-    // Single argument: expect array or number
-    if args.len() == 1 {
-        if let Some(n) = args[0].as_number_coerce() {
-            return Ok(ValueWord::from_f64(n));
-        }
-        // i64 fast path: direct SIMD min on integer arrays
-        if let Some(slice) = try_extract_i64_slice(&args[0]) {
-            return match simd_i64::simd_min_i64(slice) {
-                Some(v) => Ok(ValueWord::from_i64(v)),
-                None => Ok(ValueWord::from_f64(f64::INFINITY)),
-            };
-        }
-        if let Some(view) = args[0].as_any_array() {
-            let arr = view.to_generic();
-            let mut min_val = f64::INFINITY;
-            for val in arr.iter() {
-                if let Some(n) = val.as_number_coerce() {
-                    min_val = min_val.min(n);
-                }
-            }
-            return Ok(ValueWord::from_f64(min_val));
-        }
-    }
-
+pub fn intrinsic_min(_args: &[KindedSlot], _ctx: &mut ExecutionContext) -> Result<KindedSlot> {
     Err(ShapeError::RuntimeError {
-        message: "min() arguments must be numbers or arrays".to_string(),
+        message: "intrinsic_min: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
         location: None,
     })
 }
@@ -267,58 +204,9 @@ pub fn intrinsic_min(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<
 /// Intrinsic: Maximum value in a series or among multi-scalar arguments.
 ///
 /// **Migration deferred** pending M1-split sub-decision. See `intrinsic_min`.
-pub fn intrinsic_max(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "max requires at least 1 argument".to_string(),
-            location: None,
-        });
-    }
-
-    // Handle two-argument max(a, b) for scalar comparison
-    if args.len() >= 2 {
-        let mut all_numbers = true;
-        let mut max_val = f64::NEG_INFINITY;
-        for arg in args {
-            match arg.as_number_coerce() {
-                Some(n) => max_val = max_val.max(n),
-                None => {
-                    all_numbers = false;
-                    break;
-                }
-            }
-        }
-        if all_numbers {
-            return Ok(ValueWord::from_f64(max_val));
-        }
-    }
-
-    // Single argument: expect array or number
-    if args.len() == 1 {
-        if let Some(n) = args[0].as_number_coerce() {
-            return Ok(ValueWord::from_f64(n));
-        }
-        // i64 fast path: direct SIMD max on integer arrays
-        if let Some(slice) = try_extract_i64_slice(&args[0]) {
-            return match simd_i64::simd_max_i64(slice) {
-                Some(v) => Ok(ValueWord::from_i64(v)),
-                None => Ok(ValueWord::from_f64(f64::NEG_INFINITY)),
-            };
-        }
-        if let Some(view) = args[0].as_any_array() {
-            let arr = view.to_generic();
-            let mut max_val = f64::NEG_INFINITY;
-            for val in arr.iter() {
-                if let Some(n) = val.as_number_coerce() {
-                    max_val = max_val.max(n);
-                }
-            }
-            return Ok(ValueWord::from_f64(max_val));
-        }
-    }
-
+pub fn intrinsic_max(_args: &[KindedSlot], _ctx: &mut ExecutionContext) -> Result<KindedSlot> {
     Err(ShapeError::RuntimeError {
-        message: "max() arguments must be numbers or arrays".to_string(),
+        message: "intrinsic_max: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
         location: None,
     })
 }
@@ -328,26 +216,14 @@ pub fn intrinsic_max(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<
 /// **Migration deferred** pending multi-input-type dispatch sub-decision.
 /// `HeapValue::Char` is first-class post-bulldozer; dropping the `as_char`
 /// branch would break `for c in s.chars()`-style consumers.
-pub fn intrinsic_char_code(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_char_code requires 1 argument".to_string(),
-            location: None,
-        });
-    }
-    // Accept both HeapValue::Char (from string indexing) and HeapValue::String
-    if let Some(c) = args[0].as_char() {
-        return Ok(ValueWord::from_f64(c as u32 as f64));
-    }
-    let s = args[0].as_str().ok_or_else(|| ShapeError::RuntimeError {
-        message: "__intrinsic_char_code argument must be a string".to_string(),
+pub fn intrinsic_char_code(
+    _args: &[KindedSlot],
+    _ctx: &mut ExecutionContext,
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_char_code: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4".to_string(),
         location: None,
-    })?;
-    let ch = s.chars().next().ok_or_else(|| ShapeError::RuntimeError {
-        message: "__intrinsic_char_code: empty string".to_string(),
-        location: None,
-    })?;
-    Ok(ValueWord::from_f64(ch as u32 as f64))
+    })
 }
 
 /// Intrinsic: Batched quadratic B-spline interpolation on a 3D grid.
@@ -359,77 +235,13 @@ pub fn intrinsic_char_code(args: &[ValueWord], _ctx: &mut ExecutionContext) -> R
 ///
 /// Args: grid_data, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, pos_flat
 pub fn intrinsic_bspline2_3d_batch(
-    args: &[ValueWord],
+    _args: &[KindedSlot],
     _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() != 11 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_bspline2_3d_batch requires 11 arguments".to_string(),
-            location: None,
-        });
-    }
-
-    let nx = args[1].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "nx must be a number".to_string(),
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_bspline2_3d_batch: pending Phase 2c intrinsic kind threading + consumer audit — see ADR-006 §2.7.4".to_string(),
         location: None,
-    })? as usize;
-    let ny = args[2].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "ny must be a number".to_string(),
-        location: None,
-    })? as usize;
-    let nz = args[3].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "nz must be a number".to_string(),
-        location: None,
-    })? as usize;
-    let x_lo = args[4].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "x_lo must be a number".to_string(),
-        location: None,
-    })?;
-    let x_hi = args[5].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "x_hi must be a number".to_string(),
-        location: None,
-    })?;
-    let y_lo = args[6].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "y_lo must be a number".to_string(),
-        location: None,
-    })?;
-    let y_hi = args[7].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "y_hi must be a number".to_string(),
-        location: None,
-    })?;
-    let z_lo = args[8].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "z_lo must be a number".to_string(),
-        location: None,
-    })?;
-    let z_hi = args[9].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
-        message: "z_hi must be a number".to_string(),
-        location: None,
-    })?;
-
-    // Extract positions (small array, ~84 elements — ok to copy)
-    let pos = super::extract_f64_array(&args[10], "pos_flat")?;
-
-    // Try zero-copy grid access first (FloatArray path)
-    let grid_view = args[0].as_any_array().ok_or_else(|| ShapeError::RuntimeError {
-        message: "grid_data must be an array".to_string(),
-        location: None,
-    })?;
-
-    if let Some(grid) = grid_view.as_f64_slice() {
-        // Fast path: direct f64 slice access
-        Ok(super::f64_vec_to_nb_array(bspline2_3d_batch_slice(
-            grid, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, &pos,
-        )))
-    } else {
-        // Slow path: per-element access via generic array
-        let generic = grid_view.to_generic();
-        let grid_fn = |idx: usize| -> f64 {
-            generic[idx].as_number_coerce().unwrap_or(0.0)
-        };
-        Ok(super::f64_vec_to_nb_array(bspline2_3d_batch_fn(
-            &grid_fn, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, &pos,
-        )))
-    }
+    })
 }
 
 // ───────────────────── Helpers (used by typed + legacy bodies) ─────────────────────

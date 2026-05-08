@@ -66,7 +66,7 @@ use crate::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::ValueSlot;
+use shape_value::{KindedSlot, ValueSlot};
 use std::sync::Arc;
 
 // Json enum variant IDs (must match order in json_value.shape).
@@ -104,15 +104,14 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             // Prefer Json::Int for integral i64-fitting numbers.
             if let Some(i) = n.as_i64() {
                 if !n.to_string().contains('.') {
-                    return HeapValue::TypedObject {
-                        schema_id: json_schema_id,
-                        slots: vec![
+                    return build_typed_object(
+                        json_schema_id,
+                        vec![
                             ValueSlot::from_int(JSON_VARIANT_INT),
                             ValueSlot::from_int(i),
-                        ]
-                        .into_boxed_slice(),
-                        heap_mask: 0,
-                    };
+                        ],
+                        0,
+                    );
                 }
             }
             (
@@ -123,7 +122,7 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
         }
         serde_json::Value::String(s) => (
             JSON_VARIANT_STR,
-            ValueSlot::from_heap(HeapValue::String(Arc::new(s))),
+            ValueSlot::from_string_arc(Arc::new(s)),
             true,
         ),
         serde_json::Value::Array(arr) => {
@@ -132,10 +131,8 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
                 .map(|v| Arc::new(build_json_enum_heap_value(v, json_schema_id)))
                 .collect();
             let buf = shape_value::TypedBuffer::from_vec(elements);
-            let array_hv = HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(
-                Arc::new(buf),
-            ));
-            (JSON_VARIANT_ARRAY, ValueSlot::from_heap(array_hv), true)
+            let data = Arc::new(shape_value::TypedArrayData::HeapValue(Arc::new(buf)));
+            (JSON_VARIANT_ARRAY, ValueSlot::from_typed_array(data), true)
         }
         serde_json::Value::Object(map) => {
             // Build a HashMap-shaped HeapValue (insertion order preserved).
@@ -148,17 +145,31 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             let hm = shape_value::heap_value::HashMapData::from_pairs(keys_vec, values_vec);
             (
                 JSON_VARIANT_OBJECT,
-                ValueSlot::from_heap(HeapValue::HashMap(Arc::new(hm))),
+                ValueSlot::from_hashmap(Arc::new(hm)),
                 true,
             )
         }
     };
     let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0u64 };
-    HeapValue::TypedObject {
-        schema_id: json_schema_id,
-        slots: vec![ValueSlot::from_int(variant_id), payload_slot].into_boxed_slice(),
+    build_typed_object(
+        json_schema_id,
+        vec![ValueSlot::from_int(variant_id), payload_slot],
         heap_mask,
-    }
+    )
+}
+
+/// Build a `HeapValue::TypedObject(Arc<TypedObjectStorage>)` from raw
+/// slots + a `heap_mask`. The schema's `FieldType`s are the source of
+/// truth at read time — no per-slot kind table is recorded on this
+/// fast path (mirrors `type_schema::typed_object_from_pairs`).
+fn build_typed_object(schema_id: u64, slots: Vec<ValueSlot>, heap_mask: u64) -> HeapValue {
+    let storage = Arc::new(shape_value::TypedObjectStorage::new(
+        schema_id,
+        slots.into_boxed_slice(),
+        heap_mask,
+        Arc::from(Vec::<shape_value::NativeKind>::new().into_boxed_slice()),
+    ));
+    HeapValue::TypedObject(storage)
 }
 
 /// Convert a `serde_json::Value` into the strict-typed `JsonValue` sum
@@ -222,29 +233,51 @@ fn build_field_slot_from_json(
             ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
             false,
         )),
-        (Value::String(s), FieldType::String) => Ok((
-            ValueSlot::from_heap(HeapValue::String(Arc::new(s.clone()))),
-            true,
-        )),
+        (Value::String(s), FieldType::String) => {
+            Ok((ValueSlot::from_string_arc(Arc::new(s.clone())), true))
+        }
         (Value::Object(obj), FieldType::Object(type_name)) => {
             if let Some(nested_schema) = registry.get(type_name) {
                 let nested_hv =
                     build_typed_object_from_json(nested_schema, obj, registry, json_schema_id)?;
-                Ok((ValueSlot::from_heap(nested_hv), true))
+                Ok((heap_to_slot(nested_hv), true))
             } else {
                 // Nested type's schema not registered — fall back to a
                 // typed `Json::Object` HeapValue per the legacy contract.
                 let json_hv =
                     build_json_enum_heap_value(Value::Object(obj.clone()), json_schema_id);
-                Ok((ValueSlot::from_heap(json_hv), true))
+                Ok((heap_to_slot(json_hv), true))
             }
         }
         // FieldType::Any or any other shape (Array, type-mismatched, etc.)
         // → fall back to a Json enum tree at the slot.
         _ => {
             let json_hv = build_json_enum_heap_value(value.clone(), json_schema_id);
-            Ok((ValueSlot::from_heap(json_hv), true))
+            Ok((heap_to_slot(json_hv), true))
         }
+    }
+}
+
+/// Project a `HeapValue` (typically a `TypedObject` produced by the
+/// nested-schema path or a `Json::Object` enum from the fallback path)
+/// into a typed `ValueSlot` via the matching per-FieldType constructor.
+/// Used by the JSON-tree builder to avoid the deprecated
+/// `ValueSlot::from_heap(HeapValue)` boxing path.
+fn heap_to_slot(hv: HeapValue) -> ValueSlot {
+    match hv {
+        HeapValue::TypedObject(arc) => ValueSlot::from_typed_object(arc),
+        HeapValue::String(arc) => ValueSlot::from_string_arc(arc),
+        HeapValue::TypedArray(arc) => ValueSlot::from_typed_array(arc),
+        HeapValue::HashMap(arc) => ValueSlot::from_hashmap(arc),
+        HeapValue::Decimal(arc) => ValueSlot::from_decimal(arc),
+        HeapValue::BigInt(arc) => ValueSlot::from_bigint(arc),
+        HeapValue::DataTable(arc) => ValueSlot::from_data_table(arc),
+        HeapValue::IoHandle(arc) => ValueSlot::from_io_handle(arc),
+        HeapValue::NativeView(arc) => ValueSlot::from_native_view(arc),
+        // Inline-scalar / less-common variants fall back to the deprecated
+        // boxing path until per-variant constructors land in Phase 2c.
+        #[allow(deprecated)]
+        other => ValueSlot::from_heap(other),
     }
 }
 
@@ -275,11 +308,11 @@ fn build_typed_object_from_json(
         }
     }
 
-    Ok(HeapValue::TypedObject {
-        schema_id: schema.id as u64,
-        slots: slots.into_boxed_slice(),
+    Ok(build_typed_object(
+        schema.id as u64,
+        slots,
         heap_mask,
-    })
+    ))
 }
 
 /// Create the `json` module with JSON parsing and serialization functions.
@@ -375,6 +408,14 @@ pub fn create_json_module() -> ModuleExports {
     );
 
     // json.stringify(value: any, pretty?: bool) -> Result<string>
+    //
+    // Phase 1.B body shim: pre-bulldozer this called
+    // `value.to_json_value()` on a `&ValueWord`. Post-ADR-006 the
+    // generic value→JSON serializer is the deferred N7 workstream
+    // (HeapValue→JSON unified across http/yaml/toml/msgpack/json).
+    // Until N7 lands, the body returns an error rather than emit a
+    // partial / unsound serializer. Variadic shape preserves the
+    // optional `pretty` arg per §2.7.4 ruling.
     register_typed_function(
         &mut module,
         "stringify",
@@ -398,26 +439,22 @@ pub fn create_json_module() -> ModuleExports {
         ],
         ConcreteType::Result(Box::new(ConcreteType::String)),
         |args, _ctx| {
-            let value = args
+            let _value = args
                 .first()
                 .ok_or_else(|| "json.stringify() requires a value argument".to_string())?;
-
-            let pretty = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
-
-            let json_value = value.to_json_value();
-
-            let output = if pretty {
-                serde_json::to_string_pretty(&json_value)
-            } else {
-                serde_json::to_string(&json_value)
-            }
-            .map_err(|e| format!("json.stringify() failed: {}", e))?;
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
+            let _pretty = args.get(1).map(|a| a.slot().as_bool()).unwrap_or(false);
+            Ok(TypedReturn::Err(ConcreteReturn::String(
+                "json.stringify() pending N7 (HeapValue→JSON) — see ADR-006 §2.7.4".to_string(),
+            )))
         },
     );
 
     // json.is_valid(text: string) -> bool
+    //
+    // Phase 1.B body shim: variadic args carry `KindedSlot` placeholders
+    // (see `marshal.rs` register_typed_function — kind threading lands
+    // in Phase 2c). Read the first slot as a `String` Arc per the
+    // declared `string` param contract.
     register_typed_function(
         &mut module,
         "is_valid",
@@ -431,18 +468,43 @@ pub fn create_json_module() -> ModuleExports {
         }],
         ConcreteType::Bool,
         |args, _ctx| {
-            let text = args
+            let slot = args
                 .first()
-                .and_then(|a| a.as_str())
                 .ok_or_else(|| "json.is_valid() requires a string argument".to_string())?;
-
-            let valid = serde_json::from_str::<serde_json::Value>(text).is_ok();
-            Ok(TypedReturn::Bool(valid))
+            let text = slot_as_string(slot)
+                .ok_or_else(|| "json.is_valid() requires a string argument".to_string())?;
+            let valid = serde_json::from_str::<serde_json::Value>(text.as_str()).is_ok();
+            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(valid)))
         },
     );
 
     module
 }
+
+/// Read a [`KindedSlot`]'s bits as an `Arc<String>` payload. Used by
+/// Phase 1.B variadic body shims that have been migrated off
+/// `ValueWord::as_str()`. Phase 2c lands proper per-position kind
+/// threading; until then, variadic bodies interpret slots per their
+/// declared `ModuleParam` contract.
+fn slot_as_string(slot: &KindedSlot) -> Option<Arc<String>> {
+    let bits = slot.slot().raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: variadic-arg slots whose registered param type is `string`
+    // store an `Arc<String>::into_raw` pointer (matching
+    // `ValueSlot::from_string_arc`). Reconstitute without consuming the
+    // slot's strong-count share by `from_raw` + `increment_strong_count`
+    // semantics — i.e. `Arc::clone` of a `from_raw`-rebuilt handle and
+    // forget the rebuilt one.
+    unsafe {
+        let arc = Arc::<String>::from_raw(bits as *const String);
+        let cloned = arc.clone();
+        std::mem::forget(arc);
+        Some(cloned)
+    }
+}
+
 
 // Tests deleted along with the legacy ValueWord-based fixtures, mirroring
 // the csv/http/xml migrations. The test infrastructure (`invoke_export`,

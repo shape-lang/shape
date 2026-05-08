@@ -357,16 +357,16 @@ impl FromSlot for Vec<u8> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::U8(buf)) => {
-                    buf.data.clone()
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                     not U8. Body's parameter type Vec<u8> requires the U8 element-width \
-                     variant. Marshal kind contract violated by caller (compiler/dispatcher \
-                     bug, not a user-facing condition).",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::U8(buf) => buf.data.clone(),
+                    other => panic!(
+                        "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                         not U8. Body's parameter type Vec<u8> requires the U8 element-width \
+                         variant. Marshal kind contract violated by caller (compiler/dispatcher \
+                         bug, not a user-facing condition).",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -393,15 +393,15 @@ impl FromSlot for Vec<i64> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::I64(buf)) => {
-                    buf.data.clone()
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                     not I64. Body's parameter type Vec<i64> requires the I64 element-width \
-                     variant. Marshal kind contract violated by caller.",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::I64(buf) => buf.data.clone(),
+                    other => panic!(
+                        "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                         not I64. Body's parameter type Vec<i64> requires the I64 element-width \
+                         variant. Marshal kind contract violated by caller.",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -430,15 +430,15 @@ impl FromSlot for Vec<Arc<String>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::String(buf)) => {
-                    buf.data.clone()
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                     not String. Body's parameter type Vec<Arc<String>> requires the String \
-                     element-width variant. Marshal kind contract violated by caller.",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::String(buf) => buf.data.clone(),
+                    other => panic!(
+                        "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                         not String. Body's parameter type Vec<Arc<String>> requires the String \
+                         element-width variant. Marshal kind contract violated by caller.",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -471,15 +471,15 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(buf)) => {
-                    buf.data.clone()
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                     not HeapValue. Body's parameter type Vec<Arc<HeapValue>> requires the \
-                     HeapValue element-width variant. Marshal kind contract violated by caller.",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::HeapValue(buf) => buf.data.clone(),
+                    other => panic!(
+                        "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::TypedArray::{}, \
+                         not HeapValue. Body's parameter type Vec<Arc<HeapValue>> requires the \
+                         HeapValue element-width variant. Marshal kind contract violated by caller.",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -505,9 +505,8 @@ impl ToSlot for Vec<Arc<String>> {
     #[inline]
     fn to_slot(self) -> u64 {
         let buf = shape_value::TypedBuffer::from_vec(self);
-        let hv = shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::String(
-            Arc::new(buf),
-        ));
+        let data = Arc::new(shape_value::TypedArrayData::String(Arc::new(buf)));
+        let hv = shape_value::HeapValue::TypedArray(data);
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -524,9 +523,8 @@ impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     #[inline]
     fn to_slot(self) -> u64 {
         let buf = shape_value::TypedBuffer::from_vec(self);
-        let hv = shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::HeapValue(
-            Arc::new(buf),
-        ));
+        let data = Arc::new(shape_value::TypedArrayData::HeapValue(Arc::new(buf)));
+        let hv = shape_value::HeapValue::TypedArray(data);
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -715,17 +713,17 @@ impl FromSlot for Arc<shape_value::AlignedTypedBuffer> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::F64(arc)) => {
-                    Arc::clone(arc)
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
-                     HeapValue::TypedArray::{}, not F64. Body's parameter type \
-                     Arc<AlignedTypedBuffer> requires the F64 storage variant. \
-                     Marshal kind contract violated by caller (compiler/dispatcher \
-                     bug, not a user-facing condition).",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::F64(buf) => Arc::clone(buf),
+                    other => panic!(
+                        "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
+                         HeapValue::TypedArray::{}, not F64. Body's parameter type \
+                         Arc<AlignedTypedBuffer> requires the F64 storage variant. \
+                         Marshal kind contract violated by caller (compiler/dispatcher \
+                         bug, not a user-facing condition).",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
                      HeapValue::{:?}, not TypedArray. Marshal kind contract \
@@ -749,9 +747,8 @@ impl ToSlot for Arc<shape_value::AlignedTypedBuffer> {
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let hv = shape_value::HeapValue::TypedArray(
-            shape_value::TypedArrayData::F64(self),
-        );
+        let data = Arc::new(shape_value::TypedArrayData::F64(self));
+        let hv = shape_value::HeapValue::TypedArray(data);
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -773,16 +770,16 @@ impl FromSlot for Arc<shape_value::TypedBuffer<i64>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::I64(arc)) => {
-                    Arc::clone(arc)
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
-                     HeapValue::TypedArray::{}, not I64. Body's parameter type \
-                     Arc<TypedBuffer<i64>> requires the I64 storage variant. \
-                     Marshal kind contract violated by caller.",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::I64(buf) => Arc::clone(buf),
+                    other => panic!(
+                        "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
+                         HeapValue::TypedArray::{}, not I64. Body's parameter type \
+                         Arc<TypedBuffer<i64>> requires the I64 storage variant. \
+                         Marshal kind contract violated by caller.",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
                      HeapValue::{:?}, not TypedArray. Marshal kind contract \
@@ -801,9 +798,8 @@ impl ToSlot for Arc<shape_value::TypedBuffer<i64>> {
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let hv = shape_value::HeapValue::TypedArray(
-            shape_value::TypedArrayData::I64(self),
-        );
+        let data = Arc::new(shape_value::TypedArrayData::I64(self));
+        let hv = shape_value::HeapValue::TypedArray(data);
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -831,18 +827,18 @@ impl FromSlot for Arc<shape_value::TypedBuffer<u8>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(shape_value::TypedArrayData::U8(arc)) => {
-                    Arc::clone(arc)
-                }
-                shape_value::HeapValue::TypedArray(other) => panic!(
-                    "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
-                     HeapValue::TypedArray::{}, not U8. Body's parameter type \
-                     Arc<TypedBuffer<u8>> requires the U8 storage variant \
-                     (Bool deferred — see zero-copy entry's 2026-05-07 dated \
-                     correction subsection). Marshal kind contract violated \
-                     by caller.",
-                    other.type_name()
-                ),
+                shape_value::HeapValue::TypedArray(arc) => match &**arc {
+                    shape_value::TypedArrayData::U8(buf) => Arc::clone(buf),
+                    other => panic!(
+                        "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
+                         HeapValue::TypedArray::{}, not U8. Body's parameter type \
+                         Arc<TypedBuffer<u8>> requires the U8 storage variant \
+                         (Bool deferred — see zero-copy entry's 2026-05-07 dated \
+                         correction subsection). Marshal kind contract violated \
+                         by caller.",
+                        other.type_name()
+                    ),
+                },
                 other => panic!(
                     "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
                      HeapValue::{:?}, not TypedArray. Marshal kind contract \
@@ -864,9 +860,8 @@ impl ToSlot for Arc<shape_value::TypedBuffer<u8>> {
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let hv = shape_value::HeapValue::TypedArray(
-            shape_value::TypedArrayData::U8(self),
-        );
+        let data = Arc::new(shape_value::TypedArrayData::U8(self));
+        let hv = shape_value::HeapValue::TypedArray(data);
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -1864,6 +1859,181 @@ fn install_async(
     let name = name.into();
     let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
     let return_type_str = return_type.shape_type_name();
+    module.add_schema_only(
+        name.clone(),
+        ModuleFunction {
+            description: description.into(),
+            params,
+            return_type: Some(return_type_str),
+        },
+    );
+    module.typed_exports_mut().async_functions.insert(
+        name,
+        TypedModuleAsyncFunction {
+            invoke,
+            return_type,
+            arg_types,
+            arg_kinds,
+        },
+    );
+}
+
+// ─────────────────── variadic register helpers (ADR-006 §2.7.4) ───────────────────
+//
+// Per ADR-006 §2.7.4 (stdlib registration ruling), the variadic
+// `register_typed_function` / `register_typed_async_function` helpers
+// are re-introduced at the [`KindedSlot`] shape. Per-arity helpers
+// remain the preferred path when the function arity is fixed; the
+// variadic helpers exist for the genuine §2.7.1.4 dispatch-slice case
+// (functions with optional / variadic arguments — json/msgpack/toml/
+// yaml/stdlib_time bodies that take optional `pretty?: bool`,
+// `iterations?: int`, etc.).
+//
+// The variadic body signature is
+// `Fn(&[KindedSlot], &ModuleContext) -> Result<TypedReturn, String>`,
+// matching the §2.7.1.4 dispatch-slice contract. The `arg_kinds` field
+// of [`TypedModuleFunction`] is left as a per-param-position table
+// derived from the registered `ModuleParam` slice (each slot is
+// declared `NativeKind::Bool` placeholder for the variadic case;
+// dispatch reads bits and bundles them as `KindedSlot` carriers
+// regardless of the placeholder kind, since the body interprets the
+// slots itself per its variadic contract).
+
+use crate::typed_module_exports::TypedModuleFunction;
+use shape_value::KindedSlot;
+
+/// Body signature for a [`register_typed_function`] caller.
+///
+/// Variadic — the body inspects the slot slice itself rather than
+/// declaring a per-arg type at registration. Used by stdlib functions
+/// with optional / overload-shaped arguments (json.stringify's optional
+/// `pretty`, time.benchmark's optional `iterations`, etc.). For
+/// fixed-arity functions, prefer [`register_typed_fn_N`].
+pub type VariadicTypedBody = dyn for<'ctx> Fn(
+        &[KindedSlot],
+        &ModuleContext<'ctx>,
+    ) -> Result<TypedReturn, String>
+    + Send
+    + Sync;
+
+/// Register a native function whose body inspects a variadic
+/// [`KindedSlot`] slice.
+///
+/// Per ADR-006 §2.7.4 ruling, the variadic helper is the §2.7.1.4
+/// dispatch-slice case — `KindedSlot` is the right carrier because the
+/// kind-per-position is determined by the registered `ModuleParam`
+/// schema, not by `FromSlot` constraints on the body's Rust signature.
+/// Conversion from raw `&[u64]` to `&[KindedSlot]` happens inside the
+/// runtime-side wrapper installed below; the body sees the typed
+/// carrier directly.
+pub fn register_typed_function<F>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: Vec<crate::module_exports::ModuleParam>,
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    use crate::module_exports::ModuleFunction;
+
+    let name = name.into();
+    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
+    // Variadic registration: `arg_kinds` is a placeholder schema. The
+    // dispatcher constructs `KindedSlot`s by pairing each slot with the
+    // declared `NativeKind` from the typed registry — for variadic
+    // bodies the kind-per-position is the body's contract, not the
+    // dispatcher's. Phase 2c wires per-position `NativeKind` derivation
+    // from the schema annotations.
+    let arg_kinds: Vec<NativeKind> = params.iter().map(|_| NativeKind::Bool).collect();
+    let return_type_str = return_type.shape_type_name();
+
+    let body = Arc::new(body);
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        // Phase 1.B variadic shim: read each raw u64 slot as a
+        // placeholder `KindedSlot::Bool`. The body is responsible for
+        // interpreting the slot bits per its own contract (which is the
+        // pre-bulldozer behaviour — variadic bodies always inspected
+        // their args). Phase 2c lands proper per-position kind
+        // threading from the registered schema.
+        let kinded: Vec<KindedSlot> = slots
+            .iter()
+            .map(|&bits| {
+                KindedSlot::new(
+                    shape_value::ValueSlot::from_raw(bits),
+                    NativeKind::Bool,
+                )
+            })
+            .collect();
+        body(&kinded, ctx)
+    });
+
+    module.add_schema_only(
+        name.clone(),
+        ModuleFunction {
+            description: description.into(),
+            params,
+            return_type: Some(return_type_str),
+        },
+    );
+    module.typed_exports_mut().functions.insert(
+        name,
+        TypedModuleFunction {
+            invoke,
+            return_type,
+            arg_types,
+            arg_kinds,
+        },
+    );
+}
+
+/// Body signature for a [`register_typed_async_function`] caller.
+///
+/// Variadic — same shape as [`VariadicTypedBody`] but returning a
+/// `Future`. No `&ModuleContext` (the borrow cannot cross await
+/// points); permission gating must happen synchronously upstream.
+pub type VariadicTypedAsyncBody<Fut> =
+    dyn Fn(Vec<KindedSlot>) -> Fut + Send + Sync;
+
+/// Register an async native function whose body inspects a variadic
+/// [`KindedSlot`] vector.
+pub fn register_typed_async_function<F, Fut>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    params: Vec<crate::module_exports::ModuleParam>,
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: Fn(Vec<KindedSlot>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
+{
+    use crate::module_exports::ModuleFunction;
+    use crate::typed_module_exports::TypedModuleAsyncFunction;
+
+    let name = name.into();
+    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
+    let arg_kinds: Vec<NativeKind> = params.iter().map(|_| NativeKind::Bool).collect();
+    let return_type_str = return_type.shape_type_name();
+
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
+        let kinded: Vec<KindedSlot> = slots
+            .into_iter()
+            .map(|bits| {
+                KindedSlot::new(
+                    shape_value::ValueSlot::from_raw(bits),
+                    NativeKind::Bool,
+                )
+            })
+            .collect();
+        let body = body.clone();
+        Box::pin(async move { body(kinded).await })
+    });
+
     module.add_schema_only(
         name.clone(),
         ModuleFunction {

@@ -92,9 +92,9 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
     match hv {
         // Mechanical-yes top-level (5)
         HeapValue::String(s) => Ok(JsonValue::String((**s).clone())),
-        HeapValue::BigInt(n) => Ok(JsonValue::Int(*n)),
+        HeapValue::BigInt(n) => Ok(JsonValue::Int(**n)),
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
-        HeapValue::TypedArray(ta) => typed_array_to_json_value(ta),
+        HeapValue::TypedArray(ta) => typed_array_to_json_value(&**ta),
         HeapValue::HashMap(d) => {
             let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(d.keys.data.len());
             for (k, v) in d.keys.data.iter().zip(d.values.data.iter()) {
@@ -104,18 +104,18 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         }
 
         // TypedObject schema-aware (1)
-        HeapValue::TypedObject {
-            schema_id,
-            slots,
-            heap_mask,
-        } => typed_object_to_json_value(*schema_id, slots, *heap_mask),
+        HeapValue::TypedObject(storage) => typed_object_to_json_value(
+            storage.schema_id,
+            &storage.slots,
+            storage.heap_mask,
+        ),
 
         // Categorically-non-data Reject (5)
         HeapValue::Future(_) => Err("cannot serialize: Future".into()),
         HeapValue::IoHandle(_) => Err("cannot serialize: IoHandle".into()),
         HeapValue::NativeView(_) => Err("cannot serialize: NativeView (C view)".into()),
         HeapValue::ClosureRaw(_) => Err("cannot serialize: closure".into()),
-        HeapValue::TaskGroup { .. } => Err("cannot serialize: TaskGroup".into()),
+        HeapValue::TaskGroup(_) => Err("cannot serialize: TaskGroup".into()),
 
         // Architectural-choice deferred (7) — first-landing Err per supervisor
         // PB 1/4 + REFINEMENT-1A. Each policy = separate sub-decision when first

@@ -237,6 +237,7 @@ fn sample_poisson(rng: &mut ChaCha8Rng, lambda: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
     use crate::intrinsics::random as random_intrinsics;
 
     fn mean_variance(samples: &[f64]) -> (f64, f64) {

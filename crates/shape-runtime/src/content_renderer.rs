@@ -126,6 +126,16 @@ impl RendererCapabilities {
             interactive: false,
         }
     }
+
+    /// JSON capabilities — structured data, no ANSI / unicode / color.
+    pub fn json() -> Self {
+        Self {
+            ansi: false,
+            unicode: false,
+            color: false,
+            interactive: false,
+        }
+    }
 }
 
 /// Trait for rendering a ContentNode tree to a string output.

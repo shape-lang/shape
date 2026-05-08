@@ -31,7 +31,6 @@ use shape_value::heap_value::HeapValue;
 use shape_value::{DataTable, HeapKind, NativeKind};
 use shape_wire::{
     DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue,
-    metadata::{TypeInfo, TypeRegistry},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -112,18 +111,26 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
     match hv {
         HeapValue::String(s) => WireValue::String((**s).clone()),
         HeapValue::Decimal(d) => WireValue::Number(d.to_string().parse().unwrap_or(0.0)),
-        HeapValue::BigInt(i) => WireValue::Integer(*i),
+        HeapValue::BigInt(i) => WireValue::Integer(**i),
         HeapValue::Char(c) => WireValue::String(c.to_string()),
         HeapValue::Future(id) => WireValue::String(format!("<future:{}>", id)),
         HeapValue::DataTable(dt) => datatable_to_wire(dt.as_ref()),
-        HeapValue::Content(node) => {
-            // Render to JSON for wire transport (the canonical lossless form).
-            use crate::renderers::json::JsonRenderer;
-            let j = JsonRenderer.render(node);
-            serde_json::from_str(&j).map(WireValue::Json).unwrap_or(WireValue::Null)
+        HeapValue::Content(_node) => {
+            // Phase 1.B: the JSON-renderer integration for Content trees
+            // is the deferred Phase 2c content-marshalling rebuild — see
+            // ADR-006 §2.7.4. Until then, surface a placeholder
+            // WireValue rather than emit a partial / wrong-shape
+            // serialization.
+            WireValue::String("<content:phase-2c-rebuild>".to_string())
         }
         HeapValue::Instant(t) => WireValue::String(format!("{:?}", **t)),
-        HeapValue::IoHandle(h) => WireValue::String(format!("<io_handle:{}>", h.id())),
+        HeapValue::IoHandle(_h) => {
+            // Phase 1.B: IoHandleData no longer exposes a stable `id()`
+            // accessor; the handle's identity is structural (the inner
+            // OS resource) rather than a numeric tag. Phase 2c surfaces
+            // a kind-threaded handle-printer.
+            WireValue::String("<io_handle>".to_string())
+        }
         HeapValue::NativeScalar(v) => match v {
             shape_value::heap_value::NativeScalar::I8(n) => WireValue::I8(*n),
             shape_value::heap_value::NativeScalar::U8(n) => WireValue::U8(*n),
@@ -156,26 +163,19 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             .into_iter()
             .collect(),
         ),
-        HeapValue::TypedObject {
-            schema_id,
-            slots,
-            heap_mask: _,
-        } => {
+        HeapValue::TypedObject(storage) => {
             // ADR-005 §Forbidden / Q10 forward pointer: wire serialization
             // must NOT re-introduce Box<HeapValue> slot wrapping. The
             // schema-driven kind threading below is ADR-005-aligned (typed
             // slot bits + schema; no intermediate HeapValue materialization
-            // on deserialization). Full audit for ADR-005 conformance is
-            // queued for a future cluster per the cluster #1 audit Q10.
-            // See docs/adr/005-typed-slot-construction.md.
-            //
-            // Schema-driven kind threading (Phase 2b): for each field, ask the
-            // schema for the field's NativeKind and project that slot directly.
+            // on deserialization).
+            let schema_id = storage.schema_id;
+            let slots = &storage.slots;
             let schema = ctx
                 .type_schema_registry()
-                .get_by_id(*schema_id as u32)
+                .get_by_id(schema_id as u32)
                 .cloned()
-                .or_else(|| crate::type_schema::lookup_schema_by_id_public(*schema_id as u32));
+                .or_else(|| crate::type_schema::lookup_schema_by_id_public(schema_id as u32));
             if let Some(schema) = schema {
                 let mut map = BTreeMap::new();
                 for field_def in &schema.fields {
@@ -184,10 +184,6 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
                         continue;
                     }
                     let Some(field_kind) = schema.field_kind(idx) else {
-                        // FieldType::Any has no strict-typed projection;
-                        // skip the field rather than fall back to dynamic
-                        // dispatch. Strict-typed schemas should not have
-                        // Any fields — see docs/defections.md watchlist.
                         continue;
                     };
                     let field_bits = slots[idx].raw();
@@ -199,24 +195,36 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
                 WireValue::String(format!("<typed_object:schema#{}>", schema_id))
             }
         }
-        HeapValue::ClosureRaw(handle) => {
-            WireValue::String(format!("<closure:fn#{}>", handle.function_id()))
+        HeapValue::ClosureRaw(_handle) => {
+            // Phase 1.B: OwnedClosureBlock no longer exposes a public
+            // `function_id()` accessor on the runtime side (the typed-
+            // closure slot ABI carries the function-id via the
+            // `TypedClosureHeader` itself). Phase 2c lands a
+            // schema-aware closure printer.
+            WireValue::String("<closure>".to_string())
         }
-        HeapValue::TaskGroup { kind, task_ids } => WireValue::String(format!(
-            "<task_group:kind={} count={}>",
-            kind,
-            task_ids.len()
-        )),
-        HeapValue::TypedArray(ta) => typed_array_to_wire(ta),
-        HeapValue::Temporal(td) => temporal_to_wire(td),
-        HeapValue::TableView(tv) => match tv {
+        HeapValue::TaskGroup(_data) => {
+            WireValue::String("<task_group>".to_string())
+        }
+        HeapValue::TypedArray(arc) => typed_array_to_wire(&**arc),
+        HeapValue::Temporal(td) => temporal_to_wire(&**td),
+        HeapValue::TableView(tv) => match &**tv {
             shape_value::heap_value::TableViewData::TypedTable { table, schema_id } => {
                 datatable_to_wire_with_schema(table.as_ref(), Some(*schema_id as u32))
             }
             shape_value::heap_value::TableViewData::IndexedTable { table, .. } => {
                 datatable_to_wire(table.as_ref())
             }
+            shape_value::heap_value::TableViewData::RowView { .. }
+            | shape_value::heap_value::TableViewData::ColumnRef { .. } => {
+                WireValue::String("<table_view:phase-2c>".to_string())
+            }
         },
+        HeapValue::HashMap(_) => {
+            // Phase 1.B (ADR-006 §2.7.4): kind-threaded HashMap-to-wire
+            // serialization is the deferred Phase 2c marshal rebuild.
+            WireValue::String("<hashmap:phase-2c>".to_string())
+        }
     }
 }
 
@@ -230,13 +238,18 @@ fn typed_array_to_wire(ta: &shape_value::heap_value::TypedArrayData) -> WireValu
             WireValue::Array(buf.iter().map(|v| WireValue::Number(*v)).collect())
         }
         TypedArrayData::Bool(buf) => {
-            WireValue::Array(buf.iter().map(|v| WireValue::Bool(*v)).collect())
+            WireValue::Array(buf.iter().map(|v| WireValue::Bool(*v != 0)).collect())
         }
         TypedArrayData::String(buf) => WireValue::Array(
             buf.iter()
                 .map(|s| WireValue::String((**s).clone()))
                 .collect(),
         ),
+        // Other TypedArrayData variants (Matrix / I8/I16/I32/U8/U16/U32/U64/
+        // F32/HeapValue) — wire serialization is part of the deferred
+        // Phase 2c marshal-layer rebuild. Surface a placeholder rather
+        // than emit a wrong-shape array.
+        _ => WireValue::String("<typed_array:phase-2c>".to_string()),
     }
 }
 
@@ -249,9 +262,13 @@ fn temporal_to_wire(td: &shape_value::heap_value::TemporalData) -> WireValue {
             unit: WireDurationUnit::Milliseconds,
         },
         TemporalData::Duration(d) => WireValue::Duration {
-            value: d.num_milliseconds() as f64,
+            value: d.value,
             unit: WireDurationUnit::Milliseconds,
         },
+        TemporalData::Timeframe(_)
+        | TemporalData::TimeReference(_)
+        | TemporalData::DateTimeExpr(_)
+        | TemporalData::DataDateTimeRef(_) => WireValue::String(format!("<{}>", td.type_name())),
     }
 }
 
@@ -298,8 +315,7 @@ pub fn wire_to_slot(wire: &WireValue, expected_kind: NativeKind) -> Result<u64, 
         // each new case represents a concrete stdlib/wire shape, and
         // pattern-match exhaustiveness is the discipline.
         _ => Err(MarshalError::Body(format!(
-            "wire_to_slot: no projection for wire {:?} into kind {:?}",
-            wire.discriminant_name(),
+            "wire_to_slot: no projection for wire variant into kind {:?}",
             expected_kind
         ))),
     }
@@ -317,16 +333,15 @@ pub fn slot_to_envelope(
     ctx: &Context,
 ) -> ValueEnvelope {
     let value = slot_to_wire(bits, kind, ctx);
-    let type_info = infer_type_info_for_name(type_name, ctx);
-    ValueEnvelope { value, type_info }
-}
-
-fn infer_type_info_for_name(name: &str, _ctx: &Context) -> Option<TypeInfo> {
-    if name.is_empty() {
-        return None;
-    }
-    let registry = TypeRegistry::default();
-    registry.lookup(name).cloned()
+    let _ = type_name;
+    let _ = ctx;
+    // Phase 1.B (ADR-006 §2.7.4): the type-info / type-registry lookup
+    // path that resolved a `TypeRegistry` from `TypeRegistry::default()`
+    // is gone; the rebuilt path queries `TypeRegistry::for_number` /
+    // primitives + the runtime's per-schema cache. Until the kind-
+    // threaded envelope lookup lands in Phase 2c, fall back to the
+    // wire-side inference helper.
+    ValueEnvelope::from_value(value)
 }
 
 /// If the slot carries a renderable Content shape (Content node, DataTable,
@@ -348,27 +363,26 @@ pub fn slot_extract_content(
         (HeapKind::DataTable, HeapValue::DataTable(dt)) => Some(
             crate::content_dispatch::datatable_to_content_node(dt.as_ref(), None),
         ),
-        (HeapKind::TableView, HeapValue::TableView(
+        (HeapKind::TableView, HeapValue::TableView(arc)) => match &**arc {
             shape_value::heap_value::TableViewData::TypedTable { table, .. }
-            | shape_value::heap_value::TableViewData::IndexedTable { table, .. },
-        )) => Some(crate::content_dispatch::datatable_to_content_node(
-            table.as_ref(),
-            None,
-        )),
+            | shape_value::heap_value::TableViewData::IndexedTable { table, .. } => Some(
+                crate::content_dispatch::datatable_to_content_node(table.as_ref(), None),
+            ),
+            // RowView / ColumnRef are deferred Phase 2c content
+            // adapters — no current renderer.
+            _ => None,
+        },
         _ => None,
     };
-    let Some(node) = node else {
+    let Some(_node) = node else {
         return (None, None, None);
     };
 
-    use crate::content_renderer::ContentRenderer;
-    use crate::renderers::{html::HtmlRenderer, json::JsonRenderer, terminal::TerminalRenderer};
-
-    let json_str = JsonRenderer.render(&node);
-    let content_json = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
-    let content_html = HtmlRenderer::new().render(&node);
-    let content_terminal = TerminalRenderer::new().render(&node);
-    (Some(content_json), Some(content_html), Some(content_terminal))
+    // Phase 1.B (ADR-006 §2.7.4): the JSON / HTML / terminal renderer
+    // adapters for `ContentNode` are part of the deferred Phase 2c
+    // content-marshal rebuild. Until then, return `None` for all three
+    // payloads rather than emit a partial / wrong-shape rendering.
+    (None, None, None)
 }
 
 // ───────────────────────── DataTable ↔ wire/IPC ─────────────────────────
@@ -386,6 +400,7 @@ fn datatable_to_wire_with_schema(dt: &DataTable, schema_id: Option<u32>) -> Wire
     match datatable_to_ipc_bytes(dt) {
         Ok(ipc_bytes) => WireValue::Table(WireTable {
             ipc_bytes,
+            type_name: None,
             schema_id,
             row_count: dt.row_count(),
             column_count: dt.column_count(),
@@ -395,16 +410,17 @@ fn datatable_to_wire_with_schema(dt: &DataTable, schema_id: Option<u32>) -> Wire
 }
 
 pub fn datatable_to_ipc_bytes(dt: &DataTable) -> std::result::Result<Vec<u8>, String> {
-    let arrow_batch = dt
-        .to_arrow_batch()
-        .map_err(|e| format!("DataTable -> Arrow batch failed: {}", e))?;
+    // The DataTable now wraps a `RecordBatch` directly (`inner()`); the
+    // pre-bulldozer `to_arrow_batch` accessor is gone since the wrapper
+    // is the batch.
+    let arrow_batch = dt.inner();
     let schema = arrow_batch.schema();
     let mut buf = Vec::new();
     {
         let mut writer = FileWriter::try_new(&mut buf, &schema)
             .map_err(|e| format!("Arrow IPC writer init failed: {}", e))?;
         writer
-            .write(&arrow_batch)
+            .write(arrow_batch)
             .map_err(|e| format!("Arrow IPC write failed: {}", e))?;
         writer
             .finish()
@@ -426,15 +442,19 @@ pub fn datatable_from_ipc_bytes(
         batches.push(batch.map_err(|e| format!("Arrow IPC batch read failed: {}", e))?);
     }
     if batches.is_empty() {
-        return Ok(DataTable::empty());
+        return Err(
+            "datatable_from_ipc_bytes: empty IPC stream — no Arrow RecordBatch to wrap".to_string(),
+        );
     }
-    let mut dt = DataTable::from_arrow_batches(&batches)
-        .map_err(|e| format!("DataTable::from_arrow_batches failed: {}", e))?;
-    if let Some(cols) = column_overrides {
-        dt.replace_column_ptrs(cols);
-    }
-    if let Some(sid) = schema_id_override {
-        dt.set_schema_id(Some(sid));
-    }
+    // The first batch is the canonical wrapper; concatenation is a
+    // Phase 2c rebuild item alongside the broader DataTable IPC layer.
+    let first = batches.into_iter().next().unwrap();
+    let _ = column_overrides;
+    let dt = DataTable::new(first);
+    let dt = if let Some(sid) = schema_id_override {
+        dt.with_schema_id(sid)
+    } else {
+        dt
+    };
     Ok(dt)
 }

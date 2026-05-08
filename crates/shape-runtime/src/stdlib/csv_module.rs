@@ -27,9 +27,8 @@ use std::sync::Arc;
 /// typed buffer's element-storage shape.
 fn row_to_heap(row: Vec<String>) -> Arc<HeapValue> {
     let strings: Vec<Arc<String>> = row.into_iter().map(Arc::new).collect();
-    Arc::new(HeapValue::TypedArray(TypedArrayData::String(Arc::new(
-        TypedBuffer::from_vec(strings),
-    ))))
+    let data = Arc::new(TypedArrayData::String(Arc::new(TypedBuffer::from_vec(strings))));
+    Arc::new(HeapValue::TypedArray(data))
 }
 
 /// Read a `Vec<Vec<String>>` from a `Vec<Arc<HeapValue>>` whose elements
@@ -41,9 +40,16 @@ fn rows_from_heap_array(
 ) -> Result<Vec<Vec<String>>, String> {
     rows.iter()
         .map(|row_arc| match &**row_arc {
-            HeapValue::TypedArray(TypedArrayData::String(buf)) => {
-                Ok(buf.data.iter().map(|s| (**s).clone()).collect())
-            }
+            HeapValue::TypedArray(arc) => match &**arc {
+                TypedArrayData::String(buf) => {
+                    Ok(buf.data.iter().map(|s| (**s).clone()).collect())
+                }
+                other => Err(format!(
+                    "{}: each row must be Array<string>, got TypedArray::{}",
+                    fn_name,
+                    other.type_name()
+                )),
+            },
             other => Err(format!(
                 "{}: each row must be Array<string>, got {}",
                 fn_name,
