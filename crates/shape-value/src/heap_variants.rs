@@ -96,21 +96,47 @@ macro_rules! define_heap_types {
         // sum types whose variants project 1:1 to HeapKind. The single
         // explicit exception is `TypedFieldValue::String(Arc<String>)`, named
         // and bounded in ADR-005. See docs/adr/005-typed-slot-construction.md.
+        // ADR-006 §2.3: each heap-resident variant carries a typed
+        // `Arc<T>` payload (single atomic refcount bump on clone, single
+        // decrement on drop, no `Box<HeapValue>` wrapping). Inline scalars
+        // (`Future(u64)`, `Char(char)`, `NativeScalar`) stay inline because
+        // their payloads fit in a register and have no heap state.
+        // `ClosureRaw` continues to use `OwnedClosureBlock` because that
+        // type already manages its own refcount via the v2 typed-closure
+        // header. See docs/adr/006-value-and-memory-model.md §2.3.
         #[derive(Debug)]
         pub enum HeapValue {
             // ===== Typed primitives =====
             String(std::sync::Arc<String>),
-            Decimal(rust_decimal::Decimal),
-            BigInt(i64),
+            // ADR-006 §2.3: `Decimal` is 16 bytes inline; wrapping in `Arc`
+            // shrinks the enum payload to a pointer so the slot's clone is
+            // a single atomic increment.
+            Decimal(std::sync::Arc<rust_decimal::Decimal>),
+            // ADR-006 §2.3: `BigInt`'s inner `i64` is the v2 placeholder
+            // for an arbitrary-precision integer. Wrapping in `Arc` keeps
+            // the variant cheap to clone today and gives the Drop discipline
+            // a single typed `Arc::decrement_strong_count::<i64>` site for
+            // when the payload widens to a real big-int representation.
+            BigInt(std::sync::Arc<i64>),
+            // Future-id is an inline scalar — no heap state.
             Future(u64),
+            // Char is an inline scalar — no heap state.
             Char(char),
             // ===== Typed handles / data stores =====
             DataTable(std::sync::Arc<$crate::datatable::DataTable>),
-            Content(Box<$crate::content::ContentNode>),
-            Instant(Box<std::time::Instant>),
+            // ADR-006 §2.3: `Box<ContentNode>` migrated to `Arc<ContentNode>`
+            // so clones are an atomic refcount bump rather than a deep copy.
+            Content(std::sync::Arc<$crate::content::ContentNode>),
+            // ADR-006 §2.3: `Box<Instant>` migrated to `Arc<Instant>`. The
+            // inner `Instant` is `Copy` but the boxing cost was paid at
+            // every clone; the Arc bump replaces it.
+            Instant(std::sync::Arc<std::time::Instant>),
             IoHandle(std::sync::Arc<$crate::heap_value::IoHandleData>),
+            // NativeScalar is `Copy` and ≤ 16 bytes — kept inline.
             NativeScalar($crate::heap_value::NativeScalar),
-            NativeView(Box<$crate::heap_value::NativeViewData>),
+            // ADR-006 §2.3: `Box<NativeViewData>` migrated to
+            // `Arc<NativeViewData>` to match `from_native_view(Arc<…>)`.
+            NativeView(std::sync::Arc<$crate::heap_value::NativeViewData>),
             // ===== Struct variants =====
             /// Object value with schema-defined typed slots.
             ///
@@ -131,14 +157,26 @@ macro_rules! define_heap_types {
             /// `Arc<HeapValue>`. Readers go through `VmClosureHandle` for
             /// the stable read API. There is no legacy fallback.
             ClosureRaw($crate::v2::closure_raw::OwnedClosureBlock),
-            TaskGroup {
-                kind: u8,
-                task_ids: Vec<u64>,
-            },
+            // ADR-006 §2.3: `TaskGroup { kind, task_ids }` struct variant
+            // collapsed to a single-tuple `Arc<TaskGroupData>` payload so
+            // every heap variant follows the typed-Arc shape. Field reads
+            // are now `tg.kind` / `tg.task_ids` (Phase 1.B caller migration).
+            TaskGroup(std::sync::Arc<$crate::heap_value::TaskGroupData>),
             // ===== Consolidated wrapper variants =====
-            TypedArray($crate::heap_value::TypedArrayData),
-            Temporal($crate::heap_value::TemporalData),
-            TableView($crate::heap_value::TableViewData),
+            // ADR-006 §2.3: the inline `TypedArrayData` enum migrated to
+            // `Arc<TypedArrayData>`. Each `TypedArrayData` arm already
+            // carries an `Arc<TypedBuffer<T>>` so the outer Arc is a thin
+            // refcount over the discriminant + inner buffer Arc — single
+            // pointer payload, single atomic clone.
+            TypedArray(std::sync::Arc<$crate::heap_value::TypedArrayData>),
+            // ADR-006 §2.3: `TemporalData` enum was inline (size = largest
+            // variant ≈ 32 bytes including `Box`'s overhead). `Arc` reduces
+            // the slot payload to a single pointer.
+            Temporal(std::sync::Arc<$crate::heap_value::TemporalData>),
+            // ADR-006 §2.3: `TableViewData` enum migrated to `Arc<…>` to
+            // match the canonical typed-Arc shape; its arms already carry
+            // `Arc<DataTable>` internally.
+            TableView(std::sync::Arc<$crate::heap_value::TableViewData>),
             // ===== Stage C HashMap-marshal P1(b) =====
             /// HashMap with string keys + heap-allocated values.
             /// Two-buffer storage reusing Phase 2d Array shapes (keys via
@@ -168,7 +206,7 @@ macro_rules! define_heap_types {
                     HeapValue::NativeView(..) => HeapKind::NativeView,
                     HeapValue::TypedObject(..) => HeapKind::TypedObject,
                     HeapValue::ClosureRaw(..) => HeapKind::Closure,
-                    HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
+                    HeapValue::TaskGroup(..) => HeapKind::TaskGroup,
                     HeapValue::TypedArray(..) => HeapKind::TypedArray,
                     HeapValue::Temporal(..) => HeapKind::Temporal,
                     HeapValue::TableView(..) => HeapKind::TableView,
@@ -182,7 +220,7 @@ macro_rules! define_heap_types {
                 match self {
                     HeapValue::String(_v) => !_v.is_empty(),
                     HeapValue::Decimal(_v) => !_v.is_zero(),
-                    HeapValue::BigInt(_v) => *_v != 0,
+                    HeapValue::BigInt(_v) => **_v != 0,
                     HeapValue::Future(_) => true,
                     HeapValue::Char(_) => true,
                     HeapValue::DataTable(_v) => _v.row_count() > 0,
@@ -193,7 +231,7 @@ macro_rules! define_heap_types {
                     HeapValue::NativeView(_v) => _v.ptr != 0,
                     HeapValue::TypedObject(s) => !s.slots.is_empty(),
                     HeapValue::ClosureRaw(..) => true,
-                    HeapValue::TaskGroup { .. } => true,
+                    HeapValue::TaskGroup(..) => true,
                     HeapValue::TypedArray(ta) => ta.is_truthy(),
                     HeapValue::Temporal(td) => td.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
@@ -224,7 +262,7 @@ macro_rules! define_heap_types {
                     }
                     HeapValue::TypedObject(..) => "object",
                     HeapValue::ClosureRaw(..) => "closure",
-                    HeapValue::TaskGroup { .. } => "task_group",
+                    HeapValue::TaskGroup(..) => "task_group",
                     HeapValue::TypedArray(ta) => ta.type_name(),
                     HeapValue::Temporal(td) => td.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),

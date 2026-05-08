@@ -598,6 +598,25 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
+
+/// Task-group payload. Extracted from the inline
+/// `HeapValue::TaskGroup { kind, task_ids }` struct variant per ADR-006 §2.3
+/// so `HeapValue::TaskGroup` becomes a single-tuple `Arc<T>` payload like
+/// every other ADR-006 §2.3 heap arm.
+///
+/// The struct preserves the `kind` discriminant and `task_ids` list verbatim
+/// — clone semantics live on the enclosing `Arc<TaskGroupData>` (one atomic
+/// refcount bump). Phase 1.B migrates the cascade pattern-match sites
+/// (`shape-vm::executor::async_ops`, `shape-jit::ffi::async_ops`,
+/// `shape-runtime::wire_conversion`, ...) from struct-variant destructuring
+/// to `task_group.kind` / `task_group.task_ids` field reads.
+#[derive(Debug, Clone)]
+pub struct TaskGroupData {
+    pub kind: u8,
+    pub task_ids: Vec<u64>,
+}
+
 // ── TypedObject storage (ADR-006 §2.3 / §2.5) ───────────────────────────────
 
 /// Schema-keyed object storage. Extracted from the inline
@@ -606,20 +625,44 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
 ///
 /// 1. `HeapValue::TypedObject` becomes `HeapValue::TypedObject(Arc<TypedObjectStorage>)`
 ///    — a typed `Arc<T>` payload like every other ADR-006 §2.3 heap arm.
-/// 2. The Drop impl (added in Step 5) lives on `TypedObjectStorage` and
-///    can dispatch on per-field `NativeKind` looked up from the schema
-///    without traversing the enclosing `HeapValue` discriminant.
+/// 2. The `Drop` impl (Step 5) lives on `TypedObjectStorage` and dispatches
+///    per-field on `NativeKind` from the embedded `field_kinds: Arc<[NativeKind]>`
+///    table — no schema-registry probe and no cross-crate function-pointer
+///    hook at drop time.
 ///
 /// Field invariants (ADR-006 §2.3):
 ///
-/// - `schema_id` is the registry key for the TypeSchema. Schema lookup
-///   at drop time is HashMap-by-id (Q8 ruling); promoting to
-///   `Arc<TypeSchema>` is profile-driven and not part of Phase 1.A.
+/// - `schema_id` is the registry key for the TypeSchema. Kept for wire /
+///   snapshot round-trip and downstream schema-aware code (printing,
+///   marshal); not consulted at drop time.
 /// - `slots` is a per-field 8-byte storage array. Field at index `i`
 ///   stores its bits per the schema's `FieldType` for that field.
 /// - `heap_mask` has bit `i` set iff slot `i` holds a heap pointer
 ///   (`Arc<T>` raw pointer per ADR-006 §2.4). Bits beyond `slots.len()`
 ///   must be zero.
+/// - `field_kinds` is an `Arc<[NativeKind]>` of length `slots.len()`,
+///   one entry per field, carrying the proven `NativeKind` for that
+///   field's slot bits. The Arc payload is **shared per-schema**: the
+///   construction path (in `shape-runtime`) maps `schema_id ⇒ Arc<[NativeKind]>`
+///   once per schema (one HashMap probe at the first construction; cached
+///   for subsequent constructions) and clones the cached Arc into each
+///   instance — so 1M Customer-objects of the same shape share one
+///   `[NativeKind]` allocation. Drop is then constant-time per slot
+///   without any cross-crate registry call.
+///
+/// Why the `Arc<[NativeKind]>` (Option B' per supervisor ruling, ADR-006 §17):
+///
+/// - **Option B** (per-instance `Box<[NativeKind]>`) was rejected: it
+///   duplicates the same NativeKind sequence across every instance of a
+///   schema (1M × 8 fields = 16MB cumulative duplication).
+/// - **Option C** (function-pointer hook in shape-value installed by
+///   shape-runtime) was rejected: it adds a cross-crate runtime hook for
+///   metadata that's already known at construction time.
+/// - **Option B'** (this one) does the lookup once at construction (where
+///   the schema is in scope) and shares the result via Arc — 8-byte
+///   pointer per instance, single payload allocation per schema, no
+///   probe at drop. Per Q8 spirit: the schema lookup happens, but it's
+///   profile-driven *preempted* to construction time and cached.
 ///
 /// `TypedObjectStorage` is `pub` with `pub` fields so the existing
 /// destructuring call sites can migrate by reading
@@ -635,6 +678,215 @@ pub struct TypedObjectStorage {
     /// Bit `i` set ⇔ slot `i` holds a heap pointer that participates in
     /// Arc refcount discipline. Bits beyond `slots.len()` must be zero.
     pub heap_mask: u64,
+    /// Per-field `NativeKind` table — same length as `slots`. **Shared
+    /// per-schema** via `Arc`: every instance of the same schema clones
+    /// the same payload (one atomic refcount bump per construction).
+    /// Consulted by `Drop` to dispatch per-slot `Arc::decrement_strong_count`
+    /// without any schema-registry probe.
+    pub field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+}
+
+impl TypedObjectStorage {
+    /// Construct a new `TypedObjectStorage`.
+    ///
+    /// Construction-side contract (callers in `shape-runtime`):
+    ///
+    /// 1. `slots.len() == field_kinds.len()` — one kind per slot.
+    /// 2. For each bit `i` set in `heap_mask`, `field_kinds[i]` must be
+    ///    a heap-pointer kind (`NativeKind::String` or
+    ///    `NativeKind::Ptr(_)`) and the slot's `u64` must be the raw
+    ///    pointer of an `Arc::into_raw::<T>` for the matching `T`. Drop
+    ///    relies on this for soundness.
+    /// 3. `field_kinds` should be the per-schema cached `Arc<[NativeKind]>`
+    ///    (callers maintain a `schema_id ⇒ Arc<[NativeKind]>` cache to
+    ///    avoid per-instance allocation).
+    ///
+    /// Returns the storage by value; the canonical wrap is
+    /// `Arc::new(TypedObjectStorage::new(...))` immediately followed by
+    /// `HeapValue::TypedObject(arc)` or `ValueSlot::from_typed_object(arc)`.
+    #[inline]
+    pub fn new(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+    ) -> Self {
+        debug_assert_eq!(
+            slots.len(),
+            field_kinds.len(),
+            "TypedObjectStorage::new: slots/field_kinds length mismatch \
+             (slots={}, field_kinds={}) — every slot must have a proven NativeKind",
+            slots.len(),
+            field_kinds.len(),
+        );
+        Self { schema_id, slots, heap_mask, field_kinds }
+    }
+}
+
+impl Drop for TypedObjectStorage {
+    /// ADR-006 §2.5: walk `heap_mask`, dispatch per-slot on
+    /// `field_kinds[i]`, and call the matching
+    /// `Arc::decrement_strong_count::<T>` for the slot's typed pointer.
+    /// Non-heap slots (heap_mask bit clear) are no-ops.
+    ///
+    /// Soundness contract (must hold by construction; see
+    /// `TypedObjectStorage::new`):
+    ///
+    /// - For every `i` where `heap_mask >> i & 1 == 1`, the slot's `u64`
+    ///   bits are the result of `Arc::into_raw::<T>` where `T` matches
+    ///   `field_kinds[i]`. The mapping is:
+    ///     - `NativeKind::String`           → `Arc<String>`
+    ///     - `NativeKind::Ptr(HeapKind::String)`        → `Arc<String>`
+    ///     - `NativeKind::Ptr(HeapKind::TypedArray)`    → `Arc<TypedArrayData>`
+    ///     - `NativeKind::Ptr(HeapKind::TypedObject)`   → `Arc<TypedObjectStorage>`
+    ///     - `NativeKind::Ptr(HeapKind::HashMap)`       → `Arc<HashMapData>`
+    ///     - `NativeKind::Ptr(HeapKind::Decimal)`       → `Arc<rust_decimal::Decimal>`
+    ///     - `NativeKind::Ptr(HeapKind::BigInt)`        → `Arc<i64>`
+    ///     - `NativeKind::Ptr(HeapKind::DataTable)`     → `Arc<DataTable>`
+    ///     - `NativeKind::Ptr(HeapKind::IoHandle)`      → `Arc<IoHandleData>`
+    ///     - `NativeKind::Ptr(HeapKind::NativeView)`    → `Arc<NativeViewData>`
+    ///     - `NativeKind::Ptr(HeapKind::Content)`       → `Arc<ContentNode>`
+    ///     - `NativeKind::Ptr(HeapKind::Instant)`       → `Arc<Instant>`
+    ///     - `NativeKind::Ptr(HeapKind::Temporal)`      → `Arc<TemporalData>`
+    ///     - `NativeKind::Ptr(HeapKind::TableView)`     → `Arc<TableViewData>`
+    ///     - `NativeKind::Ptr(HeapKind::TaskGroup)`     → `Arc<TaskGroupData>`
+    /// - `NativeKind::Ptr(HeapKind::{Closure, Future, Char, NativeScalar})`
+    ///   correspond to `HeapValue` variants that do **not** carry an
+    ///   `Arc<T>` slot payload (closure uses `OwnedClosureBlock` whose
+    ///   refcount is managed by its own Drop; the others are inline
+    ///   scalars). A heap_mask bit set with one of those kinds is a
+    ///   soundness violation by construction; the Drop arms hit
+    ///   `unreachable!` in debug and silently no-op in release rather
+    ///   than guess at the slot bits.
+    fn drop(&mut self) {
+        use crate::heap_value::HeapKind;
+        use crate::native_kind::NativeKind;
+
+        // Defensive: if construction left a length mismatch (debug_assert
+        // catches it earlier), drop only the prefix where both bookkeeping
+        // structures agree. Better a leak than UB.
+        let n = self.slots.len().min(self.field_kinds.len());
+        for i in 0..n {
+            // heap_mask is u64; bits beyond 63 cannot be addressed today.
+            // Schemas with >64 fields are out of scope until the bitmap
+            // widens (no caller produces that; documented invariant).
+            if i >= 64 {
+                break;
+            }
+            if (self.heap_mask >> i) & 1 == 0 {
+                continue;
+            }
+            let bits = self.slots[i].raw();
+            if bits == 0 {
+                continue;
+            }
+            // SAFETY (each arm): the construction-side contract guarantees
+            // that for every set heap_mask bit, the slot's bits are the
+            // result of `Arc::into_raw::<T>` where `T` matches `field_kinds[i]`.
+            // We reclaim exactly one strong-count share per slot via
+            // `Arc::decrement_strong_count::<T>` and then never look at the
+            // bits again.
+            unsafe {
+                match self.field_kinds[i] {
+                    // Both NativeKind::String and Ptr(HeapKind::String)
+                    // resolve to the same Arc<String> payload — the field
+                    // type's String is the named exception (ADR-005 §2).
+                    NativeKind::String => {
+                        std::sync::Arc::decrement_strong_count(bits as *const String);
+                    }
+                    NativeKind::Ptr(hk) => match hk {
+                        HeapKind::String => {
+                            std::sync::Arc::decrement_strong_count(bits as *const String);
+                        }
+                        HeapKind::TypedArray => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const TypedArrayData,
+                            );
+                        }
+                        HeapKind::TypedObject => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const TypedObjectStorage,
+                            );
+                        }
+                        HeapKind::HashMap => {
+                            std::sync::Arc::decrement_strong_count(bits as *const HashMapData);
+                        }
+                        HeapKind::Decimal => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const rust_decimal::Decimal,
+                            );
+                        }
+                        HeapKind::BigInt => {
+                            std::sync::Arc::decrement_strong_count(bits as *const i64);
+                        }
+                        HeapKind::DataTable => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::datatable::DataTable,
+                            );
+                        }
+                        HeapKind::IoHandle => {
+                            std::sync::Arc::decrement_strong_count(bits as *const IoHandleData);
+                        }
+                        HeapKind::NativeView => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const NativeViewData,
+                            );
+                        }
+                        HeapKind::Content => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::content::ContentNode,
+                            );
+                        }
+                        HeapKind::Instant => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const std::time::Instant,
+                            );
+                        }
+                        HeapKind::Temporal => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TemporalData);
+                        }
+                        HeapKind::TableView => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TableViewData);
+                        }
+                        HeapKind::TaskGroup => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TaskGroupData);
+                        }
+                        // Closure / Future / Char / NativeScalar: these
+                        // HeapKind discriminators do not have an Arc<T>
+                        // slot payload (closure uses OwnedClosureBlock with
+                        // its own refcount; the others are inline scalars).
+                        // A heap_mask bit set with one of these is a
+                        // construction-side bug — never produced by the
+                        // current caller surface.
+                        HeapKind::Closure
+                        | HeapKind::Future
+                        | HeapKind::Char
+                        | HeapKind::NativeScalar => {
+                            debug_assert!(
+                                false,
+                                "TypedObjectStorage::drop: heap_mask bit {} set with \
+                                 non-Arc-payload kind {:?} (schema_id={}); \
+                                 construction-side soundness violation",
+                                i, hk, self.schema_id
+                            );
+                        }
+                    },
+                    // Non-heap NativeKinds (integers, floats, bool) should
+                    // never have their heap_mask bit set. Same construction
+                    // soundness contract as above.
+                    other => {
+                        debug_assert!(
+                            false,
+                            "TypedObjectStorage::drop: heap_mask bit {} set with \
+                             non-heap NativeKind {:?} (schema_id={}); \
+                             construction-side soundness violation",
+                            i, other, self.schema_id
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── TypedArray buckets ──────────────────────────────────────────────────────
@@ -1006,36 +1258,40 @@ crate::define_heap_types!();
 
 // ── Manual Clone for HeapValue ──────────────────────────────────────────────
 //
-// All surviving variants own fields whose `Clone` already reclaims-and-clones
-// the resource (Arc refcount bump, Box deep-clone, struct field clone). With
-// the strict-typed bulldozer's deletion of every `ValueWord`-bearing variant,
-// there is no longer any `vw_clone` / `vw_drop` bookkeeping to pair, so this
-// impl is purely mechanical delegation.
+// ADR-006 §2.3 + Step 6: every heap-resident variant carries `Arc<T>` so its
+// clone is one atomic refcount bump — no allocation, no payload copy. Inline
+// scalars (`Future`, `Char`, `NativeScalar`) clone by `Copy`. `ClosureRaw`
+// delegates to `OwnedClosureBlock::clone`, which already does a single
+// `retain_typed_closure` refcount bump on the v2 closure block plus an Arc
+// bump on the layout pointer.
+//
+// This impl is purely mechanical Arc::clone delegation — there is no
+// `vw_clone` / `vw_drop` bookkeeping (the strict-typed bulldozer deleted
+// every `ValueWord`-bearing variant).
 impl Clone for HeapValue {
     fn clone(&self) -> Self {
         match self {
-            HeapValue::String(v) => HeapValue::String(v.clone()),
-            HeapValue::Decimal(v) => HeapValue::Decimal(*v),
-            HeapValue::BigInt(v) => HeapValue::BigInt(*v),
+            // ADR-006 §2.3: Arc bump only — no allocation, no payload copy.
+            HeapValue::String(v) => HeapValue::String(Arc::clone(v)),
+            HeapValue::Decimal(v) => HeapValue::Decimal(Arc::clone(v)),
+            HeapValue::BigInt(v) => HeapValue::BigInt(Arc::clone(v)),
             HeapValue::Future(v) => HeapValue::Future(*v),
             HeapValue::Char(v) => HeapValue::Char(*v),
-            HeapValue::DataTable(v) => HeapValue::DataTable(v.clone()),
-            HeapValue::Content(v) => HeapValue::Content(v.clone()),
-            HeapValue::Instant(v) => HeapValue::Instant(v.clone()),
-            HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
+            HeapValue::DataTable(v) => HeapValue::DataTable(Arc::clone(v)),
+            HeapValue::Content(v) => HeapValue::Content(Arc::clone(v)),
+            HeapValue::Instant(v) => HeapValue::Instant(Arc::clone(v)),
+            HeapValue::IoHandle(v) => HeapValue::IoHandle(Arc::clone(v)),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
-            HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
-            // ADR-006 §2.3: Arc bump only — no allocation, no slot copy.
+            HeapValue::NativeView(v) => HeapValue::NativeView(Arc::clone(v)),
             HeapValue::TypedObject(s) => HeapValue::TypedObject(Arc::clone(s)),
+            // OwnedClosureBlock::clone is one refcount bump on the typed
+            // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
-            HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
-                kind: *kind,
-                task_ids: task_ids.clone(),
-            },
-            HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
-            HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
-            HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
-            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
+            HeapValue::TaskGroup(v) => HeapValue::TaskGroup(Arc::clone(v)),
+            HeapValue::TypedArray(v) => HeapValue::TypedArray(Arc::clone(v)),
+            HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
+            HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
+            HeapValue::HashMap(v) => HeapValue::HashMap(Arc::clone(v)),
         }
     }
 }
@@ -1096,6 +1352,42 @@ fn native_view_eq(a: &NativeViewData, b: &NativeViewData) -> bool {
     a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
 }
 
+/// Structural equality for two `TypedArrayData` payloads.
+///
+/// ADR-006 §2.3: `HeapValue::TypedArray` carries `Arc<TypedArrayData>`,
+/// so the outer pattern binds the Arc and forwards the inner-enum
+/// dispatch here. Centralising the per-arm dispatch keeps both
+/// `structural_eq` and `equals` honest about which arms genuinely
+/// compare structurally vs which fall through to `false`.
+#[inline]
+fn typed_array_structural_eq(a: &TypedArrayData, b: &TypedArrayData) -> bool {
+    match (a, b) {
+        (TypedArrayData::I64(x), TypedArrayData::I64(y)) => x == y,
+        (TypedArrayData::F64(x), TypedArrayData::F64(y)) => x == y,
+        (TypedArrayData::I64(x), TypedArrayData::F64(y)) => int_float_array_eq(x, y),
+        (TypedArrayData::F64(x), TypedArrayData::I64(y)) => int_float_array_eq(y, x),
+        (TypedArrayData::Bool(x), TypedArrayData::Bool(y)) => x == y,
+        (TypedArrayData::I8(x), TypedArrayData::I8(y)) => x == y,
+        (TypedArrayData::I16(x), TypedArrayData::I16(y)) => x == y,
+        (TypedArrayData::I32(x), TypedArrayData::I32(y)) => x == y,
+        (TypedArrayData::U8(x), TypedArrayData::U8(y)) => x == y,
+        (TypedArrayData::U16(x), TypedArrayData::U16(y)) => x == y,
+        (TypedArrayData::U32(x), TypedArrayData::U32(y)) => x == y,
+        (TypedArrayData::U64(x), TypedArrayData::U64(y)) => x == y,
+        (TypedArrayData::F32(x), TypedArrayData::F32(y)) => x == y,
+        (TypedArrayData::Matrix(x), TypedArrayData::Matrix(y)) => matrix_eq(x, y),
+        (
+            TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 },
+            TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 },
+        ) => {
+            let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
+            let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
+            s1 == s2
+        }
+        _ => false,
+    }
+}
+
 // ── Display ─────────────────────────────────────────────────────────────────
 
 impl fmt::Display for HeapValue {
@@ -1125,8 +1417,8 @@ impl fmt::Display for HeapValue {
                 write!(f, "<io_handle:{}:{}>", data.path, status)
             }
             HeapValue::Future(id) => write!(f, "<future:{}>", id),
-            HeapValue::TaskGroup { task_ids, .. } => {
-                write!(f, "<task_group:{}>", task_ids.len())
+            HeapValue::TaskGroup(tg) => {
+                write!(f, "<task_group:{}>", tg.task_ids.len())
             }
             HeapValue::Temporal(td) => write!(f, "{}", td),
             HeapValue::NativeScalar(v) => write!(f, "{v}"),
@@ -1181,6 +1473,11 @@ impl HeapValue {
     }
 
     /// Structural equality comparison for HeapValue.
+    ///
+    /// ADR-006 §2.3: `TypedArray` and `Temporal` payloads are now
+    /// `Arc<TypedArrayData>` / `Arc<TemporalData>`; the per-arm dispatch
+    /// dereferences the Arc once at the outer match and forwards into the
+    /// inner enum via `typed_array_structural_eq` / direct `match`.
     pub fn structural_eq(&self, other: &HeapValue) -> bool {
         match (self, other) {
             (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
@@ -1197,33 +1494,17 @@ impl HeapValue {
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
+            (HeapValue::Temporal(a), HeapValue::Temporal(b)) => match (a.as_ref(), b.as_ref()) {
+                (TemporalData::DateTime(x), TemporalData::DateTime(y)) => x == y,
+                _ => false,
+            },
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 std::sync::Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
-            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
-            (
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
-            ) => {
-                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
-                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
-                s1 == s2
+            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
+                typed_array_structural_eq(a.as_ref(), b.as_ref())
             }
             _ => false,
         }
@@ -1275,67 +1556,54 @@ impl HeapValue {
             }
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
-            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a, b),
-            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b, a),
+            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a.as_ref(), b.as_ref()),
+            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b.as_ref(), a.as_ref()),
             (HeapValue::DataTable(a), HeapValue::DataTable(b)) => Arc::ptr_eq(a, b),
-            (
-                HeapValue::TableView(TableViewData::TypedTable { schema_id: s1, table: t1 }),
-                HeapValue::TableView(TableViewData::TypedTable { schema_id: s2, table: t2 }),
-            ) => s1 == s2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 }),
-                HeapValue::TableView(TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 }),
-            ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 }),
-                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 }),
-            ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 }),
-                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 }),
-            ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+            (HeapValue::TableView(a), HeapValue::TableView(b)) => match (a.as_ref(), b.as_ref()) {
+                (
+                    TableViewData::TypedTable { schema_id: s1, table: t1 },
+                    TableViewData::TypedTable { schema_id: s2, table: t2 },
+                ) => s1 == s2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 },
+                    TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 },
+                ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 },
+                    TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 },
+                ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 },
+                    TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 },
+                ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+                _ => false,
+            },
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 Arc::ptr_eq(&a.resource, &b.resource)
             }
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::Duration(a)), HeapValue::Temporal(TemporalData::Duration(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::TimeSpan(a)), HeapValue::Temporal(TemporalData::TimeSpan(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::Timeframe(a)), HeapValue::Temporal(TemporalData::Timeframe(b))) => a == b,
+            (HeapValue::Temporal(a), HeapValue::Temporal(b)) => match (a.as_ref(), b.as_ref()) {
+                (TemporalData::DateTime(x), TemporalData::DateTime(y)) => x == y,
+                (TemporalData::Duration(x), TemporalData::Duration(y)) => x == y,
+                (TemporalData::TimeSpan(x), TemporalData::TimeSpan(y)) => x == y,
+                (TemporalData::Timeframe(x), TemporalData::Timeframe(y)) => x == y,
+                _ => false,
+            },
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
-            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
-            (
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
-            ) => {
-                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
-                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
-                s1 == s2
+            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
+                typed_array_structural_eq(a.as_ref(), b.as_ref())
             }
             // Cross-type numeric
-            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b),
-            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a),
+            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b.as_ref()),
+            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a.as_ref()),
             (HeapValue::NativeScalar(a), HeapValue::Decimal(b)) => {
-                native_scalar_decimal_eq(a, b)
+                native_scalar_decimal_eq(a, b.as_ref())
             }
             (HeapValue::Decimal(a), HeapValue::NativeScalar(b)) => {
-                native_scalar_decimal_eq(b, a)
+                native_scalar_decimal_eq(b, a.as_ref())
             }
             _ => false,
         }
@@ -1359,5 +1627,170 @@ mod closure_variant_regression {
         // not load-bearing for any external consumer per the Phase 2b
         // audit.)
         let _ = HeapKind::Closure;
+    }
+}
+
+#[cfg(test)]
+mod typed_object_storage_drop {
+    //! ADR-006 §2.5 / Step 5: pin the Drop impl's behaviour on
+    //! `TypedObjectStorage`. The contract tested:
+    //!
+    //! 1. Heap-mask bits cause `Arc::decrement_strong_count::<T>` for the
+    //!    matching `field_kinds[i]` payload type.
+    //! 2. Non-heap slots (heap_mask bit clear) are no-ops — even with
+    //!    non-zero raw bits (those bits are scalar field contents, not
+    //!    typed pointers).
+    //! 3. `field_kinds` itself is shared via Arc — multiple instances of
+    //!    the same schema share one `[NativeKind]` allocation.
+    use super::*;
+    use crate::native_kind::NativeKind;
+    use crate::slot::ValueSlot;
+    use std::sync::Arc;
+
+    #[test]
+    fn drop_decrements_arc_string_for_heap_string_slot() {
+        let s: Arc<String> = Arc::new("phase-1a".to_string());
+        // Hold a second strong ref so the test can observe the count drop.
+        let witness = Arc::clone(&s);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let slot = ValueSlot::from_string_arc(s);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::String]);
+        let storage = TypedObjectStorage::new(
+            42,
+            vec![slot].into_boxed_slice(),
+            0b1, // bit 0 set
+            kinds,
+        );
+
+        // Construction stored the Arc raw pointer; nothing dropped yet.
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        drop(storage);
+
+        // Drop walked heap_mask, dispatched on NativeKind::String, and
+        // released the slot's strong count via Arc::decrement_strong_count.
+        assert_eq!(Arc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn drop_is_noop_for_non_heap_slot_with_non_zero_bits() {
+        // Non-heap slot — heap_mask bit clear. Raw bits are an i64 value;
+        // Drop must not interpret them as a pointer.
+        let slot = ValueSlot::from_int(0x1234_5678);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let storage = TypedObjectStorage::new(
+            7,
+            vec![slot].into_boxed_slice(),
+            0, // no heap bits
+            kinds,
+        );
+        // Just dropping the storage must not crash / dereference the bits.
+        drop(storage);
+    }
+
+    #[test]
+    fn drop_skips_zero_pointer_slots() {
+        // Heap-mask bit set but the slot was zeroed (e.g. moved-out) —
+        // Drop must not call Arc::decrement_strong_count on null.
+        let slot = ValueSlot::from_raw(0);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::String]);
+        let storage = TypedObjectStorage::new(
+            9,
+            vec![slot].into_boxed_slice(),
+            0b1,
+            kinds,
+        );
+        drop(storage);
+    }
+
+    #[test]
+    fn field_kinds_arc_is_shared_across_instances() {
+        // Option B' invariant: two instances of the same schema clone the
+        // same Arc<[NativeKind]> (one payload allocation per schema).
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Bool]);
+        let kinds_count_before = Arc::strong_count(&kinds);
+
+        let storage_a = TypedObjectStorage::new(
+            1,
+            vec![ValueSlot::from_int(0), ValueSlot::from_bool(true)].into_boxed_slice(),
+            0,
+            Arc::clone(&kinds),
+        );
+        let storage_b = TypedObjectStorage::new(
+            1,
+            vec![ValueSlot::from_int(1), ValueSlot::from_bool(false)].into_boxed_slice(),
+            0,
+            Arc::clone(&kinds),
+        );
+
+        // Two instances + the test's own handle = +2 over the baseline.
+        assert_eq!(Arc::strong_count(&kinds), kinds_count_before + 2);
+
+        // Both instances point at the same payload (no per-instance copy).
+        assert!(Arc::ptr_eq(&storage_a.field_kinds, &storage_b.field_kinds));
+        assert!(Arc::ptr_eq(&storage_a.field_kinds, &kinds));
+
+        drop(storage_a);
+        drop(storage_b);
+        // Each Drop released its share; only the test's handle remains.
+        assert_eq!(Arc::strong_count(&kinds), kinds_count_before);
+    }
+
+    #[test]
+    fn drop_handles_mixed_heap_and_scalar_fields() {
+        // Realistic shape: int + string + bool. Only the string slot
+        // participates in refcount; the int/bool slots are scalar bits.
+        let s: Arc<String> = Arc::new("mixed".to_string());
+        let witness = Arc::clone(&s);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let slots = vec![
+            ValueSlot::from_int(99),
+            ValueSlot::from_string_arc(s),
+            ValueSlot::from_bool(true),
+        ]
+        .into_boxed_slice();
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![
+            NativeKind::Int64,
+            NativeKind::String,
+            NativeKind::Bool,
+        ]);
+        let storage = TypedObjectStorage::new(
+            13,
+            slots,
+            0b010, // only bit 1 (the string) is heap
+            kinds,
+        );
+
+        drop(storage);
+        assert_eq!(Arc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn drop_decrements_arc_typed_object_for_heap_pointer_slot() {
+        // Nested TypedObject: outer storage holds an Arc<TypedObjectStorage>
+        // in slot 0 via NativeKind::Ptr(HeapKind::TypedObject).
+        let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let inner = Arc::new(TypedObjectStorage::new(
+            100,
+            vec![ValueSlot::from_int(7)].into_boxed_slice(),
+            0,
+            inner_kinds,
+        ));
+        let inner_witness = Arc::clone(&inner);
+        assert_eq!(Arc::strong_count(&inner_witness), 2);
+
+        let outer_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+        let outer = TypedObjectStorage::new(
+            101,
+            vec![ValueSlot::from_typed_object(inner)].into_boxed_slice(),
+            0b1,
+            outer_kinds,
+        );
+
+        drop(outer);
+        assert_eq!(Arc::strong_count(&inner_witness), 1);
     }
 }
