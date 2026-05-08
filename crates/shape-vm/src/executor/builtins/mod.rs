@@ -4,7 +4,7 @@
 
 // Builtin handler modules
 mod array_comprehension;
-mod array_ops;
+pub(in crate::executor) mod array_ops;
 pub mod datetime_builtins;
 mod generators;
 pub mod intrinsics;
@@ -12,7 +12,7 @@ mod json_helpers;
 // ADR-006 §2.7.6: heterogeneous-kind body-side dispatch helpers, kept
 // off the `KindedSlot` carrier per the Q8 carrier-API bound.
 pub(crate) mod kind_coerce;
-mod math;
+pub(in crate::executor) mod math;
 mod matrix_intrinsics;
 mod object_ops;
 pub mod remote_builtins;

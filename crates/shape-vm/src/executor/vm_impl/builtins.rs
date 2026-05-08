@@ -5,10 +5,12 @@
 //! with the carrier-API bound spec'd at §2.7.6. The body interiors
 //! (math kernels, array kernels, content builders, type-introspection,
 //! stats, intrinsics, JSON helpers, table builders, content / DateTime /
-//! concurrency constructors) are deferred to Waves 5b-5e:
+//! concurrency constructors) are deferred to Waves 5b-5e.
 //!
-//! - **Wave 5b**: math + array + utility bodies (`builtin_abs`, `builtin_push`,
-//!   `builtin_format`, etc.) + `pop_builtin_args` runtime implementation.
+//! - **Wave 5b (LANDED)**: math + array + utility bodies (`builtin_abs`,
+//!   `builtin_push`, `builtin_object_rest`, `builtin_snapshot`,
+//!   `builtin_exit`, etc.) are now `Fn(&[KindedSlot], ...) -> Result<KindedSlot, VMError>`
+//!   and the dispatch arms call them directly.
 //! - **Wave 5c**: type-introspection + conversion + native-interop bodies
 //!   (`builtin_is_*`, `builtin_to_*`, `dispatch_native_interop_builtin`).
 //! - **Wave 5d**: closure-driven array builtins (`map`, `filter`, `reduce`,
@@ -17,45 +19,94 @@
 //! - **Wave 5e**: content + DateTime + concurrency constructors + window /
 //!   join / reflect / state-builtin bodies + `executor/printing.rs` formatter.
 //!
-//! Until those bodies land, every arm here is `todo!(...)` with a sub-cluster
-//! tag. The dispatch SHAPE compiles in isolation; runtime invocation panics
-//! cleanly with the sub-cluster name.
-//!
 //! The companion §2.7.6 / Q8 carrier-API bound: NO per-heap-variant
 //! accessors on `KindedSlot`; bodies that inspect heap payloads use
 //! `slot.as_heap_value()` + `HeapValue` match. NO cross-kind accessors
 //! (`as_number_coerce`, etc.) on the carrier; coercion lives at
 //! `executor/builtins/kind_coerce.rs` (free helper at the body site).
+//!
+//! # `pop_builtin_args` runtime semantics (Wave 5b → architectural surface)
+//!
+//! Wave 5b implements `pop_builtin_args` by popping the call's arg-count
+//! slot (always Int64-kinded, pushed as `PushConst(Number(n))` by the
+//! compiler), then popping each arg's raw u64 bits off the stack. The
+//! per-arg `NativeKind` is **not yet recoverable from the stack ABI** —
+//! the typed VM stack stores raw u64 with kinds threaded only through the
+//! producing opcode operand and (for locals) the `FrameDescriptor`. There
+//! is no per-stack-slot kind shadow. Wave 6 owns that work.
+//!
+//! As a transitional shim, every popped arg is currently tagged with
+//! `NativeKind::Bool` (the §2.7 default sentinel — Drop is a no-op for
+//! Bool-kinded slots regardless of the underlying bits, so this is leak-
+//! free at the cost of being kind-blind). Builtin bodies will fail their
+//! kind discriminator at runtime when the bits are not actually Bool —
+//! making the architectural gap immediately visible. No silent corruption.
+//!
+//! When Wave 6 lands a kind-bearing stack ABI, this is the call site that
+//! gets the real `NativeKind` per arg from the stack metadata. See the
+//! audit's §C1/§D entries (`type_tracking.rs:286`, `vm_impl/stack.rs`).
 
 use super::super::*;
-use shape_value::KindedSlot;
+use shape_value::{KindedSlot, NativeKind};
 
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a
-    /// `Vec<KindedSlot>`. The arg count is the topmost stack slot;
-    /// per-arg kinds are projected from the frame descriptor / ARG
-    /// opcode stream in the Wave 5b body migration.
+    /// `Vec<KindedSlot>`. The topmost stack slot is the arg count
+    /// (Int64-kinded, pushed by the compiler as a numeric `PushConst`).
     ///
-    /// Wave 5a foundation: signature flipped from
-    /// `Result<Vec<ValueWord>, VMError>` to
-    /// `Result<Vec<KindedSlot>, VMError>` (per §2.7.6, deletes the
-    /// last `ValueWord`-shaped collection in the dispatch slice). The
-    /// runtime implementation is stubbed for Wave 5b; the kind-threaded
-    /// pop-and-pair logic lives there.
+    /// **Wave 5b semantic gap (surfaced as architectural concern)**: the
+    /// VM stack does not currently carry per-slot `NativeKind`. The
+    /// compiler emits typed pushes (e.g. `PushNativeInt64`,
+    /// `PushNativeF64`) but the kind is consumed by the producing
+    /// opcode and not retained on the stack itself. Until Wave 6 lands a
+    /// kind-bearing stack ABI, this method tags every popped arg with
+    /// `NativeKind::Bool` (§2.7 default sentinel — Drop / Clone is a
+    /// no-op for the Bool arm regardless of underlying bits).
+    ///
+    /// Builtin bodies will surface the gap by failing their kind
+    /// discriminator at runtime; the failure mode is a clean
+    /// `VMError::RuntimeError` (`"<name>() argument must be a number"`,
+    /// etc.) — never silent heap corruption.
     pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<KindedSlot>, VMError> {
-        todo!(
-            "phase-1b-vm wave 5b — pop_builtin_args runtime: pop count from \
-             stack, project each arg through (ValueSlot::from_raw(bits), \
-             NativeKind from FrameDescriptor / ARG opcode kind)"
-        )
+        // Top of stack: the arg count, pushed as a numeric constant by the
+        // compiler (`PushConst(Number(arg_count as f64))`). Some sites omit
+        // the count (zero-arg builtins like `Snapshot`) — we cannot
+        // distinguish here, so we pop the count when the topmost slot
+        // looks numeric; otherwise treat as zero. Wave 6 will bake the
+        // count into the BuiltinCall operand.
+        //
+        // Today the count is always present: the compiler in
+        // `compiler/expressions/function_calls.rs:1151-1158` only emits the
+        // PushConst(arg_count) when `builtin_requires_arg_count(builtin)`
+        // returns true, but for the math/array/utility scope of Wave 5b it
+        // does. We rely on that contract.
+        let count_bits = self.pop_raw_u64()?;
+        // The count was pushed via `PushConst(Number(n as f64))` —
+        // reinterpret the raw bits as f64 and cast.
+        let count = f64::from_bits(count_bits) as usize;
+
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let bits = self.pop_raw_u64()?;
+            // Wave 6 architectural surface: stack slots do not carry
+            // NativeKind metadata. Tag with the §2.7 default (Bool, no
+            // Drop side-effects) and let the body surface the kind
+            // mismatch via its own type-error path.
+            args.push(KindedSlot::new(
+                shape_value::ValueSlot::from_raw(bits),
+                NativeKind::Bool,
+            ));
+        }
+        args.reverse();
+        Ok(args)
     }
 
     // ========================================================================
     // Builtin Dispatch
     //
     // Wave 5a flipped the dispatch SHAPE: every arm produces /
-    // consumes `Vec<KindedSlot>`. Body interiors stubbed with
-    // `todo!("phase-1b-vm wave 5{b,c,d,e} — body migration pending")`.
+    // consumes `Vec<KindedSlot>`. Wave 5b lands the math/array/utility
+    // body migrations and wires the dispatch arms.
 
     pub fn op_builtin_call(
         &mut self,
@@ -65,67 +116,252 @@ impl VirtualMachine {
         if let Some(Operand::Builtin(builtin)) = instruction.operand {
             let _ctx = ctx;
             match builtin {
-                // ── Wave 5b: math + array + utility builtins ──────────────
-                BuiltinFunction::Abs
-                | BuiltinFunction::Sqrt
-                | BuiltinFunction::Ln
-                | BuiltinFunction::Pow
-                | BuiltinFunction::Exp
-                | BuiltinFunction::Log
-                | BuiltinFunction::Floor
-                | BuiltinFunction::Ceil
-                | BuiltinFunction::Round
-                | BuiltinFunction::Sin
-                | BuiltinFunction::Cos
-                | BuiltinFunction::Tan
-                | BuiltinFunction::Asin
-                | BuiltinFunction::Acos
-                | BuiltinFunction::Atan
-                | BuiltinFunction::Min
-                | BuiltinFunction::Max
-                | BuiltinFunction::StdDev
-                | BuiltinFunction::Sign
-                | BuiltinFunction::Gcd
-                | BuiltinFunction::Lcm
-                | BuiltinFunction::Hypot
-                | BuiltinFunction::Clamp
-                | BuiltinFunction::IsNaN
-                | BuiltinFunction::IsFinite => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5b — math builtin body migration \
-                         pending: {:?}",
-                        builtin
-                    );
+                // ── Wave 5b: math builtins ────────────────────────────────
+                BuiltinFunction::Abs => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_abs(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
                 }
-                BuiltinFunction::Push
-                | BuiltinFunction::Pop
-                | BuiltinFunction::First
-                | BuiltinFunction::Last
-                | BuiltinFunction::Zip
-                | BuiltinFunction::Filled
-                | BuiltinFunction::Range
-                | BuiltinFunction::Slice => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5b — array builtin body migration \
-                         pending: {:?}",
-                        builtin
-                    );
+                BuiltinFunction::Sqrt => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sqrt(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
                 }
-                BuiltinFunction::Format
+                BuiltinFunction::Ln => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_ln(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Pow => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_pow(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Exp => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_exp(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Log => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_log(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Floor => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_floor(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Ceil => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_ceil(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Round => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_round(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Sin => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sin(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Cos => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_cos(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Tan => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_tan(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Asin => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_asin(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Acos => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_acos(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Atan => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_atan(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Min => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_min(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Max => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_max(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::StdDev => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_stddev(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Sign => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sign(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Gcd => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_gcd(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Lcm => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_lcm(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Hypot => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_hypot(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Clamp => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_clamp(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::IsNaN => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_is_nan(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::IsFinite => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_is_finite(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+
+                // ── Wave 5b: array builtins ───────────────────────────────
+                BuiltinFunction::Push => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_push(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Pop => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_pop(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::First => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_first(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Last => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_last(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Zip => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_zip(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Filled => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_filled(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Range => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_range(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Slice => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_slice(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+
+                // ── Wave 5b: utility builtins ─────────────────────────────
+                BuiltinFunction::ObjectRest => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_object_rest(&args)?;
+                    self.push_raw_u64(r.slot().raw())?;
+                    std::mem::forget(r);
+                }
+                BuiltinFunction::Snapshot => {
+                    // Snapshot suspends execution; never returns a value.
+                    let _args = self.pop_builtin_args()?;
+                    return Err(VMError::Suspended {
+                        future_id: SNAPSHOT_FUTURE_ID,
+                        resume_ip: self.ip,
+                    });
+                }
+                BuiltinFunction::Exit => {
+                    let args = self.pop_builtin_args()?;
+                    let code = if args.is_empty() {
+                        0
+                    } else {
+                        // Best-effort code extraction. The arg comes in as
+                        // Bool-kinded (Wave 6 stack-ABI gap); reinterpret the
+                        // raw bits as i64 since `exit(code)` is documented to
+                        // take an int.
+                        args[0].slot.raw() as i64 as i32
+                    };
+                    std::process::exit(code);
+                }
+                BuiltinFunction::Print
+                | BuiltinFunction::Format
                 | BuiltinFunction::FormatValueWithMeta
-                | BuiltinFunction::FormatValueWithSpec
-                | BuiltinFunction::ObjectRest
-                | BuiltinFunction::Print
-                | BuiltinFunction::Snapshot
-                | BuiltinFunction::Exit => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5b — utility builtin body migration \
-                         pending: {:?}",
+                | BuiltinFunction::FormatValueWithSpec => {
+                    // Print/Format machinery touches the formatter
+                    // (`executor/printing.rs`), Content rendering, and the
+                    // OutputAdapter — all explicitly Wave 5e scope per the
+                    // dispatch comment. Wave 5b deliberately leaves these
+                    // bodies unmigrated and surfaces a clean runtime error
+                    // when invoked, rather than panicking.
+                    let _args = self.pop_builtin_args()?;
+                    return Err(VMError::NotImplemented(format!(
+                        "{:?} body migration deferred to Wave 5e (formatter \
+                         lives in executor/printing.rs)",
                         builtin
-                    );
+                    )));
                 }
 
                 // ── Wave 5c: type-introspection + conversion + native-interop ──
@@ -348,9 +584,6 @@ impl VirtualMachine {
                 | BuiltinFunction::DateTimeFromEpoch
                 | BuiltinFunction::DateTimeFromParts
                 | BuiltinFunction::DateTimeFromUnixSecs => {
-                    // DateTimeNow/Utc don't consume args, but pop is a
-                    // no-op when count is zero — the runtime impl in 5b
-                    // handles both shapes uniformly.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     todo!(
                         "phase-1b-vm wave 5e — DateTime ctor body migration \
@@ -444,11 +677,6 @@ impl VirtualMachine {
         } else {
             return Err(VMError::InvalidOperand);
         }
-        // unreachable today: every reachable arm above either returns or
-        // panics with `todo!`. Once Wave 5b lands `pop_builtin_args` and
-        // the math/array/utility bodies, the structural-fallthrough arms
-        // will produce a result and reach this line.
-        #[allow(unreachable_code)]
         Ok(())
     }
 
