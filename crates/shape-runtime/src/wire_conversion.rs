@@ -161,6 +161,14 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             slots,
             heap_mask: _,
         } => {
+            // ADR-005 §Forbidden / Q10 forward pointer: wire serialization
+            // must NOT re-introduce Box<HeapValue> slot wrapping. The
+            // schema-driven kind threading below is ADR-005-aligned (typed
+            // slot bits + schema; no intermediate HeapValue materialization
+            // on deserialization). Full audit for ADR-005 conformance is
+            // queued for a future cluster per the cluster #1 audit Q10.
+            // See docs/adr/005-typed-slot-construction.md.
+            //
             // Schema-driven kind threading (Phase 2b): for each field, ask the
             // schema for the field's NativeKind and project that slot directly.
             let schema = ctx

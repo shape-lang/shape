@@ -334,6 +334,13 @@ pub enum SerializableVMValue {
         upvalues: Vec<SerializableVMValue>,
     },
     ModuleFunction(String),
+    // ADR-005 §Forbidden / Q10 forward pointer: snapshot must NOT
+    // re-introduce Box<HeapValue> slot wrapping. The current schema-+-slot
+    // serialization layout aligns with ADR-005 §3 (typed slot bits + the
+    // schema; deserialization reconstructs the typed pointer; no
+    // intermediate HeapValue materialization). Audit of this path for full
+    // ADR-005 conformance is queued for a future cluster (cluster #1
+    // audit Q10). See docs/adr/005-typed-slot-construction.md.
     TypedObject {
         schema_id: u64,
         /// Serialized slots: each slot is 8 bytes (raw bits for simple, serialized heap values for heap slots)
