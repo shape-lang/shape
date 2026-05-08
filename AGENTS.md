@@ -18,7 +18,7 @@ before it's coded.
 
 | Branch | Worktree | Role | Active cluster | Files owned (rg pattern) | Status | Last update |
 |---|---|---|---|---|---|---|
-| `bulldozer-strictly-typed-phase-1a` | `../shape-phase-1a` | Phase 1.A migrator | Phase 1.A (ADR-006 foundation refactor) | `crates/shape-value/src/{slot,heap_value,heap_variants,heap_header}.rs` | blocked (steps 3 + 6 landed at `23eba0c`; step 5 surfaced ARCHITECTURAL: Drop schema-lookup cross-crate hook needed) | 2026-05-08 |
+| `bulldozer-strictly-typed-phase-1a` | `../shape-phase-1a` | Phase 1.A migrator | — | `crates/shape-value/src/{slot,heap_value,heap_variants,heap_header}.rs` | idle (last: phase-1a close — ADR-006 foundation steps 1-6 + 9 landed; awaiting supervisor merge) | 2026-05-08 |
 | `bulldozer-strictly-typed-stage-c-dev2` | `../shape-stage-c-dev2` | Cluster #5/#7 migrator (idle) | — | territory: `crates/shape-runtime/src/{json_value.rs,stdlib/{io,http,toml,yaml,msgpack,csv}.rs,stdlib_io/network_ops.rs}` | idle (last: sub-cluster 1 (network_ops) verified-already-closed at `820980d`; N7 close at `7bab206`) | 2026-05-07 |
 
 ## Status values
