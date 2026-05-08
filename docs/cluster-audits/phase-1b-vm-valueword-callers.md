@@ -195,3 +195,18 @@ Sites: `executor/tests/mod.rs`, `lib_tests_parts/extension_{integration,system}_
 - `bash scripts/check-no-dynamic.sh` exit 0 throughout
 - AGENTS.md row updated to `idle` with wave-close commit hash
 - Concise wave-close commit message at HEAD
+
+## Wave 2 follow-up correction (2026-05-08)
+
+The audit text in §2.A8, §2.A9, §2.A12, §2.A13 references `NativeKind::Dynamic` as a kept variant or fallback target. **This is incorrect**: `NativeKind::Dynamic` was deleted alongside `NativeKind::Unknown` (`crates/shape-value/src/native_kind.rs:103-107`, commit `128cb8a`). CLAUDE.md "Forbidden code" + §2.7.5.1 spirit applies to both equally — neither is a runtime "we don't know" placeholder.
+
+**Corrected migration pattern** (Wave 2 reference, applies to Waves 3-10):
+
+- Compile-time intermediate state where the kind is "not yet propagated" → `Option<NativeKind>` locally; `None => I64` (legacy NaN-boxed slot width) for Cranelift fallback. Not a sentinel reintroduction — `None` is a total mapping over `Option`.
+- `is_dynamic_kind(kind)` predicate sites → `kind == NativeKind::String || matches!(kind, NativeKind::Ptr(_))` (the heap-pointer / Arc<String> arms that previously fell through `Dynamic`).
+- `String|Dynamic|Unknown => I64` Cranelift type fallbacks → `String | Ptr(_) => I64`.
+- `kind == Unknown || kind == Dynamic` predicate sites → `Option<None> | Some(NativeKind::String) | Some(NativeKind::Ptr(_))` flow, depending on what the predicate gates.
+
+Wave 2's `cranelift_type_for_slot_opt(Option<NativeKind>)` is the canonical helper for the post-Option Cranelift fallback shape. Later waves call it (or mirror its construction) at every former `Dynamic` arm.
+
+The agent's surfaced concern: "if later waves expect `Dynamic` to still exist, they need the same `Option` treatment." Confirmed binding for Waves 3-10.
