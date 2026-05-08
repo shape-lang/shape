@@ -1,28 +1,61 @@
+//! Builtin dispatch slice (ADR-006 §2.7.6 / Q8).
+//!
+//! Wave 5a (phase-1b-vm) flipped the dispatch SHAPE here: every arm now
+//! produces / consumes `Vec<KindedSlot>` (and `&[KindedSlot]`), aligned
+//! with the carrier-API bound spec'd at §2.7.6. The body interiors
+//! (math kernels, array kernels, content builders, type-introspection,
+//! stats, intrinsics, JSON helpers, table builders, content / DateTime /
+//! concurrency constructors) are deferred to Waves 5b-5e:
+//!
+//! - **Wave 5b**: math + array + utility bodies (`builtin_abs`, `builtin_push`,
+//!   `builtin_format`, etc.) + `pop_builtin_args` runtime implementation.
+//! - **Wave 5c**: type-introspection + conversion + native-interop bodies
+//!   (`builtin_is_*`, `builtin_to_*`, `dispatch_native_interop_builtin`).
+//! - **Wave 5d**: closure-driven array builtins (`map`, `filter`, `reduce`,
+//!   etc.) + intrinsic dispatch (`handle_intrinsic_builtin`,
+//!   `handle_vector_intrinsic`, `handle_matrix_intrinsic`).
+//! - **Wave 5e**: content + DateTime + concurrency constructors + window /
+//!   join / reflect / state-builtin bodies + `executor/printing.rs` formatter.
+//!
+//! Until those bodies land, every arm here is `todo!(...)` with a sub-cluster
+//! tag. The dispatch SHAPE compiles in isolation; runtime invocation panics
+//! cleanly with the sub-cluster name.
+//!
+//! The companion §2.7.6 / Q8 carrier-API bound: NO per-heap-variant
+//! accessors on `KindedSlot`; bodies that inspect heap payloads use
+//! `slot.as_heap_value()` + `HeapValue` match. NO cross-kind accessors
+//! (`as_number_coerce`, etc.) on the carrier; coercion lives at
+//! `executor/builtins/kind_coerce.rs` (free helper at the body site).
+
 use super::super::*;
-use shape_value::ValueWordExt;
+use shape_value::KindedSlot;
 
 impl VirtualMachine {
-    pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<ValueWord>, VMError> {
-        // Pop arg count (top of stack)
-        let count_nb = self.pop_raw_u64()?;
-        let count = count_nb.as_number_coerce().ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Expected numeric arg count, got {:?}",
-                count_nb.type_name()
-            ))
-        })? as usize;
-
-        // Pop args in reverse order (stack is LIFO) then reverse to get correct order
-        let mut args = Vec::with_capacity(count);
-        for _ in 0..count {
-            args.push(self.pop_raw_u64()?);
-        }
-        args.reverse();
-        Ok(args)
+    /// Pop the builtin call's args off the typed VM stack into a
+    /// `Vec<KindedSlot>`. The arg count is the topmost stack slot;
+    /// per-arg kinds are projected from the frame descriptor / ARG
+    /// opcode stream in the Wave 5b body migration.
+    ///
+    /// Wave 5a foundation: signature flipped from
+    /// `Result<Vec<ValueWord>, VMError>` to
+    /// `Result<Vec<KindedSlot>, VMError>` (per §2.7.6, deletes the
+    /// last `ValueWord`-shaped collection in the dispatch slice). The
+    /// runtime implementation is stubbed for Wave 5b; the kind-threaded
+    /// pop-and-pair logic lives there.
+    pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<KindedSlot>, VMError> {
+        todo!(
+            "phase-1b-vm wave 5b — pop_builtin_args runtime: pop count from \
+             stack, project each arg through (ValueSlot::from_raw(bits), \
+             NativeKind from FrameDescriptor / ARG opcode kind)"
+        )
     }
 
     // ========================================================================
     // Builtin Dispatch
+    //
+    // Wave 5a flipped the dispatch SHAPE: every arm produces /
+    // consumes `Vec<KindedSlot>`. Body interiors stubbed with
+    // `todo!("phase-1b-vm wave 5{b,c,d,e} — body migration pending")`.
 
     pub fn op_builtin_call(
         &mut self,
@@ -30,273 +63,136 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         if let Some(Operand::Builtin(builtin)) = instruction.operand {
-            let mut ctx = ctx;
+            let _ctx = ctx;
             match builtin {
-                // Math builtins (15)
-                BuiltinFunction::Abs => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_abs(args)?;
-                    self.push_raw_u64(result)?;
+                // ── Wave 5b: math + array + utility builtins ──────────────
+                BuiltinFunction::Abs
+                | BuiltinFunction::Sqrt
+                | BuiltinFunction::Ln
+                | BuiltinFunction::Pow
+                | BuiltinFunction::Exp
+                | BuiltinFunction::Log
+                | BuiltinFunction::Floor
+                | BuiltinFunction::Ceil
+                | BuiltinFunction::Round
+                | BuiltinFunction::Sin
+                | BuiltinFunction::Cos
+                | BuiltinFunction::Tan
+                | BuiltinFunction::Asin
+                | BuiltinFunction::Acos
+                | BuiltinFunction::Atan
+                | BuiltinFunction::Min
+                | BuiltinFunction::Max
+                | BuiltinFunction::StdDev
+                | BuiltinFunction::Sign
+                | BuiltinFunction::Gcd
+                | BuiltinFunction::Lcm
+                | BuiltinFunction::Hypot
+                | BuiltinFunction::Clamp
+                | BuiltinFunction::IsNaN
+                | BuiltinFunction::IsFinite => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5b — math builtin body migration \
+                         pending: {:?}",
+                        builtin
+                    );
                 }
-                BuiltinFunction::Sqrt => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sqrt(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::Push
+                | BuiltinFunction::Pop
+                | BuiltinFunction::First
+                | BuiltinFunction::Last
+                | BuiltinFunction::Zip
+                | BuiltinFunction::Filled
+                | BuiltinFunction::Range
+                | BuiltinFunction::Slice => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5b — array builtin body migration \
+                         pending: {:?}",
+                        builtin
+                    );
                 }
-                BuiltinFunction::Ln => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ln(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::Format
+                | BuiltinFunction::FormatValueWithMeta
+                | BuiltinFunction::FormatValueWithSpec
+                | BuiltinFunction::ObjectRest
+                | BuiltinFunction::Print
+                | BuiltinFunction::Snapshot
+                | BuiltinFunction::Exit => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5b — utility builtin body migration \
+                         pending: {:?}",
+                        builtin
+                    );
                 }
-                BuiltinFunction::Pow => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_pow(args)?;
-                    self.push_raw_u64(result)?;
+
+                // ── Wave 5c: type-introspection + conversion + native-interop ──
+                BuiltinFunction::IsNumber
+                | BuiltinFunction::IsString
+                | BuiltinFunction::IsBool
+                | BuiltinFunction::IsArray
+                | BuiltinFunction::IsObject
+                | BuiltinFunction::IsDataRow => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — is_* type-check body migration \
+                         pending: {:?}",
+                        builtin
+                    );
                 }
-                BuiltinFunction::Exp => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_exp(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Log => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_log(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Floor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_floor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Ceil => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ceil(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Round => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_round(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Sin => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sin(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Cos => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_cos(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Tan => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_tan(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Asin => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_asin(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Acos => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_acos(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Atan => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_atan(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                // Stats builtins (3)
-                BuiltinFunction::Min => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_min(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Max => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_max(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::StdDev => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_stddev(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                // Array builtins (6)
-                BuiltinFunction::Push => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_push(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Pop => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_pop(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::First => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_first(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Last => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_last(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Zip => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_zip(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Filled => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_filled(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                // Utility builtins (2)
-                BuiltinFunction::Format => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                // BuiltinFunction::Throw removed: Shape uses Result types
-                BuiltinFunction::Range => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_range(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Slice => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_slice(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Map => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_map(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Filter => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_filter(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Reduce => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_reduce(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ForEach => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_for_each(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Find => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_find(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FindIndex => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_find_index(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Some => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_some(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Every => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_every(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Print => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_print(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Snapshot => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_snapshot(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Exit => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_exit(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ObjectRest => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_object_rest(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsNumber => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_number(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsString => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_string(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsBool => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_bool(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsArray => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_array(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsObject => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_object(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsDataRow => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_data_row(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                b @ (BuiltinFunction::ToString
+                BuiltinFunction::ToString
                 | BuiltinFunction::ToNumber
-                | BuiltinFunction::ToBool) => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.dispatch_conversion_builtin(b, args)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::ToBool => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — conversion body migration \
+                         pending (dispatch_conversion_builtin): {:?}",
+                        builtin
+                    );
                 }
-                b @ (BuiltinFunction::NativePtrSize
+                BuiltinFunction::NativePtrSize
                 | BuiltinFunction::NativePtrNewCell
                 | BuiltinFunction::NativePtrFreeCell
                 | BuiltinFunction::NativePtrReadPtr
                 | BuiltinFunction::NativePtrWritePtr
                 | BuiltinFunction::NativeTableFromArrowC
                 | BuiltinFunction::NativeTableFromArrowCTyped
-                | BuiltinFunction::NativeTableBindType) => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.dispatch_native_interop_builtin(b, args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FormatValueWithMeta => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format_with_meta(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FormatValueWithSpec => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format_with_spec(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::NativeTableBindType => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — native-interop body migration \
+                         pending (dispatch_native_interop_builtin): {:?}",
+                        builtin
+                    );
                 }
                 BuiltinFunction::TypeOf => {
-                    let args: shape_value::ArgVec = shape_value::ArgVec::new(); // TypeOf uses self.pop_raw_u64() internally
-                    let result = self.builtin_type_of(args)?;
-                    self.push_raw_u64(result)?;
+                    todo!(
+                        "phase-1b-vm wave 5c — TypeOf body migration pending \
+                         (uses self.pop_raw_u64 internally; needs kind \
+                         carrier rebuild)"
+                    );
                 }
-                b @ (BuiltinFunction::IntrinsicVecAbs
+
+                // ── Wave 5d: closure-driven array builtins + intrinsics ──────
+                BuiltinFunction::Map
+                | BuiltinFunction::Filter
+                | BuiltinFunction::Reduce
+                | BuiltinFunction::ForEach
+                | BuiltinFunction::Find
+                | BuiltinFunction::FindIndex
+                | BuiltinFunction::Some
+                | BuiltinFunction::Every
+                | BuiltinFunction::ControlFold => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5d — closure-driven array builtin \
+                         body migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::IntrinsicVecAbs
                 | BuiltinFunction::IntrinsicVecSqrt
                 | BuiltinFunction::IntrinsicVecLn
                 | BuiltinFunction::IntrinsicVecExp
@@ -307,113 +203,31 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicVecMax
                 | BuiltinFunction::IntrinsicVecMin
                 | BuiltinFunction::IntrinsicVecSelect
-                | BuiltinFunction::IntrinsicVecAddI64) => {
-                    return self.handle_vector_intrinsic(b, ctx.as_deref_mut());
+                | BuiltinFunction::IntrinsicVecAddI64 => {
+                    todo!(
+                        "phase-1b-vm wave 5d — vector intrinsic body \
+                         migration pending (handle_vector_intrinsic): {:?}",
+                        builtin
+                    );
                 }
-                b @ (BuiltinFunction::IntrinsicMatMulVec
+                BuiltinFunction::IntrinsicMatMulVec
                 | BuiltinFunction::IntrinsicMatMulMat
                 | BuiltinFunction::IntrinsicMatAdd
-                | BuiltinFunction::IntrinsicMatSub) => {
-                    return self.handle_matrix_intrinsic(b, ctx.as_deref_mut());
-                }
-                BuiltinFunction::SomeCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_some_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::OkCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ok_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ErrCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_err_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::HashMapCtor => {
-                    // Build an ArgVec so any heap-tagged args are released on
-                    // drop even though HashMapCtor ignores them today.
-                    let _args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    self.push_raw_u64(ValueWord::empty_hashmap())?;
-                }
-                BuiltinFunction::SetCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_set())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            // Copy elements out of the source array. Each
-                            // `items[i]` is a bit-copy that needs its own
-                            // refcount bump so the Set owns a fresh ref.
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_set(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            // Single non-array item — wrap in set; ownership
-                            // transfers from a0 into the Set.
-                            self.push_raw_u64(ValueWord::from_set(vec![a0]))?;
-                        }
-                    } else {
-                        // Set(a, b, c) — multiple args become set items.
-                        // Ownership of each arg's heap ref transfers into the
-                        // Set via the raw Vec.
-                        self.push_raw_u64(ValueWord::from_set(args))?;
-                    }
-                }
-                BuiltinFunction::DequeCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_deque())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_deque(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            self.push_raw_u64(ValueWord::from_deque(vec![a0]))?;
-                        }
-                    } else {
-                        self.push_raw_u64(ValueWord::from_deque(args))?;
-                    }
-                }
-                BuiltinFunction::PriorityQueueCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_priority_queue())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_priority_queue(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            self.push_raw_u64(ValueWord::from_priority_queue(vec![a0]))?;
-                        }
-                    } else {
-                        self.push_raw_u64(ValueWord::from_priority_queue(args))?;
-                    }
-                }
-                BuiltinFunction::ControlFold => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_control_fold(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::IntrinsicMatSub => {
+                    todo!(
+                        "phase-1b-vm wave 5d — matrix intrinsic body \
+                         migration pending (handle_matrix_intrinsic): {:?}",
+                        builtin
+                    );
                 }
                 BuiltinFunction::IntrinsicMinimize => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_minimize(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5d — minimize intrinsic body \
+                         migration pending"
+                    );
                 }
-                // Delegate ALL intrinsics to helper method
-                b @ (BuiltinFunction::IntrinsicBspline2_3dBatch
+                BuiltinFunction::IntrinsicBspline2_3dBatch
                 | BuiltinFunction::IntrinsicSum
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
@@ -458,50 +272,119 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
-                | BuiltinFunction::IntrinsicSeries) => {
-                    return self.handle_intrinsic_builtin(b, ctx.as_deref_mut());
-                }
-                BuiltinFunction::EvalTimeRef => {
-                    return Err(VMError::NotImplemented(
-                        "eval_time_ref() (VM-only mode)".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDateTimeExpr => {
-                    return self.handle_eval_datetime_expr(ctx);
-                }
-                BuiltinFunction::EvalDataDateTimeRef => {
-                    // DataReference type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDataSet => {
-                    // DataRow type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataRow type has been removed".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDataRelative => {
-                    // DataReference type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDataRelativeRange => {
-                    // DataReference type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
-                    ));
+                | BuiltinFunction::IntrinsicSeries => {
+                    todo!(
+                        "phase-1b-vm wave 5d — intrinsic body migration \
+                         pending (handle_intrinsic_builtin): {:?}",
+                        builtin
+                    );
                 }
 
-                // Window functions evaluated inline against ValueWord args.
-                // The previous "delegate to runtime WindowExecutor" routing
-                // never actually fired — it was dead code; the runtime
-                // executor was deleted by the strict-typing bulldozer
-                // (see shape/docs/defections.md 2026-05-06: AST-evaluation
-                // runtime executors deletion).
-                // In VM mode, window functions are evaluated differently than in JIT
-                b @ (BuiltinFunction::WindowRowNumber
+                // ── Wave 5e: constructors (Result/Option, Set, Deque,
+                // PriorityQueue, HashMap, Mutex/Atomic/Lazy/Channel),
+                // Content builders, DateTime constructors, Table from
+                // rows, JSON navigation helpers, Window functions, Join,
+                // Reflect, MatFromFlat, MakeContent*. ─────────────────────
+                BuiltinFunction::SomeCtor
+                | BuiltinFunction::OkCtor
+                | BuiltinFunction::ErrCtor => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — Option/Result ctor body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::HashMapCtor
+                | BuiltinFunction::SetCtor
+                | BuiltinFunction::DequeCtor
+                | BuiltinFunction::PriorityQueueCtor => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — collection ctor body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::MutexCtor
+                | BuiltinFunction::AtomicCtor
+                | BuiltinFunction::LazyCtor
+                | BuiltinFunction::ChannelCtor => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — concurrency ctor body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::MakeContentText
+                | BuiltinFunction::MakeContentFragment
+                | BuiltinFunction::ApplyContentStyle
+                | BuiltinFunction::MakeContentChartFromValue => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — content builder body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::ContentChart
+                | BuiltinFunction::ContentTextCtor
+                | BuiltinFunction::ContentTableCtor
+                | BuiltinFunction::ContentCodeCtor
+                | BuiltinFunction::ContentKvCtor
+                | BuiltinFunction::ContentFragmentCtor => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — content namespace ctor body \
+                         migration pending (shape_runtime::content_builders): \
+                         {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::DateTimeNow
+                | BuiltinFunction::DateTimeUtc
+                | BuiltinFunction::DateTimeParse
+                | BuiltinFunction::DateTimeFromEpoch
+                | BuiltinFunction::DateTimeFromParts
+                | BuiltinFunction::DateTimeFromUnixSecs => {
+                    // DateTimeNow/Utc don't consume args, but pop is a
+                    // no-op when count is zero — the runtime impl in 5b
+                    // handles both shapes uniformly.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — DateTime ctor body migration \
+                         pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::MatFromFlat => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — mat() ctor body migration \
+                         pending"
+                    );
+                }
+                BuiltinFunction::MakeTableFromRows => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — make_table_from_rows body \
+                         migration pending"
+                    );
+                }
+                BuiltinFunction::JsonObjectGet
+                | BuiltinFunction::JsonArrayAt
+                | BuiltinFunction::JsonObjectKeys
+                | BuiltinFunction::JsonArrayLen
+                | BuiltinFunction::JsonObjectLen => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — JSON navigation helper body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::WindowRowNumber
                 | BuiltinFunction::WindowRank
                 | BuiltinFunction::WindowDenseRank
                 | BuiltinFunction::WindowNtile
@@ -514,255 +397,66 @@ impl VirtualMachine {
                 | BuiltinFunction::WindowAvg
                 | BuiltinFunction::WindowMin
                 | BuiltinFunction::WindowMax
-                | BuiltinFunction::WindowCount) => {
-                    return self.handle_window_functions(b);
+                | BuiltinFunction::WindowCount => {
+                    todo!(
+                        "phase-1b-vm wave 5e — window function body \
+                         migration pending (handle_window_functions): {:?}",
+                        builtin
+                    );
                 }
-
-                // JOIN operation
                 BuiltinFunction::JoinExecute => {
-                    return self.handle_join_execute();
+                    todo!(
+                        "phase-1b-vm wave 5e — JOIN body migration pending \
+                         (handle_join_execute)"
+                    );
                 }
-
-                // Reflection
                 BuiltinFunction::Reflect => {
-                    return self.builtin_reflect();
+                    todo!(
+                        "phase-1b-vm wave 5e — reflect builtin body \
+                         migration pending"
+                    );
                 }
 
-                // Content string builtins
-                BuiltinFunction::MakeContentText => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_text(args)?;
-                    self.push_raw_u64(result)?;
+                // ── Eval-* removed-feature stubs (preserved as runtime
+                // errors per pre-Wave 5a behaviour). These do not need
+                // body migration; their semantics is already terminal. ──
+                BuiltinFunction::EvalTimeRef => {
+                    return Err(VMError::NotImplemented(
+                        "eval_time_ref() (VM-only mode)".to_string(),
+                    ));
                 }
-                BuiltinFunction::MakeContentFragment => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_fragment(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::EvalDateTimeExpr => {
+                    todo!(
+                        "phase-1b-vm wave 5e — handle_eval_datetime_expr \
+                         body migration pending"
+                    );
                 }
-                BuiltinFunction::ApplyContentStyle => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_apply_content_style(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::MakeContentChartFromValue => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_chart_from_value(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Content namespace constructors
-                BuiltinFunction::ContentChart => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_chart(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentTextCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_text(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentTableCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_table(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentCodeCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_code(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentKvCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_kv(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentFragmentCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_fragment(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // DateTime constructor builtins
-                BuiltinFunction::DateTimeNow => {
-                    let result = ValueWord::from_time(chrono::Local::now().fixed_offset());
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeUtc => {
-                    let result = ValueWord::from_time_utc(chrono::Utc::now());
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeParse => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_parse(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromEpoch => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_epoch(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromParts => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_parts(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromUnixSecs => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_unix_secs(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Concurrency primitive constructors
-                BuiltinFunction::MutexCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let inner_value = args.into_iter().next().unwrap_or_else(ValueWord::none);
-                    self.push_raw_u64(ValueWord::from_mutex(inner_value))?;
-                }
-                BuiltinFunction::AtomicCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let init_val = args.first().and_then(|nb| nb.as_i64()).unwrap_or(0);
-                    self.push_raw_u64(ValueWord::from_atomic(init_val))?;
-                }
-                BuiltinFunction::LazyCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let initializer = args.into_iter().next().unwrap_or_else(ValueWord::none);
-                    self.push_raw_u64(ValueWord::from_lazy(initializer))?;
-                }
-                BuiltinFunction::ChannelCtor => {
-                    let _args = self.pop_builtin_args()?;
-                    let (sender, receiver) = shape_value::heap_value::ChannelData::new_pair();
-                    let arr = vec![
-                        ValueWord::from_channel(sender),
-                        ValueWord::from_channel(receiver),
-                    ];
-                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))?;
-                }
-
-                // Additional math builtins
-                BuiltinFunction::Sign => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sign(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Gcd => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_gcd(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Lcm => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_lcm(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Hypot => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_hypot(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Clamp => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_clamp(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsNaN => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_nan(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsFinite => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_finite(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Matrix construction (normally compiled to NewMatrix opcode)
-                BuiltinFunction::MatFromFlat => {
-                    let args = self.pop_builtin_args()?;
-                    if args.len() < 2 {
-                        return Err(VMError::RuntimeError(
-                            "mat() requires at least rows and cols arguments".to_string(),
-                        ));
-                    }
-                    let rows = args[0].as_i64().unwrap_or(0) as u32;
-                    let cols = args[1].as_i64().unwrap_or(0) as u32;
-                    let expected = (rows as usize) * (cols as usize);
-                    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(expected);
-                    // If the third argument is an array, extract its elements
-                    if args.len() == 3 {
-                        if let Some(arr) = args[2].as_any_array() {
-                            for i in 0..arr.len() {
-                                if let Some(v) = arr.get_nb(i) {
-                                    data.push(v.as_number_coerce().unwrap_or(0.0));
-                                }
-                            }
-                        } else {
-                            data.push(args[2].as_number_coerce().unwrap_or(0.0));
-                        }
-                    } else {
-                        for v in &args[2..] {
-                            data.push(v.as_number_coerce().unwrap_or(0.0));
-                        }
-                    }
-                    let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
-                    self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(mat)))?;
-                }
-
-                // Table construction
-                BuiltinFunction::MakeTableFromRows => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_table_from_rows(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Json navigation helpers
-                BuiltinFunction::JsonObjectGet => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_get(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonArrayAt => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_array_at(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonObjectKeys => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_keys(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonArrayLen => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_array_len(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonObjectLen => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_len(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::EvalDataDateTimeRef
+                | BuiltinFunction::EvalDataSet
+                | BuiltinFunction::EvalDataRelative
+                | BuiltinFunction::EvalDataRelativeRange => {
+                    return Err(VMError::RuntimeError(
+                        "DataReference / DataRow type has been removed"
+                            .to_string(),
+                    ));
                 }
             }
         } else {
             return Err(VMError::InvalidOperand);
         }
+        // unreachable today: every reachable arm above either returns or
+        // panics with `todo!`. Once Wave 5b lands `pop_builtin_args` and
+        // the math/array/utility bodies, the structural-fallthrough arms
+        // will produce a result and reach this line.
+        #[allow(unreachable_code)]
         Ok(())
     }
 
-    // Runtime bridge functions (pop_builtin_args, eval_runtime_*) moved to builtins/runtime_bridge.rs
-    // map_runtime_error and type_of_name moved to module_registry module
-
-    // ===== Exception Handling Operations =====
-    // handle_exception moved to exceptions/mod.rs
-
-    // ===== Slice and Null Coalescing Operations =====
-
-    // ===== Loop Control Operations =====
+    // Runtime bridge functions (pop_builtin_args impl, eval_runtime_*)
+    // moved to builtins/runtime_bridge.rs.
+    // map_runtime_error and type_of_name moved to module_registry module.
 
     // ===== Helper Methods =====
-    // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison moved to arithmetic/mod.rs
+    // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison
+    // moved to arithmetic/mod.rs
 }
