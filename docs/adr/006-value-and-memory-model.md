@@ -702,24 +702,109 @@ Following ADR-005's convention:
 - Strict-typed baseline: `docs/strictly-typed-baseline.md`
 - Forbidden patterns: `CLAUDE.md` "Forbidden Patterns" section
 
-## 17. Open questions
+## 17. Resolved questions
 
-These are questions that don't block ADR acceptance but need answers
-during implementation:
+Answers below were reached during the ADR-006 review on 2026-05-08.
+Q5 remains predicted-pending-audit; the rest are decisions binding for
+Phase 1 onward.
 
-1. **`var` cross-task inference precision.** When does the borrow-solver's
-   `B0014 NonSendableAcrossTaskBoundary` fire vs when does `var`
-   inference upgrade to `SharedAtomicMut`? Both are post-escape-analysis;
-   coordination needed in Phase 1.C.
-2. **Schema-pointer vs schema-id at drop.** §2.5 says hash-lookup. Profile
-   in Phase 1.A and promote to `Arc<TypeSchema>` if drop-path overhead
-   measurable.
-3. **`@ai` annotation × var inference.** `@ai` rewrites function
-   signatures at comptime. Does `var` inference run before or after `@ai`
-   rewriting? Probably before, but needs validation on actual `@ai`
-   bodies in Phase 1.C.
-4. **JIT introspection drop strategy.** Per-function flag? Per-tier?
-   Per-deopt-point? Decide in Phase 3.
-5. **PVL audit outcome.** §7 is conditional; the audit (Phase 4) decides.
-6. **String SSO threshold.** §5.1 says 15 bytes (Swift / ecow precedent).
-   Profile a Shape stdlib parser workload in Phase 1.A to confirm.
+### Q1 — `var` × `B0014 NonSendableAcrossTaskBoundary` coordination
+
+**Decision:** B0014 fires as an error for `let` / `let mut`. For `var`,
+the same condition triggers a class upgrade to `SharedAtomicMut` (or
+`SharedAtomic` if read-only) instead of an error.
+
+**Rationale:** Consistent with the let/let mut/var philosophy — explicit
+forms have contracts, `var` is forgiving. The inlay hint shows the
+upgrade so users see the cost of the cross-task share. Concrete
+example:
+
+```shape
+let counter = 0
+spawn { counter += 1 }   // B0014 ERROR (user wrote `let`)
+
+var counter = 0
+spawn { counter += 1 }   // OK; ⟦SharedAtomicMut⟧ inlay hint
+```
+
+### Q2 — Schema-pointer vs schema-id at drop
+
+**Decision:** Default to schema-id with HashMap lookup. Profile in Phase
+1.A; switch to `Arc<TypeSchema>` only if drop-path is >1% of CPU on a
+representative workload.
+
+**Rationale:** Schema-id is 8 bytes per `TypedObject`; schema-pointer is
+16 bytes plus an Arc bump on every object construction. Drops are
+typically batched at scope-end (one HashMap probe per object) — amortized
+cost favors the id+lookup approach. Switch only if profiling justifies
+moving the cost from the (frequent) alloc path to the (less frequent)
+drop path.
+
+### Q3 — `@ai` × `var` inference ordering
+
+**Decision:** `@ai` annotation rewriting runs first at comptime. `var`
+inference runs on the rewritten body. No special-casing in the inference
+layer.
+
+**Rationale:** `@ai` expands `@ai fn name(args) -> ReturnType {}` into a
+function body that constructs an LLM prompt and parses the structured
+response. By the time type-inference + storage-planning passes run, the
+AST is fully expanded — the generated body uses regular `let` /
+`let mut` / `var` internally. Add a Phase 1.C test for an `@ai` body that
+uses `var` to validate.
+
+### Q4 — JIT introspection drop strategy
+
+**Decision:** Three-layer:
+
+- **Tier 1 (baseline) always keeps** introspection metadata (frame info,
+  slot kinds, source positions).
+- **Tier 2 (optimizing) drops by default**, gated by a per-function
+  `introspection_needed` flag. Flag is set true when a debugger or
+  profiler attaches to the function, otherwise false.
+- **Deopt always works** via stack maps + side tables (HotSpot
+  precedent). Stack-map cost is amortized; side tables aren't on the hot
+  path.
+
+**Rationale:** Tier-1 metadata is small relative to interpreter dispatch;
+keeping it everywhere costs little. Tier-2 metadata is bloat that hurts
+cache + codegen on hot loops; dropping is the win. The
+`introspection_needed` flag is the escape hatch for active debugging.
+Matches V8/JSC/HotSpot production patterns (survey 02 §4.1, §4.4, §8.1).
+
+### Q5 — PVL audit outcome (predicted)
+
+**Predicted decision:** Partial PVL — unify scalars + frozen-immutable
+values + buffer crossings (where structural overlap is real); keep
+per-language adapters for object-handle crossings (where it isn't).
+
+**Rationale:** Python's PyObject (refcount + attributes + methods),
+TypeScript's JSValueRef (prototypes + dynamic shape), and C (no value
+model) genuinely diverge at the object-handle layer. Forcing a unified
+protocol there would invent escape hatches that erode the unification.
+But scalars, frozen values, and Arrow buffers are already moved as
+opaque bit-blobs at all four boundaries — unification captures real
+shared structure.
+
+**Status:** Phase 4 audit (~2 weeks) is the actual decision-maker. This
+is a prediction.
+
+### Q6 — String SSO threshold
+
+**Decision:** Default 15 bytes (Swift / ecow precedent — survey 03 §1.4,
+§1.6, §1.8). Exposed as a tunable constant:
+
+```rust
+// crates/shape-value/src/lib.rs
+pub const SSO_THRESHOLD_BYTES: usize = 15;
+```
+
+All SSO-aware code paths (carrier load/store, bit-packing, comparison,
+hash) reference the const. Profile-driven adjustment is a one-symbol
+change; never hardcoded at call sites.
+
+**Rationale:** 15 bytes balances inline capacity with carrier size for
+Shape's 16-byte tagged `String` value. Phase 1.A profiles a Shape stdlib
+parser workload; if measurement shows a meaningfully higher threshold
+performs better (e.g., 23 bytes per Mojo / smol_str), increment the
+const and re-profile.
