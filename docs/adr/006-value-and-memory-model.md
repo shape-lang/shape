@@ -373,6 +373,107 @@ tag-decode hops via `value.as_heap_ref()` / `value.raw_bits()`) is
 in-scope for Phase 1.B and pre-flagged as needing audit-grounded
 cleanup, not pure-mechanical.
 
+#### 2.7.4 API rebuild scope clarification
+
+Phase 1.B's first work session (`6ae58c4`, partial close at 57/62
+errors) surfaced that the ValueWord-deletion bulldozer cascaded into
+helper-API surface beyond the audit's call-site classification. The
+audit documents per-cluster *recipe shapes*, not a literal helper-API
+catalog. Phase 1.B's scope clarifications:
+
+- **Snapshot serialization** — `nanboxed_to_serializable` /
+  `serializable_to_nanboxed` (and `enum_*` / `print_result_*` adapters)
+  were deleted. The replacement — kind-threaded
+  `slot_to_serializable(slot: &KindedSlot, store) -> Result<SerializableVMValue>`
+  plus inverse — is **deferred to a Phase 2c snapshot rebuild
+  session**. Phase 1.B replaces the deleted-API call sites with
+  `todo!("phase-2c snapshot rebuild — see snapshot.rs:648 deferral")`
+  to let `shape-runtime` compile. Snapshot/restore is a known-broken
+  capability; do not paper over it with placeholder serializers that
+  silently corrupt persisted state.
+
+- **Stdlib registration** — `register_typed_function` /
+  `register_typed_async_function` (variadic-arg helpers) were deleted
+  in favor of per-arity helpers (`register_typed_fn_N`) in
+  `crates/shape-runtime/src/marshal.rs`. Phase 1.B **re-introduces the
+  variadic helpers at the KindedSlot shape** — body signature
+  `Fn(&[KindedSlot], &ModuleContext) -> Result<TypedReturn, String>` —
+  because (a) variadic dispatch is exactly the §2.7.1.4 dispatch-slice
+  case, (b) the 5 stdlib consumers (json/msgpack/toml/yaml/stdlib_time)
+  genuinely need variadic shape for functions with optional arguments,
+  and (c) per-arity stdlib mass migration is Phase 2c scope, not Phase
+  1.B's caller migration. The new variadic helpers live alongside the
+  per-arity ones in `marshal.rs`. Both are valid registration paths;
+  per-arity is preferred when the function arity is fixed.
+
+- **Output adapter** — `PrintResult` and `PrintSpan` (output-formatting
+  carriers) were inline references to the deprecated
+  `RareHeapData::PrintResult`. Phase 1.B **moves `PrintResult` /
+  `PrintSpan` to `shape-runtime`** (they are runtime-tier formatting
+  concerns with no value-tier dependency). Trait signature becomes
+  `fn print(&mut self, result: PrintResult) -> KindedSlot`. The
+  `RareHeapData::PrintResult` arm is deleted.
+
+- **Display / utility helpers** (`ValueWordDisplay`, `vmarray_from_vec`,
+  `ArgVec`, `ValueMap`) — these were thin wrappers around `ValueWord`.
+  Their post-`KindedSlot` shapes are call-site-local (DETAIL):
+  - `ValueWordDisplay(slot)` → `format!("{:?}", kinded_slot)`, or add
+    `KindedSlot::display()` if multi-line formatting is needed.
+  - `vmarray_from_vec(...)` → direct `TypedArrayData::from_*`
+    constructor matching the array's element FieldType.
+  - `ArgVec` typedef → `Vec<KindedSlot>` at call sites.
+  - `ValueMap` typedef → `HashMap<String, KindedSlot>` at call sites.
+
+- **Audit accuracy** — the audit's site lists are *recipe instances*,
+  not literal site catalogs. Where catalogued sites do not exist in
+  the current source (e.g. `event_queue.rs` no longer has the
+  Cache/State/Registry structs the audit listed), apply the recipe
+  pattern to whatever sites actually exist. This is DETAIL, not
+  architectural surface.
+
+#### 2.7.5 Cross-crate ABI policy
+
+`KindedSlot` is a `shape-runtime`-tier carrier. It does **not**
+propagate into stable cross-crate ABI surfaces. The split:
+
+- **Extension contract (FFI via `*mut c_void`)** — keeps the raw-bits
+  ABI. The canonical site is `RawCallableInvoker.invoke` at
+  `module_exports.rs:21`:
+  ```rust
+  unsafe fn(*mut c_void, &u64, &[u64]) -> Result<u64, String>
+  ```
+  Extensions store this signature in their CFFI userdata; changing it
+  requires extension recompilation. The conversion to/from `KindedSlot`
+  happens **inside `shape-runtime` at the boundary** —
+  `invoke_callable` reads bits + parallel `NativeKind` from the typed
+  registry, constructs `KindedSlot` for runtime-tier dispatch, then
+  unpacks back to `u64` for the extension call. Extensions stay on the
+  stable raw-bits ABI.
+
+- **Internal Rust trait objects / function pointers** — migrate to
+  `KindedSlot`. `ModuleFn` (`module_exports.rs:248`) becomes
+  `Arc<dyn for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<KindedSlot, String> + Send + Sync>`.
+  `IntrinsicFn` (`intrinsics/mod.rs:32`) becomes
+  `fn(&[KindedSlot], &mut ExecutionContext) -> Result<KindedSlot>`.
+  These trait objects live entirely inside `shape-runtime` with no
+  recompilation concern.
+
+- **shape-vm / shape-jit consumers** — migrate the `shape-runtime`
+  side to `KindedSlot`; break the consumer side. shape-jit's
+  `ffi_symbols/data_access/mod.rs:95` calls `align_tables` with the
+  legacy `(ctx, &[ValueWord])` signature; the consumer-side migration
+  is the next session's scope. shape-jit is already non-compiling
+  from the broader cascade — there is no value in preserving the
+  legacy shape on the runtime side just to keep shape-jit compiling
+  through this session.
+
+General policy: **stable ABI surfaces (extension contracts, persisted
+formats, FFI handoffs to non-Rust callers) stay on raw bits + parallel
+`NativeKind`. Internal Rust dispatch (trait objects, function
+pointers, structs, enums) uses `KindedSlot`.** A new internal Rust
+API surface that mirrors a stable raw-bits ABI on the runtime side is
+acceptable and expected.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
@@ -940,9 +1041,15 @@ one `KindedSlot` shape. Alternatives considered and rejected:
   the N9 close-out as a defection-attractor.
 
 **Status:** Binding for Phase 1.B onward. Audit-grounded site catalog
-is at `/tmp/phase-1b-audit.md` (2026-05-08; preserved by Phase 1.B
-commit history once the cluster closes). Cluster of 60 files / 658
-references / ~95 GENERIC_CARRIER sites.
+at `docs/cluster-audits/phase-1b-valueword-callers.md` (2026-05-08).
+Cluster of 60 files / 658 references / ~95 GENERIC_CARRIER sites.
+
+Working-session refinements (Phase 1.B partial close `6ae58c4`,
+2026-05-08): API rebuild scope (snapshot defer to Phase 2c, variadic
+register_typed_function re-introduction at KindedSlot shape, PrintResult
+move to shape-runtime, display/utility helper replacements) is spelled
+out at §2.7.4. Cross-crate ABI policy (extension contracts stay on
+raw bits, internal Rust dispatch uses KindedSlot) at §2.7.5.
 
 ### Q6 — String SSO threshold
 
