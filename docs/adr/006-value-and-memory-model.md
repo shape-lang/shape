@@ -517,6 +517,94 @@ are post-proof, no Option wrapping. If a future struct needs to
 carry "not yet known" kind state across sessions or wire boundaries,
 that's an ADR-level decision (probably wrong-shape).
 
+#### 2.7.6 Carrier API bound (Q8 ruling)
+
+The `KindedSlot` accessor + constructor surface is **bounded by
+`NativeKind` variant cardinality**. This is mechanical, code-review-
+enforceable, and matches the §2.7 / Q7 carrier-not-discriminator
+framing.
+
+**For each `NativeKind` scalar variant V** (`Int64`, `Float64`, `Bool`,
+`Char`, `String`, etc. — see `crates/shape-value/src/native_kind.rs`
+for the complete list):
+- At most one constructor: `KindedSlot::from_<v>(payload) -> KindedSlot`
+  that wraps a concrete payload and sets `kind = NativeKind::V`.
+- At most one scalar accessor: `KindedSlot::as_<v>() -> Option<T>` that
+  matches on `self.kind`; returns `Some(payload)` if `self.kind ==
+  NativeKind::V`, else `None`.
+
+**For heap kinds (`NativeKind::Ptr(HeapKind::*)`)**:
+- One constructor per `HeapKind` variant
+  (`KindedSlot::from_typed_array`, `KindedSlot::from_typed_object`,
+  `KindedSlot::from_hashmap`, etc.) — all already in place from
+  Phase 1.B.
+- **NO per-heap-variant accessor on `KindedSlot`.** Dispatch on
+  heap-side payload goes through
+  `kinded_slot.slot.as_heap_value() -> Option<&HeapValue>` (already
+  on `ValueSlot`) plus pattern-match on `&HeapValue`. `HeapValue`
+  stays the **single discriminator** per ADR-005 §1.
+
+**Forbidden shapes the bound rules out:**
+
+- `KindedSlot::as_typed_array()`, `KindedSlot::as_typed_object()`,
+  `KindedSlot::as_hashmap()`, `KindedSlot::as_decimal()`,
+  `KindedSlot::as_function_id()`, etc. — every per-heap-variant
+  accessor would re-create parallel `HeapKind` discrimination on a
+  non-`HeapValue` type. Use `slot.as_heap_value()` + `HeapValue::*`
+  match.
+- `KindedSlot::as_X()` where X is not a `NativeKind` variant
+  (e.g. `as_number_or_int_coerced()`) — coercion is the caller's
+  job at the body site, not a carrier concern.
+- Convenience accessors bundling multiple kinds into one return
+  (e.g. `as_any_numeric() -> Option<f64>` covering both `Int64`
+  and `Float64`). Bodies that accept heterogeneous-kind input
+  dispatch on `kind` explicitly at the body site.
+- `KindedSlot::as_value_word()`, `KindedSlot::raw_bits()` — same
+  defection-attractor as the deleted `ValueWord::raw_bits()` /
+  `ValueWordExt::*` surface, just renamed. CLAUDE.md "Renames to
+  refuse on sight" applies in spirit.
+
+**Adding a method outside the bound requires either:**
+
+- (a) Adding a `NativeKind` variant to `shape-value` (gated by
+  ADR-006 / Q-ruling — same gate as ADR-005 §1 single-discriminator
+  additions), OR
+- (b) An ADR amendment justifying the parallel discrimination
+  (would need to overcome ADR-005 §1).
+
+**Mechanical effect:** at maximum, `KindedSlot` carries ~25
+constructors and ~5-10 scalar accessors (NativeKind has ~25 variants
+total, ~7 are scalar; ~18 are `Ptr(HeapKind::*)` which get
+constructor-only). Total carrier surface is ~150 LoC, bounded by the
+type system's enum cardinality, not by user demand.
+
+**Code-review rule:** "Does this proposed accessor pair 1:1 with a
+`NativeKind` variant, with no parallel discrimination on `HeapKind`?
+If no, refuse."
+
+**Heterogeneous-kind body pattern.** Builtin bodies that genuinely
+accept heterogeneous-kind input (e.g. `abs(x: int|float)`,
+`format(value: any)`) dispatch on `kind: NativeKind` explicitly at
+the body site:
+
+```rust
+fn builtin_abs(arg: &KindedSlot) -> Result<KindedSlot, VMError> {
+    match arg.kind {
+        NativeKind::Int64 =>
+            Ok(KindedSlot::from_int(arg.as_i64().unwrap().abs())),
+        NativeKind::Float64 =>
+            Ok(KindedSlot::from_number(arg.as_f64().unwrap().abs())),
+        _ => Err(type_error("abs requires int or float")),
+    }
+}
+```
+
+This is **runtime-tier dispatch on a carrier** at a builtin
+boundary, not a hot-path tag-decode. It does not violate the
+strict-typing rules — the alternative (Option 2: per-kind body
+variants) pushes the same dispatch into the central wrapper and
+costs the same total work.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
@@ -964,9 +1052,10 @@ Following ADR-005's convention:
 ## 17. Resolved questions
 
 Answers below were reached during the ADR-006 review on 2026-05-08
-(Q1-Q6) and the Phase 1.B carrier-shape decision on 2026-05-08 (Q7).
-Q5 remains predicted-pending-audit; the rest are decisions binding for
-Phase 1 onward.
+(Q1-Q6), the Phase 1.B carrier-shape decision on 2026-05-08 (Q7),
+and the Phase 1.B-vm Wave 5 carrier-API-bound decision on 2026-05-08
+(Q8). Q5 remains predicted-pending-audit; the rest are decisions
+binding for Phase 1 onward.
 
 ### Q1 — `var` × `B0014 NonSendableAcrossTaskBoundary` coordination
 
@@ -1048,6 +1137,50 @@ shared structure.
 
 **Status:** Phase 4 audit (~2 weeks) is the actual decision-maker. This
 is a prediction.
+
+### Q8 — Carrier API bound for `KindedSlot` accessors/constructors
+
+**Decision:** `KindedSlot`'s accessor and constructor surface is
+**bounded by `NativeKind` variant cardinality** (one constructor +
+at most one scalar accessor per variant; **no per-heap-variant
+accessors** — heap dispatch via `slot.as_heap_value()` +
+`HeapValue` match). Adding a method outside this bound requires
+adding a `NativeKind` variant first (itself gated) or an ADR
+amendment overcoming ADR-005 §1. Spec lives at §2.7.6.
+
+**Rationale:** Phase 1.B-vm Wave 5 surfaced that the audit's
+"STATIC_KIND once dispatch flips" claim was wrong for heterogeneous-
+kind builtin bodies (~12 accessors + ~30 constructors needed).
+Three options were considered:
+
+- **Option 1 (full ValueWordExt-equivalent on `KindedSlot`)** —
+  rejected: same defection-attractor surface as the deleted
+  2,497-LoC `ValueWordExt` module, just renamed (CLAUDE.md
+  "Renames to refuse on sight" pattern). Surface unbounded by
+  type-system structure.
+
+- **Option 2 (per-kind dispatch tables in `BuiltinFunction`
+  enum)** — rejected: massively bigger refactor (every
+  `BuiltinFunction` arm × per-kind dispatch). Pushes the same
+  dispatch into the central wrapper without architectural win;
+  total work same.
+
+- **Option 4 (refined Option 3 — bounded carrier API +
+  HeapValue-via-slot for heap dispatch)** — accepted. Surface
+  bounded by `NativeKind` cardinality; heap-side dispatch
+  preserves ADR-005 §1 single-discriminator (HeapValue is the
+  canonical heap discriminator); ~150 LoC carrier total.
+
+**Performance characteristics:** KindedSlot is shape-runtime tier
+(§2.7.5); not in opcode dispatch / VM stack ABI / JIT codegen.
+Accessor calls (`match self.kind` per call) run at builtin-boundary
+cost, where function-call overhead already dominates by orders of
+magnitude. Hot path stays raw `u64` + opcode-encoded kind, unchanged.
+
+**Status:** Binding for Wave 5a onward. Bound is mechanically
+enforceable in code review — "Does this accessor pair 1:1 with a
+`NativeKind` variant, with no parallel discrimination on `HeapKind`?
+If no, refuse."
 
 ### Q7 — Carrier shape for kind-erased call sites (Phase 1.B surface)
 
