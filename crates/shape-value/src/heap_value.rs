@@ -625,20 +625,44 @@ pub struct TaskGroupData {
 ///
 /// 1. `HeapValue::TypedObject` becomes `HeapValue::TypedObject(Arc<TypedObjectStorage>)`
 ///    — a typed `Arc<T>` payload like every other ADR-006 §2.3 heap arm.
-/// 2. The Drop impl (added in Step 5) lives on `TypedObjectStorage` and
-///    can dispatch on per-field `NativeKind` looked up from the schema
-///    without traversing the enclosing `HeapValue` discriminant.
+/// 2. The `Drop` impl (Step 5) lives on `TypedObjectStorage` and dispatches
+///    per-field on `NativeKind` from the embedded `field_kinds: Arc<[NativeKind]>`
+///    table — no schema-registry probe and no cross-crate function-pointer
+///    hook at drop time.
 ///
 /// Field invariants (ADR-006 §2.3):
 ///
-/// - `schema_id` is the registry key for the TypeSchema. Schema lookup
-///   at drop time is HashMap-by-id (Q8 ruling); promoting to
-///   `Arc<TypeSchema>` is profile-driven and not part of Phase 1.A.
+/// - `schema_id` is the registry key for the TypeSchema. Kept for wire /
+///   snapshot round-trip and downstream schema-aware code (printing,
+///   marshal); not consulted at drop time.
 /// - `slots` is a per-field 8-byte storage array. Field at index `i`
 ///   stores its bits per the schema's `FieldType` for that field.
 /// - `heap_mask` has bit `i` set iff slot `i` holds a heap pointer
 ///   (`Arc<T>` raw pointer per ADR-006 §2.4). Bits beyond `slots.len()`
 ///   must be zero.
+/// - `field_kinds` is an `Arc<[NativeKind]>` of length `slots.len()`,
+///   one entry per field, carrying the proven `NativeKind` for that
+///   field's slot bits. The Arc payload is **shared per-schema**: the
+///   construction path (in `shape-runtime`) maps `schema_id ⇒ Arc<[NativeKind]>`
+///   once per schema (one HashMap probe at the first construction; cached
+///   for subsequent constructions) and clones the cached Arc into each
+///   instance — so 1M Customer-objects of the same shape share one
+///   `[NativeKind]` allocation. Drop is then constant-time per slot
+///   without any cross-crate registry call.
+///
+/// Why the `Arc<[NativeKind]>` (Option B' per supervisor ruling, ADR-006 §17):
+///
+/// - **Option B** (per-instance `Box<[NativeKind]>`) was rejected: it
+///   duplicates the same NativeKind sequence across every instance of a
+///   schema (1M × 8 fields = 16MB cumulative duplication).
+/// - **Option C** (function-pointer hook in shape-value installed by
+///   shape-runtime) was rejected: it adds a cross-crate runtime hook for
+///   metadata that's already known at construction time.
+/// - **Option B'** (this one) does the lookup once at construction (where
+///   the schema is in scope) and shares the result via Arc — 8-byte
+///   pointer per instance, single payload allocation per schema, no
+///   probe at drop. Per Q8 spirit: the schema lookup happens, but it's
+///   profile-driven *preempted* to construction time and cached.
 ///
 /// `TypedObjectStorage` is `pub` with `pub` fields so the existing
 /// destructuring call sites can migrate by reading
@@ -654,6 +678,215 @@ pub struct TypedObjectStorage {
     /// Bit `i` set ⇔ slot `i` holds a heap pointer that participates in
     /// Arc refcount discipline. Bits beyond `slots.len()` must be zero.
     pub heap_mask: u64,
+    /// Per-field `NativeKind` table — same length as `slots`. **Shared
+    /// per-schema** via `Arc`: every instance of the same schema clones
+    /// the same payload (one atomic refcount bump per construction).
+    /// Consulted by `Drop` to dispatch per-slot `Arc::decrement_strong_count`
+    /// without any schema-registry probe.
+    pub field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+}
+
+impl TypedObjectStorage {
+    /// Construct a new `TypedObjectStorage`.
+    ///
+    /// Construction-side contract (callers in `shape-runtime`):
+    ///
+    /// 1. `slots.len() == field_kinds.len()` — one kind per slot.
+    /// 2. For each bit `i` set in `heap_mask`, `field_kinds[i]` must be
+    ///    a heap-pointer kind (`NativeKind::String` or
+    ///    `NativeKind::Ptr(_)`) and the slot's `u64` must be the raw
+    ///    pointer of an `Arc::into_raw::<T>` for the matching `T`. Drop
+    ///    relies on this for soundness.
+    /// 3. `field_kinds` should be the per-schema cached `Arc<[NativeKind]>`
+    ///    (callers maintain a `schema_id ⇒ Arc<[NativeKind]>` cache to
+    ///    avoid per-instance allocation).
+    ///
+    /// Returns the storage by value; the canonical wrap is
+    /// `Arc::new(TypedObjectStorage::new(...))` immediately followed by
+    /// `HeapValue::TypedObject(arc)` or `ValueSlot::from_typed_object(arc)`.
+    #[inline]
+    pub fn new(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+    ) -> Self {
+        debug_assert_eq!(
+            slots.len(),
+            field_kinds.len(),
+            "TypedObjectStorage::new: slots/field_kinds length mismatch \
+             (slots={}, field_kinds={}) — every slot must have a proven NativeKind",
+            slots.len(),
+            field_kinds.len(),
+        );
+        Self { schema_id, slots, heap_mask, field_kinds }
+    }
+}
+
+impl Drop for TypedObjectStorage {
+    /// ADR-006 §2.5: walk `heap_mask`, dispatch per-slot on
+    /// `field_kinds[i]`, and call the matching
+    /// `Arc::decrement_strong_count::<T>` for the slot's typed pointer.
+    /// Non-heap slots (heap_mask bit clear) are no-ops.
+    ///
+    /// Soundness contract (must hold by construction; see
+    /// `TypedObjectStorage::new`):
+    ///
+    /// - For every `i` where `heap_mask >> i & 1 == 1`, the slot's `u64`
+    ///   bits are the result of `Arc::into_raw::<T>` where `T` matches
+    ///   `field_kinds[i]`. The mapping is:
+    ///     - `NativeKind::String`           → `Arc<String>`
+    ///     - `NativeKind::Ptr(HeapKind::String)`        → `Arc<String>`
+    ///     - `NativeKind::Ptr(HeapKind::TypedArray)`    → `Arc<TypedArrayData>`
+    ///     - `NativeKind::Ptr(HeapKind::TypedObject)`   → `Arc<TypedObjectStorage>`
+    ///     - `NativeKind::Ptr(HeapKind::HashMap)`       → `Arc<HashMapData>`
+    ///     - `NativeKind::Ptr(HeapKind::Decimal)`       → `Arc<rust_decimal::Decimal>`
+    ///     - `NativeKind::Ptr(HeapKind::BigInt)`        → `Arc<i64>`
+    ///     - `NativeKind::Ptr(HeapKind::DataTable)`     → `Arc<DataTable>`
+    ///     - `NativeKind::Ptr(HeapKind::IoHandle)`      → `Arc<IoHandleData>`
+    ///     - `NativeKind::Ptr(HeapKind::NativeView)`    → `Arc<NativeViewData>`
+    ///     - `NativeKind::Ptr(HeapKind::Content)`       → `Arc<ContentNode>`
+    ///     - `NativeKind::Ptr(HeapKind::Instant)`       → `Arc<Instant>`
+    ///     - `NativeKind::Ptr(HeapKind::Temporal)`      → `Arc<TemporalData>`
+    ///     - `NativeKind::Ptr(HeapKind::TableView)`     → `Arc<TableViewData>`
+    ///     - `NativeKind::Ptr(HeapKind::TaskGroup)`     → `Arc<TaskGroupData>`
+    /// - `NativeKind::Ptr(HeapKind::{Closure, Future, Char, NativeScalar})`
+    ///   correspond to `HeapValue` variants that do **not** carry an
+    ///   `Arc<T>` slot payload (closure uses `OwnedClosureBlock` whose
+    ///   refcount is managed by its own Drop; the others are inline
+    ///   scalars). A heap_mask bit set with one of those kinds is a
+    ///   soundness violation by construction; the Drop arms hit
+    ///   `unreachable!` in debug and silently no-op in release rather
+    ///   than guess at the slot bits.
+    fn drop(&mut self) {
+        use crate::heap_value::HeapKind;
+        use crate::native_kind::NativeKind;
+
+        // Defensive: if construction left a length mismatch (debug_assert
+        // catches it earlier), drop only the prefix where both bookkeeping
+        // structures agree. Better a leak than UB.
+        let n = self.slots.len().min(self.field_kinds.len());
+        for i in 0..n {
+            // heap_mask is u64; bits beyond 63 cannot be addressed today.
+            // Schemas with >64 fields are out of scope until the bitmap
+            // widens (no caller produces that; documented invariant).
+            if i >= 64 {
+                break;
+            }
+            if (self.heap_mask >> i) & 1 == 0 {
+                continue;
+            }
+            let bits = self.slots[i].raw();
+            if bits == 0 {
+                continue;
+            }
+            // SAFETY (each arm): the construction-side contract guarantees
+            // that for every set heap_mask bit, the slot's bits are the
+            // result of `Arc::into_raw::<T>` where `T` matches `field_kinds[i]`.
+            // We reclaim exactly one strong-count share per slot via
+            // `Arc::decrement_strong_count::<T>` and then never look at the
+            // bits again.
+            unsafe {
+                match self.field_kinds[i] {
+                    // Both NativeKind::String and Ptr(HeapKind::String)
+                    // resolve to the same Arc<String> payload — the field
+                    // type's String is the named exception (ADR-005 §2).
+                    NativeKind::String => {
+                        std::sync::Arc::decrement_strong_count(bits as *const String);
+                    }
+                    NativeKind::Ptr(hk) => match hk {
+                        HeapKind::String => {
+                            std::sync::Arc::decrement_strong_count(bits as *const String);
+                        }
+                        HeapKind::TypedArray => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const TypedArrayData,
+                            );
+                        }
+                        HeapKind::TypedObject => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const TypedObjectStorage,
+                            );
+                        }
+                        HeapKind::HashMap => {
+                            std::sync::Arc::decrement_strong_count(bits as *const HashMapData);
+                        }
+                        HeapKind::Decimal => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const rust_decimal::Decimal,
+                            );
+                        }
+                        HeapKind::BigInt => {
+                            std::sync::Arc::decrement_strong_count(bits as *const i64);
+                        }
+                        HeapKind::DataTable => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::datatable::DataTable,
+                            );
+                        }
+                        HeapKind::IoHandle => {
+                            std::sync::Arc::decrement_strong_count(bits as *const IoHandleData);
+                        }
+                        HeapKind::NativeView => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const NativeViewData,
+                            );
+                        }
+                        HeapKind::Content => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::content::ContentNode,
+                            );
+                        }
+                        HeapKind::Instant => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const std::time::Instant,
+                            );
+                        }
+                        HeapKind::Temporal => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TemporalData);
+                        }
+                        HeapKind::TableView => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TableViewData);
+                        }
+                        HeapKind::TaskGroup => {
+                            std::sync::Arc::decrement_strong_count(bits as *const TaskGroupData);
+                        }
+                        // Closure / Future / Char / NativeScalar: these
+                        // HeapKind discriminators do not have an Arc<T>
+                        // slot payload (closure uses OwnedClosureBlock with
+                        // its own refcount; the others are inline scalars).
+                        // A heap_mask bit set with one of these is a
+                        // construction-side bug — never produced by the
+                        // current caller surface.
+                        HeapKind::Closure
+                        | HeapKind::Future
+                        | HeapKind::Char
+                        | HeapKind::NativeScalar => {
+                            debug_assert!(
+                                false,
+                                "TypedObjectStorage::drop: heap_mask bit {} set with \
+                                 non-Arc-payload kind {:?} (schema_id={}); \
+                                 construction-side soundness violation",
+                                i, hk, self.schema_id
+                            );
+                        }
+                    },
+                    // Non-heap NativeKinds (integers, floats, bool) should
+                    // never have their heap_mask bit set. Same construction
+                    // soundness contract as above.
+                    other => {
+                        debug_assert!(
+                            false,
+                            "TypedObjectStorage::drop: heap_mask bit {} set with \
+                             non-heap NativeKind {:?} (schema_id={}); \
+                             construction-side soundness violation",
+                            i, other, self.schema_id
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── TypedArray buckets ──────────────────────────────────────────────────────
@@ -1394,5 +1627,170 @@ mod closure_variant_regression {
         // not load-bearing for any external consumer per the Phase 2b
         // audit.)
         let _ = HeapKind::Closure;
+    }
+}
+
+#[cfg(test)]
+mod typed_object_storage_drop {
+    //! ADR-006 §2.5 / Step 5: pin the Drop impl's behaviour on
+    //! `TypedObjectStorage`. The contract tested:
+    //!
+    //! 1. Heap-mask bits cause `Arc::decrement_strong_count::<T>` for the
+    //!    matching `field_kinds[i]` payload type.
+    //! 2. Non-heap slots (heap_mask bit clear) are no-ops — even with
+    //!    non-zero raw bits (those bits are scalar field contents, not
+    //!    typed pointers).
+    //! 3. `field_kinds` itself is shared via Arc — multiple instances of
+    //!    the same schema share one `[NativeKind]` allocation.
+    use super::*;
+    use crate::native_kind::NativeKind;
+    use crate::slot::ValueSlot;
+    use std::sync::Arc;
+
+    #[test]
+    fn drop_decrements_arc_string_for_heap_string_slot() {
+        let s: Arc<String> = Arc::new("phase-1a".to_string());
+        // Hold a second strong ref so the test can observe the count drop.
+        let witness = Arc::clone(&s);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let slot = ValueSlot::from_string_arc(s);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::String]);
+        let storage = TypedObjectStorage::new(
+            42,
+            vec![slot].into_boxed_slice(),
+            0b1, // bit 0 set
+            kinds,
+        );
+
+        // Construction stored the Arc raw pointer; nothing dropped yet.
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        drop(storage);
+
+        // Drop walked heap_mask, dispatched on NativeKind::String, and
+        // released the slot's strong count via Arc::decrement_strong_count.
+        assert_eq!(Arc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn drop_is_noop_for_non_heap_slot_with_non_zero_bits() {
+        // Non-heap slot — heap_mask bit clear. Raw bits are an i64 value;
+        // Drop must not interpret them as a pointer.
+        let slot = ValueSlot::from_int(0x1234_5678);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let storage = TypedObjectStorage::new(
+            7,
+            vec![slot].into_boxed_slice(),
+            0, // no heap bits
+            kinds,
+        );
+        // Just dropping the storage must not crash / dereference the bits.
+        drop(storage);
+    }
+
+    #[test]
+    fn drop_skips_zero_pointer_slots() {
+        // Heap-mask bit set but the slot was zeroed (e.g. moved-out) —
+        // Drop must not call Arc::decrement_strong_count on null.
+        let slot = ValueSlot::from_raw(0);
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::String]);
+        let storage = TypedObjectStorage::new(
+            9,
+            vec![slot].into_boxed_slice(),
+            0b1,
+            kinds,
+        );
+        drop(storage);
+    }
+
+    #[test]
+    fn field_kinds_arc_is_shared_across_instances() {
+        // Option B' invariant: two instances of the same schema clone the
+        // same Arc<[NativeKind]> (one payload allocation per schema).
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Bool]);
+        let kinds_count_before = Arc::strong_count(&kinds);
+
+        let storage_a = TypedObjectStorage::new(
+            1,
+            vec![ValueSlot::from_int(0), ValueSlot::from_bool(true)].into_boxed_slice(),
+            0,
+            Arc::clone(&kinds),
+        );
+        let storage_b = TypedObjectStorage::new(
+            1,
+            vec![ValueSlot::from_int(1), ValueSlot::from_bool(false)].into_boxed_slice(),
+            0,
+            Arc::clone(&kinds),
+        );
+
+        // Two instances + the test's own handle = +2 over the baseline.
+        assert_eq!(Arc::strong_count(&kinds), kinds_count_before + 2);
+
+        // Both instances point at the same payload (no per-instance copy).
+        assert!(Arc::ptr_eq(&storage_a.field_kinds, &storage_b.field_kinds));
+        assert!(Arc::ptr_eq(&storage_a.field_kinds, &kinds));
+
+        drop(storage_a);
+        drop(storage_b);
+        // Each Drop released its share; only the test's handle remains.
+        assert_eq!(Arc::strong_count(&kinds), kinds_count_before);
+    }
+
+    #[test]
+    fn drop_handles_mixed_heap_and_scalar_fields() {
+        // Realistic shape: int + string + bool. Only the string slot
+        // participates in refcount; the int/bool slots are scalar bits.
+        let s: Arc<String> = Arc::new("mixed".to_string());
+        let witness = Arc::clone(&s);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let slots = vec![
+            ValueSlot::from_int(99),
+            ValueSlot::from_string_arc(s),
+            ValueSlot::from_bool(true),
+        ]
+        .into_boxed_slice();
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![
+            NativeKind::Int64,
+            NativeKind::String,
+            NativeKind::Bool,
+        ]);
+        let storage = TypedObjectStorage::new(
+            13,
+            slots,
+            0b010, // only bit 1 (the string) is heap
+            kinds,
+        );
+
+        drop(storage);
+        assert_eq!(Arc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn drop_decrements_arc_typed_object_for_heap_pointer_slot() {
+        // Nested TypedObject: outer storage holds an Arc<TypedObjectStorage>
+        // in slot 0 via NativeKind::Ptr(HeapKind::TypedObject).
+        let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let inner = Arc::new(TypedObjectStorage::new(
+            100,
+            vec![ValueSlot::from_int(7)].into_boxed_slice(),
+            0,
+            inner_kinds,
+        ));
+        let inner_witness = Arc::clone(&inner);
+        assert_eq!(Arc::strong_count(&inner_witness), 2);
+
+        let outer_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+        let outer = TypedObjectStorage::new(
+            101,
+            vec![ValueSlot::from_typed_object(inner)].into_boxed_slice(),
+            0b1,
+            outer_kinds,
+        );
+
+        drop(outer);
+        assert_eq!(Arc::strong_count(&inner_witness), 1);
     }
 }
