@@ -29,7 +29,7 @@ The repo is a monorepo with several top-level projects:
 |-------|------|---------|
 | **shape-ast** | `crates/shape-ast/` | Pest grammar (`shape.pest`) + AST types |
 | **shape-value** | `crates/shape-value/` | Value representation (`ValueWord` in `value_word.rs`), HeapValue, TypedObject schemas |
-| **shape-types** | `crates/shape-types/` | Type system definitions, type inference types |
+| **shape-types** | `crates/shape-types/` | **Empty crate skeleton** (only `data/` subdir, no `src/`). Type-system code actually lives at `shape-runtime/src/type_system/` and `shape-runtime/src/type_schema/`. Crate is reserved for a planned move; do not look here for type code. |
 | **shape-common** | `crates/shape-common/` | Shared utilities across crates |
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
 | **shape-vm** | `crates/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors, resource limits, content-addressed bytecode, linker |
@@ -300,20 +300,33 @@ See `docs/adr/006-value-and-memory-model.md`. Code touchpoints carry a `// ADR-0
 
 ## Key File Locations
 
+For comprehensive concept-to-location mapping see [`docs/codebase-index.md`](docs/codebase-index.md) and the per-domain files at `docs/codebase-index/0{1,2,3}-*.md`. The table below is a quick subset.
+
 | What | Where |
 |------|-------|
 | Pest grammar | `crates/shape-ast/src/shape.pest` |
-| Bytecode compiler | `crates/shape-runtime/src/compiler/` |
-| Type environment | `crates/shape-runtime/src/compiler/environment/mod.rs` |
-| Method registry (PHF) | `crates/shape-runtime/src/method_registry/` |
+| Bytecode compiler | `crates/shape-vm/src/compiler/` |
+| Type environment | `crates/shape-runtime/src/type_system/environment/` |
+| Type system / inference | `crates/shape-runtime/src/type_system/` |
+| Type schemas (`FieldType`, etc.) | `crates/shape-runtime/src/type_schema/` |
+| Method registry (PHF) | `crates/shape-vm/src/executor/objects/method_registry.rs` |
+| `BindingStorageClass` (lifetime lattice) | `crates/shape-vm/src/type_tracking.rs:286` |
+| MIR borrow solver | `crates/shape-vm/src/mir/solver.rs` |
+| MIR storage planning | `crates/shape-vm/src/mir/storage_planning.rs` |
 | Capability tags | `crates/shape-runtime/src/stdlib/capability_tags.rs` |
-| Permission enum | `crates/shape-abi-v1/src/lib.rs` |
+| Permission enum (16 perms) | `crates/shape-abi-v1/src/lib.rs:996` |
+| `LanguageRuntimeVTable` (polyglot) | `crates/shape-abi-v1/src/lib.rs:722` |
 | Resource limits | `crates/shape-vm/src/resource_limits.rs` |
 | Content-addressed blobs | `crates/shape-vm/src/bytecode/content_addressed.rs` |
 | Linker | `crates/shape-vm/src/linker.rs` |
 | VM executor | `crates/shape-vm/src/executor/` |
 | JIT compiler | `crates/shape-jit/src/` |
+| Tier thresholds (T1@100, T2@10k) | `crates/shape-vm/src/tier.rs:17-87` |
+| Inline cache state machine | `crates/shape-vm/src/feedback.rs:9-128` |
 | Ed25519 signing | `crates/shape-runtime/src/crypto/signing.rs` |
+| Wire protocol v1 | `crates/shape-wire/src/lib.rs:51` |
 | Runtime v2 spec | `docs/runtime-v2-spec.md` |
+| Value & memory model (canonical) | `docs/adr/006-value-and-memory-model.md` |
+| Codebase index | `docs/codebase-index.md` |
 | Landing page | `../shape-web/landing/index.html` |
 | Book (Astro) | `../shape-web/book/` |
