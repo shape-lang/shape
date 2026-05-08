@@ -2,7 +2,6 @@
 //!
 //! Contains:
 //! - Generic store emission (`emit_container_store_if_needed`)
-//! - Operand collection helpers (`collect_operands`, `collect_named_operands`)
 //! - Task boundary emission
 //! - Place projection utilities
 //! - Type inference from expressions
@@ -98,35 +97,6 @@ pub(super) fn emit_task_boundary_if_needed(
         TaskBoundaryKind::Detached
     };
     builder.push_stmt(StatementKind::TaskBoundary(operands, kind), span);
-}
-
-// ---------------------------------------------------------------------------
-// Operand collection
-// ---------------------------------------------------------------------------
-
-/// Collect operands by lowering each expression through `lower_fn`.
-///
-/// This consolidates the repeated pattern of:
-/// ```ignore
-/// let operands: Vec<_> = exprs.iter().map(|e| lower_as_moved(builder, e)).collect();
-/// ```
-#[allow(dead_code)]
-pub(super) fn collect_operands<'a>(
-    builder: &mut MirBuilder,
-    exprs: impl IntoIterator<Item = &'a Expr>,
-    lower_fn: fn(&mut MirBuilder, &Expr) -> Operand,
-) -> Vec<Operand> {
-    exprs.into_iter().map(|e| lower_fn(builder, e)).collect()
-}
-
-/// Collect operands from named (key, expr) pairs by lowering only the expr.
-#[allow(dead_code)]
-pub(super) fn collect_named_operands<'a>(
-    builder: &mut MirBuilder,
-    named: impl IntoIterator<Item = &'a (String, Expr)>,
-    lower_fn: fn(&mut MirBuilder, &Expr) -> Operand,
-) -> Vec<Operand> {
-    named.into_iter().map(|(_, e)| lower_fn(builder, e)).collect()
 }
 
 // ---------------------------------------------------------------------------
