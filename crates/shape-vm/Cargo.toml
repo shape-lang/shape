@@ -13,6 +13,7 @@ shape-value = { workspace = true }
 shape-runtime = { workspace = true }
 shape-wire = { workspace = true }
 shape-abi-v1 = { workspace = true, features = ["serde"] }
+shape-diagnostics = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

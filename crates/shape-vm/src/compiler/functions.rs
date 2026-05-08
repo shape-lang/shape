@@ -2,10 +2,52 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use shape_ast::ast::{FunctionDef, Item, Span, Statement};
-use shape_ast::error::{ErrorNote, Result, ShapeError};
+use shape_ast::error::{ErrorNote, Result, ShapeError, SourceLocation};
 use std::collections::HashMap;
 
 use super::{BytecodeCompiler, ParamPassMode};
+
+/// Bridge from an LSDS [`shape_diagnostics::Diagnostic`] to a
+/// [`ShapeError::SemanticError`].
+///
+/// Phase 2 vertical-slice helper: the LSDS is the source of truth, and
+/// the legacy `ShapeError::SemanticError` is derived from it. Subsequent
+/// sessions will introduce direct LSDS sinks (LSP renderer, MCP
+/// renderer) and the bridge becomes optional. For now it preserves the
+/// existing `[B00XX] body` message shape so downstream consumers
+/// (test snapshots, terminal output) keep working without flag-day
+/// migration.
+pub(crate) fn diagnostic_to_shape_error(diag: &shape_diagnostics::Diagnostic) -> ShapeError {
+    let message = format!("[{}] {}", diag.diagnostic_id, diag.message);
+    let mut loc = SourceLocation::new(diag.location.line as usize, diag.location.col as usize);
+    if let Some(file) = &diag.location.file {
+        loc = loc.with_file(file.clone());
+    }
+    let span_len = diag.location.span[1].saturating_sub(diag.location.span[0]) as usize;
+    if span_len > 0 {
+        loc = loc.with_length(span_len);
+    }
+    for fix in &diag.fixes {
+        loc.hints.push(fix.label.clone());
+    }
+    for note in &diag.notes {
+        let note_loc = note.location.as_ref().map(|nl| {
+            let mut sl = SourceLocation::new(nl.line as usize, nl.col as usize);
+            if let Some(file) = &nl.file {
+                sl = sl.with_file(file.clone());
+            }
+            sl
+        });
+        loc.notes.push(ErrorNote {
+            message: note.message.clone(),
+            location: note_loc,
+        });
+    }
+    ShapeError::SemanticError {
+        message,
+        location: Some(loc),
+    }
+}
 
 impl BytecodeCompiler {
     pub(super) fn explicit_param_pass_modes(
@@ -634,28 +676,93 @@ impl BytecodeCompiler {
     }
 
     fn mir_borrow_error(&self, error: &crate::mir::analysis::BorrowError) -> ShapeError {
+        // Phase 2 (ADR-006 §9): produce LSDS first; ShapeError::SemanticError
+        // is derived from the LSDS so the wire-format truth lives in the
+        // diagnostic struct, not in the message string. The vertical-slice
+        // path covers all BorrowError kinds; subsequent sessions migrate
+        // remaining diagnostic emission sites the same way.
+        let diag = self.borrow_error_to_lsds(error);
+        diagnostic_to_shape_error(&diag)
+    }
+
+    /// Convert a [`crate::mir::analysis::BorrowError`] into an LSDS
+    /// [`shape_diagnostics::Diagnostic`].
+    ///
+    /// This is the **canonical** emission path for the B-series borrow /
+    /// lifetime / aliasing diagnostics per ADR-006 §9. The diagnostic id
+    /// matches `BorrowErrorKind::code()` (`"B0001"`..`"B0014"`); the
+    /// message body is taken verbatim from `mir_borrow_error_message`
+    /// (no `[B00XX]` prefix — that's the diagnostic_id field).
+    ///
+    /// Hints from the message table and the repair candidates surface as
+    /// suggested fixes; the loan-origin span and last-use span surface as
+    /// LSDS notes. When the kind is one of the type-mismatch-shaped
+    /// variants (currently none — borrow errors are aliasing errors, not
+    /// type errors), `expected`/`found` would be populated; for the
+    /// B-series they are left `None`.
+    pub(crate) fn borrow_error_to_lsds(
+        &self,
+        error: &crate::mir::analysis::BorrowError,
+    ) -> shape_diagnostics::Diagnostic {
         let (body, default_hint) = self.mir_borrow_error_message(error.kind.clone());
         let code = error.kind.code();
-        let message = format!("[{}] {}", code, body);
-        let mut location = self.span_to_source_location(error.span);
-        location.hints.push(default_hint.to_string());
+        let primary = self.shape_loc_to_lsds(&self.span_to_source_location(error.span));
+
+        let mut builder = shape_diagnostics::DiagnosticBuilder::new(
+            code.as_str(),
+            shape_diagnostics::Severity::Error,
+            primary,
+            body,
+        )
+        .rule("ADR-006-§9");
+
+        // Default hint → top-ranked suggested fix. Confidence is a fixed
+        // 0.5 placeholder; richer ranking is later-session scope.
+        builder = builder.with_fix(shape_diagnostics::SuggestedFix::new(default_hint, 0.5));
+
+        // Repair candidate → second suggested fix when present.
         if let Some(repair) = error.repairs.first() {
-            location.hints.push(repair.description.clone());
+            builder =
+                builder.with_fix(shape_diagnostics::SuggestedFix::new(repair.description.clone(), 0.7));
         }
-        location.notes.push(ErrorNote {
-            message: self.mir_borrow_origin_note(error.kind.clone()).to_string(),
-            location: Some(self.span_to_source_location(error.loan_span)),
-        });
+
+        // Loan-origin note.
+        let loan_loc = self.shape_loc_to_lsds(&self.span_to_source_location(error.loan_span));
+        builder = builder.with_note(shape_diagnostics::DiagnosticNote::new(
+            self.mir_borrow_origin_note(error.kind.clone()),
+            Some(loan_loc),
+        ));
+
+        // Last-use note (when known).
         if let Some(last_use_span) = error.last_use_span {
-            location.notes.push(ErrorNote {
-                message: "borrow is still needed here".to_string(),
-                location: Some(self.span_to_source_location(last_use_span)),
-            });
+            let last_use_loc =
+                self.shape_loc_to_lsds(&self.span_to_source_location(last_use_span));
+            builder = builder.with_note(shape_diagnostics::DiagnosticNote::new(
+                "borrow is still needed here",
+                Some(last_use_loc),
+            ));
         }
-        ShapeError::SemanticError {
-            message,
-            location: Some(location),
-        }
+
+        builder.build()
+    }
+
+    /// Bridge: existing `SourceLocation` (line/col + optional file) →
+    /// LSDS `Location`. Spans collapse to `[0, 0]` when the existing
+    /// location lacks length info; LSDS emitters with span data should
+    /// populate the byte range directly.
+    fn shape_loc_to_lsds(
+        &self,
+        loc: &shape_ast::error::SourceLocation,
+    ) -> shape_diagnostics::Location {
+        let span_start = 0;
+        let span_end = loc.length.unwrap_or(0) as u32;
+        shape_diagnostics::Location::new(
+            loc.file.clone(),
+            loc.line as u32,
+            loc.column as u32,
+            span_start,
+            span_end,
+        )
     }
 
     fn mir_mutability_error(&self, error: &crate::mir::analysis::MutabilityError) -> ShapeError {

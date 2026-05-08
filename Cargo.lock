@@ -5682,6 +5682,7 @@ dependencies = [
  "sha2",
  "shape-abi-v1",
  "shape-ast",
+ "shape-diagnostics",
  "shape-gc",
  "shape-runtime",
  "shape-value",
