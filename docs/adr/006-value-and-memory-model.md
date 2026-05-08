@@ -474,6 +474,49 @@ pointers, structs, enums) uses `KindedSlot`.** A new internal Rust
 API surface that mirrors a stable raw-bits ABI on the runtime side is
 acceptable and expected.
 
+#### 2.7.5.1 Wire-format structs are post-proof shapes
+
+`FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is
+`#[derive(Serialize, Deserialize)]` and lives inside `FunctionBlob`
+(`crates/shape-vm/src/bytecode/content_addressed.rs`), which is the
+content-hash unit for distributed bytecode. Per the general §2.7.5
+policy, it falls under "stable wire format": the `slots` field stays
+`Vec<NativeKind>` — **no `Option<NativeKind>` wrapping, no
+`Unspecialized` / `Unknown` placeholder variant**.
+
+Compile-time analysis state where a slot's kind is "not yet known"
+during inference is held **locally** in the analysis tracker as
+`Option<NativeKind>` or `Result<NativeKind, ProofGap>`. Such
+intermediate states must NOT propagate into `FrameDescriptor` — by
+the time `FunctionBlob` is constructed, every slot's `NativeKind` is
+proven. A slot whose kind genuinely cannot be proven by that point
+is a compile error per CLAUDE.md type-system rules ("If the type
+can't be proven, it is a compile error. There is no generic-opcode
+fallback path."), not a runtime "we don't know" marker.
+
+**Forbidden patterns this rules out:**
+- `FrameDescriptor.slots: Vec<Option<NativeKind>>` — the `Option`
+  wrap is a wire-format-visible defection-attractor, identical in
+  shape to the deleted `SlotKind::Unknown` / `SlotKind::Dynamic`
+  variants and the W-series tag-decode hops. Don't migrate the
+  in-memory state into the wire format.
+- Adding `NativeKind::Unspecialized` / `NativeKind::Unknown` /
+  `NativeKind::Pending` — same defection-attractor with a different
+  spelling. CLAUDE.md "Renames to refuse on sight" applies in
+  spirit; if you find yourself drafting any of these, stop.
+- Splitting `FrameDescriptor` into "wire-stable" + "compile-time
+  intermediate" twin types where the intermediate type leaks back
+  into wire-stable surfaces. The right shape is one wire-stable
+  `FrameDescriptor` plus *whatever* local analysis structure the
+  compile-time pass needs (a `Vec<Option<NativeKind>>` is fine
+  inside the analysis pass, just don't serialize it).
+
+The same rule generalizes to any `#[derive(Serialize, Deserialize)]`
+struct that reaches the `FunctionBlob` content hash: its kind fields
+are post-proof, no Option wrapping. If a future struct needs to
+carry "not yet known" kind state across sessions or wire boundaries,
+that's an ADR-level decision (probably wrong-shape).
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
