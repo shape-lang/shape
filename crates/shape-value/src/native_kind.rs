@@ -94,6 +94,11 @@ pub enum NativeKind {
     /// parametric NativeKind variants re-creates heterogeneous-by-default
     /// sum types at the discriminator level — the same defection
     /// pattern as the rejected `enum SlotValue { Int, Float, Bool, Heap }`.
+    ///
+    // ADR-005 names the general principle this watchlist applies at
+    // the proof layer: HeapValue is the single discriminator for
+    // heap-resident values; layers above take Arc<HeapValue> and dispatch
+    // on HeapValue::kind(). See docs/adr/005-typed-slot-construction.md.
     Ptr(HeapKind),
     // NativeKind::Dynamic and NativeKind::Unknown deleted by the strict-typing
     // bulldozer (commit 128cb8a). There is no dynamic-typed slot. Every slot

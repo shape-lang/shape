@@ -51,6 +51,11 @@ macro_rules! define_heap_types {
         /// ordinal-stability test that made that contract load-bearing,
         /// so the dead variants no longer had a justification to
         /// remain in the source.
+        ///
+        // ADR-005: HeapKind is the canonical heap-shape discriminator.
+        // Layers above HeapValue take Arc<HeapValue> and dispatch on
+        // HeapValue::kind() rather than introducing parallel discriminators.
+        // See docs/adr/005-typed-slot-construction.md.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
         #[repr(u8)]
         pub enum HeapKind {
@@ -83,6 +88,14 @@ macro_rules! define_heap_types {
         /// dynamic word were removed in the strict-typing Phase-2 bulldozer.
         /// See the corresponding `HeapKind` ordinals (annotated "(removed)")
         /// for the migration target.
+        ///
+        // ADR-005: HeapValue is the single discriminator for heap-resident
+        // values. New variants are added here when a new heap shape is
+        // genuinely required; layers above (ConcreteReturn, TypedFieldValue,
+        // marshal helpers, JIT FFI carriers) must NOT introduce parallel
+        // sum types whose variants project 1:1 to HeapKind. The single
+        // explicit exception is `TypedFieldValue::String(Arc<String>)`, named
+        // and bounded in ADR-005. See docs/adr/005-typed-slot-construction.md.
         #[derive(Debug)]
         pub enum HeapValue {
             // ===== Typed primitives =====

@@ -45,6 +45,12 @@ use std::sync::Arc;
 /// `TypedReturn::Ok(TypedReturn::ValueWord(...))`-shaped patterns are
 /// constructible — the forbidden state is unrepresentable, not just
 /// unreachable. Mirrors the `ProofGap` discipline.
+///
+// ADR-005: do not add per-HeapKind variants here. HeapValue is the canonical
+// discriminator; the existing heap-arm variants (`ArrayHeapValue`,
+// `HashMapStringHeapValue`, `JsonValue`, `OpaqueTypedObject`) are scheduled
+// for cluster #7 cleanup — fold into a single `Heap(Arc<HeapValue>)` arm.
+// See docs/adr/005-typed-slot-construction.md before extending this enum.
 #[derive(Debug, Clone)]
 pub enum ConcreteReturn {
     /// 64-bit signed integer.

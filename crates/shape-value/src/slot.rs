@@ -50,6 +50,11 @@ impl ValueSlot {
     ///
     /// Without `gc` feature: allocates via Box (freed by drop_heap).
     /// With `gc` feature: allocates via GcHeap (freed by garbage collector).
+    ///
+    // ADR-005: transitional API. New code uses per-FieldType constructors
+    // (e.g. `from_string_arc(Arc<String>)`, `from_typed_array(Arc<TypedArrayData>)`)
+    // that store typed pointers directly without `Box<HeapValue>` wrapping.
+    // See docs/adr/005-typed-slot-construction.md.
     #[cfg(not(feature = "gc"))]
     pub fn from_heap(value: HeapValue) -> Self {
         let ptr = Box::into_raw(Box::new(value)) as u64;

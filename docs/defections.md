@@ -6678,4 +6678,84 @@ ordering.
 
 ---
 
-(Add new entries above this line. Newest first.)
+(Append new entries below. Append-only since 2026-05-08 — see "How to use" at top of file. Newest at end.)
+
+## 2026-05-08 — Single-discriminator discipline promoted to ADR-005
+
+This is **not** a defection. On-record promotion of the
+parallel-discriminator pattern (named at the N9 cluster close,
+2026-05-07) to a fully-articulated architectural discipline with
+its own ADR.
+
+### Provenance
+
+The pattern was first named informally at N9: "smaller-subset enum
+of an existing discriminator" as a defection attractor on a par
+with the W-series ValueWord renames. During cluster #1's
+architectural surface-and-decide round-trip (2026-05-08), the
+supervisor pressed on the `TypedFieldValue` initial sketch's
+`Array(Arc<HeapValue>)` / `Object(Arc<HeapValue>)` variants — both
+of which project 1:1 to `HeapKind` — and observed that the same
+shape repeats at multiple layers above HeapValue (ConcreteReturn,
+NativeKind watchlist, the rejected SlotValue enum). The principle
+generalizes; promoting it to an ADR makes it canonical.
+
+### Decision
+
+`HeapValue` is the single discriminator for heap-resident values.
+Layers above HeapValue (`ConcreteReturn`, `TypedFieldValue`,
+marshal helpers, JIT FFI carriers, snapshot serialization) take
+`Arc<HeapValue>` and dispatch on `HeapValue::kind()`. No layer
+above HeapValue may introduce a sum type whose variants project
+1:1 to HeapKind variants.
+
+Single explicit exception: `TypedFieldValue::String(Arc<String>)`,
+named and bounded in ADR-005. Justification is measured-allocation-
+cost on the most common heap type plus the wrap-is-pure-tagging
+property. A second exception requires its own ADR.
+
+Slot storage is typed: `ValueSlot` stores typed pointers directly
+via per-FieldType constructors, never `Box<HeapValue>` wrappers.
+VM and JIT share the slot ABI — no conversion at the boundary.
+
+### Why this is recorded as a defection-log entry, not a code change
+
+The principle is the architectural anchor for cluster #1
+(`TypedFieldValue` API + per-FieldType `ValueSlot` constructors
++ NativeKind-driven drop) and cluster #7 (`ConcreteReturn`
+heap-arm folding into a single `Heap(Arc<HeapValue>)` arm,
+named here for the first time). The defection-log entry
+records the moment the principle was promoted from
+"informally-named cluster-close pattern" to "ADR-level
+architectural rule" — so future sessions know when to date
+the principle and what triggered the promotion.
+
+### Cost saved
+
+Estimated 2-4 weeks of "drift cleanup" across the future
+clusters that would have grown parallel discriminators
+incrementally without the ADR. Plus the meta-cost of "agents
+edit a layer above HeapValue and have to re-derive the rule
+from scratch" — code-comment markers (`// ADR-005`) at five
+load-bearing sites cap that cost at "read one comment, find
+the ADR."
+
+### References
+
+- `docs/adr/005-typed-slot-construction.md` — full discipline.
+- `docs/cluster-audits/cluster-1-type-schema.md` — the cluster
+  audit that triggered the surface-and-decide round-trip.
+- `CLAUDE.md` "Single-discriminator discipline (ADR-005)"
+  subsection — short summary loaded into every agent's context.
+- N9 cluster close (2026-05-07,
+  `type_schema-slot-construction-cleanup workstream`) — where
+  the pattern was first informally named.
+- Code touchpoints (grep `// ADR-005`):
+  `crates/shape-value/src/heap_variants.rs` (HeapKind, HeapValue),
+  `crates/shape-value/src/slot.rs` (from_heap),
+  `crates/shape-value/src/native_kind.rs` (Ptr watchlist),
+  `crates/shape-runtime/src/typed_module_exports.rs`
+  (ConcreteReturn),
+  `crates/shape-runtime/src/json_value.rs` (parser-intermediate
+  role).
+

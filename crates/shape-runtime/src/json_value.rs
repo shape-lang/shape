@@ -13,6 +13,15 @@
 //! See `docs/defections.md` (2026-05-06 — typed JsonValue) for the
 //! rationale, and (2026-05-07 — N7 unified workstream — ε disposition)
 //! for the universal-intermediate role.
+//!
+//! ADR-005: `JsonValue` is the parser-intermediate / wire-form translation
+//! layer, NOT a runtime storage type for user objects. Runtime objects live
+//! in `HeapValue::TypedObject` with a flat schema-driven slot array. The
+//! typed-parse path (`__parse_typed`) projects `JsonValue` to `TypedObject`
+//! before reaching user code; only the untyped `json.parse` path surfaces
+//! `JsonValue` to user code (as the `Json` enum in
+//! `stdlib-src/core/json_value.shape`). See
+//! `docs/adr/005-typed-slot-construction.md`.
 
 use shape_value::heap_value::{HeapValue, TypedArrayData};
 

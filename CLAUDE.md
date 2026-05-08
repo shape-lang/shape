@@ -256,6 +256,16 @@ The `v2-nanbox-removal-plan.md` Step 6 ("delete `ValueWord`") was quietly downgr
 
 If you encounter a case that genuinely seems to need dynamic dispatch, surface it to the user. Don't rationalize. Log considered-but-rejected compromises in `docs/defections.md`.
 
+### Single-discriminator discipline (ADR-005)
+
+`HeapValue` is the canonical discriminator for heap-resident values. Layers above HeapValue (`ConcreteReturn`, `TypedFieldValue`, marshal helpers, JIT FFI carriers, snapshot serialization) take `Arc<HeapValue>` and dispatch on `HeapValue::kind()`. Do not introduce sum types whose variants project 1:1 to `HeapKind` — every parallel discriminator we have added has eventually drifted (the N9 close-out names this as a defection-attractor on a par with the W-series ValueWord renames).
+
+The single explicit exception is `TypedFieldValue::String(Arc<String>)`, named and bounded in ADR-005 (justified by measured allocation cost on the most common heap type). A second exception requires its own ADR-level justification with measurement.
+
+Slot storage is typed: `ValueSlot` stores typed pointers directly via per-FieldType constructors, never `Box<HeapValue>` wrappers. VM and JIT share the slot ABI — no conversion at the boundary.
+
+See `docs/adr/005-typed-slot-construction.md`. Code touchpoints carry a `// ADR-005` marker comment for grep visibility.
+
 ### Mechanical enforcement
 
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
