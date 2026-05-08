@@ -18,7 +18,7 @@ before it's coded.
 
 | Branch | Worktree | Role | Active cluster | Files owned (rg pattern) | Status | Last update |
 |---|---|---|---|---|---|---|
-| `bulldozer-strictly-typed-phase-1a` | `../shape-phase-1a` | Phase 1.A migrator | — | `crates/shape-value/src/{slot,heap_value,heap_variants,heap_header}.rs` | idle (last: phase-1a close — ADR-006 foundation steps 1-6 + 9 landed; awaiting supervisor merge) | 2026-05-08 |
+| `bulldozer-strictly-typed-phase-1a` | `../shape-phase-1a` | Phase 1.A migrator | — | `crates/shape-value/src/{slot,heap_value,heap_variants,heap_header}.rs` | idle (last: phase-1a close `8567f81` merged into main at `94eb34d` — ADR-006 foundation steps 1-6 + 9 landed) | 2026-05-08 |
 | `bulldozer-strictly-typed-stage-c-dev2` | `../shape-stage-c-dev2` | Cluster #5/#7 migrator (idle) | — | territory: `crates/shape-runtime/src/{json_value.rs,stdlib/{io,http,toml,yaml,msgpack,csv}.rs,stdlib_io/network_ops.rs}` | idle (last: sub-cluster 1 (network_ops) verified-already-closed at `820980d`; N7 close at `7bab206`) | 2026-05-07 |
 | `bulldozer-strictly-typed-phase-2` | `../shape-phase-2` | Phase 2 LSDS migrator | — | `crates/shape-diagnostics/, docs/lsds-migration-plan.md, crates/shape-vm/src/compiler/functions.rs (borrow_error_to_lsds + diagnostic_to_shape_error bridge)` | idle (last: phase-2 first session close, schema + B-series vertical slice + migration plan landed) | 2026-05-08 |
 
@@ -50,7 +50,7 @@ before it's coded.
 
 | Phase | Gate command | Current |
 |---|---|---|
-| 2 | `just verify-phase-2` | shape-runtime --lib at 63 errors (2026-05-07) |
+| 2 | `just verify-phase-2` | shape-runtime --lib at 62 errors (2026-05-08, post phase-1a merge) |
 | 5 | `just verify-phase-5` (calls `check-no-dynamic`) | passes at frozen baseline; 0/0 forbidden phrases |
 
 Phases 3 and 4 do not yet have automated gates — see `docs/strictly-typed-baseline.md`.
