@@ -31,7 +31,6 @@ pub mod v2_math;
 pub mod v2_string_ffi;
 pub mod v2_struct;
 pub mod v2_typed;
-pub mod window;
 
 // Re-export all FFI functions for easy access
 pub use jit_kinds::*;
@@ -55,4 +54,3 @@ pub use result::*;
 pub use simd::*;
 pub use typed_object::*;
 pub use v2_typed::*;
-pub use window::*;
