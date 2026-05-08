@@ -157,7 +157,7 @@ impl std::fmt::Debug for HeapHeader {
 impl HeapKind {
     /// The last (highest-numbered) variant in HeapKind.
     /// IMPORTANT: Update this when adding new HeapKind variants.
-    pub const MAX_VARIANT: Self = HeapKind::Char;
+    pub const MAX_VARIANT: Self = HeapKind::HashMap;
 
     /// Convert a u16 discriminant to a HeapKind, returning None if out of range.
     #[inline]
