@@ -266,6 +266,21 @@ Slot storage is typed: `ValueSlot` stores typed pointers directly via per-FieldT
 
 See `docs/adr/005-typed-slot-construction.md`. Code touchpoints carry a `// ADR-005` marker comment for grep visibility.
 
+### Value & memory model (ADR-006)
+
+ADR-006 supersedes ADR-005 §3 (typed-pointer constructor examples) with the corrected HeapValue layout. ADR-005 §1 (single-discriminator), §2 (String exception), §4 (uniform slot ABI), and §Forbidden are preserved verbatim.
+
+Key rules:
+
+- **Three binding forms.** `let` (immutable single-owner) and `let mut` (mutable single-owner) are explicit and Rust-shaped. `var` is *smart-default*: the compiler infers the lightest storage class from observed usage (Direct / UniqueHeap / SharedCow / SharedAtomic / SharedAtomicMut) and surfaces the choice as an LSP inlay hint.
+- **Refcount on escape, not on mutability.** `let mut x = 0` is a stack scalar, not `Arc<Mutex<int>>`. RC is reached only when escape (closure capture, cross-task share, store-into-shared) requires it.
+- **HeapValue payloads carry typed `Arc<T>` directly.** `HeapValue::TypedArray(Arc<TypedArrayData>)`, `HeapValue::TypedObject(Arc<TypedObjectStorage>)`, etc. The slot stores typed pointers; `Box<HeapValue>` wrapping is forbidden in new code.
+- **No `from_heap_arc(Arc<HeapValue>)` catch-all.** Per-FieldType constructors only (`from_string_arc`, `from_typed_array`, `from_typed_object`, ...). The Q6 ruling stands.
+- **No new modal-types subsystem.** The existing borrow solver, MIR storage planner, and `BindingStorageClass` vocabulary (`type_tracking.rs:286`) are extended by two variants (`SharedAtomic`, `SharedAtomicMut`) for cross-task sharing — not replaced.
+- **LSDS** is the primary diagnostic format. Renderers consume it.
+
+See `docs/adr/006-value-and-memory-model.md`. Code touchpoints carry a `// ADR-006` marker.
+
 ### Mechanical enforcement
 
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.

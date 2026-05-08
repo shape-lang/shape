@@ -6904,3 +6904,90 @@ recorded in AGENTS.md when cluster #1 closes.
 - defections.md:3514 (Q2-marshal-fold-light scope: opcode discriminants
   preserved).
 
+## 2026-05-08 — ADR-006 supersedes ADR-005 §3; cluster #1 reframed
+
+This is **not** a defection. On-record promotion of the architectural
+work done at the cluster #1 audit + design-alternatives-B/C surfacing
+into a canonical ADR (`docs/adr/006-value-and-memory-model.md`).
+
+### What ADR-006 supersedes
+
+- **ADR-005 §3** ("typed slot storage") had typed-pointer constructor
+  examples (`from_typed_array(Arc<TypedArrayData>)`) that presumed a
+  `HeapValue` payload layout that doesn't exist today. The migrator
+  hit this gap during cluster #1 implementation, rationalized
+  `from_heap_arc(Arc<HeapValue>)` as a workaround, and surfaced the
+  Q6 ruling violation. ADR-006 §2.3 corrects the layout: each
+  `HeapValue` variant payload carries `Arc<TypedT>` directly
+  (`TypedArray(Arc<TypedArrayData>)`,
+  `TypedObject(Arc<TypedObjectStorage>)`, ...), making the per-
+  FieldType constructors implementable as ADR-005 §3 originally
+  intended.
+
+### What ADR-006 preserves from ADR-005
+
+ADR-005 §1 (single-discriminator), §2 (String exception), §4 (uniform
+slot ABI), §Forbidden (no Box<HeapValue> wrapping in new code) — all
+preserved verbatim. The `// ADR-005` marker comments at five source
+sites stay; new code may add `// ADR-006` markers for v3-specific
+concerns.
+
+### What ADR-006 adds
+
+- **Three binding forms with `var` smart-default.** `let` / `let mut`
+  Rust-shaped (existing infra); `var` extends storage-planning with a
+  per-binding policy inference among Direct / UniqueHeap / SharedCow /
+  SharedAtomic / SharedAtomicMut. Two new `BindingStorageClass`
+  variants (`SharedAtomic`, `SharedAtomicMut`) added for cross-task
+  sharing.
+- **Refcount-on-escape, not on mutability.** Default for owned heap
+  bindings is `UniqueHeap`. RC reached only when escape requires it.
+  `let mut x = 0` allocates zero bytes of refcount overhead.
+- **LSDS** as primary diagnostic format. Inlay hints for `var`
+  inferred class. Type witnesses + suggested-fix diffs +
+  token-budgeted context windows.
+- **PVL audit** — conditional polyglot-boundary unification.
+- **PES** — permission-aware JIT speculation, post-Cranelift,
+  feature-flagged.
+- **CT-AION** — opt-in compile-time AI advisor for layout/tile
+  decisions, content-hash-reproducible.
+
+### Cluster reframing
+
+Open clusters #1 / #5 / #6 / #7 (originally derived from ADR-005)
+are reframed as phases of ADR-006's migration roadmap. Migrator-
+cluster-1's parked commits (`263e372`–`dd02c8e` on
+`bulldozer-strictly-typed-intrinsics-dev1`) are partially salvaged:
+keep `263e372` (TypedFieldValue), `7cbff57` (forward markers); rewrite
+`681557f` (drop `from_heap_arc`); partial-keep `2260310`
+(signature flip + readback OK; call sites adjusted).
+
+### Why this is recorded as a defection-log entry
+
+The "rationalize past the ruling" failure mode is exactly what the
+defection log exists to surface. Cluster #1 surfaced the underlying
+architectural gap (ADR-005 §3 layout assumption); ADR-006 closes the
+gap. Future sessions reading this entry know the gap was real, the
+rationalization was rejected, and the architectural correction
+landed in ADR-006.
+
+### Cost saved
+
+Prevented: indefinite drift between TypedFieldValue / ConcreteReturn
+/ slot ABI / JIT FFI as each cluster patched a different symptom of
+the same root cause (HeapValue layout mismatch). Estimated 4-6 weeks
+of cumulative cluster-correction cycles avoided by surfacing and
+landing the corrected layout in one architectural decision.
+
+### References
+
+- `docs/adr/006-value-and-memory-model.md` — full ADR.
+- `docs/adr/006-DRAFT-alternative-B.md` /
+  `006-DRAFT-alternative-C.md` — design alternatives that informed
+  the decision (preserved as historical context).
+- `docs/research/01-ownership-gc.md` /
+  `02-layout-runtime.md` /
+  `03-strings-arrays.md` — research base.
+- CLAUDE.md "Value & memory model (ADR-006)" subsection — short
+  summary loaded into every agent's context.
+
