@@ -6759,3 +6759,148 @@ the ADR."
   `crates/shape-runtime/src/json_value.rs` (parser-intermediate
   role).
 
+## 2026-05-08 — Cluster #5 O1 chosen with explicit caveat (transitional ABI artifact)
+
+This is **not** a defection. On-record disposition for the cluster #5
+sub-decision (`docs/cluster-audits/cluster-5-jsonvalue-marshal.md`
+"Open question 1: O1 vs O2"), with a **supervisor reservation** that
+the chosen shape is a near-term unblock, not the final architecture.
+
+### Decision
+
+**O1**: add `pub fn json_value_to_heap_value(jv: &JsonValue) -> Arc<HeapValue>`
+in `crates/shape-runtime/src/json_value.rs`, sibling to the existing
+C2 walker + C3-C6 reverse helpers. Self-contained in shape-runtime;
+unblocks C7-C13 mechanical drain (yaml/toml/msgpack/http stringify)
+without waiting for shape-vm cascade.
+
+### Why O2 was not taken
+
+O2 (dispatcher-side projection in shape-vm) is the cleaner long-term
+shape but **blocks cluster #5 progress until shape-vm cascade lands** —
+cross-crate coupling that defers the C7-C13 mechanical drain by
+several weeks. Taking O1 now unblocks parallel work on
+`shape-stage-c-dev2` while cluster #1 proceeds on
+`shape-intrinsics-dev1`.
+
+### The supervisor caveat — why this is not the final shape
+
+The `json_value_to_heap_value` walker is a **transitional ABI
+artifact**. It exists because `ConcreteReturn::JsonValue(JsonValue)`
+is currently a top-level variant — itself an ADR-005 §1 violation
+(parallel discriminator: `ConcreteReturn::JsonValue` projects 1:1 to
+`HeapKind::HashMap`-or-similar via the walker).
+
+ADR-005 §Implementation roadmap names **cluster #7** as the cleanup
+target: fold `ConcreteReturn`'s heap-arm variants — including
+`JsonValue`, `ArrayHeapValue`, `HashMapStringHeapValue`,
+`OpaqueTypedObject` — into a single `Heap(Arc<HeapValue>)` arm.
+
+Once cluster #7 lands:
+
+- Consumers that today produce `ConcreteReturn::JsonValue(jv)` will
+  instead produce `Heap(Arc::new(HeapValue::HashMap(...)))` (or the
+  correct `HeapValue` arm) **directly** — no JsonValue intermediate
+  at the ABI boundary.
+- The `json_value_to_heap_value` walker survives only as a
+  parser-internal helper (legitimate; not crossing an ABI boundary)
+  or gets deprecated entirely.
+- The cost of "JsonValue::Object → HeapValue::HashMap conversion at
+  every return for consumers whose source was already HashMap-shaped"
+  goes away.
+
+### Marker discipline
+
+The walker function carries a `// ADR-005` marker comment
+(verbatim text in the cluster-5 audit "Supervisor caveat" subsection)
+naming itself as transitional and pointing forward to cluster #7.
+This is the on-record reason future sessions must not treat the
+walker as the canonical shape, even if it becomes load-bearing for
+C7-C13 parser output in the interim.
+
+### Cluster #7 dependencies
+
+Cluster #7 cannot dispatch today. It depends on:
+
+- Cluster #1 closure (typed-slot-construction discipline must be in
+  place to give cluster #7 a stable `Arc<HeapValue>` slot ABI to
+  fold into).
+- Its own surface-and-decide round-trip + audit doc (not yet
+  written).
+
+Cluster #7 enters the queue **post-cluster-#1**.
+
+### Cost saved
+
+Estimated ~3-5 weeks of parallel work unblocked on
+`shape-stage-c-dev2` (C7-C13 mechanical drain) versus waiting for
+shape-vm cascade. The cost is the temporary parallel-discriminator
+shape at the function-return ABI, which is bounded by the cluster
+#7 cleanup commitment recorded here.
+
+### References
+
+- `docs/adr/005-typed-slot-construction.md` §1, §Implementation
+  roadmap (cluster #7 named target).
+- `docs/cluster-audits/cluster-5-jsonvalue-marshal.md` "Supervisor
+  caveat" subsection (marker comment text + framing).
+- N7 ε disposition (defections.md, 2026-05-07) — original sign-off
+  on JsonValue universal intermediate, which O1 builds on.
+
+## 2026-05-08 — Cluster #6 (intrinsics-typed-CC) sub-decisions signed off
+
+This is **not** a defection. On-record dispositions for cluster #6
+(formerly "intrinsics-dispatch-table cluster") per
+`docs/cluster-audits/cluster-6-intrinsics-dispatch-table.md`.
+
+### Cluster rename
+
+**"intrinsics-dispatch-table"** → **"intrinsics-typed-CC"**.
+
+The original handover name reflected an assumed dispatch-table
+structure that turned out to be dead code (`IntrinsicsRegistry`
+confirmed unused per cluster #6 audit). The cluster's actual subject
+is the `IntrinsicFn = fn(&[ValueWord], &mut ExecutionContext) ->
+Result<ValueWord>` calling convention migration to typed marshal —
+hence "typed-CC."
+
+### Sub-decisions (audit Q1-Q5)
+
+| Audit Q | Decision |
+|---|---|
+| **Q1 (M1-split)** | **ML1 — per-element-type split.** Each polymorphic intrinsic gets per-element-type typed-marshal entries (`__intrinsic_sum_i64`, `__intrinsic_sum_f64`, etc.). Mirrors the existing `vector.rs` precedent (`add` vs `add_i64`). ML2 (kind-discriminator arg) refused on watchlist-match grounds: kind discriminator at marshal-arg layer = inline tag-decode by another name, same shape as the rejected `Convert<X>To<Y>` pattern. ML3 (hot/cold hybrid) refused per defections.md:3357 ("splits CC into hot/cold buckets, defection-attractor"). |
+| **Q2 (validity-aware-return)** | **VAR2 — reuse `Arc<TypedBuffer<i64>>` ToSlot.** Bodies write validity-bitmap-aware buffers directly (matching `option_i64_vec_to_nb`'s current behavior at intrinsics/mod.rs:363). Zero-copy on output side; reuses already-landed infrastructure; no new ConcreteReturn variant. VAR1 (new `ConcreteReturn::NullableArrayI64`) refused on variant-count growth + heap-allocating Vec<Option<i64>> body-side representation. |
+| **Q3 (`IntrinsicsRegistry` deletion sequencing)** | **Land first.** Confirmed dead code per audit. C2 (deletion) lands mechanically before any per-file migration starts; removes dead-code surface upfront, makes per-file migrations cleaner. |
+| **Q4 (multi_table bundling)** | **Bundle into cluster #6.** Per defections.md:3304 — `multi_table/functions.rs`'s `align_tables` / `correlation` share IntrinsicFn calling convention with the intrinsics surface; "same architectural fate." Avoids a separate per-file revert sub-cluster. |
+| **Q5 (char_code multi-input dispatch)** | **A — split-per-input-type at compiler emission.** `char_code(string)` emits `IntrinsicCharCodeStr`, `char_code(int)` emits `IntrinsicCharCodeInt`. Same shape as M1-split-α for consistency. B (single entry, body-side dispatch on `ConcreteReturn::Any`) refused — reintroduces dynamic dispatch at the marshal layer. |
+
+### Sequencing
+
+Per audit's recommended commit plan:
+
+1. C1 — defections.md cluster-execution entry (this entry serves; 0 errors).
+2. C2 — `IntrinsicsRegistry` deletion (0 errors, dead-code removal).
+3. C3-C7 — math.rs migrations (5 fns, 5 commits, per-file revert discipline).
+4. C8-C10 — rolling.rs migrations.
+5. C11-C12 — array_transforms.rs migrations.
+6. C13 — recurrence.rs migration.
+7. C14-C15 — multi_table/functions.rs migrations (with shape-jit FFI shim update).
+8. Bench-feasibility gate post-cluster.
+
+### Dispatch dependency
+
+Cluster #6 territory (`crates/shape-runtime/src/intrinsics/`) overlaps
+with `shape-intrinsics-dev1` worktree's cluster #1 active scope. Cluster
+#6 dispatches **post-cluster-#1**, on the same worktree. Sequencing
+recorded in AGENTS.md when cluster #1 closes.
+
+### References
+
+- `docs/cluster-audits/cluster-6-intrinsics-dispatch-table.md` (the
+  audit; filename retains old "dispatch-table" name for now to avoid
+  double-renaming churn — rename when cluster #6 actually starts).
+- defections.md:3304 (multi_table bundling rationale).
+- defections.md:3357 (ML3 hot/cold hybrid refusal).
+- defections.md:3514 (Q2-marshal-fold-light scope: opcode discriminants
+  preserved).
+
