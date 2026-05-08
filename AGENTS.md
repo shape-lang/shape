@@ -51,7 +51,7 @@ before it's coded.
 
 | Phase | Gate command | Current |
 |---|---|---|
-| 2 | `just verify-phase-2` | shape-runtime --lib at 62 errors (2026-05-08, post phase-1a merge) |
+| 2 | `just verify-phase-2` | shape-runtime --lib at 0 errors (2026-05-08, post phase-1b merge `c5f6672`); shape-vm/jit at ~2000 each — next session's scope per §2.7.5 |
 | 5 | `just verify-phase-5` (calls `check-no-dynamic`) | passes at frozen baseline; 0/0 forbidden phrases |
 
 Phases 3 and 4 do not yet have automated gates — see `docs/strictly-typed-baseline.md`.
