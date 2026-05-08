@@ -113,11 +113,14 @@ macro_rules! define_heap_types {
             NativeView(Box<$crate::heap_value::NativeViewData>),
             // ===== Struct variants =====
             /// Object value with schema-defined typed slots.
-            TypedObject {
-                schema_id: u64,
-                slots: Box<[$crate::slot::ValueSlot]>,
-                heap_mask: u64,
-            },
+            ///
+            // ADR-006 §2.3: payload is `Arc<TypedObjectStorage>` rather
+            // than the previous inline `{ schema_id, slots, heap_mask }`
+            // struct. The Drop impl (Step 5) lives on the inner struct
+            // and dispatches per-field on `NativeKind` looked up via
+            // `schema_id` (Q8 ruling). See
+            // docs/adr/006-value-and-memory-model.md.
+            TypedObject(std::sync::Arc<$crate::heap_value::TypedObjectStorage>),
             /// Track A.5 — the canonical closure representation.
             ///
             /// Raw `TypedClosureHeader`-backed closure. Captures live in a
@@ -163,7 +166,7 @@ macro_rules! define_heap_types {
                     HeapValue::IoHandle(..) => HeapKind::IoHandle,
                     HeapValue::NativeScalar(..) => HeapKind::NativeScalar,
                     HeapValue::NativeView(..) => HeapKind::NativeView,
-                    HeapValue::TypedObject { .. } => HeapKind::TypedObject,
+                    HeapValue::TypedObject(..) => HeapKind::TypedObject,
                     HeapValue::ClosureRaw(..) => HeapKind::Closure,
                     HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
                     HeapValue::TypedArray(..) => HeapKind::TypedArray,
@@ -188,7 +191,7 @@ macro_rules! define_heap_types {
                     HeapValue::IoHandle(_v) => _v.is_open(),
                     HeapValue::NativeScalar(_v) => _v.is_truthy(),
                     HeapValue::NativeView(_v) => _v.ptr != 0,
-                    HeapValue::TypedObject { slots, .. } => !slots.is_empty(),
+                    HeapValue::TypedObject(s) => !s.slots.is_empty(),
                     HeapValue::ClosureRaw(..) => true,
                     HeapValue::TaskGroup { .. } => true,
                     HeapValue::TypedArray(ta) => ta.is_truthy(),
@@ -219,7 +222,7 @@ macro_rules! define_heap_types {
                             "cview"
                         }
                     }
-                    HeapValue::TypedObject { .. } => "object",
+                    HeapValue::TypedObject(..) => "object",
                     HeapValue::ClosureRaw(..) => "closure",
                     HeapValue::TaskGroup { .. } => "task_group",
                     HeapValue::TypedArray(ta) => ta.type_name(),

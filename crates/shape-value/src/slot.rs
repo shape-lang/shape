@@ -17,7 +17,7 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    HashMapData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
+    HashMapData, HeapValue, IoHandleData, NativeViewData, TypedArrayData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -120,6 +120,14 @@ impl ValueSlot {
     /// `HeapValue::TypedArray(Arc<TypedArrayData>)` (post Step 3 / ADR-006 §2.3).
     pub fn from_typed_array(a: Arc<TypedArrayData>) -> Self {
         Self(Arc::into_raw(a) as u64)
+    }
+
+    /// Store an `Arc<TypedObjectStorage>` directly. Mirrors
+    /// `FieldType::Object(_)` / `NativeKind::Ptr(HeapKind::TypedObject)` /
+    /// `HeapValue::TypedObject(Arc<TypedObjectStorage>)` (post Step 4 /
+    /// ADR-006 §2.3).
+    pub fn from_typed_object(o: Arc<TypedObjectStorage>) -> Self {
+        Self(Arc::into_raw(o) as u64)
     }
 
     /// Store an `Arc<rust_decimal::Decimal>` directly. Mirrors

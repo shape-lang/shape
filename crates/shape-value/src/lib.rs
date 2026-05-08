@@ -42,7 +42,7 @@ pub use content::{
 pub use context::{ErrorLocation, LocatedVMError, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
-pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData};
+pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData, TypedObjectStorage};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use native_kind::NativeKind;

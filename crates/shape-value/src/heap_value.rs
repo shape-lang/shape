@@ -598,6 +598,45 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── TypedObject storage (ADR-006 §2.3 / §2.5) ───────────────────────────────
+
+/// Schema-keyed object storage. Extracted from the inline
+/// `HeapValue::TypedObject { schema_id, slots, heap_mask }` struct
+/// variant per ADR-006 §2.3, so that:
+///
+/// 1. `HeapValue::TypedObject` becomes `HeapValue::TypedObject(Arc<TypedObjectStorage>)`
+///    — a typed `Arc<T>` payload like every other ADR-006 §2.3 heap arm.
+/// 2. The Drop impl (added in Step 5) lives on `TypedObjectStorage` and
+///    can dispatch on per-field `NativeKind` looked up from the schema
+///    without traversing the enclosing `HeapValue` discriminant.
+///
+/// Field invariants (ADR-006 §2.3):
+///
+/// - `schema_id` is the registry key for the TypeSchema. Schema lookup
+///   at drop time is HashMap-by-id (Q8 ruling); promoting to
+///   `Arc<TypeSchema>` is profile-driven and not part of Phase 1.A.
+/// - `slots` is a per-field 8-byte storage array. Field at index `i`
+///   stores its bits per the schema's `FieldType` for that field.
+/// - `heap_mask` has bit `i` set iff slot `i` holds a heap pointer
+///   (`Arc<T>` raw pointer per ADR-006 §2.4). Bits beyond `slots.len()`
+///   must be zero.
+///
+/// `TypedObjectStorage` is `pub` with `pub` fields so the existing
+/// destructuring call sites can migrate by reading
+/// `storage.schema_id` / `storage.slots` / `storage.heap_mask`. The
+/// struct is intentionally not `Clone` — clone semantics belong to the
+/// enclosing `Arc<TypedObjectStorage>` (one atomic refcount bump).
+#[derive(Debug)]
+pub struct TypedObjectStorage {
+    /// Registry key for the TypeSchema describing each slot's `FieldType`.
+    pub schema_id: u64,
+    /// Per-field 8-byte storage. Length matches the schema's field count.
+    pub slots: Box<[crate::slot::ValueSlot]>,
+    /// Bit `i` set ⇔ slot `i` holds a heap pointer that participates in
+    /// Arc refcount discipline. Bits beyond `slots.len()` must be zero.
+    pub heap_mask: u64,
+}
+
 // ── TypedArray buckets ──────────────────────────────────────────────────────
 
 /// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
@@ -986,15 +1025,8 @@ impl Clone for HeapValue {
             HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
             HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
-            HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            } => HeapValue::TypedObject {
-                schema_id: *schema_id,
-                slots: slots.clone(),
-                heap_mask: *heap_mask,
-            },
+            // ADR-006 §2.3: Arc bump only — no allocation, no slot copy.
+            HeapValue::TypedObject(s) => HeapValue::TypedObject(Arc::clone(s)),
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
             HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
                 kind: *kind,
@@ -1071,7 +1103,7 @@ impl fmt::Display for HeapValue {
         match self {
             HeapValue::Char(c) => write!(f, "{}", c),
             HeapValue::String(s) => write!(f, "{}", s),
-            HeapValue::TypedObject { .. } => write!(f, "{{...}}"),
+            HeapValue::TypedObject(_) => write!(f, "{{...}}"),
             HeapValue::ClosureRaw(owned) => {
                 // SAFETY: OwnedClosureBlock's invariant guarantees the
                 // pointer is live for the duration of `&self`.
@@ -1210,28 +1242,25 @@ impl HeapValue {
                 let cs = c.encode_utf8(&mut buf);
                 cs == s.as_str()
             }
-            (
-                HeapValue::TypedObject {
-                    schema_id: s1,
-                    slots: sl1,
-                    heap_mask: hm1,
-                },
-                HeapValue::TypedObject {
-                    schema_id: s2,
-                    slots: sl2,
-                    heap_mask: hm2,
-                },
-            ) => {
-                if s1 != s2 || sl1.len() != sl2.len() || hm1 != hm2 {
+            (HeapValue::TypedObject(a), HeapValue::TypedObject(b)) => {
+                // ADR-006 §2.3: payloads are `Arc<TypedObjectStorage>`;
+                // pointer-equality is the fast path for shared storage.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.schema_id != b.schema_id
+                    || a.slots.len() != b.slots.len()
+                    || a.heap_mask != b.heap_mask
+                {
                     return false;
                 }
-                for i in 0..sl1.len() {
+                for i in 0..a.slots.len() {
                     // Both heap-mask and primitive-mask: compare raw bits
                     // for primitives. For heap slots, raw-bit equality is
                     // also conservatively correct since `ValueSlot` heap
                     // payloads are typed pointers — pointer-equality
                     // implies value-equality for shared Arc'd payloads.
-                    if sl1[i].raw() != sl2[i].raw() {
+                    if a.slots[i].raw() != b.slots[i].raw() {
                         return false;
                     }
                 }
