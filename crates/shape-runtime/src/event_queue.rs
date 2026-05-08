@@ -8,7 +8,13 @@
 //! allowing Shape to run on any platform.
 
 use serde::{Deserialize, Serialize};
-use shape_value::ValueWord;
+// ADR-006 §2.7: GENERIC_CARRIER vector storage uses `KindedSlot`. Event
+// payloads (`QueuedEvent::DataPoint::data`) and suspension-state buffers
+// (`SuspensionState::saved_locals`/`saved_stack`) hold heterogeneous
+// runtime values whose `NativeKind` isn't statically determined here.
+// Serialization of the slot bytes is deferred (see snapshot.rs comment
+// at line 650) — the data fields stay `#[serde(skip)]` for now.
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
 /// Events that can be queued for processing
@@ -19,7 +25,7 @@ pub enum QueuedEvent {
         /// Name of the data source (e.g., "data", "iot_sensors")
         source: String,
         /// The data payload
-        data: ValueWord,
+        data: KindedSlot,
     },
 
     /// Timer fired
@@ -41,7 +47,7 @@ pub enum QueuedEvent {
         /// Source name
         source: String,
         /// Data payload
-        data: ValueWord,
+        data: KindedSlot,
     },
 
     /// Error from a data source or plugin
@@ -204,10 +210,12 @@ impl EventQueue for TokioEventQueue {
 /// everything needed to resume execution later.
 ///
 /// **WB2.5 retain-on-read.** `saved_locals` / `saved_stack` hold
-/// owning shares of heap-tagged `ValueWord`s. The manual `Clone`
-/// bumps each element's refcount via `vw_clone`; `Drop` releases
-/// via `vw_drop_slice`.
-#[derive(Debug, Serialize, Deserialize)]
+/// owning shares of heap-tagged values. ADR-006 §2.7 GENERIC_CARRIER
+/// vector storage: `Vec<KindedSlot>` carries the explicit `Drop`/`Clone`
+/// discipline so push/pop/clone preserve refcount semantics. The serde
+/// skip-on-payload pattern matches the snapshot.rs:650 comment — slot
+/// (de)serialization is deferred to the kind-threaded follow-up API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuspensionState {
     /// What condition we're waiting for
     pub waiting_for: WaitCondition,
@@ -216,31 +224,11 @@ pub struct SuspensionState {
     /// Saved local variables
     #[serde(skip)]
     #[serde(default)]
-    pub saved_locals: Vec<ValueWord>,
+    pub saved_locals: Vec<KindedSlot>,
     /// Saved stack (for VM)
     #[serde(skip)]
     #[serde(default)]
-    pub saved_stack: Vec<ValueWord>,
-}
-
-impl Clone for SuspensionState {
-    fn clone(&self) -> Self {
-        use shape_value::value_word_drop::vw_clone;
-        SuspensionState {
-            waiting_for: self.waiting_for.clone(),
-            resume_pc: self.resume_pc,
-            saved_locals: self.saved_locals.iter().map(|&b| vw_clone(b)).collect(),
-            saved_stack: self.saved_stack.iter().map(|&b| vw_clone(b)).collect(),
-        }
-    }
-}
-
-impl Drop for SuspensionState {
-    fn drop(&mut self) {
-        use shape_value::value_word_drop::vw_drop_slice;
-        vw_drop_slice(&self.saved_locals);
-        vw_drop_slice(&self.saved_stack);
-    }
+    pub saved_stack: Vec<KindedSlot>,
 }
 
 impl SuspensionState {
@@ -254,14 +242,15 @@ impl SuspensionState {
         }
     }
 
-    /// Create with saved locals
-    pub fn with_locals(mut self, locals: Vec<ValueWord>) -> Self {
+    /// Create with saved locals. `KindedSlot::Drop` retires refcounts on
+    /// drop; `KindedSlot::Clone` retains them on copy.
+    pub fn with_locals(mut self, locals: Vec<KindedSlot>) -> Self {
         self.saved_locals = locals;
         self
     }
 
     /// Create with saved stack
-    pub fn with_stack(mut self, stack: Vec<ValueWord>) -> Self {
+    pub fn with_stack(mut self, stack: Vec<KindedSlot>) -> Self {
         self.saved_stack = stack;
         self
     }
@@ -318,7 +307,7 @@ pub fn create_tokio_event_queue() -> SharedEventQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWordExt;
+    #[allow(unused_imports)]
     use std::sync::Arc;
 
     #[test]
@@ -376,7 +365,7 @@ mod tests {
             },
             42,
         )
-        .with_locals(vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)]);
+        .with_locals(vec![KindedSlot::from_number(1.0), KindedSlot::from_number(2.0)]);
 
         assert_eq!(state.resume_pc, 42);
         assert_eq!(state.saved_locals.len(), 2);
@@ -392,14 +381,14 @@ mod tests {
 
         queue.push(QueuedEvent::DataPoint {
             source: "iot_sensors".to_string(),
-            data: ValueWord::from_f64(42.5),
+            data: KindedSlot::from_number(42.5),
         });
 
         let event = queue.poll().unwrap();
         match event {
             QueuedEvent::DataPoint { source, data } => {
                 assert_eq!(source, "iot_sensors");
-                assert!((data.as_f64().unwrap() - 42.5).abs() < 0.001);
+                assert!((data.slot().as_f64() - 42.5).abs() < 0.001);
             }
             _ => panic!("Expected DataPoint event"),
         }
@@ -429,7 +418,7 @@ mod tests {
         queue.push(QueuedEvent::Subscription {
             subscription_id: 123,
             source: "live_feed".to_string(),
-            data: ValueWord::from_string(Arc::new("update".to_string())),
+            data: KindedSlot::from_string_arc(Arc::new("update".to_string())),
         });
 
         let event = queue.poll().unwrap();
@@ -441,7 +430,12 @@ mod tests {
             } => {
                 assert_eq!(subscription_id, 123);
                 assert_eq!(source, "live_feed");
-                assert_eq!(data.as_str().unwrap(), "update");
+                // Read the Arc<String> back via the slot's raw bits.
+                let s_ref: &str = unsafe {
+                    let ptr = data.slot().raw() as *const String;
+                    (*ptr).as_str()
+                };
+                assert_eq!(s_ref, "update");
             }
             _ => panic!("Expected Subscription event"),
         }
@@ -524,9 +518,9 @@ mod tests {
     #[test]
     fn test_suspension_state_with_stack() {
         let state = SuspensionState::new(WaitCondition::Yield, 100).with_stack(vec![
-            ValueWord::from_f64(1.0),
-            ValueWord::from_f64(2.0),
-            ValueWord::from_f64(3.0),
+            KindedSlot::from_number(1.0),
+            KindedSlot::from_number(2.0),
+            KindedSlot::from_number(3.0),
         ]);
 
         assert_eq!(state.resume_pc, 100);
@@ -543,7 +537,7 @@ mod tests {
         queue.push(QueuedEvent::Shutdown);
         queue.push(QueuedEvent::DataPoint {
             source: "test".to_string(),
-            data: ValueWord::none(),
+            data: KindedSlot::none(),
         });
 
         // Verify FIFO ordering preserved across types

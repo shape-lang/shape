@@ -11,8 +11,6 @@ mod tests {
     };
     use crate::project::*;
     #[allow(unused_imports)]
-    use shape_value::ValueWordExt;
-    #[allow(unused_imports)]
     use std::collections::HashMap;
     use std::io::Write;
     use std::path::PathBuf;

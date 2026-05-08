@@ -4,14 +4,23 @@
 
 use shape_ast::ast::VarKind;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueMap, ValueWord, ValueWordExt};
+// ADR-006 §2.7: GENERIC_CARRIER — `Variable.value: KindedSlot`. Adjacent
+// `kind: VarKind` (Let/Var/Const) is the storage class, NOT the
+// NativeKind, so the slot carries its own kind via `KindedSlot`.
+// `format_overrides` becomes `HashMap<String, KindedSlot>`; `KindedSlot`'s
+// per-element `Drop` retires heap refcounts cleanly without a wrapper
+// type (the deleted `ValueMap` wrapped `HashMap<String, ValueWord>` for
+// the same purpose).
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 
 /// A variable in the execution context
 #[derive(Debug, Clone)]
 pub struct Variable {
-    /// The variable's current value (NaN-boxed for compact 8-byte storage)
-    pub value: ValueWord,
+    /// The variable's current value. ADR-006 §2.7 GENERIC_CARRIER —
+    /// `KindedSlot` pairs the 8-byte slot with its `NativeKind` so heap
+    /// refcounts are managed by `KindedSlot::Drop`/`Clone`.
+    pub value: KindedSlot,
     /// The variable kind (let, var, const)
     pub kind: VarKind,
     /// Whether the variable has been initialized
@@ -23,30 +32,28 @@ pub struct Variable {
     pub format_hint: Option<String>,
     /// Optional format parameter overrides from type alias (e.g.,
     /// `{ decimals: 4 }` from `type Percent4 = Percent { decimals: 4 }`).
-    /// Stored as `Option<ValueMap>` so heap-tagged override values
-    /// (strings, etc.) are released on drop.
-    pub format_overrides: Option<ValueMap>,
+    /// `KindedSlot::Drop` releases each value's refcount when the
+    /// `HashMap` is dropped — no wrapper type required.
+    pub format_overrides: Option<HashMap<String, KindedSlot>>,
 }
 
 impl Variable {
     /// Create a new variable
-    pub fn new(kind: VarKind, value: Option<ValueWord>) -> Self {
+    pub fn new(kind: VarKind, value: Option<KindedSlot>) -> Self {
         Self::with_format(kind, value, None, None)
     }
 
     /// Create a new variable with format hint and parameter overrides.
-    /// The caller-owned `HashMap` is wrapped in a `ValueMap`, transferring
-    /// ownership of its values' heap refs to the variable.
     pub fn with_format(
         kind: VarKind,
-        value: Option<ValueWord>,
+        value: Option<KindedSlot>,
         format_hint: Option<String>,
-        format_overrides: Option<HashMap<String, ValueWord>>,
+        format_overrides: Option<HashMap<String, KindedSlot>>,
     ) -> Self {
         let is_function_scoped = matches!(kind, VarKind::Var);
         let (value, is_initialized) = match value {
             Some(v) => (v, true),
-            None => (ValueWord::none(), false),
+            None => (KindedSlot::none(), false),
         };
 
         Self {
@@ -55,7 +62,7 @@ impl Variable {
             is_initialized,
             is_function_scoped,
             format_hint,
-            format_overrides: format_overrides.map(ValueMap::from),
+            format_overrides,
         }
     }
 
@@ -68,7 +75,7 @@ impl Variable {
     }
 
     /// Assign a value to this variable
-    pub fn assign(&mut self, value: ValueWord) -> Result<()> {
+    pub fn assign(&mut self, value: KindedSlot) -> Result<()> {
         if !self.can_assign() {
             return Err(ShapeError::RuntimeError {
                 message: "Cannot assign to const variable after initialization".to_string(),
@@ -81,8 +88,8 @@ impl Variable {
         Ok(())
     }
 
-    /// Get the value as ValueWord reference, checking initialization
-    pub fn get_value(&self) -> Result<&ValueWord> {
+    /// Get the value as `KindedSlot` reference, checking initialization
+    pub fn get_value(&self) -> Result<&KindedSlot> {
         if !self.is_initialized {
             return Err(ShapeError::RuntimeError {
                 message: "Variable used before initialization".to_string(),
@@ -95,7 +102,7 @@ impl Variable {
 
 impl super::ExecutionContext {
     /// Set a variable value (for simple assignment without declaration)
-    pub fn set_variable(&mut self, name: &str, value: ValueWord) -> Result<()> {
+    pub fn set_variable(&mut self, name: &str, value: KindedSlot) -> Result<()> {
         // Search from innermost to outermost scope for existing variable
         for scope in self.variable_scopes.iter_mut().rev() {
             if let Some(variable) = scope.get_mut(name) {
@@ -116,8 +123,8 @@ impl super::ExecutionContext {
         }
     }
 
-    /// Get a variable value as ValueWord
-    pub fn get_variable(&self, name: &str) -> Result<Option<ValueWord>> {
+    /// Get a variable value as `KindedSlot` (clones the slot, retaining refcount)
+    pub fn get_variable(&self, name: &str) -> Result<Option<KindedSlot>> {
         // Search from innermost to outermost scope
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
@@ -132,7 +139,7 @@ impl super::ExecutionContext {
         &mut self,
         name: &str,
         kind: VarKind,
-        value: Option<ValueWord>,
+        value: Option<KindedSlot>,
     ) -> Result<()> {
         self.declare_variable_with_format(name, kind, value, None, None)
     }
@@ -147,9 +154,9 @@ impl super::ExecutionContext {
         &mut self,
         name: &str,
         kind: VarKind,
-        value: Option<ValueWord>,
+        value: Option<KindedSlot>,
         format_hint: Option<String>,
-        format_overrides: Option<HashMap<String, ValueWord>>,
+        format_overrides: Option<HashMap<String, KindedSlot>>,
     ) -> Result<()> {
         // Check if variable already exists in current scope
         if let Some(current_scope) = self.variable_scopes.last() {
@@ -197,10 +204,14 @@ impl super::ExecutionContext {
     ///
     /// Returns parameter overrides from type alias, e.g., { "decimals": 4 }
     /// for a variable declared as `let x: Percent4` where
-    /// `type Percent4 = Percent { decimals: 4 }`. The returned `ValueMap`
-    /// bumps each override value's heap refcount so the original variable
-    /// keeps its own ownership.
-    pub fn get_variable_format_overrides(&self, name: &str) -> Option<ValueMap> {
+    /// `type Percent4 = Percent { decimals: 4 }`. The returned
+    /// `HashMap<String, KindedSlot>` bumps each override value's refcount
+    /// (via `KindedSlot::Clone`) so the original variable keeps its own
+    /// ownership.
+    pub fn get_variable_format_overrides(
+        &self,
+        name: &str,
+    ) -> Option<HashMap<String, KindedSlot>> {
         // Search from innermost to outermost scope
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
@@ -214,7 +225,7 @@ impl super::ExecutionContext {
     pub fn get_variable_format_info(
         &self,
         name: &str,
-    ) -> (Option<String>, Option<ValueMap>) {
+    ) -> (Option<String>, Option<HashMap<String, KindedSlot>>) {
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
                 return (
@@ -278,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_variable_let_creation() {
-        let var = Variable::new(VarKind::Let, Some(ValueWord::from_f64(42.0)));
+        let var = Variable::new(VarKind::Let, Some(KindedSlot::from_number(42.0)));
         assert!(var.is_initialized);
         assert!(!var.is_function_scoped);
         assert!(var.can_assign());
@@ -286,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_variable_const_creation() {
-        let var = Variable::new(VarKind::Const, Some(ValueWord::from_f64(42.0)));
+        let var = Variable::new(VarKind::Const, Some(KindedSlot::from_number(42.0)));
         assert!(var.is_initialized);
         assert!(!var.can_assign()); // Const cannot be reassigned
     }
@@ -295,7 +306,7 @@ mod tests {
     fn test_variable_var_creation() {
         let var = Variable::new(
             VarKind::Var,
-            Some(ValueWord::from_string(std::sync::Arc::new(
+            Some(KindedSlot::from_string_arc(std::sync::Arc::new(
                 "hello".to_string(),
             ))),
         );
@@ -313,22 +324,22 @@ mod tests {
 
     #[test]
     fn test_variable_assignment() {
-        let mut var = Variable::new(VarKind::Let, Some(ValueWord::from_f64(1.0)));
-        assert!(var.assign(ValueWord::from_f64(2.0)).is_ok());
-        assert_eq!(var.get_value().unwrap().as_f64(), Some(2.0));
+        let mut var = Variable::new(VarKind::Let, Some(KindedSlot::from_number(1.0)));
+        assert!(var.assign(KindedSlot::from_number(2.0)).is_ok());
+        assert_eq!(var.get_value().unwrap().slot().as_f64(), 2.0);
     }
 
     #[test]
     fn test_const_reassignment_fails() {
-        let mut var = Variable::new(VarKind::Const, Some(ValueWord::from_f64(1.0)));
-        assert!(var.assign(ValueWord::from_f64(2.0)).is_err());
+        let mut var = Variable::new(VarKind::Const, Some(KindedSlot::from_number(1.0)));
+        assert!(var.assign(KindedSlot::from_number(2.0)).is_err());
     }
 
     #[test]
     fn test_const_initial_assignment() {
         let mut var = Variable::new(VarKind::Const, None);
         assert!(var.can_assign()); // Can assign during initialization
-        assert!(var.assign(ValueWord::from_f64(42.0)).is_ok());
+        assert!(var.assign(KindedSlot::from_number(42.0)).is_ok());
         assert!(!var.can_assign()); // Cannot assign after initialization
     }
 
@@ -339,11 +350,11 @@ mod tests {
     #[test]
     fn test_variable_with_format_overrides() {
         let mut overrides = HashMap::new();
-        overrides.insert("decimals".to_string(), ValueWord::from_f64(4.0));
+        overrides.insert("decimals".to_string(), KindedSlot::from_number(4.0));
 
         let var = Variable::with_format(
             VarKind::Let,
-            Some(ValueWord::from_f64(0.1234)),
+            Some(KindedSlot::from_number(0.1234)),
             Some("Percent".to_string()),
             Some(overrides.clone()),
         );
@@ -353,7 +364,7 @@ mod tests {
         assert!(var.format_overrides.is_some());
         let stored_overrides = var.format_overrides.unwrap();
         assert_eq!(
-            stored_overrides.get("decimals").and_then(|v| v.as_f64()),
+            stored_overrides.get("decimals").map(|ks| ks.slot().as_f64()),
             Some(4.0)
         );
     }
@@ -364,12 +375,12 @@ mod tests {
 
         let mut ctx = ExecutionContext::new_empty();
         let mut overrides = HashMap::new();
-        overrides.insert("decimals".to_string(), ValueWord::from_f64(4.0));
+        overrides.insert("decimals".to_string(), KindedSlot::from_number(4.0));
 
         ctx.declare_variable_with_format(
             "rate",
             VarKind::Let,
-            Some(ValueWord::from_f64(0.15)),
+            Some(KindedSlot::from_number(0.15)),
             Some("Percent".to_string()),
             Some(overrides),
         )
@@ -386,7 +397,7 @@ mod tests {
             stored_overrides
                 .unwrap()
                 .get("decimals")
-                .and_then(|v| v.as_f64()),
+                .map(|ks| ks.slot().as_f64()),
             Some(4.0)
         );
 
