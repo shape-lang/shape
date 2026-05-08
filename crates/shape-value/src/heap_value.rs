@@ -598,6 +598,25 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
+
+/// Task-group payload. Extracted from the inline
+/// `HeapValue::TaskGroup { kind, task_ids }` struct variant per ADR-006 §2.3
+/// so `HeapValue::TaskGroup` becomes a single-tuple `Arc<T>` payload like
+/// every other ADR-006 §2.3 heap arm.
+///
+/// The struct preserves the `kind` discriminant and `task_ids` list verbatim
+/// — clone semantics live on the enclosing `Arc<TaskGroupData>` (one atomic
+/// refcount bump). Phase 1.B migrates the cascade pattern-match sites
+/// (`shape-vm::executor::async_ops`, `shape-jit::ffi::async_ops`,
+/// `shape-runtime::wire_conversion`, ...) from struct-variant destructuring
+/// to `task_group.kind` / `task_group.task_ids` field reads.
+#[derive(Debug, Clone)]
+pub struct TaskGroupData {
+    pub kind: u8,
+    pub task_ids: Vec<u64>,
+}
+
 // ── TypedObject storage (ADR-006 §2.3 / §2.5) ───────────────────────────────
 
 /// Schema-keyed object storage. Extracted from the inline
@@ -1006,36 +1025,40 @@ crate::define_heap_types!();
 
 // ── Manual Clone for HeapValue ──────────────────────────────────────────────
 //
-// All surviving variants own fields whose `Clone` already reclaims-and-clones
-// the resource (Arc refcount bump, Box deep-clone, struct field clone). With
-// the strict-typed bulldozer's deletion of every `ValueWord`-bearing variant,
-// there is no longer any `vw_clone` / `vw_drop` bookkeeping to pair, so this
-// impl is purely mechanical delegation.
+// ADR-006 §2.3 + Step 6: every heap-resident variant carries `Arc<T>` so its
+// clone is one atomic refcount bump — no allocation, no payload copy. Inline
+// scalars (`Future`, `Char`, `NativeScalar`) clone by `Copy`. `ClosureRaw`
+// delegates to `OwnedClosureBlock::clone`, which already does a single
+// `retain_typed_closure` refcount bump on the v2 closure block plus an Arc
+// bump on the layout pointer.
+//
+// This impl is purely mechanical Arc::clone delegation — there is no
+// `vw_clone` / `vw_drop` bookkeeping (the strict-typed bulldozer deleted
+// every `ValueWord`-bearing variant).
 impl Clone for HeapValue {
     fn clone(&self) -> Self {
         match self {
-            HeapValue::String(v) => HeapValue::String(v.clone()),
-            HeapValue::Decimal(v) => HeapValue::Decimal(*v),
-            HeapValue::BigInt(v) => HeapValue::BigInt(*v),
+            // ADR-006 §2.3: Arc bump only — no allocation, no payload copy.
+            HeapValue::String(v) => HeapValue::String(Arc::clone(v)),
+            HeapValue::Decimal(v) => HeapValue::Decimal(Arc::clone(v)),
+            HeapValue::BigInt(v) => HeapValue::BigInt(Arc::clone(v)),
             HeapValue::Future(v) => HeapValue::Future(*v),
             HeapValue::Char(v) => HeapValue::Char(*v),
-            HeapValue::DataTable(v) => HeapValue::DataTable(v.clone()),
-            HeapValue::Content(v) => HeapValue::Content(v.clone()),
-            HeapValue::Instant(v) => HeapValue::Instant(v.clone()),
-            HeapValue::IoHandle(v) => HeapValue::IoHandle(v.clone()),
+            HeapValue::DataTable(v) => HeapValue::DataTable(Arc::clone(v)),
+            HeapValue::Content(v) => HeapValue::Content(Arc::clone(v)),
+            HeapValue::Instant(v) => HeapValue::Instant(Arc::clone(v)),
+            HeapValue::IoHandle(v) => HeapValue::IoHandle(Arc::clone(v)),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
-            HeapValue::NativeView(v) => HeapValue::NativeView(v.clone()),
-            // ADR-006 §2.3: Arc bump only — no allocation, no slot copy.
+            HeapValue::NativeView(v) => HeapValue::NativeView(Arc::clone(v)),
             HeapValue::TypedObject(s) => HeapValue::TypedObject(Arc::clone(s)),
+            // OwnedClosureBlock::clone is one refcount bump on the typed
+            // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
-            HeapValue::TaskGroup { kind, task_ids } => HeapValue::TaskGroup {
-                kind: *kind,
-                task_ids: task_ids.clone(),
-            },
-            HeapValue::TypedArray(v) => HeapValue::TypedArray(v.clone()),
-            HeapValue::Temporal(v) => HeapValue::Temporal(v.clone()),
-            HeapValue::TableView(v) => HeapValue::TableView(v.clone()),
-            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
+            HeapValue::TaskGroup(v) => HeapValue::TaskGroup(Arc::clone(v)),
+            HeapValue::TypedArray(v) => HeapValue::TypedArray(Arc::clone(v)),
+            HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
+            HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
+            HeapValue::HashMap(v) => HeapValue::HashMap(Arc::clone(v)),
         }
     }
 }
@@ -1096,6 +1119,42 @@ fn native_view_eq(a: &NativeViewData, b: &NativeViewData) -> bool {
     a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
 }
 
+/// Structural equality for two `TypedArrayData` payloads.
+///
+/// ADR-006 §2.3: `HeapValue::TypedArray` carries `Arc<TypedArrayData>`,
+/// so the outer pattern binds the Arc and forwards the inner-enum
+/// dispatch here. Centralising the per-arm dispatch keeps both
+/// `structural_eq` and `equals` honest about which arms genuinely
+/// compare structurally vs which fall through to `false`.
+#[inline]
+fn typed_array_structural_eq(a: &TypedArrayData, b: &TypedArrayData) -> bool {
+    match (a, b) {
+        (TypedArrayData::I64(x), TypedArrayData::I64(y)) => x == y,
+        (TypedArrayData::F64(x), TypedArrayData::F64(y)) => x == y,
+        (TypedArrayData::I64(x), TypedArrayData::F64(y)) => int_float_array_eq(x, y),
+        (TypedArrayData::F64(x), TypedArrayData::I64(y)) => int_float_array_eq(y, x),
+        (TypedArrayData::Bool(x), TypedArrayData::Bool(y)) => x == y,
+        (TypedArrayData::I8(x), TypedArrayData::I8(y)) => x == y,
+        (TypedArrayData::I16(x), TypedArrayData::I16(y)) => x == y,
+        (TypedArrayData::I32(x), TypedArrayData::I32(y)) => x == y,
+        (TypedArrayData::U8(x), TypedArrayData::U8(y)) => x == y,
+        (TypedArrayData::U16(x), TypedArrayData::U16(y)) => x == y,
+        (TypedArrayData::U32(x), TypedArrayData::U32(y)) => x == y,
+        (TypedArrayData::U64(x), TypedArrayData::U64(y)) => x == y,
+        (TypedArrayData::F32(x), TypedArrayData::F32(y)) => x == y,
+        (TypedArrayData::Matrix(x), TypedArrayData::Matrix(y)) => matrix_eq(x, y),
+        (
+            TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 },
+            TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 },
+        ) => {
+            let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
+            let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
+            s1 == s2
+        }
+        _ => false,
+    }
+}
+
 // ── Display ─────────────────────────────────────────────────────────────────
 
 impl fmt::Display for HeapValue {
@@ -1125,8 +1184,8 @@ impl fmt::Display for HeapValue {
                 write!(f, "<io_handle:{}:{}>", data.path, status)
             }
             HeapValue::Future(id) => write!(f, "<future:{}>", id),
-            HeapValue::TaskGroup { task_ids, .. } => {
-                write!(f, "<task_group:{}>", task_ids.len())
+            HeapValue::TaskGroup(tg) => {
+                write!(f, "<task_group:{}>", tg.task_ids.len())
             }
             HeapValue::Temporal(td) => write!(f, "{}", td),
             HeapValue::NativeScalar(v) => write!(f, "{v}"),
@@ -1181,6 +1240,11 @@ impl HeapValue {
     }
 
     /// Structural equality comparison for HeapValue.
+    ///
+    /// ADR-006 §2.3: `TypedArray` and `Temporal` payloads are now
+    /// `Arc<TypedArrayData>` / `Arc<TemporalData>`; the per-arm dispatch
+    /// dereferences the Arc once at the outer match and forwards into the
+    /// inner enum via `typed_array_structural_eq` / direct `match`.
     pub fn structural_eq(&self, other: &HeapValue) -> bool {
         match (self, other) {
             (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
@@ -1197,33 +1261,17 @@ impl HeapValue {
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
+            (HeapValue::Temporal(a), HeapValue::Temporal(b)) => match (a.as_ref(), b.as_ref()) {
+                (TemporalData::DateTime(x), TemporalData::DateTime(y)) => x == y,
+                _ => false,
+            },
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 std::sync::Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
-            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
-            (
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
-            ) => {
-                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
-                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
-                s1 == s2
+            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
+                typed_array_structural_eq(a.as_ref(), b.as_ref())
             }
             _ => false,
         }
@@ -1275,67 +1323,54 @@ impl HeapValue {
             }
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
-            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a, b),
-            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b, a),
+            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a.as_ref(), b.as_ref()),
+            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b.as_ref(), a.as_ref()),
             (HeapValue::DataTable(a), HeapValue::DataTable(b)) => Arc::ptr_eq(a, b),
-            (
-                HeapValue::TableView(TableViewData::TypedTable { schema_id: s1, table: t1 }),
-                HeapValue::TableView(TableViewData::TypedTable { schema_id: s2, table: t2 }),
-            ) => s1 == s2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 }),
-                HeapValue::TableView(TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 }),
-            ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 }),
-                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 }),
-            ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
-            (
-                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 }),
-                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 }),
-            ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+            (HeapValue::TableView(a), HeapValue::TableView(b)) => match (a.as_ref(), b.as_ref()) {
+                (
+                    TableViewData::TypedTable { schema_id: s1, table: t1 },
+                    TableViewData::TypedTable { schema_id: s2, table: t2 },
+                ) => s1 == s2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 },
+                    TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 },
+                ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 },
+                    TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 },
+                ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+                (
+                    TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 },
+                    TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 },
+                ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
+                _ => false,
+            },
             (HeapValue::Content(a), HeapValue::Content(b)) => a == b,
             (HeapValue::Instant(a), HeapValue::Instant(b)) => a == b,
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 Arc::ptr_eq(&a.resource, &b.resource)
             }
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::Duration(a)), HeapValue::Temporal(TemporalData::Duration(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::TimeSpan(a)), HeapValue::Temporal(TemporalData::TimeSpan(b))) => a == b,
-            (HeapValue::Temporal(TemporalData::Timeframe(a)), HeapValue::Temporal(TemporalData::Timeframe(b))) => a == b,
+            (HeapValue::Temporal(a), HeapValue::Temporal(b)) => match (a.as_ref(), b.as_ref()) {
+                (TemporalData::DateTime(x), TemporalData::DateTime(y)) => x == y,
+                (TemporalData::Duration(x), TemporalData::Duration(y)) => x == y,
+                (TemporalData::TimeSpan(x), TemporalData::TimeSpan(y)) => x == y,
+                (TemporalData::Timeframe(x), TemporalData::Timeframe(y)) => x == y,
+                _ => false,
+            },
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
-            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
-            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
-            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
-            (
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
-                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
-            ) => {
-                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
-                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
-                s1 == s2
+            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
+                typed_array_structural_eq(a.as_ref(), b.as_ref())
             }
             // Cross-type numeric
-            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b),
-            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a),
+            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b.as_ref()),
+            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a.as_ref()),
             (HeapValue::NativeScalar(a), HeapValue::Decimal(b)) => {
-                native_scalar_decimal_eq(a, b)
+                native_scalar_decimal_eq(a, b.as_ref())
             }
             (HeapValue::Decimal(a), HeapValue::NativeScalar(b)) => {
-                native_scalar_decimal_eq(b, a)
+                native_scalar_decimal_eq(b, a.as_ref())
             }
             _ => false,
         }
