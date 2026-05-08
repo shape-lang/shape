@@ -20,7 +20,47 @@
 //! Field collisions are detected at compile time and result in errors.
 
 use shape_value::{ValueWord, ValueWordExt};
+use shape_value::heap_value::HeapValue;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+// ADR-005: TypedFieldValue is the input carrier ABI for object construction.
+// Single-discriminator discipline (§Decision §1): all heap types route through
+// `Heap(Arc<HeapValue>)` and dispatch via `HeapValue::kind()`. The single
+// explicit exception is `String(Arc<String>)` (§Decision §2), justified by
+// measured allocation cost on the most common heap type — strings are an
+// order of magnitude more frequent than other heap types in stdlib parser
+// output, and routing them through `Arc::new(HeapValue::String(arc))` would
+// cost one extra `Arc::new` allocation per string field at construction.
+//
+// Per ADR-005 §Forbidden, do NOT add per-HeapKind variants here
+// (Array/Object/HashMap/Decimal/Timestamp/...). Adding any such variant
+// requires its own ADR-level justification with measurement.
+//
+// See docs/adr/005-typed-slot-construction.md.
+#[derive(Debug, Clone)]
+pub enum TypedFieldValue {
+    F64(f64),
+    I64(i64),
+    I8(i8),
+    U8(u8),
+    I16(i16),
+    U16(u16),
+    I32(i32),
+    U32(u32),
+    U64(u64),
+    Bool(bool),
+    /// String exception, named and bounded in ADR-005 §Decision §2.
+    /// `Arc<String>` is the runtime carrier (refcounted shared ownership);
+    /// not `String` (owned), not `&str` (borrowed), not `StringId` (interned).
+    /// Future interning layer (ADR-005 §5 Layer 3) coexists by deduplicating
+    /// the Arc-inner.
+    String(Arc<String>),
+    /// Single discriminator for all other heap types. Dispatch via
+    /// `HeapValue::kind()`. Per ADR-005 §1, no parallel sum types whose
+    /// variants project 1:1 to HeapKind.
+    Heap(Arc<HeapValue>),
+}
 
 // Module declarations
 pub mod builtin_schemas;
