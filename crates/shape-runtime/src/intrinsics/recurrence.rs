@@ -23,13 +23,12 @@
 //! Computes `y[t] = y[t-1] * decay + input[t]`. Used for recursive indicators
 //! (EMA, etc.). Optional initial value: when omitted/null, `y[0] = input[0]`.
 
-use super::{extract_f64, extract_f64_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, ValueWord, ValueWordExt};
+use shape_value::{AlignedTypedBuffer, KindedSlot};
 use std::sync::Arc;
 
 // ───────────────────── Module factory (1 typed entry) ─────────────────────
@@ -118,53 +117,11 @@ pub fn create_recurrence_intrinsics_module() -> ModuleExports {
 /// `runtime_delegated.rs:138`. Removal blocked on shape-vm cleanup
 /// workstream (M-A scope binding) — see module docstring.
 pub fn intrinsic_linear_recurrence(
-    args: &[ValueWord],
+    _args: &[KindedSlot],
     _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_linear_recurrence requires 2 or 3 arguments".to_string(),
-            location: None,
-        });
-    }
-
-    let decay = extract_f64(&args[1], "Decay factor")?;
-
-    let initial_value = if args.len() == 3 {
-        if args[2].is_none() {
-            None
-        } else {
-            Some(extract_f64(&args[2], "Initial value")?)
-        }
-    } else {
-        None
-    };
-
-    let data = extract_f64_array(&args[0], "Input array")?;
-
-    if data.is_empty() {
-        return Ok(f64_vec_to_nb_array(vec![]));
-    }
-
-    let mut result = Vec::with_capacity(data.len());
-
-    if let Some(init) = initial_value {
-        let mut prev = init;
-        for &val in &data {
-            let curr = prev * decay + val;
-            result.push(curr);
-            prev = curr;
-        }
-    } else {
-        let first = data[0];
-        result.push(first);
-        let mut prev = first;
-        for &val in &data[1..] {
-            let curr = prev * decay + val;
-            result.push(curr);
-            prev = curr;
-        }
-    }
-
-    Ok(f64_vec_to_nb_array(result))
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_linear_recurrence: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4".to_string(),
+        location: None,
+    })
 }

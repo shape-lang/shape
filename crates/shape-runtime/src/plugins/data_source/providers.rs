@@ -8,7 +8,7 @@ use std::ptr;
 
 use serde_json::Value;
 use shape_abi_v1::DataSourceVTable;
-use shape_value::ValueWordExt;
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use shape_ast::error::{Result, ShapeError};
 
 use super::query;
@@ -253,7 +253,7 @@ pub(super) fn load_binary(
     query: &Value,
     _granularity: crate::progress::ProgressGranularity,
     _progress_handle: Option<&crate::progress::ProgressHandle>,
-) -> Result<shape_value::ValueWord> {
+) -> Result<KindedSlot> {
     let load_fn = vtable.load_binary.ok_or_else(|| ShapeError::RuntimeError {
         message: format!("Plugin '{}' has no load_binary function", name),
         location: None,
@@ -302,7 +302,9 @@ pub(super) fn load_binary(
         unsafe { free_fn(out_ptr, out_len) };
     }
 
-    Ok(shape_value::ValueWord::from_datatable(std::sync::Arc::new(
-        dt,
-    )))
+    // STATIC_KIND: DataTable result — kind is `Ptr(HeapKind::DataTable)`.
+    Ok(KindedSlot::new(
+        ValueSlot::from_data_table(std::sync::Arc::new(dt)),
+        NativeKind::Ptr(HeapKind::DataTable),
+    ))
 }

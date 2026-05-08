@@ -579,17 +579,13 @@ impl TypeSchemaRegistry {
     }
 }
 
-impl shape_value::external_value::SchemaLookup for TypeSchemaRegistry {
-    fn type_name(&self, schema_id: u64) -> Option<&str> {
-        self.get_by_id(schema_id as SchemaId)
-            .map(|s| s.name.as_str())
-    }
-
-    fn field_names(&self, schema_id: u64) -> Option<Vec<&str>> {
-        self.get_by_id(schema_id as SchemaId)
-            .map(|s| s.fields.iter().map(|f| f.name.as_str()).collect())
-    }
-}
+// `shape_value::external_value::SchemaLookup` was deleted alongside the
+// rest of the external-value adapter layer (Phase 2b — see
+// `docs/defections.md` 2026-05-06). The trait's role was to let
+// `shape_value` look up schema metadata without depending on
+// `shape_runtime`; with `external_value` removed, callers route
+// through the runtime's `current_registry()` directly. This `impl`
+// block becomes a no-op and is omitted entirely.
 
 /// Builder for creating type schemas fluently
 pub struct TypeSchemaBuilder {

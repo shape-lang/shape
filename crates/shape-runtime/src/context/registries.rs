@@ -164,7 +164,6 @@ impl super::ExecutionContext {
 
 #[cfg(test)]
 mod tests {
-    use shape_value::ValueWordExt;
     use super::super::ExecutionContext;
     use shape_ast::ast::{
         Annotation, AnnotationDef, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef,
@@ -330,7 +329,9 @@ mod tests {
             let registry = ctx.annotation_context_mut().registry("test_registry");
             registry.set(
                 "key1".to_string(),
-                shape_value::ValueWord::from_string(std::sync::Arc::new("value1".to_string())),
+                shape_value::KindedSlot::from_string_arc(std::sync::Arc::new(
+                    "value1".to_string(),
+                )),
             );
         }
 

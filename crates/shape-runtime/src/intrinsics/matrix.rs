@@ -163,16 +163,18 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
 /// contract.
 fn row_to_f64_vec(hv: &Arc<HeapValue>, label: &str, row_idx: usize) -> Result<Vec<f64>, String> {
     match &**hv {
-        HeapValue::TypedArray(TypedArrayData::F64(buf)) => Ok(buf.as_slice().to_vec()),
-        HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
-            Ok(buf.as_slice().iter().map(|&v| v as f64).collect())
-        }
-        HeapValue::TypedArray(other) => Err(format!(
-            "{} row {} must be a numeric array; got TypedArray::{}",
-            label,
-            row_idx,
-            other.type_name()
-        )),
+        HeapValue::TypedArray(arc) => match &**arc {
+            TypedArrayData::F64(buf) => Ok(buf.as_slice().to_vec()),
+            TypedArrayData::I64(buf) => {
+                Ok(buf.as_slice().iter().map(|&v| v as f64).collect())
+            }
+            other => Err(format!(
+                "{} row {} must be a numeric array; got TypedArray::{}",
+                label,
+                row_idx,
+                other.type_name()
+            )),
+        },
         other => Err(format!(
             "{} row {} must be an array of numeric values; got {:?}",
             label,
@@ -241,9 +243,8 @@ fn matrix_to_heap_value_vec(flat: &[f64], rows: usize, cols: usize) -> Vec<Arc<H
         let base = i * cols;
         let row_data: Vec<f64> = flat[base..base + cols].to_vec();
         let buf = AlignedTypedBuffer::from(AlignedVec::from_vec(row_data));
-        out_rows.push(Arc::new(HeapValue::TypedArray(TypedArrayData::F64(
-            Arc::new(buf),
-        ))));
+        let data = Arc::new(TypedArrayData::F64(Arc::new(buf)));
+        out_rows.push(Arc::new(HeapValue::TypedArray(data)));
     }
     out_rows
 }

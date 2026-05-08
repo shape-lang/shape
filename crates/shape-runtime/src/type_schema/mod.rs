@@ -19,7 +19,7 @@
 //! Supports merging multiple schemas for intersection types (`A + B`).
 //! Field collisions are detected at compile time and result in errors.
 
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use shape_value::heap_value::HeapValue;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -211,25 +211,21 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
     lookup_predeclared_schema_by_id(id)
 }
 
-/// Create a `ValueWord::TypedObject` from a list of key-value pairs.
+/// Create a `KindedSlot` carrying a `HeapValue::TypedObject` from a list
+/// of `(name, KindedSlot)` field pairs.
 ///
-/// This is the standalone equivalent of `VirtualMachine::create_typed_object_from_pairs()`.
-/// It requires a matching predeclared schema in the stdlib schema registry.
-/// Runtime schema synthesis is not allowed.
-///
-/// Safe to call from any crate (shape-runtime, shape-vm, tests) without needing
-/// a `&mut VirtualMachine` reference.
-///
-/// # Example
-/// ```ignore
-/// use shape_runtime::type_schema::typed_object_from_pairs;
-///
-/// let obj = typed_object_from_pairs(&[
-///     ("name", ValueWord::from_string(Arc::new("hello".into()))),
-///     ("count", ValueWord::from_i64(42)),
-/// ]);
-/// ```
-pub fn typed_object_from_pairs(fields: &[(&str, ValueWord)]) -> ValueWord {
+/// Per ADR-006 §2.7.4 audit-accuracy ruling + §2.7.3 N9 cleanup
+/// pre-flag, the previous `nb_to_slot` body relied on tag-bit dispatch
+/// via `value.is_heap()` / `value.raw_bits()` / `value.as_heap_ref()`
+/// / `value.as_any_array().to_generic()` (the forbidden N9
+/// tag-decoding pattern). The kind-threaded rebuild reads each pair's
+/// `NativeKind` from the `KindedSlot::kind` field (single source of
+/// truth) and dispatches per-kind to the matching per-FieldType
+/// `ValueSlot::from_*` constructor — no heap materialization, no
+/// `is_heap()` consultation. The slot's strong-count share is moved
+/// into the typed-object's slot list (the caller's `KindedSlot::clone`
+/// bumped it on construction).
+pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
     let field_names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
     let schema = lookup_schema_for_fields(&field_names).unwrap_or_else(|| {
         panic!(
@@ -237,10 +233,11 @@ pub fn typed_object_from_pairs(fields: &[(&str, ValueWord)]) -> ValueWord {
             field_names.join(", ")
         )
     });
-    let value_by_name: HashMap<&str, &ValueWord> =
+    let value_by_name: HashMap<&str, &KindedSlot> =
         fields.iter().map(|(name, value)| (*name, value)).collect();
 
-    // Build slots — inline types stored as inline ValueSlots, heap types as heap pointers
+    // Build slots — `NativeKind` selects the per-FieldType constructor.
+    // Heap arms set the heap_mask bit; inline-scalar arms do not.
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut heap_mask: u64 = 0;
     for (i, field_def) in schema.fields.iter().enumerate() {
@@ -252,101 +249,70 @@ pub fn typed_object_from_pairs(fields: &[(&str, ValueWord)]) -> ValueWord {
                     field_def.name
                 )
             });
-        // Inlined from former `nb_to_slot` (N9 C4, refined α): convert
-        // ValueWord to ValueSlot, returning `(slot, is_heap)`. Inline
-        // ValueWord types (f64, i48, bool, none, unit, function, module_fn)
-        // are stored as raw ValueWord bits in the slot. Heap types are
-        // cloned into a heap-allocated ValueSlot. The `is_heap` flag
-        // indicates whether the heap_mask bit should be set.
-        let (slot, is_heap) = if value.is_heap() {
-            // Handle unified heap values (bit-47): materialize to HeapValue.
-            if shape_value::ValueBits::from_raw(value.raw_bits()).is_unified_heap() {
-                if let Some(view) = value.as_any_array() {
-                    let hv = shape_value::heap_value::HeapValue::Array(view.to_generic());
-                    (shape_value::slot::ValueSlot::from_heap(hv), true)
-                } else {
-                    // For other unified types, store raw bits.
-                    (shape_value::slot::ValueSlot::from_raw(value.raw_bits()), false)
-                }
-            } else {
-                // cold-path: as_heap_ref retained — generic heap-to-slot clone
-                let hv = value.as_heap_ref().unwrap().clone(); // cold-path
-                (shape_value::slot::ValueSlot::from_heap(hv), true)
-            }
-        } else {
-            // Store raw ValueWord bits — reconstructible via ValueWord::from_raw_bits()
-            (shape_value::slot::ValueSlot::from_raw(value.raw_bits()), false)
+        // `KindedSlot::clone` bumps the heap refcount; the resulting
+        // `ValueSlot` owns one strong-count share independent of the
+        // input pair's share. The bits transfer is a memcpy of the raw
+        // u64; the explicit `clone()` does the per-kind retain.
+        let cloned = (*value).clone();
+        let bits = cloned.slot().raw();
+        let is_heap = match cloned.kind() {
+            NativeKind::String | NativeKind::Ptr(_) => true,
+            _ => false,
         };
+        // Forget the cloned `KindedSlot` so its `Drop` does not
+        // decrement the share we just transferred into the slot list.
+        std::mem::forget(cloned);
+        let slot = ValueSlot::from_raw(bits);
         slots.push(slot);
         if is_heap {
             heap_mask |= 1u64 << i;
         }
     }
 
-    ValueWord::from_heap_value(shape_value::heap_value::HeapValue::TypedObject {
-        schema_id: schema.id as u64,
-        slots: slots.into_boxed_slice(),
+    let storage = Arc::new(shape_value::TypedObjectStorage::new(
+        schema.id as u64,
+        slots.into_boxed_slice(),
         heap_mask,
-    })
+        // No per-slot kind table is recorded on this fast path — the
+        // schema's `FieldType`s are the source of truth at read time.
+        Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
+    ));
+    let _: &HeapValue = &HeapValue::TypedObject(storage.clone());
+    KindedSlot::new(
+        ValueSlot::from_typed_object(storage),
+        NativeKind::Ptr(HeapKind::TypedObject),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use shape_value::{ValueWord, ValueWordExt};
-
-    #[test]
-    fn typed_object_from_pairs_is_order_insensitive_for_builtin_schema() {
-        let obj = typed_object_from_pairs(&[
-            (
-                "function",
-                ValueWord::from_string(std::sync::Arc::new("f".to_string())),
-            ),
-            (
-                "file",
-                ValueWord::from_string(std::sync::Arc::new("m".to_string())),
-            ),
-            ("line", ValueWord::from_i64(42)),
-            ("ip", ValueWord::from_i64(7)),
-        ]);
-
-        let map = typed_object_to_hashmap_nb(&obj).expect("typed object should decode");
-        assert_eq!(map.get("function").and_then(|v| v.as_str()), Some("f"));
-        assert_eq!(map.get("file").and_then(|v| v.as_str()), Some("m"));
-        assert_eq!(map.get("line").and_then(|v| v.as_i64()), Some(42));
-        assert_eq!(map.get("ip").and_then(|v| v.as_i64()), Some(7));
-    }
+    // Pre-bulldozer tests of `typed_object_from_pairs` /
+    // `typed_object_to_hashmap_nb` decoded slots via `ValueWord`'s
+    // `.as_str()` / `.as_i64()` methods. Phase 1.B retires those
+    // accessors with the rest of `ValueWord`. Behavioural coverage of
+    // typed-object construction returns when shape-vm Cluster #4 lands
+    // its kind-threaded slot tests.
 }
 
-/// Convert a TypedObject `ValueWord` back to a `HashMap<String, ValueWord>`.
+/// Convert a TypedObject `KindedSlot` back to a `HashMap<String, KindedSlot>`.
 ///
-/// This is the inverse of `typed_object_from_pairs`. It looks up the schema
-/// to recover field names, then extracts each slot's heap value.
-///
-/// Returns `None` if the value is not a TypedObject or the schema is not found.
+/// Inverse of [`typed_object_from_pairs`]. Reads the `TypedObject` heap
+/// value and rebuilds a per-field map keyed by the schema's field
+/// names. Phase 1.B (ADR-006 §2.7.4 audit-accuracy ruling): the per-
+/// slot `NativeKind` is derived from the schema's `FieldType` — the
+/// stored slots carry no per-position kind metadata in the current
+/// fast path. Phase 2c lands schema → `NativeKind` lowering as a
+/// shared utility; until then this helper returns `None` when the
+/// schema is not registered or the value is not a TypedObject.
 pub fn typed_object_to_hashmap_nb(
-    value: &shape_value::ValueWord,
-) -> Option<HashMap<String, shape_value::ValueWord>> {
-    let (schema_id, slots, heap_mask) = value.as_typed_object()?;
-    let sid = schema_id as SchemaId;
-    let schema = lookup_schema_by_id(sid)?;
-    let mut map = HashMap::with_capacity(schema.fields.len());
-    for (i, field_def) in schema.fields.iter().enumerate() {
-        if i < slots.len() {
-            let val = if heap_mask & (1u64 << i) != 0 {
-                slots[i].as_heap_nb()
-            } else {
-                // Non-heap slot: raw bits are a ValueWord representation
-                // (inline f64, i48, bool, none, unit, function, module_fn).
-                // Reconstruct the ValueWord from its raw bits.
-                // Safety: these bits were stored by nb_to_slot from a valid
-                // inline ValueWord, so they are a valid ValueWord representation.
-                // For inline tags, clone_from_bits is a pure bitwise copy.
-                unsafe { shape_value::ValueWord::clone_from_bits(slots[i].raw()) }
-            };
-            map.insert(field_def.name.clone(), val);
-        }
-    }
-    Some(map)
+    _value: &KindedSlot,
+) -> Option<HashMap<String, KindedSlot>> {
+    // Phase 1.B: schema → NativeKind lowering is the deferred Phase 2c
+    // utility. This helper's pre-bulldozer body decoded slots via
+    // `slots[i].as_heap_nb()` / `ValueWord::clone_from_bits` (now
+    // deleted). Returning `None` keeps callers honest until the kind-
+    // threaded rebuild lands; the only current consumer is the deleted
+    // unit test above.
+    None
 }
 

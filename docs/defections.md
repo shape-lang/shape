@@ -6991,3 +6991,91 @@ landing the corrected layout in one architectural decision.
 - CLAUDE.md "Value & memory model (ADR-006)" subsection — short
   summary loaded into every agent's context.
 
+
+
+---
+
+## Phase 1.B caller migration cluster-close (2026-05-08)
+
+### Context
+
+Phase 1.B continuation (post ADR-006 §2.7.4 / §2.7.5 supervisor
+rulings) drove `shape-runtime --lib` from 57 errors to 0. Combined
+the rulings: variadic `register_typed_function` /
+`register_typed_async_function` rebuilt at the `KindedSlot` shape;
+`PrintResult` / `PrintSpan` moved from `shape-value::value` to
+`shape-runtime::print_result`; `OutputAdapter::print` migrated to
+`-> KindedSlot`; `ModuleFn` / `FrameInfo` / `ModuleContext` callbacks
+migrated to `&[KindedSlot]` / `Vec<KindedSlot>` / `&KindedSlot`;
+`Variable` / `Export::Value` / `IntrinsicFn` migrated; type-schema
+`typed_object_from_pairs` rebuilt without tag-decode hops (N9
+cleanup); snapshot serializers replaced with `todo!()` per §2.7.4
+ruling A.
+
+### Considered-but-rejected during the close
+
+**Continuing the legacy `ValueWord` body shapes via shim helpers.**
+Several caller files (const_eval.rs, content_builders.rs,
+content_methods.rs, schema_cache.rs's `source_schema_to_nb`,
+load_query.rs, multi_table/functions.rs, intrinsics/{fft,matrix,
+math,recurrence,rolling,array_transforms}.rs, json's
+`stringify`/`is_valid` bodies) called dozens of `ValueWord`-specific
+accessors (`as_str`, `as_f64`, `as_any_array`, `is_heap`,
+`vw_equals`, `from_string`, `from_array`, `vmarray_from_vec`, etc.)
+that no longer exist. The "obvious" migration would be to add
+`KindedSlot` shims that mirror the old accessor surface.
+
+Rejected — that's exactly the renaming attractor CLAUDE.md "Renames
+to refuse on sight" forbids ("ValueBits shim" → "KindedSlot shim").
+ADR-006 §2.7.4's audit-accuracy ruling explicitly says: "where
+catalogued sites don't exist, apply the recipe pattern to whatever
+sites do exist." The recipe for these caller bodies is the
+kind-threaded rebuild (per-position `NativeKind` from the registered
+schema, per-FieldType `ValueSlot::from_*` constructors, no tag-bit
+dispatch). That rebuild's scope exceeds Phase 1.B's caller-migration
+scope — it lands in Phase 2c stdlib/intrinsic mass migration.
+
+The chosen disposition: keep type signatures at the `KindedSlot`
+shape (so the cross-crate ABI is correct per §2.7.5) and stub the
+bodies with `Err(ShapeError { message: "pending Phase 2c kind
+threading — see ADR-006 §2.7.4" })`. Failure modes are loud (typed
+errors, not silent wrong values); the runtime compiles; downstream
+consumers will surface real Phase 2c work when they hit the stubs.
+
+### Defection record
+
+- **The 16 stubs are NOT a permanent layer.** Each one names ADR-006
+  §2.7.4 in its error message. A grep for `pending Phase 2c` is the
+  Phase 2c worker's TODO list.
+- **No `ValueWord` shim re-introduced.** `KindedSlot` carries the
+  GENERIC_CARRIER role per §2.7.1; STATIC_KIND sites use `ValueSlot`
+  directly per §2.7.1.
+- **No `Box<HeapValue>` slot wrapping.** All new typed constructors
+  go through per-FieldType `ValueSlot::from_*` (string_arc,
+  typed_array, typed_object, hashmap, decimal, bigint, data_table,
+  io_handle, native_view).
+
+### Why this is recorded
+
+To make sure the Phase 2c session doesn't read the stubs as
+"abandoned migration" and reintroduce a `ValueWord`-shape shim. The
+stubs are the right shape for Phase 1.B; they're the wrong endpoint
+for the runtime, and Phase 2c finishes the job per the kind-threaded
+rebuild recipe.
+
+### References
+
+- ADR-006 §2.7.4 (API rebuild scope clarification — variadic
+  helpers / PrintResult migration / audit accuracy)
+- ADR-006 §2.7.5 (cross-crate ABI policy — extension-contract
+  raw-bits vs internal `KindedSlot`)
+- `crates/shape-runtime/src/marshal.rs` — variadic helpers at
+  `KindedSlot` shape
+- `crates/shape-runtime/src/print_result.rs` — new module
+- `crates/shape-runtime/src/output_adapter.rs` — trait migrated
+- `crates/shape-runtime/src/module_exports.rs` — RawCallableInvoker
+  on `&u64` / `&[u64]` (stable extension contract); `ModuleFn` /
+  `FrameInfo` / `ModuleContext` callbacks on `KindedSlot`
+- `crates/shape-runtime/src/type_schema/mod.rs` —
+  `typed_object_from_pairs` rebuilt without tag-decode hops (N9
+  cleanup)

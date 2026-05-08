@@ -79,9 +79,12 @@ impl ElementData {
         let mut values: Vec<Arc<HeapValue>> = vec![
             Arc::new(HeapValue::String(Arc::new(self.name))),
             Arc::new(HeapValue::HashMap(Arc::new(attrs_data))),
-            Arc::new(HeapValue::TypedArray(TypedArrayData::HeapValue(Arc::new(
-                TypedBuffer::from_vec(children_arc),
-            )))),
+            {
+                let data = Arc::new(TypedArrayData::HeapValue(Arc::new(
+                    TypedBuffer::from_vec(children_arc),
+                )));
+                Arc::new(HeapValue::TypedArray(data))
+            },
         ];
         if let Some(text) = self.text {
             keys.push(Arc::new("text".to_string()));
@@ -255,8 +258,10 @@ fn write_node_pairs(
                 }
             }
             "children" => {
-                if let HeapValue::TypedArray(TypedArrayData::HeapValue(buf)) = &**v {
-                    children = Some(buf);
+                if let HeapValue::TypedArray(arc) = &**v {
+                    if let TypedArrayData::HeapValue(buf) = &**arc {
+                        children = Some(buf);
+                    }
                 }
             }
             "text" => {

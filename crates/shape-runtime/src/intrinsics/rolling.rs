@@ -19,18 +19,13 @@
 //! operations, critical for technical indicators like SMA, Bollinger Bands, etc.
 //! Uses SIMD acceleration via the simd_rolling module.
 
-use super::{
-    extract_f64_array, extract_usize, f64_vec_to_nb_array, i64_vec_to_nb_int_array,
-    option_i64_vec_to_nb, try_extract_i64_slice,
-};
 use crate::context::ExecutionContext;
 use crate::marshal::register_typed_fn_2;
 use crate::module_exports::ModuleExports;
-use crate::simd_i64;
 use crate::simd_rolling;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, ValueWord};
+use shape_value::{AlignedTypedBuffer, KindedSlot};
 use std::sync::Arc;
 
 // ───────────────────── Module factory (3 typed entries) ─────────────────────
@@ -129,157 +124,36 @@ pub fn create_rolling_intrinsics_module() -> ModuleExports {
 /// validity-bitmap; `Vec<number>` fallback returns `Vec<f64>` with NaN
 /// sentinels). Joins `array_transforms::diff` in the validity-aware-return
 /// sub-question.
-pub fn intrinsic_rolling_sum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_rolling_sum requires 2 arguments (series, window)".to_string(),
-            location: None,
-        });
-    }
-
-    let window = extract_usize(&args[1], "Window size")?;
-
-    // i64 fast path: skip f64 conversion for integer arrays
-    if let Some(slice) = try_extract_i64_slice(&args[0]) {
-        if slice.is_empty() {
-            return Ok(i64_vec_to_nb_int_array(vec![]));
-        }
-        if window == 0 {
-            return Err(ShapeError::RuntimeError {
-                message: "Window size must be greater than 0".to_string(),
-                location: None,
-            });
-        }
-        if window > slice.len() {
-            return Ok(option_i64_vec_to_nb(vec![None; slice.len()]));
-        }
-        let result = simd_i64::rolling_sum_i64(slice, window);
-        return Ok(option_i64_vec_to_nb(result));
-    }
-
-    let data = extract_f64_array(&args[0], "Column")?;
-
-    if data.is_empty() {
-        return Ok(f64_vec_to_nb_array(vec![]));
-    }
-
-    if window == 0 {
-        return Err(ShapeError::RuntimeError {
-            message: "Window size must be greater than 0".to_string(),
-            location: None,
-        });
-    }
-
-    if window > data.len() {
-        return Ok(f64_vec_to_nb_array(vec![f64::NAN; data.len()]));
-    }
-
-    let result = simd_rolling::rolling_sum(&data, window);
-    Ok(f64_vec_to_nb_array(result))
+pub fn intrinsic_rolling_sum(
+    _args: &[KindedSlot],
+    _ctx: &mut ExecutionContext,
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_rolling_sum: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
+        location: None,
+    })
 }
 
-/// Intrinsic: Rolling minimum.
-///
-/// **Migration deferred** pending M1-split sub-decision extension
-/// (polymorphic input: `Vec<int>` fast path vs `Vec<number>`).
-pub fn intrinsic_rolling_min(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_rolling_min requires 2 arguments (series, window)".to_string(),
-            location: None,
-        });
-    }
-
-    let window = extract_usize(&args[1], "Window size")?;
-
-    // i64 fast path
-    if let Some(slice) = try_extract_i64_slice(&args[0]) {
-        if slice.is_empty() {
-            return Ok(i64_vec_to_nb_int_array(vec![]));
-        }
-        if window == 0 {
-            return Err(ShapeError::RuntimeError {
-                message: "Window size must be greater than 0".to_string(),
-                location: None,
-            });
-        }
-        if window > slice.len() {
-            return Ok(option_i64_vec_to_nb(vec![None; slice.len()]));
-        }
-        let result = simd_i64::rolling_min_i64(slice, window);
-        return Ok(option_i64_vec_to_nb(result));
-    }
-
-    let data = extract_f64_array(&args[0], "Column")?;
-
-    if data.is_empty() {
-        return Ok(f64_vec_to_nb_array(vec![]));
-    }
-
-    if window == 0 {
-        return Err(ShapeError::RuntimeError {
-            message: "Window size must be greater than 0".to_string(),
-            location: None,
-        });
-    }
-
-    if window > data.len() {
-        return Ok(f64_vec_to_nb_array(vec![f64::NAN; data.len()]));
-    }
-
-    let result = simd_rolling::rolling_min_deque(&data, window);
-    Ok(f64_vec_to_nb_array(result))
+/// Intrinsic: Rolling minimum. See [`intrinsic_rolling_sum`] for the
+/// Phase 1.B deferral rationale.
+pub fn intrinsic_rolling_min(
+    _args: &[KindedSlot],
+    _ctx: &mut ExecutionContext,
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_rolling_min: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
+        location: None,
+    })
 }
 
-/// Intrinsic: Rolling maximum.
-///
-/// **Migration deferred** pending M1-split sub-decision extension
-/// (polymorphic input: `Vec<int>` fast path vs `Vec<number>`).
-pub fn intrinsic_rolling_max(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_rolling_max requires 2 arguments (series, window)".to_string(),
-            location: None,
-        });
-    }
-
-    let window = extract_usize(&args[1], "Window size")?;
-
-    // i64 fast path
-    if let Some(slice) = try_extract_i64_slice(&args[0]) {
-        if slice.is_empty() {
-            return Ok(i64_vec_to_nb_int_array(vec![]));
-        }
-        if window == 0 {
-            return Err(ShapeError::RuntimeError {
-                message: "Window size must be greater than 0".to_string(),
-                location: None,
-            });
-        }
-        if window > slice.len() {
-            return Ok(option_i64_vec_to_nb(vec![None; slice.len()]));
-        }
-        let result = simd_i64::rolling_max_i64(slice, window);
-        return Ok(option_i64_vec_to_nb(result));
-    }
-
-    let data = extract_f64_array(&args[0], "Column")?;
-
-    if data.is_empty() {
-        return Ok(f64_vec_to_nb_array(vec![]));
-    }
-
-    if window == 0 {
-        return Err(ShapeError::RuntimeError {
-            message: "Window size must be greater than 0".to_string(),
-            location: None,
-        });
-    }
-
-    if window > data.len() {
-        return Ok(f64_vec_to_nb_array(vec![f64::NAN; data.len()]));
-    }
-
-    let result = simd_rolling::rolling_max_deque(&data, window);
-    Ok(f64_vec_to_nb_array(result))
+/// Intrinsic: Rolling maximum. See [`intrinsic_rolling_sum`] for the
+/// Phase 1.B deferral rationale.
+pub fn intrinsic_rolling_max(
+    _args: &[KindedSlot],
+    _ctx: &mut ExecutionContext,
+) -> Result<KindedSlot> {
+    Err(ShapeError::RuntimeError {
+        message: "intrinsic_rolling_max: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
+        location: None,
+    })
 }

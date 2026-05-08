@@ -10,7 +10,7 @@
 //! This module is industry-agnostic and works with any timestamped data.
 
 use chrono::{DateTime, Duration, Utc};
-use shape_value::{ValueMap, ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 
 use shape_ast::error::Result;
@@ -60,10 +60,11 @@ impl WindowType {
 #[derive(Debug, Clone)]
 pub struct WindowDataPoint {
     pub timestamp: DateTime<Utc>,
-    /// Raw field values. Stored as a `ValueMap` so heap refs (Arc/unified)
-    /// are released on drop; `ValueMap`'s custom `Clone` bumps the
-    /// refcounts, keeping the derive(Clone) on `WindowDataPoint` correct.
-    pub fields: ValueMap,
+    /// Raw field values. `KindedSlot`'s explicit `Drop` / `Clone` dispatch
+    /// on `NativeKind` to release / bump heap refcounts, so
+    /// `HashMap<String, KindedSlot>` preserves the WB2.4 retain discipline
+    /// across snapshot/aggregator clones (per ADR-006 §2.7).
+    pub fields: HashMap<String, KindedSlot>,
 }
 
 /// A completed window with aggregated data
@@ -160,15 +161,9 @@ impl WindowManager {
     pub fn process(
         &mut self,
         timestamp: DateTime<Utc>,
-        fields: HashMap<String, ValueWord>,
+        fields: HashMap<String, KindedSlot>,
     ) -> Result<()> {
-        // Wrap the caller-owned HashMap into a ValueMap so field heap refs
-        // are released when the data point (and its clones inside windows)
-        // are finally dropped.
-        let data_point = WindowDataPoint {
-            timestamp,
-            fields: ValueMap::from(fields),
-        };
+        let data_point = WindowDataPoint { timestamp, fields };
 
         match &self.window_type {
             WindowType::Tumbling { size } => {
@@ -393,7 +388,7 @@ impl WindowManager {
             let values: Vec<f64> = window
                 .data
                 .iter()
-                .filter_map(|d| d.fields.get(&spec.field).and_then(|v| v.as_f64()))
+                .filter_map(|d| d.fields.get(&spec.field).map(|v| v.slot().as_f64()))
                 .collect();
 
             let result = self.compute_aggregate(&values, spec.function)?;
@@ -469,9 +464,9 @@ mod tests {
     fn make_data_point(
         timestamp: DateTime<Utc>,
         value: f64,
-    ) -> (DateTime<Utc>, HashMap<String, ValueWord>) {
+    ) -> (DateTime<Utc>, HashMap<String, KindedSlot>) {
         let mut fields = HashMap::new();
-        fields.insert("value".to_string(), ValueWord::from_f64(value));
+        fields.insert("value".to_string(), KindedSlot::from_number(value));
         (timestamp, fields)
     }
 

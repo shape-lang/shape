@@ -62,6 +62,7 @@ pub mod multi_table;
 pub mod multiple_testing;
 pub mod native_resolution;
 pub mod output_adapter;
+pub mod print_result;
 pub mod package_bundle;
 pub mod package_lock;
 pub mod pattern_library;

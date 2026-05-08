@@ -76,30 +76,30 @@ pub struct MultipleTestingStats {
 }
 
 impl MultipleTestingStats {
-    /// Convert to a ValueWord TypedObject for Shape
-    pub fn to_value(&self) -> shape_value::ValueWord {
-        use shape_value::{ValueWord, ValueWordExt};
+    /// Convert to a [`shape_value::KindedSlot`] TypedObject for Shape.
+    pub fn to_value(&self) -> shape_value::KindedSlot {
+        use shape_value::KindedSlot;
 
         let warning_msg = self
             .warning_message
             .clone()
-            .map(|s| ValueWord::from_string(Arc::new(s)))
-            .unwrap_or(ValueWord::none());
+            .map(|s| KindedSlot::from_string_arc(Arc::new(s)))
+            .unwrap_or(KindedSlot::none());
 
         crate::type_schema::typed_object_from_pairs(&[
-            ("n_tests", ValueWord::from_f64(self.n_tests as f64)),
-            ("alpha", ValueWord::from_f64(self.alpha)),
-            ("adjusted_alpha", ValueWord::from_f64(self.adjusted_alpha)),
+            ("n_tests", KindedSlot::from_number(self.n_tests as f64)),
+            ("alpha", KindedSlot::from_number(self.alpha)),
+            ("adjusted_alpha", KindedSlot::from_number(self.adjusted_alpha)),
             (
                 "method",
-                ValueWord::from_string(Arc::new(format!("{:?}", self.method))),
+                KindedSlot::from_string_arc(Arc::new(format!("{:?}", self.method))),
             ),
             (
                 "warning_level",
-                ValueWord::from_string(Arc::new(format!("{:?}", self.warning_level))),
+                KindedSlot::from_string_arc(Arc::new(format!("{:?}", self.warning_level))),
             ),
             ("warning_message", warning_msg),
-            ("risk_accepted", ValueWord::from_bool(self.risk_accepted)),
+            ("risk_accepted", KindedSlot::from_bool(self.risk_accepted)),
         ])
     }
 }

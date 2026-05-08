@@ -246,7 +246,7 @@ mod tests {
         });
 
         let n = 100usize;
-        let dt = 1.0 / 252.0;
+        let dt: f64 = 1.0 / 252.0;
         let mu = 0.1;
         let sigma = 0.2;
         let s0 = 100.0;

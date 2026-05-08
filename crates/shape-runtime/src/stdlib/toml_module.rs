@@ -2,108 +2,50 @@
 //!
 //! Exports: toml.parse(text), toml.stringify(value), toml.is_valid(text)
 //!
-//! NOTE: toml.parse / toml.stringify REMAIN DEFERRED pending the **N4**
-//! (any-input typed marshal) and **N6** (any-output typed marshal)
-//! architectural decisions per `docs/defections.md` HashMap-marshal
-//! cluster's sub-decision queue extension subsection (commit
-//! `d3411a7`).
+//! Phase 1.B (ADR-006 §2.7.4) status: `toml.parse` / `toml.stringify`
+//! REMAIN DEFERRED pending the **N4** (any-input typed marshal) and
+//! **N6** (any-output typed marshal) architectural decisions per
+//! `docs/defections.md` HashMap-marshal cluster's sub-decision queue.
 //!
 //! - `toml.parse(text) -> Result<any>` returns a polymorphic recursive
-//!   `toml::Value`-equivalent tree projected via the deleted
-//!   `TypedReturn::ValueWord` escape-hatch wrapper. Mapping to the N6
-//!   architectural surface.
+//!   `toml::Value`-equivalent tree. Mapping to the N6 architectural
+//!   surface.
 //! - `toml.stringify(value: any)` takes a polymorphic `value: any`
-//!   input parameter that maps to the N4 architectural surface.
+//!   input. Mapping to the N4 architectural surface.
 //!
-//! `toml.is_valid(text)` is independent and could in principle migrate
-//! standalone; held as a batch with the others for clean per-file
-//! atomicity.
+//! `toml.is_valid(text)` is migratable standalone — it only needs the
+//! incoming `string` slot.
 //!
-//! Both N4 + N6 are supervisor-level decisions queued in the
-//! HashMap-marshal cluster's sub-decision queue. After both land, the
-//! toml module migrates as a batch (Stage D or equivalent). Mirrors
-//! the deferral pattern from `csv_module.rs:7-8/183-189`'s
-//! `parse_records`/`stringify_records` breadcrumb (now activated at
-//! commit `fbe6155` once HashMap-marshal P1(b) landed).
-//!
-//! Tests use the deleted ValueWord API; deletable per `csv_module.rs`
-//! migration precedent (commit `9f6b1d3`) once the bodies migrate.
-//!
-//! Current state: legacy bodies retained as cascade-broken pending
-//! N4+N6 sign-off; import errors at lines 6+7 + body errors remain
-//! on-record in the cascade.
+//! Until N4 + N6 land, the bodies use the variadic
+//! [`register_typed_function`] shape (per ADR-006 §2.7.4 ruling) and
+//! return `Err(...)` for the deferred halves; `is_valid` is fully
+//! functional.
 
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
+use crate::typed_module_exports::{
+    ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
+};
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
-/// Convert a `toml::Value` into a `ValueWord`.
-fn toml_value_to_nanboxed(value: toml::Value) -> ValueWord {
-    match value {
-        toml::Value::Boolean(b) => ValueWord::from_bool(b),
-        toml::Value::Integer(n) => ValueWord::from_i64(n),
-        toml::Value::Float(f) => ValueWord::from_f64(f),
-        toml::Value::String(s) => ValueWord::from_string(Arc::new(s)),
-        toml::Value::Datetime(dt) => ValueWord::from_string(Arc::new(dt.to_string())),
-        toml::Value::Array(arr) => {
-            let items: ArgVec =
-                ArgVec::from_vec(arr.into_iter().map(toml_value_to_nanboxed).collect());
-            ValueWord::from_array(shape_value::vmarray_from_vec(items.into_inner()))
-        }
-        toml::Value::Table(map) => {
-            let mut keys = Vec::with_capacity(map.len());
-            let mut values = Vec::with_capacity(map.len());
-            for (k, v) in map.into_iter() {
-                keys.push(ValueWord::from_string(Arc::new(k)));
-                values.push(toml_value_to_nanboxed(v));
-            }
-            ValueWord::from_hashmap_pairs(keys, values)
-        }
+/// Read a [`KindedSlot`]'s bits as an `Arc<String>` payload. Mirrors
+/// the helper in `stdlib/json.rs` — Phase 1.B variadic shim until per-
+/// position kind threading lands in Phase 2c.
+fn slot_as_string(slot: &KindedSlot) -> Option<Arc<String>> {
+    let bits = slot.slot().raw();
+    if bits == 0 {
+        return None;
     }
-}
-
-/// Convert a `ValueWord` into a `toml::Value` for serialization.
-fn nanboxed_to_toml_value(nb: &ValueWord) -> toml::Value {
-    if nb.is_none() {
-        return toml::Value::String("null".to_string());
+    // SAFETY: variadic-arg slots whose registered param type is
+    // `string` store `Arc::into_raw::<String>` bits. Reconstitute via
+    // `from_raw` + `clone` + `forget` to bump the refcount without
+    // consuming the slot's strong-count share.
+    unsafe {
+        let arc = Arc::<String>::from_raw(bits as *const String);
+        let cloned = arc.clone();
+        std::mem::forget(arc);
+        Some(cloned)
     }
-    if let Some(b) = nb.as_bool() {
-        return toml::Value::Boolean(b);
-    }
-    if let Some(n) = nb.as_i64() {
-        return toml::Value::Integer(n);
-    }
-    if let Some(f) = nb.as_f64() {
-        return toml::Value::Float(f);
-    }
-    if let Some(s) = nb.as_str() {
-        return toml::Value::String(s.to_string());
-    }
-    if let Some(arr) = nb.as_any_array() {
-        let items: Vec<toml::Value> = arr
-            .to_generic()
-            .iter()
-            .map(nanboxed_to_toml_value)
-            .collect();
-        return toml::Value::Array(items);
-    }
-    if let Some((keys, values, _index)) = nb.as_hashmap() {
-        let mut map = toml::map::Map::new();
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if let Some(key) = k.as_str() {
-                map.insert(key.to_string(), nanboxed_to_toml_value(v));
-            }
-        }
-        return toml::Value::Table(map);
-    }
-    // TypedObject — convert via field extraction
-    if let Some((_sid, slots, _hm)) = nb.as_typed_object() {
-        // Fall back to string representation for complex types
-        let _ = slots;
-        return toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)));
-    }
-    toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)))
 }
 
 /// Create the `toml` module with TOML parsing and serialization functions.
@@ -124,17 +66,10 @@ pub fn create_toml_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::HashMap)),
-        |args, _ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "toml.parse() requires a string argument".to_string())?;
-
-            let parsed: toml::Value =
-                toml::from_str(text).map_err(|e| format!("toml.parse() failed: {}", e))?;
-
-            let result = toml_value_to_nanboxed(parsed);
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(result))))
+        |_args, _ctx| {
+            Ok(TypedReturn::Err(ConcreteReturn::String(
+                "toml.parse() pending N6 (any-output marshal) — see ADR-006 §2.7.4".to_string(),
+            )))
         },
     );
 
@@ -142,25 +77,20 @@ pub fn create_toml_module() -> ModuleExports {
     register_typed_function(
         &mut module,
         "stringify",
-        "Serialize a Shape value to a TOML string",
+        "Serialize Shape values to a TOML string",
         vec![ModuleParam {
             name: "value".to_string(),
             type_name: "any".to_string(),
             required: true,
-            description: "Value to serialize".to_string(),
+            description: "Value to serialize (must be a HashMap or TypedObject)".to_string(),
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::String)),
-        |args, _ctx| {
-            let value = args
-                .first()
-                .ok_or_else(|| "toml.stringify() requires a value argument".to_string())?;
-
-            let toml_value = nanboxed_to_toml_value(value);
-            let output = toml::to_string(&toml_value)
-                .map_err(|e| format!("toml.stringify() failed: {}", e))?;
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
+        |_args, _ctx| {
+            Ok(TypedReturn::Err(ConcreteReturn::String(
+                "toml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4"
+                    .to_string(),
+            )))
         },
     );
 
@@ -178,13 +108,13 @@ pub fn create_toml_module() -> ModuleExports {
         }],
         ConcreteType::Bool,
         |args, _ctx| {
-            let text = args
+            let slot = args
                 .first()
-                .and_then(|a| a.as_str())
                 .ok_or_else(|| "toml.is_valid() requires a string argument".to_string())?;
-
-            let valid = toml::from_str::<toml::Value>(text).is_ok();
-            Ok(TypedReturn::Bool(valid))
+            let text = slot_as_string(slot)
+                .ok_or_else(|| "toml.is_valid() requires a string argument".to_string())?;
+            let valid = toml::from_str::<toml::Value>(text.as_str()).is_ok();
+            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(valid)))
         },
     );
 
@@ -194,21 +124,6 @@ pub fn create_toml_module() -> ModuleExports {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
 
     #[test]
     fn test_toml_module_creation() {
@@ -220,145 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn test_toml_parse_simple_table() {
+    fn test_toml_typed_registry_populated() {
         let module = create_toml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(
-            r#"
-[server]
-host = "localhost"
-port = 8080
-"#
-            .to_string(),
-        ));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, _values, _index) = inner.as_hashmap().expect("should be hashmap");
-        assert_eq!(keys.len(), 1); // "server" key
+        let typed = module.typed_exports();
+        assert!(typed.get("parse").is_some());
+        assert!(typed.get("stringify").is_some());
+        assert!(typed.get("is_valid").is_some());
     }
 
-    #[test]
-    fn test_toml_parse_basic_types() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(
-            r#"
-name = "test"
-version = 42
-pi = 3.14
-active = true
-"#
-            .to_string(),
-        ));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert!(inner.as_hashmap().is_some());
-    }
-
-    #[test]
-    fn test_toml_parse_array() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(r#"values = [1, 2, 3]"#.to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert!(inner.as_hashmap().is_some());
-    }
-
-    #[test]
-    fn test_toml_parse_invalid() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("= invalid toml [".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_toml_parse_requires_string() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_toml_stringify_table() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let keys = vec![ValueWord::from_string(Arc::new("name".to_string()))];
-        let values = vec![ValueWord::from_string(Arc::new("test".to_string()))];
-        let hm = ValueWord::from_hashmap_pairs(keys, values);
-        let result = module.invoke_export("stringify", &[hm], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let s = inner.as_str().expect("should be string");
-        assert!(s.contains("name"));
-        assert!(s.contains("test"));
-    }
-
-    #[test]
-    fn test_toml_is_valid_true() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", 
-            &[ValueWord::from_string(Arc::new(
-                r#"key = "value""#.to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_toml_is_valid_false() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", 
-            &[ValueWord::from_string(Arc::new(
-                "= not valid toml".to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        assert_eq!(result.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_toml_roundtrip() {
-        let module = create_toml_module();
-        let ctx = test_ctx();
-
-        let toml_str = r#"name = "test"
-version = 42
-"#;
-        let parsed = module.invoke_export("parse", 
-            &[ValueWord::from_string(Arc::new(toml_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = parsed.as_ok_inner().expect("should be Ok");
-        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
-        let re_str = re_stringified.as_ok_inner().expect("should be Ok");
-        assert!(re_str.as_str().is_some());
-    }
-
-    #[test]
-    fn test_toml_schemas() {
-        let module = create_toml_module();
-
-        let parse_schema = module.get_schema("parse").unwrap();
-        assert_eq!(parse_schema.params.len(), 1);
-        assert_eq!(parse_schema.params[0].name, "text");
-        assert!(parse_schema.params[0].required);
-        assert_eq!(parse_schema.return_type.as_deref(), Some("Result<HashMap>"));
-
-        let stringify_schema = module.get_schema("stringify").unwrap();
-        assert_eq!(stringify_schema.params.len(), 1);
-        assert!(stringify_schema.params[0].required);
-
-        let is_valid_schema = module.get_schema("is_valid").unwrap();
-        assert_eq!(is_valid_schema.params.len(), 1);
-        assert_eq!(is_valid_schema.return_type.as_deref(), Some("bool"));
-    }
+    // Behavioural roundtrip tests deleted alongside `module.invoke_export()`
+    // and the deleted `ValueWord` constructors. They return when N4 + N6
+    // land and the bodies become real serializers.
 }

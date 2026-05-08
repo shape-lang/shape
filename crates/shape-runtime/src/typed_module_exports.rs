@@ -26,9 +26,7 @@
 //! `Fn(...) -> Result<ValueWord, String>` body into a
 //! `TypedReturn::ValueWord` passthrough.
 
-use crate::module_exports::{
-    ModuleContext, ModuleExports, ModuleFunction, ModuleParam,
-};
+use crate::module_exports::ModuleContext;
 use shape_value::datatable::DataTable;
 use std::collections::HashMap;
 use std::future::Future;
@@ -474,12 +472,15 @@ impl TypedModuleExports {
     }
 }
 
-// `register_typed_function` and `register_typed_async_function` (the
-// polymorphic-arg legacy registration helpers that took
-// `Fn(&[ValueWord], ..)` bodies) are deleted. Use the per-arity helpers
-// in [`crate::marshal`] instead — they enforce typed args via
-// `FromSlot` at the type-system level. Stdlib modules will be migrated
-// module-by-module in Phase 2c.
+// `register_typed_function` and `register_typed_async_function` are
+// re-introduced at the [`shape_value::KindedSlot`] shape per ADR-006
+// §2.7.4 ruling. Per-arity helpers (`register_typed_fn_N`) remain the
+// preferred path when the function arity is fixed; the variadic
+// helpers below cover the genuine §2.7.1.4 dispatch-slice case
+// (functions with optional arguments — json/msgpack/toml/yaml/
+// stdlib_time bodies that take `pretty?: bool` / `iterations?: int` /
+// etc.). Both registration paths are valid; pick by arity contract.
+pub use crate::marshal::{register_typed_async_function, register_typed_function};
 
 // `register_test_function` / `_with_schema` / `register_test_async_function`
 // were thin wrappers that fed a `Fn(&[ValueWord]) -> Result<ValueWord, ..>`

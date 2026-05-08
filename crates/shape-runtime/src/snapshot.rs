@@ -20,7 +20,6 @@ use crate::hashing::{HashDigest, hash_bytes};
 use shape_ast::ast::{DataDateTimeRef, DateTimeExpr, EnumDef, TimeReference, TypeAnnotation};
 use shape_ast::data::Timeframe;
 
-use crate::data::DataFrame;
 use shape_value::datatable::DataTable;
 
 /// Schema version for the snapshot binary format.
