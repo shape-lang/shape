@@ -17,7 +17,6 @@
 //!   - decoding kind from the raw `u64` bits (forbidden — the deleted
 //!     tag_bits dispatch — §2.7.7 #4 / #7), or
 //!   - defaulting to `NativeKind::Bool` "because Drop is a no-op" (forbidden
-use shape_runtime::context::ExecutionContext;
 //!     §2.7.7 #9 — the W-series rationalization the playbook names
 //!     verbatim), or
 //!   - probing a heap discriminant via a deleted heap-ref accessor /
@@ -37,6 +36,7 @@ use shape_runtime::context::ExecutionContext;
 //! Mirrors the surface shape established by `array_joins.rs` (Wave-α
 //! `D-array-joins` close).
 
+use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use shape_value::{KindedSlot, VMError};
 
