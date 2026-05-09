@@ -363,6 +363,8 @@ impl VirtualMachine {
             upvalues: None,
             blob_hash,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            closure_heap_kind: None,
         };
         self.call_stack.push(frame);
         self.ip = entry_point;
@@ -375,8 +377,9 @@ impl VirtualMachine {
     /// closure HeapValue backing `upvalues`. The frame pushed by this
     /// call stashes the share so the block outlives the callee's
     /// `OwnedMutable` / `Shared` pointer captures; it is released via
-    /// `vw_drop` on frame-pop. Pass `None` for synthetic frames where
-    /// the caller has already guaranteed block lifetime (e.g.,
+    /// `drop_with_kind(bits, kind)` on frame-pop using the lockstep
+    /// `closure_heap_kind` companion. Pass `None` for synthetic frames
+    /// where the caller has already guaranteed block lifetime (e.g.,
     /// trampoline callers that keep a separate Arc alive).
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
@@ -384,19 +387,31 @@ impl VirtualMachine {
         upvalues: Vec<Upvalue>,
         args: &[ValueWord],
     ) -> Result<(), VMError> {
-        self.call_closure_with_nb_args_keepalive(func_id, upvalues, args, None)
+        // ADR-006 §2.7.8 / Q10: both `closure_heap_bits` and
+        // `closure_heap_kind` are `None` together at every observable
+        // boundary.
+        self.call_closure_with_nb_args_keepalive(func_id, upvalues, args, None, None)
     }
 
     /// WB2.3 variant of [`call_closure_with_nb_args`] that takes an
-    /// optional keep-alive `closure_heap_bits`. Stored on the pushed
-    /// `CallFrame` and released on frame pop.
+    /// optional keep-alive `closure_heap_bits` plus its lockstep
+    /// `closure_heap_kind` companion (ADR-006 §2.7.8 / Q10). Stored on
+    /// the pushed `CallFrame` and released on frame pop via
+    /// `drop_with_kind(bits, kind)`. Both arguments are `Some`
+    /// together or `None` together; mixed states are a bug.
     pub(crate) fn call_closure_with_nb_args_keepalive(
         &mut self,
         func_id: u16,
         upvalues: Vec<Upvalue>,
         args: &[ValueWord],
         closure_heap_bits: Option<u64>,
+        closure_heap_kind: Option<shape_value::NativeKind>,
     ) -> Result<(), VMError> {
+        debug_assert_eq!(
+            closure_heap_bits.is_some(),
+            closure_heap_kind.is_some(),
+            "ADR-006 §2.7.8 / Q10: closure_heap_bits and closure_heap_kind must be Some together or None together"
+        );
         let function = self
             .program
             .functions
@@ -452,6 +467,9 @@ impl VirtualMachine {
             upvalues: Some(upvalues),
             blob_hash,
             closure_heap_bits,
+            // ADR-006 §2.7.8 / Q10: lockstep companion. Caller-supplied
+            // alongside `closure_heap_bits`.
+            closure_heap_kind,
         });
 
         self.ip = entry_point;
@@ -697,6 +715,8 @@ impl VirtualMachine {
             upvalues: None,
             blob_hash,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            closure_heap_kind: None,
         });
         self.ip = entry_point;
         Ok(())
@@ -764,6 +784,11 @@ impl VirtualMachine {
             upvalues: Some(upvalues.to_vec()),
             blob_hash,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // `call_closure_with_raw_args` does not take a keep-alive
+            // share — synthetic / trampoline-style construction where
+            // block lifetime is guaranteed externally.
+            closure_heap_kind: None,
         });
 
         self.ip = entry_point;
@@ -825,6 +850,8 @@ impl VirtualMachine {
             upvalues: None,
             blob_hash,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            closure_heap_kind: None,
         });
         self.ip = entry_point;
         Ok(())

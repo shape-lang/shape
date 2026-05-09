@@ -4928,6 +4928,9 @@ mod tests {
             upvalues: Some(upvalues),
             blob_hash: None,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // Synthetic test frame — no closure keep-alive owned.
+            closure_heap_kind: None,
         });
     }
 
@@ -4958,6 +4961,9 @@ mod tests {
             upvalues: Some(upvalues),
             blob_hash: None,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // Synthetic test frame — no closure keep-alive owned.
+            closure_heap_kind: None,
         });
     }
 
@@ -5360,6 +5366,9 @@ mod tests {
             upvalues: None,
             blob_hash: None,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // Synthetic test frame — no closure keep-alive owned.
+            closure_heap_kind: None,
         });
     }
 

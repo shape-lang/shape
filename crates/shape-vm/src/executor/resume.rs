@@ -204,6 +204,10 @@ impl VirtualMachine {
                     // SharedCell path — so the frame does not own a
                     // closure block keep-alive share here.
                     closure_heap_bits: None,
+                    // ADR-006 §2.7.8 / Q10: lockstep with
+                    // `closure_heap_bits` — both `None` together at
+                    // this resume-rebuild site.
+                    closure_heap_kind: None,
                 });
             }
         }

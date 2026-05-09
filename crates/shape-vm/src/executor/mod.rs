@@ -183,9 +183,22 @@ pub struct CallFrame {
     /// pointer dereferences.
     ///
     /// `None` for regular function calls and host-closure calls.
-    /// Released via `vw_drop` on frame-pop (see `op_return` /
-    /// `op_return_value` cleanup).
+    /// Released via `drop_with_kind(bits, kind)` on frame-pop (see
+    /// `op_return` / `op_return_value` cleanup) using the lockstep
+    /// `closure_heap_kind` companion below.
     pub closure_heap_bits: Option<u64>,
+    /// ADR-006 §2.7.8 / Q10 — lockstep `NativeKind` companion for
+    /// `closure_heap_bits`. Both fields are `Some` together or `None`
+    /// together at every observable boundary; mixed states are a bug.
+    /// When `closure_heap_bits = Some(bits)`, this carries the
+    /// `NativeKind` that the teardown path (`op_return` /
+    /// `op_return_value`) feeds into `drop_with_kind(bits, kind)` —
+    /// replacing the forbidden `vw_drop(bits)` (§2.7.7 #8) and the
+    /// forbidden Bool-default fallback (§2.7.7 #9). For closure calls
+    /// the kind is `NativeKind::Ptr(HeapKind::Closure)` (the
+    /// `closure_heap_bits` always come from a TAG_HEAP `ValueWord`
+    /// pointing to a `HeapValue::ClosureRaw`).
+    pub closure_heap_kind: Option<shape_value::NativeKind>,
 }
 
 /// Function pointer type for JIT-compiled functions.

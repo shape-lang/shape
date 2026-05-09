@@ -328,6 +328,10 @@ impl VirtualMachine {
                     // pointer captures are not representable
                     // post-snapshot anyway.
                     closure_heap_bits: None,
+                    // ADR-006 §2.7.8 / Q10: lockstep with
+                    // `closure_heap_bits` — both `None` together at
+                    // this snapshot-rebuild site.
+                    closure_heap_kind: None,
                 })
             })
             .collect::<Result<Vec<_>, VMError>>()?;
