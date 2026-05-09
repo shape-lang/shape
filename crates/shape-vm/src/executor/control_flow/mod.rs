@@ -63,6 +63,7 @@ impl VirtualMachine {
     pub(in crate::executor) fn exec_control_flow(
         &mut self,
         instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
@@ -71,9 +72,15 @@ impl VirtualMachine {
             JumpIfFalseTrusted => self.op_jump_if_false_trusted(instruction)?,
             JumpIfTrue => self.op_jump_if_true(instruction)?,
             Call => self.op_call(instruction)?,
-            CallValue => self.op_call_value()?,
-            CallClosure => self.op_call_closure(instruction)?,
-            CallFunctionIndirect => self.op_call_function_indirect(instruction)?,
+            // ADR-006 §2.7.11 / Q12: value-call dispatch shells route
+            // through `call_value_immediate_nb`, which drives the callee
+            // synchronously via `execute_until_call_depth(ctx)`. The
+            // outer dispatch loop owns the `ExecutionContext`; thread it
+            // through so the sub-loop can resolve any nested foreign /
+            // remote / suspension surfaces the callee body raises.
+            CallValue => self.op_call_value(ctx)?,
+            CallClosure => self.op_call_closure(instruction, ctx)?,
+            CallFunctionIndirect => self.op_call_function_indirect(instruction, ctx)?,
             CallForeign => self.op_call_foreign(instruction)?,
             Return => self.op_return()?,
             ReturnValue => self.op_return_value()?,
@@ -285,21 +292,21 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_call_closure(
         &mut self,
         instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let _arity = match instruction.operand {
+        let arity = match instruction.operand {
             Some(Operand::Count(n)) => n as usize,
             _ => return Err(VMError::InvalidOperand),
         };
-        // ADR-006 §2.7.4 / §2.7.5 SURFACE: closure dispatch through
-        // `VmClosureHandle` requires `as_heap_value()` + `HeapValue::*`
-        // match plus the `extract_closure_info` raw-bits helper. The
-        // current call shape passes `&[ValueWord]` slices into
-        // `call_closure_with_nb_args_keepalive`, which is the consumer
-        // side of the §2.7.5 cross-crate ABI. Rebuild is phase-2c.
-        Err(VMError::NotImplemented(format!(
-            "op_call_closure: {}",
-            PHASE_2C_CALL_REBUILD_SURFACE
-        )))
+        // Closure spec Phase F: arity from the opcode operand; otherwise
+        // the dispatch tree is the same as `op_call_value`. The kinded
+        // value-call dispatch in `call_value_immediate_nb` (ADR-006
+        // §2.7.11 / Q12) already classifies the callee on `kind`
+        // (`Ptr(HeapKind::Closure)` vs `UInt64`), so the typed-vs-
+        // polymorphic distinction collapses at the runtime tier — the
+        // JIT keeps the type discrimination at codegen time per
+        // `docs/v2-closure-specialization.md` §1.3.
+        self.dispatch_call_value_immediate(arity, ctx)
     }
 
     /// Closure spec Phase F — polymorphic dispatch through `Function<A, R>`.
@@ -315,82 +322,126 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_call_function_indirect(
         &mut self,
         instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let _arity = match instruction.operand {
+        let arity = match instruction.operand {
             Some(Operand::Count(n)) => n as usize,
             _ => return Err(VMError::InvalidOperand),
         };
-        // ADR-006 §2.7.4 / §2.7.5 SURFACE: same `dispatch_call_closure_like`
-        // path as `op_call_closure` — see surface there for the rebuild
-        // scope.
-        Err(VMError::NotImplemented(format!(
-            "op_call_function_indirect: {}",
-            PHASE_2C_CALL_REBUILD_SURFACE
-        )))
+        // Closure spec Phase F: same dispatch tree as `op_call_closure`;
+        // distinction only matters to the JIT (`call_indirect` signature
+        // selection from `FunctionTypeId`). At runtime the ADR-006
+        // §2.7.11 / Q12 value-call dispatch shell handles both the
+        // `Ptr(HeapKind::Closure)` and `UInt64` callee cases uniformly.
+        self.dispatch_call_value_immediate(arity, ctx)
     }
 
-    /// Shared VM dispatch helper for `CallClosure` / `CallFunctionIndirect`.
+    /// Shared value-call dispatch helper for `CallValue`, `CallClosure`,
+    /// and `CallFunctionIndirect` (ADR-006 §2.7.11 / Q12, W7-op-call-value
+    /// Round 3).
     ///
-    /// The arity comes from the opcode operand rather than the stack, so
-    /// this helper does not pop a Count sentinel before peeking the
-    /// callee. Otherwise the dispatch tree mirrors `op_call_value`.
+    /// `arg_count` is supplied by the caller — popped from the stack for
+    /// `CallValue` (legacy arg-count-on-stack form), or read from the
+    /// opcode operand for `CallClosure` / `CallFunctionIndirect` (typed
+    /// dispatch forms). From here the body shape is identical and mirrors
+    /// the §2.7.10 op_call_method dispatch-shell precedent in
+    /// `executor/objects/mod.rs:267-296`:
     ///
-    /// Closure spec Phase G §5.4: records the resolved target `function_id`
-    /// into the current function's feedback vector so the JIT Tier 2 can
-    /// emit speculative direct-call guards when the site has gone
-    /// monomorphic. The feedback recording happens on the indirect path
-    /// (closure / function-ref callees). Host closures and module
-    /// functions are not recorded (no stable `function_id` / different
-    /// call ABI).
-    #[allow(dead_code)]
-    fn dispatch_call_closure_like(&mut self, _arg_count: usize) -> Result<(), VMError> {
-        // ADR-006 §2.7.4 / §2.7.5 SURFACE: the indirect-call dispatch tree
-        // (TAG_FUNCTION / TAG_MODULE_FN / TAG_HEAP closure / HostClosure)
-        // depends on tag-bit dispatch on a stack-resident `ValueWord`-shape
-        // callee plus `as_heap_value()` + `HeapValue::*` match for
-        // `HeapValue::HostClosure(callable)`. The TAG_HEAP closure arm
-        // additionally calls `raw_helpers::extract_closure_info(bits)`
-        // (the D-raw-helpers sub-cluster rewrite landed at `a27c0e4` —
-        // `extract_closure_info` was deleted with the rest of the
-        // forbidden `tag_bits` consumer surface). The arg-slicing path
-        // collects `Vec<ValueWord>` for `call_closure_with_nb_args_keepalive`
-        // — that consumer is `&[ValueWord]` per §2.7.5 cross-crate ABI on
-        // the call_convention boundary, also out of B11 territory.
-        //
-        // Re-emission needs (a) a kinded callee dispatch on
-        // `(NativeKind, bits)` rather than tag bits, (b) closure handle
-        // recovery via `slot.as_heap_value()` (single discriminator per
-        // ADR-005 §1) and (c) the `&[KindedSlot]` consumer-side migration
-        // of `call_closure_with_nb_args_keepalive`. All three cross
-        // territories — surface and stop per playbook §8.
-        Err(VMError::NotImplemented(format!(
-            "dispatch_call_closure_like: {}",
-            PHASE_2C_CALL_REBUILD_SURFACE
-        )))
+    /// 1. Pop `arg_count` slots via `pop_kinded()`, wrapping each
+    ///    `(bits, kind)` pair into a transient `KindedSlot` carrier.
+    ///    `pop_kinded` transfers one strong-count share into the
+    ///    returned bits + kind (WB2.4 retain-on-read), and the
+    ///    `KindedSlot::new` carrier takes ownership of that share.
+    ///    Args are popped in reverse order; reverse the vec back to
+    ///    push order so `args[0]` is the first arg.
+    /// 2. Pop the callee the same way; build the callee `KindedSlot`.
+    /// 3. Dispatch through `call_value_immediate_nb(&callee, &args[..],
+    ///    ctx)` (W7-cv-static `06cdfce`). The borrow contract leaves the
+    ///    shares with the carriers in this stack frame — the dispatch
+    ///    body never moves them out.
+    /// 4. The dispatch returns a `KindedSlot` carrying the callee's
+    ///    return value with one strong-count share. Push raw + kind
+    ///    onto the kinded stack via `push_kinded`, then `mem::forget`
+    ///    the result carrier so the share transfers to the stack
+    ///    cleanly (no double-drop).
+    /// 5. `args` and `callee` carriers drop at end of scope; their
+    ///    `Drop` impls dispatch on `kind` and release the shares via
+    ///    `drop_with_kind` (Round 2.5 + 2.5b wired
+    ///    `HeapKind::Closure → Arc::decrement_strong_count` for the
+    ///    carrier-drop path; `HeapKind::Future` is no-op for inline
+    ///    future-id payloads).
+    ///
+    /// Forbidden (W7 playbook §6 #12-18): `Vec<KindedSlot>` by-move
+    /// into `call_value_immediate_nb`; `&[(u64, NativeKind)]` pair-slice
+    /// runtime-tier ABI; tag-bits decode on callee bits;
+    /// Bool-default fallback; defection-attractor framing per CLAUDE.md
+    /// "Renames to refuse on sight" (the value-call ABI family).
+    ///
+    /// Closure spec Phase G §5.4 (deferred): pre-§2.7.11 dispatch records
+    /// the resolved target `function_id` into the current function's
+    /// feedback vector for JIT Tier-2 speculative direct-call guards.
+    /// The feedback recording is a downstream IC concern; surfacing the
+    /// `function_id` from the dispatch body cleanly requires either
+    /// peeking the callee before the dispatch shell takes ownership, or
+    /// pushing the recording into `call_value_immediate_nb` itself. The
+    /// JIT-dispatch path in `op_call:222-236` stays SURFACE until W10 —
+    /// the IC recording lands with that wave.
+    fn dispatch_call_value_immediate(
+        &mut self,
+        arg_count: usize,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count);
+        for _ in 0..arg_count {
+            // ADR-006 §2.7.7 WB2.4: pop_kinded transfers one share
+            // (heap-bearing kinds) from the stack into the returned
+            // (bits, kind) pair. KindedSlot::new takes ownership of
+            // that share; its Drop releases it via drop_with_kind on
+            // scope exit.
+            let (bits, kind) = self.pop_kinded()?;
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+        // Pop order is reverse of push order; flip to restore positional
+        // alignment so args[0] is the first call argument.
+        args.reverse();
+
+        let (callee_bits, callee_kind) = self.pop_kinded()?;
+        let callee = KindedSlot::new(ValueSlot::from_raw(callee_bits), callee_kind);
+
+        // The dispatch body borrows the carriers (`&KindedSlot`,
+        // `&[KindedSlot]`) — share ownership stays here. The returned
+        // `KindedSlot` is a fresh carrier with one share transferred
+        // from the callee body's `ReturnValue` opcode.
+        let result = self.call_value_immediate_nb(&callee, &args, ctx)?;
+
+        // Transfer the result share back to the kinded stack. The
+        // share is now owned by the stack slot; mem::forget on the
+        // carrier prevents the carrier's Drop from releasing it
+        // (which would be a double-drop).
+        self.push_kinded(result.raw(), result.kind())?;
+        std::mem::forget(result);
+
+        // `args` and `callee` carriers drop here, releasing each share
+        // via `KindedSlot::drop` (kind-dispatched
+        // Arc::decrement_strong_count per ADR-006 §2.7.6 / Q8 — no
+        // bare vw_drop, no Bool-default fallback).
+        Ok(())
     }
 
-    pub(in crate::executor) fn op_call_value(&mut self) -> Result<(), VMError> {
+    pub(in crate::executor) fn op_call_value(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         // ADR-006 §2.7.7 / playbook §2: arg-count is post-proof integer
         // kind; same body-site `int_operand` dispatch as `op_call`.
         let (arg_count_bits, arg_count_kind) = self.pop_kinded()?;
         let arg_count_slot = KindedSlot::new(ValueSlot::from_raw(arg_count_bits), arg_count_kind);
-        let _arg_count = int_operand(&arg_count_slot)
+        let arg_count = int_operand(&arg_count_slot)
             .map_err(|_| VMError::RuntimeError("Expected integer for arg count".to_string()))?
             as usize;
         crate::executor::vm_impl::stack::drop_with_kind(arg_count_bits, arg_count_kind);
 
-        // ADR-006 §2.7.4 / §2.7.5 SURFACE: same indirect-call dispatch
-        // surface as `dispatch_call_closure_like` — see surface there.
-        // The `op_call_value` body additionally peeks the callee via
-        // `stack_read_raw(idx)` (deleted shim) — the kinded peek
-        // (`stack_read_kinded_raw` / `stack_peek_kinded`) is available,
-        // but the downstream `tag_bits::get_tag` / `as_heap_ref()` /
-        // `extract_closure_info` chain is the unmigrated forbidden-pattern
-        // surface that the rebuild needs.
-        Err(VMError::NotImplemented(format!(
-            "op_call_value: {}",
-            PHASE_2C_CALL_REBUILD_SURFACE
-        )))
+        self.dispatch_call_value_immediate(arg_count, ctx)
     }
 
     pub(in crate::executor) fn op_make_closure(
