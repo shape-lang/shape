@@ -246,8 +246,8 @@ pub struct VirtualMachine {
     /// `kinds[i]` is the `NativeKind` interpretation of `stack[i]`. Index
     /// invariant: `stack.len() == kinds.len()` at every API boundary.
     /// WB2.4 retain-on-read uses this track for kind-aware clone/drop
-    /// dispatch (`clone_with_kind` / `drop_with_kind`) — no tag decode,
-    /// no `is_heap()` probe.
+    /// dispatch (`clone_with_kind` / `drop_with_kind`); the deleted
+    /// tag_bits dispatch and the deleted `is_heap()` call do not run here.
     pub(crate) kinds: Vec<shape_value::NativeKind>,
 
     /// Stack pointer — logical top of the value stack.

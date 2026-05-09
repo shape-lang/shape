@@ -2660,8 +2660,8 @@ impl VirtualMachine {
             // would have done it; here we go through `stack_read_kinded_raw`
             // + `clone_with_kind` to keep the bits + kind on the stack
             // with an independent share). Replaces the deleted
-            // `raw_helpers::clone_raw_bits(bits)` call which used
-            // forbidden tag-decode internally.
+            // `raw_helpers::clone_raw_bits(bits)` call which ran the
+            // forbidden tag_bits dispatch internally.
             let (bits, kind) = self.stack_read_kinded_raw(slot);
             crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
             self.push_kinded(bits, kind)?;

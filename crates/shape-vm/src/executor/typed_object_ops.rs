@@ -10,9 +10,9 @@
 //! match arms in [`push_field_value`].
 //!
 //! Forbidden patterns (CLAUDE.md "Forbidden Patterns" + playbook §4):
-//! the deleted dynamic-word runtime construction, raw-helper tag-decode
-//! hops, and the deleted Wave 6.0 transitional shim layer have all been
-//! migrated off this file. Cross-cluster cascades (write-path
+//! the deleted dynamic-word runtime construction, the deleted raw-helper
+//! tag_bits dispatch, and the deleted Wave 6.0 transitional shim layer
+//! have all been migrated off this file. Cross-cluster cascades (write-path
 //! `clone_slots_with_update` / `op_set_field_typed`) are surfaced as
 //! `VMError::NotImplemented` with a SURFACE marker per playbook §7 #4.
 
@@ -78,9 +78,10 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
 }
 
 /// Map a heap-backed `field_type_tag` to its `NativeKind` (ADR-006 §2.7.7
-/// — kinded API receives the kind alongside the bits, no tag-decode at the
-/// consumer). For tags whose heap arm is unambiguous, returns `Some(kind)`;
-/// for `FIELD_TAG_ANY` / `FIELD_TAG_UNKNOWN` (dynamic), returns `None`.
+/// — kinded API receives the kind alongside the bits; the deleted
+/// tag_bits dispatch never runs at the consumer). For tags whose heap arm
+/// is unambiguous, returns `Some(kind)`; for `FIELD_TAG_ANY` /
+/// `FIELD_TAG_UNKNOWN` (dynamic), returns `None`.
 #[inline]
 fn field_tag_to_heap_native_kind(tag: u16) -> Option<NativeKind> {
     match tag {

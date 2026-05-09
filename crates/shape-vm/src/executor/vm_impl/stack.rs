@@ -10,16 +10,17 @@
 //! (kind = `Bool` by convention so dead bits never leak refcount).
 //!
 //! WB2.4 retain-on-read uses the parallel kind track for kind-aware
-//! clone/drop dispatch via [`clone_with_kind`] / [`drop_with_kind`]. No
-//! tag decode, no `is_heap()` probe, no `as_heap_ref()` hop — the kind is
-//! locally available at every retain/release site by construction (the
-//! producing opcode emits it).
+//! clone/drop dispatch via [`clone_with_kind`] / [`drop_with_kind`]. The
+//! deleted tag_bits dispatch does not run here, the deleted `is_heap()`
+//! call is not made, and the deleted `as_heap_ref()` is not invoked — the
+//! kind is locally available at every retain/release site by construction
+//! (the producing opcode emits it).
 //!
-//! The pre-Wave-6 `vw_clone(bits)` / `vw_drop(bits)` helpers (which did
-//! tag-decode internally) are replaced by `clone_with_kind(bits, kind)` /
-//! `drop_with_kind(bits, kind)`, which mirror `KindedSlot::Clone` /
-//! `KindedSlot::Drop` (the canonical refcount-dispatch table in
-//! `crates/shape-value/src/kinded_slot.rs`).
+//! The pre-Wave-6 `vw_clone(bits)` / `vw_drop(bits)` helpers (which ran
+//! the now-deleted tag_bits dispatch internally) are replaced by
+//! `clone_with_kind(bits, kind)` / `drop_with_kind(bits, kind)`, which
+//! mirror `KindedSlot::Clone` / `KindedSlot::Drop` (the canonical
+//! refcount-dispatch table in `crates/shape-value/src/kinded_slot.rs`).
 //!
 //! See `docs/adr/006-value-and-memory-model.md` §2.7.7 and §17 Q9.
 

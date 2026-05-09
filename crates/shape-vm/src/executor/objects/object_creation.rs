@@ -77,8 +77,8 @@ impl VirtualMachine {
     /// `kinded_to_slot`, then construct `Arc<TypedObjectStorage>` per the
     /// playbook §3 TypedObject pattern and push the raw `Arc::into_raw`
     /// pointer bits with `NativeKind::Ptr(HeapKind::TypedObject)`. No
-    /// ValueWord round-trip; no `decode_field_bits_for_type` tag-decode
-    /// hop. The popped shares' ownership transfers into the new
+    /// ValueWord round-trip; the deleted `decode_field_bits_for_type`
+    /// does not run. The popped shares' ownership transfers into the new
     /// TypedObject (each heap slot's strong-count remains at 1; Drop on
     /// the final TypedObject decrements via `field_kinds`-driven
     /// dispatch — same pattern as `executor/builtins/object_ops.rs`).

@@ -27,12 +27,13 @@ impl VirtualMachine {
     /// **Surfaced (`NotImplemented(SURFACE)`):** every other receiver
     /// shape — typed arrays, strings, hashmaps, table views, native
     /// views, matrices, etc. The legacy code paths used the deleted
-    /// dynamic-word carrier, the deleted `raw_helpers` tag-decode
-    /// hops, and the deleted is-tagged index probe — all forbidden
-    /// by §2.7.7. Those paths need first-class kinded handlers that
-    /// consume `(bits, kind)` pairs and never round-trip through a
-    /// tagged encoding; that work belongs to the matching cluster
-    /// (typed-array element ops, hashmap, table-view) per playbook §10.
+    /// dynamic-word carrier, the deleted `raw_helpers` tag_bits
+    /// dispatch, and the deleted `is_tagged()` index call — all
+    /// forbidden by §2.7.7. Those paths need first-class kinded
+    /// handlers that consume `(bits, kind)` pairs and never round-trip
+    /// through a tagged encoding; that work belongs to the matching
+    /// cluster (typed-array element ops, hashmap, table-view) per
+    /// playbook §10.
     pub(in crate::executor) fn op_get_prop(
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
