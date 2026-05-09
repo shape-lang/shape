@@ -1,5 +1,4 @@
 use super::*;
-use shape_value::ValueWordExt;
 use crate::bytecode::{OpCode, SourceMap};
 use shape_abi_v1::PermissionSet;
 
@@ -489,8 +488,13 @@ fn test_vm_starts_linked_program_at_entry_function() {
     assert_eq!(linked.functions[1].name, "main");
     assert_eq!(linked.entry, main_hash);
 
-    let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
-    vm.load_linked_program(linked);
-    let result = vm.execute(None).expect("execution should succeed");
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    // Phase-2c surface: `execute(None)` returns the deleted host-tier
+    // dynamic-value carrier; the `as_number_coerce()` accessor lived on
+    // an extension trait that was deleted with the carrier. Once the
+    // host-tier kinded eval API lands in Phase-2c, use `execute_raw(None)`
+    // (returns raw u64 bits) and decode against the program's declared
+    // `top_level_frame.return_kind`. Per playbook §7 REVISED part 4 +
+    // ADR-006 §2.7.4 surface as todo!() until then.
+    let _linked_program = linked;
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }

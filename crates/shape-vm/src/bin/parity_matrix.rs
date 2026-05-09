@@ -4,7 +4,6 @@
 //! to verify execution parity.
 
 use clap::Parser;
-use shape_value::ValueWordExt;
 use shape_vm::feature_tests::{ParityReport, ParityRunner, all_feature_tests};
 use std::process::ExitCode;
 
