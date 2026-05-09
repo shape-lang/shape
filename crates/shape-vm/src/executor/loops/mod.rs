@@ -1,49 +1,62 @@
 //! Loop control operations for the VM executor
 //!
 //! Handles: LoopStart, LoopEnd, Break, Continue, IterNext, IterDone
+//!
+//! ADR-006 §2.7.6 / §2.7.7 / Wave-β `B10-loops-heap` (playbook §10):
+//! heap-side dispatch in `op_iter_next` / `op_iter_done` goes through
+//! `ValueSlot::from_raw(bits).as_heap_value()` + `HeapValue::*` match
+//! (Q8 single-discriminator). Iterator + idx are popped via the kinded
+//! API; element kind for the pushed value is sourced from the matched
+//! `TypedArrayData::*` variant per playbook §2 ("loop iteration value
+//! kind from iterator's element FieldType — capture per element").
+//!
+//! `HeapValue` no longer carries the deleted `Array` / `Range` /
+//! `Iterator` variants (post-§2.7.6 heap layout). Iteration over those
+//! shapes surfaces as `VMError::NotImplemented` per playbook §7 #4 +
+//! §2.7.4 — never papered over with a Bool-default fallback (the
+//! W-series rationalization §2.7.7 #9 names verbatim).
+//!
+//! `RowView` / `TypedTable` row materialization at `IterNext` requires
+//! the deleted `ValueWord::from_row_view` packed-tag carrier; the
+//! kinded redesign of the row-view payload is Phase 2c work
+//! (ADR-006 §2.7.4). Same disposition as the existing
+//! `executor/tests/table_iteration.rs` `todo!("phase-2c …")` markers.
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::{LoopContext, VirtualMachine},
 };
-use shape_value::heap_value::HeapValue;
-use shape_value::tag_bits::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_INT};
-use shape_value::{TypedArrayData, TableViewData, VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use crate::executor::vm_impl::stack::drop_with_kind;
+use shape_value::heap_value::{HeapKind, HeapValue, TableViewData, TypedArrayData};
+use shape_value::{NativeKind, VMError, ValueSlot};
 
-/// Decode a loop iterator-protocol index from raw stack bits.
+/// Decode the loop iterator-protocol index from its kinded slot.
 ///
-/// E+5.5: typed locals and `AddInt`/`PushConst Int` push native i64 raw bits
-/// (no NaN-tag). The legacy `as_number_coerce()` decode path interprets
-/// untagged bits as f64, which silently mangles small native i64 values
-/// (e.g., raw bits 1 → subnormal f64 ≈ 5e-324 → cast to i64 = 0), causing
-/// for-loops to never advance. This decoder handles all three encodings the
-/// idx slot may carry:
-///   - Tagged i48 (`TAG_INT`): legacy compiler emit sites that haven't
-///     migrated to native i64 yet.
-///   - Untagged subnormal-or-zero with non-zero raw bits: native i64
-///     (post-E+5.5 typed slot or `AddInt` result).
-///   - Untagged normal f64 (or canonical zero): real f64 value (test
-///     harness using `Constant::Number(N.0)` for the idx).
+/// The compiler emits `IterNext` / `IterDone` with the idx top-of-stack
+/// as one of:
+///   - `NativeKind::Int64` (and the rest of the `is_integer_family()`
+///     kinds) — typed loop counters from `LoadLocalI64`, `AddInt`, etc.
+///   - `NativeKind::Float64` — test harnesses still using
+///     `Constant::Number(N.0)` for the idx (legacy entry-point shape).
+///
+/// All other kinds are a wrong-shape opcode emit and surface as a
+/// `TypeError`.
 #[inline(always)]
-fn decode_iter_idx(bits: u64) -> Result<i64, VMError> {
-    if is_tagged(bits) {
-        if get_tag(bits) == TAG_INT {
-            return Ok(sign_extend_i48(get_payload(bits)));
-        }
-        return Err(VMError::TypeError {
-            expected: "number",
-            got: "unknown",
-        });
+fn decode_iter_idx(bits: u64, kind: NativeKind) -> Result<i64, VMError> {
+    if kind.is_integer_family() {
+        // Sign-extend per the integer family — `as i64` on the raw bits
+        // is the canonical reinterpretation for `NativeKind::Int*`.
+        return Ok(bits as i64);
     }
-    // Untagged: distinguish native i64 from f64. f64::from_bits(N) for
-    // 1 <= N < 2^52 is always subnormal (exponent bits = 0), so any
-    // subnormal-with-nonzero-bits is unambiguously native i64.
-    let f = f64::from_bits(bits);
-    if f.is_subnormal() && bits != 0 {
-        Ok(bits as i64)
-    } else {
-        Ok(f as i64)
+    match kind {
+        NativeKind::Float64 | NativeKind::NullableFloat64 => {
+            Ok(f64::from_bits(bits) as i64)
+        }
+        NativeKind::Bool => Ok(bits as i64),
+        _ => Err(VMError::TypeError {
+            expected: "number",
+            got: "non-numeric idx",
+        }),
     }
 }
 
@@ -132,274 +145,386 @@ impl VirtualMachine {
         }
     }
 
+    /// Iterator-protocol "done" check.
+    ///
+    /// Stack on entry: `[..., iter, idx]`.
+    /// Stack on exit: `[..., done: bool]` with `NativeKind::Bool`.
+    ///
+    /// Both `iter` and `idx` shares are popped via the kinded API and
+    /// retired with `drop_with_kind` once the bool is decided. Heap-side
+    /// dispatch on `iter_kind` matches against `slot.as_heap_value()` per
+    /// Q8 (single-discriminator) — no per-heap-variant accessor on the
+    /// carrier.
     pub(in crate::executor) fn op_iter_done(&mut self) -> Result<(), VMError> {
-        let idx_bits = self.pop_raw_u64()?;
-        let iter = self.pop_raw_u64()?;
-        let idx = decode_iter_idx(idx_bits)?;
-        // v2 typed array fast path: read len directly from the stamped header.
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        let (iter_bits, iter_kind) = self.pop_kinded()?;
+        let idx = decode_iter_idx(idx_bits, idx_kind)?;
+
+        // v2 typed array fast path: `as_v2_typed_array(bits, kind)` returns
+        // Some only when `kind == UInt64` and the header pad byte stamps a
+        // v2 typed array. No Arc share involved on this path.
         if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(iter_bits, iter_kind)
         {
             let done = idx < 0 || idx as u32 >= view.len;
-            self.push_tagged_bool(done)?;
-            return Ok(());
+            // Idx is plain numeric; iter is a raw `*mut TypedArray<_>`
+            // pointer in `UInt64` (no refcount). `drop_with_kind` is a
+            // no-op for both kinds, but call it for symmetry/future-proof.
+            drop_with_kind(idx_bits, idx_kind);
+            drop_with_kind(iter_bits, iter_kind);
+            return self.push_kinded(done as u64, NativeKind::Bool);
         }
-        // Handle unified arrays (bit-47 tagged) for iteration.
-        let vb = shape_value::ValueBits::from_raw(iter.raw_bits());
-        if vb.is_unified_heap() {
-            let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
-                };
-                let done = idx < 0 || idx as usize >= arr.len();
-                self.push_tagged_bool(done)?;
-                return Ok(());
-            }
-        }
-        // cold-path: as_heap_ref retained — multi-variant iteration done check
-        let done = match iter.as_heap_ref() { // cold-path
-            Some(HeapValue::Array(arr)) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { len, .. })) => idx < 0 || idx as usize >= *len as usize,
-            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::String(s)) => idx < 0 || idx as usize >= s.len(),
-            Some(HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            }) => {
-                let start_val = start
-                    .as_ref()
-                    .and_then(|s| s.as_number_coerce())
-                    .unwrap_or(0.0) as i64;
-                let end_val = end
-                    .as_ref()
-                    .and_then(|e| e.as_number_coerce())
-                    .unwrap_or(i64::MAX as f64) as i64;
-                let end_val = if *inclusive { end_val + 1 } else { end_val };
-                let count = end_val - start_val;
-                count <= 0 || idx >= count
-            }
-            Some(HeapValue::DataTable(dt)) => idx < 0 || idx as usize >= dt.row_count(),
-            Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => {
-                idx < 0 || idx as usize >= table.row_count()
-            }
-            Some(HeapValue::Iterator(state)) => {
-                // For iterators without transforms, delegate to source length.
-                // Iterators with transforms should be .collect()'d before for-loop.
-                if state.done {
-                    true
-                } else {
-                    let src_len =
-                        crate::executor::objects::iterator_methods::iter_source_len(&state.source);
-                    idx < 0 || idx as usize >= src_len
+
+        // Heap-side dispatch (Q8): single-discriminator pattern through
+        // `ValueSlot::as_heap_value()` + `HeapValue::*` match. The bits
+        // are an `Arc::into_raw::<T>` payload only on `Ptr(HeapKind::*)`
+        // and `String` kinds; non-heap kinds are wrong-shape iter input
+        // and surface as a `TypeError` after dropping both shares.
+        let done_result: Result<bool, VMError> = match iter_kind {
+            NativeKind::Ptr(HeapKind::TypedArray)
+            | NativeKind::Ptr(HeapKind::String)
+            | NativeKind::String
+            | NativeKind::Ptr(HeapKind::DataTable)
+            | NativeKind::Ptr(HeapKind::TableView)
+            | NativeKind::Ptr(HeapKind::HashMap) => {
+                // SAFETY: per the §2.7.7 ownership contract, when `iter_kind`
+                // selects one of these heap arms, `iter_bits` is the result
+                // of `Arc::into_raw::<T>` for the matching `T`. Building a
+                // borrowing `ValueSlot` view over the bits and calling
+                // `as_heap_value()` is the Q8-sanctioned single-discriminator
+                // dispatch; the `Arc` share retired by `drop_with_kind`
+                // below balances the `pop_kinded` transfer.
+                let slot = ValueSlot::from_raw(iter_bits);
+                let hv = slot.as_heap_value();
+                match hv {
+                    HeapValue::TypedArray(arr_arc) => {
+                        let len = match arr_arc.as_ref() {
+                            TypedArrayData::I64(a) => a.len(),
+                            TypedArrayData::F64(a) => a.len(),
+                            TypedArrayData::Bool(a) => a.len(),
+                            TypedArrayData::I8(a) => a.len(),
+                            TypedArrayData::I16(a) => a.len(),
+                            TypedArrayData::I32(a) => a.len(),
+                            TypedArrayData::U8(a) => a.len(),
+                            TypedArrayData::U16(a) => a.len(),
+                            TypedArrayData::U32(a) => a.len(),
+                            TypedArrayData::U64(a) => a.len(),
+                            TypedArrayData::F32(a) => a.len(),
+                            TypedArrayData::String(a) => a.len(),
+                            TypedArrayData::HeapValue(a) => a.len(),
+                            TypedArrayData::FloatSlice { len, .. } => *len as usize,
+                            TypedArrayData::Matrix(m) => m.data.len(),
+                        };
+                        Ok(idx < 0 || idx as usize >= len)
+                    }
+                    HeapValue::String(s) => Ok(idx < 0 || idx as usize >= s.len()),
+                    HeapValue::DataTable(dt) => Ok(idx < 0 || idx as usize >= dt.row_count()),
+                    HeapValue::TableView(tv) => match tv.as_ref() {
+                        TableViewData::TypedTable { table, .. } => {
+                            Ok(idx < 0 || idx as usize >= table.row_count())
+                        }
+                        // Phase-2c surface: RowView / ColumnRef / IndexedTable
+                        // iteration semantics weren't part of the kinded
+                        // for-loop redesign. ADR-006 §2.7.4.
+                        _ => Err(VMError::NotImplemented(
+                            "op_iter_done SURFACE: TableViewData::{RowView,ColumnRef,\
+                             IndexedTable} iteration — phase-2c, see ADR-006 §2.7.4"
+                                .to_string(),
+                        )),
+                    },
+                    HeapValue::HashMap(hm) => Ok(idx < 0 || idx as usize >= hm.keys.len()),
+                    // The heap arm disagrees with `iter_kind`. ADR-005 §1
+                    // single-discriminator violation — surface, never
+                    // paper over.
+                    other => Err(VMError::NotImplemented(format!(
+                        "op_iter_done SURFACE: iter_kind={:?} but heap arm is {:?} — \
+                         ADR-005 §1 single-discriminator violation",
+                        iter_kind,
+                        other.kind()
+                    ))),
                 }
             }
-            Some(HeapValue::HashMap(hm)) => idx < 0 || idx as usize >= hm.keys.len(),
-            _ => {
-                return Err(VMError::TypeError {
-                    expected: "array, string, range, table, iterator, or hashmap",
-                    got: iter.type_name(),
-                });
-            }
+            // Per playbook §7 #4: legacy `HeapValue::Array` / `Range` /
+            // `Iterator` variants were deleted from the heap layout
+            // (post-§2.7.6 typed-Arc payload migration). Iteration over
+            // those shapes is Phase 2c work — the kinded carrier for
+            // ranges + the boxed-Vec `Array` payload both need redesign.
+            // Surface, do not invent a Bool-default fallback (§2.7.7 #9).
+            _ => Err(VMError::NotImplemented(format!(
+                "op_iter_done SURFACE: iter_kind={:?} not supported as iterator \
+                 in the kinded API (legacy Array/Range/Iterator HeapValue \
+                 variants deleted) — phase-2c, see ADR-006 §2.7.4",
+                iter_kind
+            ))),
         };
-        self.push_tagged_bool(done)?;
-        Ok(())
+
+        // Retire both popped shares. Idx kind has no heap payload; iter
+        // kind may have an `Arc<T>` share that `drop_with_kind` decrements.
+        drop_with_kind(idx_bits, idx_kind);
+        drop_with_kind(iter_bits, iter_kind);
+        let done = done_result?;
+        self.push_kinded(done as u64, NativeKind::Bool)
     }
 
+    /// Iterator-protocol "next element" fetch.
+    ///
+    /// Stack on entry: `[..., iter, idx]`.
+    /// Stack on exit: `[..., element]` with the element's `NativeKind`
+    /// sourced from the matched heap arm (§2 / playbook "loop iteration
+    /// value kind from iterator's element FieldType").
+    ///
+    /// The element-kind decision per heap arm:
+    ///   - `TypedArrayData::I64` / `I8..I32` / `U8..U64`  → `Int64`
+    ///     (sign- or zero-extended to i64 per the source family).
+    ///   - `TypedArrayData::F64` / `F32` / `FloatSlice`   → `Float64`.
+    ///   - `TypedArrayData::Bool`                          → `Bool`.
+    ///   - `TypedArrayData::String`                        → `String`
+    ///     (an `Arc<String>` share is bumped via `Arc::increment_strong_count`
+    ///     before being handed to `push_kinded`).
+    ///   - `HeapValue::String`                             → `Char` (per
+    ///     codepoint), `NativeKind::Ptr(HeapKind::Char)`.
+    ///   - `TypedArrayData::HeapValue`                     → SURFACE
+    ///     (polymorphic `Arc<HeapValue>` carriers don't have a single
+    ///     element kind; phase-2c work — see ADR-006 §2.7.4).
+    ///
+    /// Both popped shares (`iter`, `idx`) are retired with `drop_with_kind`
+    /// before return; the pushed element owns its own retained share.
     pub(in crate::executor) fn op_iter_next(&mut self) -> Result<(), VMError> {
-        let idx_bits = self.pop_raw_u64()?;
-        let iter = self.pop_raw_u64()?;
-        let idx = decode_iter_idx(idx_bits)?;
-        // v2 typed array fast path: read element through the stamped header.
-        //
-        // Wave E+5.5 producer-side flip: for primitive native kinds (I64,
-        // I32, F64, Bool) push raw native bits, matching the typed
-        // `LoadLocalI64`/`LoadLocalF64`/`LoadLocalBool` consumers emitted
-        // for for-loop variables whose `set_local_type_info` resolves to
-        // a native primitive (`compiler/loops.rs:411`). The legacy tagged
-        // `ValueWord::from_i64` push was observable as `pop_native_i64`
-        // reading a tagged-i48 bit pattern as a huge negative i64 — e.g.
-        // `MulInt(1, x)` returning ~-5e33 for `x=2` instead of 2.
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        let (iter_bits, iter_kind) = self.pop_kinded()?;
+        let idx = decode_iter_idx(idx_bits, idx_kind)?;
+
+        // v2 typed array fast path. Element kind from `view.elem_type`
+        // per playbook §2 (capture per element from the iterator's
+        // element FieldType — here the v2 element-type byte stamped on
+        // the heap header).
         if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(iter_bits, iter_kind)
         {
             use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
             use shape_value::v2::typed_array::TypedArray;
+            // Out-of-range push the §2 sentinel (zero bits + Bool kind).
             if idx < 0 || idx as u32 >= view.len {
-                self.push_raw_u64(ValueWord::none())?;
-                return Ok(());
+                drop_with_kind(idx_bits, idx_kind);
+                drop_with_kind(iter_bits, iter_kind);
+                return self.push_kinded(Self::NONE_BITS, NativeKind::Bool);
             }
             let i = idx as u32;
-            match view.elem_type {
+            let push_result = match view.elem_type {
                 V2ElemType::I64 => {
                     let arr = view.ptr as *const TypedArray<i64>;
-                    self.push_native_i64(unsafe { TypedArray::<i64>::get_unchecked(arr, i) })?;
+                    let v = unsafe { TypedArray::<i64>::get_unchecked(arr, i) };
+                    self.push_kinded(v as u64, NativeKind::Int64)
                 }
                 V2ElemType::I32 => {
                     let arr = view.ptr as *const TypedArray<i32>;
-                    let val = unsafe { TypedArray::<i32>::get_unchecked(arr, i) };
-                    self.push_native_i64(val as i64)?;
+                    let v = unsafe { TypedArray::<i32>::get_unchecked(arr, i) };
+                    // Sign-extend i32 → i64 before reinterpret to u64.
+                    self.push_kinded(v as i64 as u64, NativeKind::Int64)
                 }
                 V2ElemType::F64 => {
                     let arr = view.ptr as *const TypedArray<f64>;
-                    self.push_raw_f64(unsafe { TypedArray::<f64>::get_unchecked(arr, i) })?;
+                    let v = unsafe { TypedArray::<f64>::get_unchecked(arr, i) };
+                    self.push_kinded(v.to_bits(), NativeKind::Float64)
                 }
                 V2ElemType::Bool => {
                     let arr = view.ptr as *const TypedArray<u8>;
-                    let val = unsafe { TypedArray::<u8>::get_unchecked(arr, i) };
-                    self.push_native_bool(val != 0)?;
+                    let v = unsafe { TypedArray::<u8>::get_unchecked(arr, i) };
+                    self.push_kinded((v != 0) as u64, NativeKind::Bool)
                 }
-            }
-            return Ok(());
+            };
+            drop_with_kind(idx_bits, idx_kind);
+            drop_with_kind(iter_bits, iter_kind);
+            return push_result;
         }
-        // Handle unified arrays (bit-47 tagged) for iteration.
-        let vb = shape_value::ValueBits::from_raw(iter.raw_bits());
-        if vb.is_unified_heap() {
-            let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
-                };
-                let result = if idx < 0 || idx as usize >= arr.len() {
-                    ValueWord::none()
-                } else {
-                    let elem_bits = *arr.get(idx as usize).unwrap();
-                    unsafe { ValueWord::clone_from_bits(elem_bits) }
-                };
-                self.push_raw_u64(result)?;
-                return Ok(());
+
+        // Heap-side dispatch (Q8 / single-discriminator). Same kind-gate
+        // as `op_iter_done`: only the heap-bearing kinds reach the
+        // `as_heap_value()` view; everything else surfaces.
+        let push_result: Result<(), VMError> = match iter_kind {
+            NativeKind::Ptr(HeapKind::TypedArray)
+            | NativeKind::Ptr(HeapKind::String)
+            | NativeKind::String
+            | NativeKind::Ptr(HeapKind::DataTable)
+            | NativeKind::Ptr(HeapKind::TableView)
+            | NativeKind::Ptr(HeapKind::HashMap) => {
+                // SAFETY: same construction-side contract as `op_iter_done`
+                // — `iter_bits` is `Arc::into_raw::<T>` for the matching
+                // heap variant.
+                let slot = ValueSlot::from_raw(iter_bits);
+                let hv = slot.as_heap_value();
+                match hv {
+                    HeapValue::TypedArray(arr_arc) => {
+                        Self::push_typed_array_element(self, arr_arc.as_ref(), idx)
+                    }
+                    HeapValue::String(s) => {
+                        // Out-of-range / negative idx → None sentinel.
+                        if idx < 0 {
+                            self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
+                        } else {
+                            match s.chars().nth(idx as usize) {
+                                Some(c) => self
+                                    .push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char)),
+                                None => self.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+                            }
+                        }
+                    }
+                    // Phase-2c surface: DataTable / TableView row
+                    // materialization at `IterNext` used the deleted
+                    // `ValueWord::from_row_view` packed-tag carrier; the
+                    // kinded redesign of the row-view payload is pending.
+                    // Same disposition as `executor/tests/table_iteration.rs`
+                    // `todo!("phase-2c …")` markers.
+                    HeapValue::DataTable(_) | HeapValue::TableView(_) => {
+                        Err(VMError::NotImplemented(
+                            "op_iter_next SURFACE: DataTable/TableView row \
+                             materialization — phase-2c, see ADR-006 §2.7.4 \
+                             (RowView carrier pending kinded redesign)"
+                                .to_string(),
+                        ))
+                    }
+                    // Phase-2c surface: HashMap iteration yielded a
+                    // `[key, value]` two-element array via the deleted
+                    // `vmarray_from_vec` constructor. The kinded
+                    // equivalent would push a fresh
+                    // `Arc<TypedArrayData::HeapValue>` two-slot buffer —
+                    // pending typed-buffer-of-heap construction helpers.
+                    HeapValue::HashMap(_) => Err(VMError::NotImplemented(
+                        "op_iter_next SURFACE: HashMap iteration yields a \
+                         [key, value] pair which used the deleted \
+                         `vmarray_from_vec` polymorphic-array constructor \
+                         — phase-2c, see ADR-006 §2.7.4"
+                            .to_string(),
+                    )),
+                    other => Err(VMError::NotImplemented(format!(
+                        "op_iter_next SURFACE: iter_kind={:?} but heap arm is {:?} \
+                         — ADR-005 §1 single-discriminator violation",
+                        iter_kind,
+                        other.kind()
+                    ))),
+                }
             }
+            // Same playbook §7 #4 disposition as `op_iter_done`: legacy
+            // Array / Range / Iterator variants were deleted; iteration
+            // over those shapes is phase-2c work.
+            _ => Err(VMError::NotImplemented(format!(
+                "op_iter_next SURFACE: iter_kind={:?} not supported as iterator \
+                 in the kinded API (legacy Array/Range/Iterator HeapValue \
+                 variants deleted) — phase-2c, see ADR-006 §2.7.4",
+                iter_kind
+            ))),
+        };
+
+        drop_with_kind(idx_bits, idx_kind);
+        drop_with_kind(iter_bits, iter_kind);
+        push_result
+    }
+
+    /// Push the `idx`-th element of a `TypedArrayData` with the matching
+    /// element `NativeKind`. Out-of-range → `(0, NativeKind::Bool)` None
+    /// sentinel per §2.7 (Drop-safe).
+    ///
+    /// Element-kind sourcing per the matched arm follows playbook §2:
+    /// loop iteration value kind from iterator's element FieldType,
+    /// captured per element from the runtime `TypedArrayData::*` arm.
+    #[inline]
+    fn push_typed_array_element(
+        vm: &mut VirtualMachine,
+        arr: &TypedArrayData,
+        idx: i64,
+    ) -> Result<(), VMError> {
+        if idx < 0 {
+            return vm.push_kinded(Self::NONE_BITS, NativeKind::Bool);
         }
-        // cold-path: as_heap_ref retained — multi-variant iteration next element
-        let result = match iter.as_heap_ref() { // cold-path
-            Some(HeapValue::Array(arr)) => {
-                if idx < 0 {
-                    ValueWord::none()
-                } else {
-                    arr.get(idx as usize)
-                        .cloned()
-                        .unwrap_or_else(ValueWord::none)
-                }
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
-                // Wave E+5.5 producer-side flip: push raw native i64 bits
-                // (no tag), matching the typed `LoadLocalI64` consumer
-                // emitted for loop vars whose static element type is `int`.
-                if idx < 0 || idx as usize >= arr.len() {
-                    self.push_raw_u64(ValueWord::none())?;
-                } else {
-                    self.push_native_i64(arr[idx as usize])?;
-                }
-                return Ok(());
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
-                // `ValueWord::from_f64` produces raw f64 bits with no
-                // NaN-tag (`value_word_ext.rs:463`), matching the typed
-                // `LoadLocalF64` raw-bit read. Use `push_raw_f64`.
-                if idx < 0 || idx as usize >= arr.len() {
-                    self.push_raw_u64(ValueWord::none())?;
-                } else {
-                    self.push_raw_f64(arr[idx as usize])?;
-                }
-                return Ok(());
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) => {
-                let slice_len = *len as usize;
-                if idx < 0 || idx as usize >= slice_len {
-                    self.push_raw_u64(ValueWord::none())?;
+        let u = idx as usize;
+        match arr {
+            TypedArrayData::I64(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::I8(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::I16(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::I32(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::U8(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::U16(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::U32(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::U64(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v, NativeKind::Int64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::F64(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded(v.to_bits(), NativeKind::Float64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::F32(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded((v as f64).to_bits(), NativeKind::Float64),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::FloatSlice { parent, offset, len } => {
+                if u >= *len as usize {
+                    vm.push_kinded(Self::NONE_BITS, NativeKind::Bool)
                 } else {
                     let off = *offset as usize;
-                    self.push_raw_f64(parent.data[off + idx as usize])?;
+                    let v = parent.data[off + u];
+                    vm.push_kinded(v.to_bits(), NativeKind::Float64)
                 }
-                return Ok(());
             }
-            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
-                // Native bool bits (0u64 / 1u64) per the typed-Bool
-                // `LoadLocalBool` raw-bit consumer contract.
-                if idx < 0 || idx as usize >= arr.len() {
-                    self.push_raw_u64(ValueWord::none())?;
+            TypedArrayData::Matrix(m) => {
+                if u >= m.data.len() {
+                    vm.push_kinded(Self::NONE_BITS, NativeKind::Bool)
                 } else {
-                    self.push_native_bool(arr[idx as usize] != 0)?;
-                }
-                return Ok(());
-            }
-            Some(HeapValue::String(s)) => {
-                if idx < 0 {
-                    ValueWord::none()
-                } else {
-                    s.chars()
-                        .nth(idx as usize)
-                        .map(ValueWord::from_char)
-                        .unwrap_or_else(ValueWord::none)
+                    vm.push_kinded(m.data[u].to_bits(), NativeKind::Float64)
                 }
             }
-            Some(HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            }) => {
-                // Wave E+5.5 producer-side flip: Range iteration yields
-                // i64 elements; push raw native bits to match the typed
-                // `LoadLocalI64` consumer emitted for `for i in 0..n` loop
-                // vars (whose `iter_element_type_name` resolves to `int`).
-                let start_val = start
-                    .as_ref()
-                    .and_then(|s| s.as_number_coerce())
-                    .unwrap_or(0.0) as i64;
-                let end_val = end
-                    .as_ref()
-                    .and_then(|e| e.as_number_coerce())
-                    .unwrap_or(i64::MAX as f64) as i64;
-                let end_val = if *inclusive { end_val + 1 } else { end_val };
-                let count = end_val - start_val;
-                if count <= 0 || idx < 0 || idx >= count {
-                    self.push_raw_u64(ValueWord::none())?;
-                } else {
-                    self.push_native_i64(start_val + idx)?;
+            TypedArrayData::Bool(a) => match a.get(u) {
+                Some(&v) => vm.push_kinded((v != 0) as u64, NativeKind::Bool),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::String(a) => match a.get(u) {
+                Some(arc_str) => {
+                    // SAFETY: `a` is alive (we hold `arr_arc` for the duration
+                    // of the match; `arc_str` borrows from it). We bump the
+                    // inner `Arc<String>` strong-count so the pushed share
+                    // outlives the iterator's share that retires on
+                    // `drop_with_kind` after this push.
+                    unsafe {
+                        std::sync::Arc::increment_strong_count(
+                            std::sync::Arc::as_ptr(arc_str),
+                        );
+                    }
+                    let bits = std::sync::Arc::as_ptr(arc_str) as u64;
+                    vm.push_kinded(bits, NativeKind::String)
                 }
-                return Ok(());
-            }
-            Some(HeapValue::DataTable(dt)) => {
-                if idx < 0 || idx as usize >= dt.row_count() {
-                    ValueWord::none()
-                } else {
-                    ValueWord::from_row_view(0, dt.clone(), idx as usize)
-                }
-            }
-            Some(HeapValue::TableView(TableViewData::TypedTable { schema_id, table })) => {
-                if idx < 0 || idx as usize >= table.row_count() {
-                    ValueWord::none()
-                } else {
-                    ValueWord::from_row_view(*schema_id, table.clone(), idx as usize)
-                }
-            }
-            Some(HeapValue::Iterator(state)) => {
-                // For iterators in for-loops, index into the source directly.
-                crate::executor::objects::iterator_methods::iter_source_element_at(
-                    &state.source,
-                    idx as usize,
-                )
-                .unwrap_or_else(ValueWord::none)
-            }
-            Some(HeapValue::HashMap(hm)) => {
-                if idx < 0 || idx as usize >= hm.keys.len() {
-                    ValueWord::none()
-                } else {
-                    let i = idx as usize;
-                    ValueWord::from_array(shape_value::vmarray_from_vec(vec![hm.keys[i].clone(), hm.values[i].clone()]))
-                }
-            }
-            _ => {
-                return Err(VMError::TypeError {
-                    expected: "array, string, range, table, iterator, or hashmap",
-                    got: iter.type_name(),
-                });
-            }
-        };
-        self.push_raw_u64(result)?;
-        Ok(())
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            // Polymorphic Arc<HeapValue> buffer — element kind cannot be
+            // determined without inspecting each element's HeapValue arm,
+            // and the kinded element redesign is phase-2c. Surface per
+            // playbook §7 #4 + §2.7.4.
+            TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
+                "op_iter_next SURFACE: TypedArrayData::HeapValue (Arc<HeapValue> \
+                 polymorphic element buffer) — phase-2c, see ADR-006 §2.7.4 \
+                 (per-element kinded carrier pending)"
+                    .to_string(),
+            )),
+        }
     }
 }
