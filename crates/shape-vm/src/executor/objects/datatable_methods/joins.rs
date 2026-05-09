@@ -1,166 +1,90 @@
 //! DataTable join methods: innerJoin, leftJoin.
+//!
+//! ADR-006 §2.7.6 / §2.7.7 — Wave-β M-datatable cluster.
+//!
+//! ABI: handlers take `args: &[KindedSlot]` (kinded carrier per Q7) and
+//! return `Result<KindedSlot, VMError>` so the caller side
+//! (`window_join.rs` `handle_join_execute`) can dispatch without
+//! kind-stripping at the boundary. The legacy `&mut [u64]` MethodFnV2
+//! shape was kind-blind by construction (CLAUDE.md "Forbidden Patterns",
+//! the deleted ValueWord-bits carrier). The flip is the cross-cluster
+//! cascade closure surfaced from D-window-join Wave-α.
+//!
+//! Bodies are placeholders (`NotImplemented(SURFACE)`) per playbook §7.4
+//! REVISED: closure callbacks for key extraction and result selection
+//! must be re-shaped to thread `KindedSlot` argument lists through
+//! `op_call_value`, equality comparison on join keys must dispatch on
+//! slot kinds (no `as_number_coerce` on a deleted carrier), and the
+//! result table must be assembled via per-slot
+//! `Arc::into_raw + NativeKind::Ptr(HeapKind::DataTable)` per playbook §3.
+//! The legacy bodies relied on `ValueWord::from_row_view`, `ArgVec`,
+//! `vw_clone`, `is_heap()`, `as_typed_object()`, and friends — all
+//! deleted with the dynamic-fallback path.
+
+use shape_value::{KindedSlot, VMError};
 
 use crate::executor::VirtualMachine;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
-use std::mem::ManuallyDrop;
 
-use super::common::{build_datatable_from_objects_nb, extract_dt_nb};
-
-/// Compare two ValueWord join key values for equality.
-fn nb_join_keys_equal(a: &ValueWord, b: &ValueWord) -> bool {
-    if a.is_f64() && b.is_f64() {
-        let (na, nb) = (a.as_f64().unwrap(), b.as_f64().unwrap());
-        if na.is_nan() && nb.is_nan() { true } else { (na - nb).abs() < f64::EPSILON }
-    } else if a.is_i64() && b.is_i64() {
-        a.as_i64() == b.as_i64()
-    } else if (a.is_f64() || a.is_i64()) && (b.is_f64() || b.is_i64()) {
-        match (a.as_number_coerce(), b.as_number_coerce()) {
-            (Some(na), Some(nb)) => (na - nb).abs() < f64::EPSILON,
-            _ => false,
-        }
-    } else if a.is_bool() && b.is_bool() {
-        a.as_bool() == b.as_bool()
-    } else if a.is_none() && b.is_none() {
-        true
-    } else if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-        sa == sb
-    } else {
-        false
-    }
-}
-
-/// `dt.innerJoin(other, leftKey, rightKey, resultSelector)` — inner join two DataTables.
+/// `dt.innerJoin(other, leftKey, rightKey, resultSelector)` — kinded ABI.
 ///
-/// Key closures receive RowView and should return a comparable value (number or string).
-/// Result selector receives two RowView args (left, right) and should return an object.
-/// The result is a new DataTable built from the collected objects.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
+/// Args (post-receiver-on-stack convention):
+///   `args[0]` = receiver `NativeKind::Ptr(HeapKind::DataTable)` (or
+///       `Ptr(HeapKind::TableView)` for typed/indexed variants),
+///   `args[1]` = right table (same kind family as receiver),
+///   `args[2]` = left key closure (`Ptr(HeapKind::Closure)` /
+///       `Ptr(HeapKind::Future)` — see playbook §3 callable family),
+///   `args[3]` = right key closure (same shape),
+///   `args[4]` = result selector closure (same shape).
+///
+/// Returns: `KindedSlot { kind: NativeKind::Ptr(HeapKind::DataTable),
+///                        slot: ValueSlot::from_data_table(Arc<DataTable>) }`.
 pub(crate) fn handle_inner_join(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    if args.len() != 5 {
-        return Err(VMError::RuntimeError(
-            "innerJoin() requires 4 arguments (other, leftKey, rightKey, resultSelector)"
-                .to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let left_dt = extract_dt_nb(&receiver)?.clone();
-    let arg1 = borrow_vw(args[1]);
-    let right_dt = extract_dt_nb(&arg1)?.clone();
-    let left_key_bits = args[2];
-    let right_key_bits = args[3];
-    let result_selector_bits = args[4];
-
-    let left_schema_id = left_dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let right_schema_id = right_dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let left_arc = Arc::new(left_dt.as_ref().clone());
-    let right_arc = Arc::new(right_dt.as_ref().clone());
-
-    let mut rows: ArgVec = ArgVec::new();
-
-    for l_idx in 0..left_arc.row_count() {
-        let left_rv_bits = ValueWord::from_row_view(left_schema_id, left_arc.clone(), l_idx).into_raw_bits();
-        let left_key_result =
-            vm.call_value_immediate_raw(left_key_bits, &[left_rv_bits], ctx.as_deref_mut())?;
-        let left_key = ValueWord::from_raw_bits(left_key_result);
-
-        for r_idx in 0..right_arc.row_count() {
-            let right_rv_bits = ValueWord::from_row_view(right_schema_id, right_arc.clone(), r_idx).into_raw_bits();
-            let right_key_result =
-                vm.call_value_immediate_raw(right_key_bits, &[right_rv_bits], ctx.as_deref_mut())?;
-            let right_key = ValueWord::from_raw_bits(right_key_result);
-
-            if nb_join_keys_equal(&left_key, &right_key) {
-                let result_bits = vm.call_value_immediate_raw(
-                    result_selector_bits,
-                    &[left_rv_bits, right_rv_bits],
-                    ctx.as_deref_mut(),
-                )?;
-                rows.push(result_bits);
-            }
-        }
-    }
-
-    Ok(build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "innerJoin — SURFACE: phase-2c body migration. Kinded ABI flip \
+         landed (M-datatable Wave-β closes the D-window-join cross-cluster \
+         cascade); body re-shape requires (1) receiver kind dispatch via \
+         slot.as_heap_value() + HeapValue::DataTable / HeapValue::TableView \
+         match per ADR-005 §1, (2) per-row RowView construction as kinded \
+         slots (replaces deleted `ValueWord::from_row_view`), (3) closure \
+         callback through op_call_value with kinded arg lists (replaces \
+         deleted `call_value_immediate_raw`), (4) join-key equality via \
+         per-kind dispatch (replaces deleted `as_number_coerce` on the \
+         legacy ValueWord carrier), (5) result table assembly via \
+         `Arc::into_raw(Arc<DataTable>) + push_kinded(bits, \
+         NativeKind::Ptr(HeapKind::DataTable))` per playbook §3."
+            .to_string(),
+    ))
 }
 
+/// `dt.leftJoin(other, leftKey, rightKey, resultSelector)` — kinded ABI.
+///
+/// Args identical to `handle_inner_join`. Unmatched-row branch must
+/// supply a kinded `none` slot to the result selector — per ADR-006
+/// §2.7 the canonical sentinel is `(0u64, NativeKind::Bool)` only when
+/// the kind is statically known to be the §2.7 sentinel; for an empty
+/// `TypedObject` payload the correct kind is
+/// `NativeKind::Ptr(HeapKind::TypedObject)` with bits =
+/// `Arc::into_raw(Arc<TypedObjectStorage>)` of an empty-schema instance.
+///
+/// Returns: `KindedSlot { kind: NativeKind::Ptr(HeapKind::DataTable),
+///                        slot: ValueSlot::from_data_table(Arc<DataTable>) }`.
 pub(crate) fn handle_left_join(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    if args.len() != 5 {
-        return Err(VMError::RuntimeError(
-            "leftJoin() requires 4 arguments (other, leftKey, rightKey, resultSelector)"
-                .to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let left_dt = extract_dt_nb(&receiver)?.clone();
-    let arg1 = borrow_vw(args[1]);
-    let right_dt = extract_dt_nb(&arg1)?.clone();
-    let left_key_bits = args[2];
-    let right_key_bits = args[3];
-    let result_selector_bits = args[4];
-
-    let left_schema_id = left_dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let right_schema_id = right_dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let left_arc = Arc::new(left_dt.as_ref().clone());
-    let right_arc = Arc::new(right_dt.as_ref().clone());
-
-    let mut rows: ArgVec = ArgVec::new();
-
-    for l_idx in 0..left_arc.row_count() {
-        let left_rv_bits = ValueWord::from_row_view(left_schema_id, left_arc.clone(), l_idx).into_raw_bits();
-        let left_key_result =
-            vm.call_value_immediate_raw(left_key_bits, &[left_rv_bits], ctx.as_deref_mut())?;
-        let left_key = ValueWord::from_raw_bits(left_key_result);
-
-        let mut found_match = false;
-
-        for r_idx in 0..right_arc.row_count() {
-            let right_rv_bits = ValueWord::from_row_view(right_schema_id, right_arc.clone(), r_idx).into_raw_bits();
-            let right_key_result =
-                vm.call_value_immediate_raw(right_key_bits, &[right_rv_bits], ctx.as_deref_mut())?;
-            let right_key = ValueWord::from_raw_bits(right_key_result);
-
-            if nb_join_keys_equal(&left_key, &right_key) {
-                let result_bits = vm.call_value_immediate_raw(
-                    result_selector_bits,
-                    &[left_rv_bits, right_rv_bits],
-                    ctx.as_deref_mut(),
-                )?;
-                rows.push(result_bits);
-                found_match = true;
-            }
-        }
-
-        if !found_match {
-            let empty_schema = vm.builtin_schemas.empty_object;
-            let empty_right =
-                ValueWord::from_heap_value(shape_value::heap_value::HeapValue::TypedObject {
-                    schema_id: empty_schema as u64,
-                    slots: vec![].into_boxed_slice(),
-                    heap_mask: 0,
-                });
-            let result_bits = vm.call_value_immediate_raw(
-                result_selector_bits,
-                &[left_rv_bits, empty_right.into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?;
-            rows.push(result_bits);
-        }
-    }
-
-    Ok(build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "leftJoin — SURFACE: phase-2c body migration. Same kinded ABI as \
+         innerJoin (M-datatable Wave-β); unmatched-row branch additionally \
+         needs an empty-TypedObject argument to the result selector with \
+         kind = NativeKind::Ptr(HeapKind::TypedObject) and bits = \
+         Arc::into_raw(Arc<TypedObjectStorage>) of an empty-schema instance \
+         (NOT a Bool-default forbidden by §2.7.7 #9). Closure dispatch and \
+         result table assembly identical to innerJoin."
+            .to_string(),
+    ))
 }
