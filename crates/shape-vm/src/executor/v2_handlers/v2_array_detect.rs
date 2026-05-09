@@ -8,8 +8,9 @@
 //! However, generic consumer-side opcodes (`Length`, `GetProp`, `SetProp`,
 //! `IterNext`) and generic method dispatch (`.len()`, `.first()`, `.last()`,
 //! `.clone()`, `.sum()`, `.push()`, `.map()`, `.filter()`) only have a runtime
-//! `ValueWord` to inspect — they need to recognize the v2 typed array pointer
-//! and dispatch to a typed implementation based on the element type.
+//! `(bits, NativeKind)` pair to inspect — they need to recognize the v2 typed
+//! array pointer and dispatch to a typed implementation based on the element
+//! type.
 //!
 //! ## Element type encoding
 //!
@@ -19,9 +20,18 @@
 //!
 //! Allocation handlers in `array.rs` stamp the byte after allocating;
 //! consumer paths in this module read the byte to dispatch.
+//!
+//! ## ADR-006 §2.7.7 / Wave 6.5 cluster D-v2-array-detect
+//!
+//! API surface uses the kinded `(u64, NativeKind)` carrier shape. v2 typed
+//! array pointers flow through the VM stack as raw `*mut TypedArray<T>` bits
+//! tagged with `NativeKind::UInt64` (no Arc, no refcount — see
+//! `v2_handlers/array.rs`). Detection rejects any other kind. Element reads
+//! return the element's native bit pattern paired with the element's
+//! `NativeKind` (Float64 / Int64 / Int32 / Bool). Writes accept the same
+//! pair, decode bits per kind, and reject incompatible kinds.
 
-use shape_value::{ValueWord, ValueWordExt};
-use shape_value::heap_value::NativeScalar;
+use shape_value::NativeKind;
 use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use shape_value::v2::typed_array::TypedArray;
 
@@ -50,6 +60,18 @@ impl V2ElemType {
             ELEM_TYPE_I32 => Some(V2ElemType::I32),
             ELEM_TYPE_BOOL => Some(V2ElemType::Bool),
             _ => None,
+        }
+    }
+
+    /// Native kind of the array's elements (read result kind / write input
+    /// kind family).
+    #[inline]
+    pub fn elem_kind(self) -> NativeKind {
+        match self {
+            V2ElemType::F64 => NativeKind::Float64,
+            V2ElemType::I64 => NativeKind::Int64,
+            V2ElemType::I32 => NativeKind::Int32,
+            V2ElemType::Bool => NativeKind::Bool,
         }
     }
 }
@@ -85,13 +107,22 @@ unsafe fn read_elem_type_byte(ptr: *const u8) -> u8 {
     unsafe { *ptr.add(7) }
 }
 
-/// Try to interpret a `ValueWord` as a v2 typed array pointer.
+/// Try to interpret a `(bits, kind)` pair as a v2 typed array pointer.
+///
+/// v2 typed array pointers flow through the kinded API as raw `*mut TypedArray<T>`
+/// values stored in `NativeKind::UInt64` slots — no Arc, no refcount (see
+/// `v2_handlers/array.rs` allocation path). Any other `kind` is rejected so a
+/// stray heap pointer (e.g. `Ptr(HeapKind::TypedArray)` carrying an
+/// `Arc<TypedArrayData>` from the legacy boxed path) is not misinterpreted.
 #[inline]
-pub fn as_v2_typed_array(vw: &ValueWord) -> Option<V2TypedArrayView> {
-    let ptr = match vw.as_native_scalar()? {
-        NativeScalar::Ptr(p) if p != 0 => p as *mut u8,
-        _ => return None,
-    };
+pub fn as_v2_typed_array(bits: u64, kind: NativeKind) -> Option<V2TypedArrayView> {
+    if kind != NativeKind::UInt64 {
+        return None;
+    }
+    if bits == 0 {
+        return None;
+    }
+    let ptr = bits as usize as *mut u8;
     let header = unsafe { &*(ptr as *const HeapHeader) };
     if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
         return None;
@@ -107,76 +138,121 @@ pub fn as_v2_typed_array(vw: &ValueWord) -> Option<V2TypedArrayView> {
     })
 }
 
-/// Read element `index` from a v2 typed array as a `ValueWord`.
+// ── Bit/kind decode helpers (call-site, ADR-006 §2.7.6) ─────────────────────
+
+/// Decode `(bits, kind)` to an `f64`. Accepts `Float64` directly and any
+/// integer-family kind (cast to f64). Returns `None` on incompatible kinds.
 #[inline]
-pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<ValueWord> {
+fn decode_f64(bits: u64, kind: NativeKind) -> Option<f64> {
+    if matches!(kind, NativeKind::Float64 | NativeKind::NullableFloat64) {
+        return Some(f64::from_bits(bits));
+    }
+    if kind.is_integer_family() {
+        return Some(decode_i64(bits, kind)? as f64);
+    }
+    None
+}
+
+/// Decode `(bits, kind)` to an `i64`. Accepts integer-family kinds with the
+/// proper sign-extension; also accepts `Float64` (truncate). Returns `None`
+/// on incompatible kinds.
+#[inline]
+fn decode_i64(bits: u64, kind: NativeKind) -> Option<i64> {
+    match kind {
+        NativeKind::Int64 | NativeKind::NullableInt64 => Some(bits as i64),
+        NativeKind::Int32 | NativeKind::NullableInt32 => Some(bits as u32 as i32 as i64),
+        NativeKind::Int16 | NativeKind::NullableInt16 => Some(bits as u16 as i16 as i64),
+        NativeKind::Int8 | NativeKind::NullableInt8 => Some(bits as u8 as i8 as i64),
+        NativeKind::IntSize | NativeKind::NullableIntSize => Some(bits as isize as i64),
+        NativeKind::UInt64 | NativeKind::NullableUInt64 => Some(bits as i64),
+        NativeKind::UInt32 | NativeKind::NullableUInt32 => Some(bits as u32 as i64),
+        NativeKind::UInt16 | NativeKind::NullableUInt16 => Some(bits as u16 as i64),
+        NativeKind::UInt8 | NativeKind::NullableUInt8 => Some(bits as u8 as i64),
+        NativeKind::UIntSize | NativeKind::NullableUIntSize => Some(bits as usize as i64),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Some(f64::from_bits(bits) as i64),
+        _ => None,
+    }
+}
+
+/// Decode `(bits, kind)` to a `bool`. Accepts only `NativeKind::Bool`.
+#[inline]
+fn decode_bool(bits: u64, kind: NativeKind) -> Option<bool> {
+    if matches!(kind, NativeKind::Bool) {
+        Some(bits != 0)
+    } else {
+        None
+    }
+}
+
+/// Read element `index` from a v2 typed array, returning `(bits, NativeKind)`.
+///
+/// The `NativeKind` is the element kind (`Float64` / `Int64` / `Int32` /
+/// `Bool`) — callers consume it directly without further inspection.
+#[inline]
+pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeKind)> {
     if index >= view.len {
         return None;
     }
-    let val = match view.elem_type {
+    let pair = match view.elem_type {
         V2ElemType::F64 => unsafe {
             let arr = view.ptr as *const TypedArray<f64>;
-            ValueWord::from_f64(TypedArray::<f64>::get_unchecked(arr, index))
+            let v = TypedArray::<f64>::get_unchecked(arr, index);
+            (v.to_bits(), NativeKind::Float64)
         },
         V2ElemType::I64 => unsafe {
             let arr = view.ptr as *const TypedArray<i64>;
-            ValueWord::from_i64(TypedArray::<i64>::get_unchecked(arr, index))
+            let v = TypedArray::<i64>::get_unchecked(arr, index);
+            (v as u64, NativeKind::Int64)
         },
         V2ElemType::I32 => unsafe {
             let arr = view.ptr as *const TypedArray<i32>;
-            ValueWord::from_i64(TypedArray::<i32>::get_unchecked(arr, index) as i64)
+            let v = TypedArray::<i32>::get_unchecked(arr, index) as i64;
+            (v as u64, NativeKind::Int32)
         },
         V2ElemType::Bool => unsafe {
             let arr = view.ptr as *const TypedArray<u8>;
-            ValueWord::from_bool(TypedArray::<u8>::get_unchecked(arr, index) != 0)
+            let v = TypedArray::<u8>::get_unchecked(arr, index) != 0;
+            (v as u64, NativeKind::Bool)
         },
     };
-    Some(val)
+    Some(pair)
 }
 
-/// Write `value` to element `index` of a v2 typed array.
+/// Write `(bits, kind)` to element `index` of a v2 typed array.
 #[inline]
 pub fn write_element(
     view: &V2TypedArrayView,
     index: u32,
-    value: &ValueWord,
+    bits: u64,
+    kind: NativeKind,
 ) -> Result<(), &'static str> {
     if index >= view.len {
         return Err("index out of bounds");
     }
     match view.elem_type {
         V2ElemType::F64 => {
-            let v = value
-                .as_f64()
-                .or_else(|| value.as_i64().map(|i| i as f64))
-                .ok_or("expected f64-compatible value")?;
+            let v = decode_f64(bits, kind).ok_or("expected f64-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<f64>;
                 TypedArray::<f64>::set(arr, index, v);
             }
         }
         V2ElemType::I64 => {
-            let v = value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f as i64))
-                .ok_or("expected i64-compatible value")?;
+            let v = decode_i64(bits, kind).ok_or("expected i64-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<i64>;
                 TypedArray::<i64>::set(arr, index, v);
             }
         }
         V2ElemType::I32 => {
-            let v = value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f as i64))
-                .ok_or("expected i32-compatible value")?;
+            let v = decode_i64(bits, kind).ok_or("expected i32-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<i32>;
                 TypedArray::<i32>::set(arr, index, v as i32);
             }
         }
         V2ElemType::Bool => {
-            let v = value.as_bool().ok_or("expected bool value")?;
+            let v = decode_bool(bits, kind).ok_or("expected bool value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<u8>;
                 TypedArray::<u8>::set(arr, index, if v { 1 } else { 0 });
@@ -186,42 +262,37 @@ pub fn write_element(
     Ok(())
 }
 
-/// Append `value` to a v2 typed array.
+/// Append `(bits, kind)` to a v2 typed array.
 #[inline]
-pub fn push_element(view: &V2TypedArrayView, value: &ValueWord) -> Result<(), &'static str> {
+pub fn push_element(
+    view: &V2TypedArrayView,
+    bits: u64,
+    kind: NativeKind,
+) -> Result<(), &'static str> {
     match view.elem_type {
         V2ElemType::F64 => {
-            let v = value
-                .as_f64()
-                .or_else(|| value.as_i64().map(|i| i as f64))
-                .ok_or("expected f64-compatible value")?;
+            let v = decode_f64(bits, kind).ok_or("expected f64-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<f64>;
                 TypedArray::<f64>::push(arr, v);
             }
         }
         V2ElemType::I64 => {
-            let v = value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f as i64))
-                .ok_or("expected i64-compatible value")?;
+            let v = decode_i64(bits, kind).ok_or("expected i64-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<i64>;
                 TypedArray::<i64>::push(arr, v);
             }
         }
         V2ElemType::I32 => {
-            let v = value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|f| f as i64))
-                .ok_or("expected i32-compatible value")?;
+            let v = decode_i64(bits, kind).ok_or("expected i32-compatible value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<i32>;
                 TypedArray::<i32>::push(arr, v as i32);
             }
         }
         V2ElemType::Bool => {
-            let v = value.as_bool().ok_or("expected bool value")?;
+            let v = decode_bool(bits, kind).ok_or("expected bool value")?;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<u8>;
                 TypedArray::<u8>::push(arr, if v { 1 } else { 0 });
@@ -231,25 +302,25 @@ pub fn push_element(view: &V2TypedArrayView, value: &ValueWord) -> Result<(), &'
     Ok(())
 }
 
-/// Pop the last element from a v2 typed array.
+/// Pop the last element from a v2 typed array, returning `(bits, NativeKind)`.
 #[inline]
-pub fn pop_element(view: &V2TypedArrayView) -> Option<ValueWord> {
+pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::F64 => unsafe {
             let arr = view.ptr as *mut TypedArray<f64>;
-            TypedArray::<f64>::pop(arr).map(ValueWord::from_f64)
+            TypedArray::<f64>::pop(arr).map(|v| (v.to_bits(), NativeKind::Float64))
         },
         V2ElemType::I64 => unsafe {
             let arr = view.ptr as *mut TypedArray<i64>;
-            TypedArray::<i64>::pop(arr).map(ValueWord::from_i64)
+            TypedArray::<i64>::pop(arr).map(|v| (v as u64, NativeKind::Int64))
         },
         V2ElemType::I32 => unsafe {
             let arr = view.ptr as *mut TypedArray<i32>;
-            TypedArray::<i32>::pop(arr).map(|v| ValueWord::from_i64(v as i64))
+            TypedArray::<i32>::pop(arr).map(|v| (v as i64 as u64, NativeKind::Int32))
         },
         V2ElemType::Bool => unsafe {
             let arr = view.ptr as *mut TypedArray<u8>;
-            TypedArray::<u8>::pop(arr).map(|v| ValueWord::from_bool(v != 0))
+            TypedArray::<u8>::pop(arr).map(|v| ((v != 0) as u64, NativeKind::Bool))
         },
     }
 }
@@ -260,7 +331,10 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<ValueWord> {
 /// arrays with >= `SIMD_SUM_THRESHOLD` elements, delivering ~4x throughput
 /// on AVX2-capable CPUs. Smaller arrays fall back to scalar accumulation
 /// where the SIMD setup overhead would exceed the savings.
-pub fn sum_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+///
+/// Returns `(bits, NativeKind::Float64)` for F64 inputs and
+/// `(bits, NativeKind::Int64)` for integer inputs. `None` for Bool inputs.
+pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     /// Minimum element count at which SIMD reduction beats scalar accumulation.
     /// Determined empirically — below this, vector load/splat overhead dominates.
     const SIMD_SUM_THRESHOLD: u32 = 16;
@@ -269,26 +343,26 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
         V2ElemType::F64 => {
             let len = view.len;
             if len == 0 {
-                return Some(ValueWord::from_f64(0.0));
+                return Some((0.0_f64.to_bits(), NativeKind::Float64));
             }
             let data = unsafe {
                 let arr = view.ptr as *const TypedArray<f64>;
                 (*arr).data as *const f64
             };
             let s = unsafe { simd_sum_f64(data, len as usize, SIMD_SUM_THRESHOLD as usize) };
-            Some(ValueWord::from_f64(s))
+            Some((s.to_bits(), NativeKind::Float64))
         }
         V2ElemType::I64 => {
             let len = view.len;
             if len == 0 {
-                return Some(ValueWord::from_i64(0));
+                return Some((0u64, NativeKind::Int64));
             }
             let data = unsafe {
                 let arr = view.ptr as *const TypedArray<i64>;
                 (*arr).data as *const i64
             };
             let s = unsafe { simd_sum_i64(data, len as usize, SIMD_SUM_THRESHOLD as usize) };
-            Some(ValueWord::from_i64(s))
+            Some((s as u64, NativeKind::Int64))
         }
         V2ElemType::I32 => {
             let mut s: i64 = 0;
@@ -299,7 +373,7 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 };
                 s = s.wrapping_add(val);
             }
-            Some(ValueWord::from_i64(s))
+            Some((s as u64, NativeKind::Int64))
         }
         V2ElemType::Bool => None,
     }
@@ -526,12 +600,13 @@ unsafe fn simd_sum_i64(data: *const i64, len: usize, threshold: usize) -> i64 {
 }
 
 /// Compute the average (mean) of all elements of a numeric v2 typed array.
-/// Returns NaN for empty arrays.
-pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+/// Returns NaN for empty arrays. Returns `(bits, NativeKind::Float64)` always
+/// (mean of integer arrays is a float).
+pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     if view.len == 0 {
         return match view.elem_type {
             V2ElemType::F64 | V2ElemType::I64 | V2ElemType::I32 => {
-                Some(ValueWord::from_f64(f64::NAN))
+                Some((f64::NAN.to_bits(), NativeKind::Float64))
             }
             V2ElemType::Bool => None,
         };
@@ -545,7 +620,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 (*arr).data as *const f64
             };
             let s = unsafe { simd_sum_f64(data, view.len as usize, 16) };
-            Some(ValueWord::from_f64(s / view.len as f64))
+            Some(((s / view.len as f64).to_bits(), NativeKind::Float64))
         }
         V2ElemType::I64 => {
             let mut s = 0.0_f64;
@@ -555,7 +630,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     TypedArray::<i64>::get_unchecked(arr, i) as f64
                 };
             }
-            Some(ValueWord::from_f64(s / view.len as f64))
+            Some(((s / view.len as f64).to_bits(), NativeKind::Float64))
         }
         V2ElemType::I32 => {
             let mut s = 0.0_f64;
@@ -565,18 +640,23 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     TypedArray::<i32>::get_unchecked(arr, i) as f64
                 };
             }
-            Some(ValueWord::from_f64(s / view.len as f64))
+            Some(((s / view.len as f64).to_bits(), NativeKind::Float64))
         }
         V2ElemType::Bool => None,
     }
 }
 
 /// Compute the minimum element of a numeric v2 typed array.
-pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+///
+/// Empty arrays return:
+///   - F64 input → `(NaN.to_bits(), Float64)`
+///   - I64/I32 input → `(0, Bool)` (the §2.7 null/unit sentinel)
+///   - Bool input → `None`
+pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     if view.len == 0 {
         return match view.elem_type {
-            V2ElemType::F64 => Some(ValueWord::from_f64(f64::NAN)),
-            V2ElemType::I64 | V2ElemType::I32 => Some(ValueWord::none()),
+            V2ElemType::F64 => Some((f64::NAN.to_bits(), NativeKind::Float64)),
+            V2ElemType::I64 | V2ElemType::I32 => Some((0u64, NativeKind::Bool)),
             V2ElemType::Bool => None,
         };
     }
@@ -587,7 +667,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 (*arr).data as *const f64
             };
             let min = unsafe { simd_min_f64(data, view.len as usize, 16) };
-            Some(ValueWord::from_f64(min))
+            Some((min.to_bits(), NativeKind::Float64))
         }
         V2ElemType::I64 => {
             let mut min = i64::MAX;
@@ -600,7 +680,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     min = v;
                 }
             }
-            Some(ValueWord::from_i64(min))
+            Some((min as u64, NativeKind::Int64))
         }
         V2ElemType::I32 => {
             let mut min = i32::MAX as i64;
@@ -613,18 +693,18 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     min = v;
                 }
             }
-            Some(ValueWord::from_i64(min))
+            Some((min as u64, NativeKind::Int64))
         }
         V2ElemType::Bool => None,
     }
 }
 
 /// Compute the maximum element of a numeric v2 typed array.
-pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     if view.len == 0 {
         return match view.elem_type {
-            V2ElemType::F64 => Some(ValueWord::from_f64(f64::NAN)),
-            V2ElemType::I64 | V2ElemType::I32 => Some(ValueWord::none()),
+            V2ElemType::F64 => Some((f64::NAN.to_bits(), NativeKind::Float64)),
+            V2ElemType::I64 | V2ElemType::I32 => Some((0u64, NativeKind::Bool)),
             V2ElemType::Bool => None,
         };
     }
@@ -635,7 +715,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 (*arr).data as *const f64
             };
             let max = unsafe { simd_max_f64(data, view.len as usize, 16) };
-            Some(ValueWord::from_f64(max))
+            Some((max.to_bits(), NativeKind::Float64))
         }
         V2ElemType::I64 => {
             let mut max = i64::MIN;
@@ -648,7 +728,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     max = v;
                 }
             }
-            Some(ValueWord::from_i64(max))
+            Some((max as u64, NativeKind::Int64))
         }
         V2ElemType::I32 => {
             let mut max = i32::MIN as i64;
@@ -661,19 +741,19 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     max = v;
                 }
             }
-            Some(ValueWord::from_i64(max))
+            Some((max as u64, NativeKind::Int64))
         }
         V2ElemType::Bool => None,
     }
 }
 
 /// Compute the sample variance of a float v2 typed array.
-/// Returns NaN for arrays with fewer than 2 elements.
-pub fn variance_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+/// Returns NaN for arrays with fewer than 2 elements. Always returns Float64.
+pub fn variance_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::F64 => {
             if view.len < 2 {
-                return Some(ValueWord::from_f64(f64::NAN));
+                return Some((f64::NAN.to_bits(), NativeKind::Float64));
             }
             let n = view.len as f64;
             let mut sum = 0.0_f64;
@@ -693,17 +773,17 @@ pub fn variance_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 let d = v - mean;
                 var_sum += d * d;
             }
-            Some(ValueWord::from_f64(var_sum / (n - 1.0)))
+            Some(((var_sum / (n - 1.0)).to_bits(), NativeKind::Float64))
         }
         _ => None,
     }
 }
 
 /// Compute the sample standard deviation of a float v2 typed array.
-pub fn std_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
-    variance_elements(view).map(|vw| {
-        let v = vw.as_f64().unwrap_or(f64::NAN);
-        ValueWord::from_f64(v.sqrt())
+pub fn std_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
+    variance_elements(view).map(|(bits, _kind)| {
+        let v = f64::from_bits(bits);
+        (v.sqrt().to_bits(), NativeKind::Float64)
     })
 }
 
@@ -711,7 +791,7 @@ pub fn std_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
 pub fn dot_elements(
     view_a: &V2TypedArrayView,
     view_b: &V2TypedArrayView,
-) -> Option<ValueWord> {
+) -> Option<(u64, NativeKind)> {
     if view_a.elem_type != V2ElemType::F64 || view_b.elem_type != V2ElemType::F64 {
         return None;
     }
@@ -730,11 +810,11 @@ pub fn dot_elements(
         };
         sum += a * b;
     }
-    Some(ValueWord::from_f64(sum))
+    Some((sum.to_bits(), NativeKind::Float64))
 }
 
 /// Compute the Euclidean norm of a float v2 typed array.
-pub fn norm_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+pub fn norm_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::F64 => {
             let mut sum_sq = 0.0_f64;
@@ -745,14 +825,14 @@ pub fn norm_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                 };
                 sum_sq += v * v;
             }
-            Some(ValueWord::from_f64(sum_sq.sqrt()))
+            Some((sum_sq.sqrt().to_bits(), NativeKind::Float64))
         }
         _ => None,
     }
 }
 
-/// Count `true` values in a bool v2 typed array.
-pub fn count_true_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+/// Count `true` values in a bool v2 typed array. Returns `(count, Int64)`.
+pub fn count_true_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::Bool => {
             let mut count = 0_i64;
@@ -765,14 +845,14 @@ pub fn count_true_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     count += 1;
                 }
             }
-            Some(ValueWord::from_i64(count))
+            Some((count as u64, NativeKind::Int64))
         }
         _ => None,
     }
 }
 
 /// Check if any element in a bool v2 typed array is true.
-pub fn any_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+pub fn any_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::Bool => {
             for i in 0..view.len {
@@ -781,17 +861,17 @@ pub fn any_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     TypedArray::<u8>::get_unchecked(arr, i)
                 };
                 if v != 0 {
-                    return Some(ValueWord::from_bool(true));
+                    return Some((1u64, NativeKind::Bool));
                 }
             }
-            Some(ValueWord::from_bool(false))
+            Some((0u64, NativeKind::Bool))
         }
         _ => None,
     }
 }
 
 /// Check if all elements in a bool v2 typed array are true.
-pub fn all_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+pub fn all_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
     match view.elem_type {
         V2ElemType::Bool => {
             for i in 0..view.len {
@@ -800,10 +880,10 @@ pub fn all_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
                     TypedArray::<u8>::get_unchecked(arr, i)
                 };
                 if v == 0 {
-                    return Some(ValueWord::from_bool(false));
+                    return Some((0u64, NativeKind::Bool));
                 }
             }
-            Some(ValueWord::from_bool(true))
+            Some((1u64, NativeKind::Bool))
         }
         _ => None,
     }
@@ -1039,6 +1119,13 @@ pub fn diff_f64(view: &V2TypedArrayView) -> Option<*mut u8> {
 mod tests {
     use super::*;
 
+    /// Build the kinded `(bits, kind)` pair for a v2 typed array pointer
+    /// (the shape `v2_handlers/array.rs` push: raw ptr bits + `UInt64`).
+    #[inline]
+    fn ptr_pair(ptr: *mut u8) -> (u64, NativeKind) {
+        (ptr as usize as u64, NativeKind::UInt64)
+    }
+
     #[test]
     fn test_stamp_and_read_elem_type_f64() {
         let arr = TypedArray::<f64>::with_capacity(0);
@@ -1058,8 +1145,8 @@ mod tests {
             TypedArray::push(arr, 2.5);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
         }
-        let vw = ValueWord::from_native_ptr(arr as usize);
-        let view = as_v2_typed_array(&vw).expect("should recognize v2 typed array");
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
         assert_eq!(view.elem_type, V2ElemType::F64);
         assert_eq!(view.len, 2);
         unsafe {
@@ -1073,11 +1160,11 @@ mod tests {
         unsafe {
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
         }
-        let vw = ValueWord::from_native_ptr(arr as usize);
-        let view = as_v2_typed_array(&vw).unwrap();
-        assert_eq!(read_element(&view, 0).unwrap().as_i64(), Some(10));
-        assert_eq!(read_element(&view, 1).unwrap().as_i64(), Some(20));
-        assert_eq!(read_element(&view, 2).unwrap().as_i64(), Some(30));
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        assert_eq!(read_element(&view, 0), Some((10u64, NativeKind::Int64)));
+        assert_eq!(read_element(&view, 1), Some((20u64, NativeKind::Int64)));
+        assert_eq!(read_element(&view, 2), Some((30u64, NativeKind::Int64)));
         assert!(read_element(&view, 3).is_none());
         unsafe {
             TypedArray::drop_array(arr);
@@ -1090,14 +1177,14 @@ mod tests {
         unsafe {
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
         }
-        let vw = ValueWord::from_native_ptr(arr as usize);
-        let view = as_v2_typed_array(&vw).unwrap();
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
         let cloned_ptr = clone_array(&view);
-        let cloned_vw = ValueWord::from_native_ptr(cloned_ptr as usize);
-        let cloned_view = as_v2_typed_array(&cloned_vw).expect("clone should be detectable");
+        let (cb, ck) = ptr_pair(cloned_ptr);
+        let cloned_view = as_v2_typed_array(cb, ck).expect("clone should be detectable");
         assert_eq!(cloned_view.elem_type, V2ElemType::I64);
         assert_eq!(cloned_view.len, 3);
-        assert_eq!(read_element(&cloned_view, 0).unwrap().as_i64(), Some(100));
+        assert_eq!(read_element(&cloned_view, 0), Some((100u64, NativeKind::Int64)));
         unsafe {
             TypedArray::<i64>::drop_array(cloned_ptr as *mut TypedArray<i64>);
             TypedArray::drop_array(arr);
@@ -1106,13 +1193,16 @@ mod tests {
 
     #[test]
     fn test_non_pointer_value_returns_none() {
-        let int_vw = ValueWord::from_i64(42);
-        assert!(as_v2_typed_array(&int_vw).is_none());
+        // Wrong kind: integer literal, not a pointer.
+        assert!(as_v2_typed_array(42u64, NativeKind::Int64).is_none());
 
-        let float_vw = ValueWord::from_f64(3.14);
-        assert!(as_v2_typed_array(&float_vw).is_none());
+        // Wrong kind: float bits.
+        assert!(as_v2_typed_array(3.14_f64.to_bits(), NativeKind::Float64).is_none());
 
-        let bool_vw = ValueWord::from_bool(true);
-        assert!(as_v2_typed_array(&bool_vw).is_none());
+        // Wrong kind: bool.
+        assert!(as_v2_typed_array(1u64, NativeKind::Bool).is_none());
+
+        // Right kind but null pointer.
+        assert!(as_v2_typed_array(0u64, NativeKind::UInt64).is_none());
     }
 }
