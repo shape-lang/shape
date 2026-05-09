@@ -89,11 +89,11 @@ impl VirtualMachine {
                         let r = kinded_truthy(a_bits, a_kind) && kinded_truthy(b_bits, b_kind);
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
-                        self.push_native_bool(r)?;
+                        self.push_kinded(r as u64, NativeKind::Bool)?;
                     }
                 } else {
                     let r = kinded_truthy(a_bits, a_kind) && kinded_truthy(b_bits, b_kind);
-                    self.push_native_bool(r)?;
+                    self.push_kinded(r as u64, NativeKind::Bool)?;
                 }
             }
             Or => {
@@ -116,11 +116,11 @@ impl VirtualMachine {
                         let r = kinded_truthy(a_bits, a_kind) || kinded_truthy(b_bits, b_kind);
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
-                        self.push_native_bool(r)?;
+                        self.push_kinded(r as u64, NativeKind::Bool)?;
                     }
                 } else {
                     let r = kinded_truthy(a_bits, a_kind) || kinded_truthy(b_bits, b_kind);
-                    self.push_native_bool(r)?;
+                    self.push_kinded(r as u64, NativeKind::Bool)?;
                 }
             }
             Not => {
@@ -134,10 +134,10 @@ impl VirtualMachine {
                     } else {
                         let r = !kinded_truthy(bits, kind);
                         drop_with_kind(bits, kind);
-                        self.push_native_bool(r)?;
+                        self.push_kinded(r as u64, NativeKind::Bool)?;
                     }
                 } else {
-                    self.push_native_bool(!kinded_truthy(bits, kind))?;
+                    self.push_kinded(!kinded_truthy(bits, kind) as u64, NativeKind::Bool)?;
                 }
             }
             _ => unreachable!(
