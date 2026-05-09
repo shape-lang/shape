@@ -112,11 +112,16 @@ impl VirtualMachine {
         // code can access locals by their original variable index.
         let mut ctx_buf = [0u64; CTX_U64_SIZE];
         for (i, &local_idx) in osr_entry.live_locals.iter().enumerate() {
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(NativeKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 let vw_slice = self.stack_slice_raw(slot_idx..(slot_idx + 1));
@@ -147,11 +152,16 @@ impl VirtualMachine {
                 "OSR local {} exceeds capacity after successful JIT execution",
                 local_idx
             );
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(NativeKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
@@ -187,11 +197,16 @@ impl VirtualMachine {
             if local_idx as usize >= 256 {
                 continue; // Defensive: should never happen (JIT rejects at compile time)
             }
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(NativeKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
                 self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
@@ -234,11 +249,17 @@ impl VirtualMachine {
 
         // Restore locals using the JIT-to-bytecode index mapping
         for (i, &(jit_idx, bc_idx)) in deopt_info.local_mapping.iter().enumerate() {
-            let kind = deopt_info
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(NativeKind::Unknown);
+            // ADR-006 §2.7.5.1: DeoptInfo.local_kinds is post-proof; the
+            // length is asserted equal to local_mapping above. Out-of-range
+            // is a verifier bug.
+            let kind = deopt_info.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "DeoptInfo.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    deopt_info.local_kinds.len()
+                )
+            });
             let src_idx = LOCALS_U64_OFFSET + jit_idx as usize;
             let dst_idx = base + bc_idx as usize;
             if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
@@ -308,11 +329,16 @@ impl VirtualMachine {
 
             // Restore locals from ctx_buf using the frame's mapping
             for (j, &(ctx_pos, bc_idx)) in iframe.local_mapping.iter().enumerate() {
-                let kind = iframe
-                    .local_kinds
-                    .get(j)
-                    .copied()
-                    .unwrap_or(NativeKind::Dynamic);
+                // ADR-006 §2.7.5.1: InlineFrameInfo.local_kinds is post-proof;
+                // out-of-range is a verifier bug.
+                let kind = iframe.local_kinds.get(j).copied().unwrap_or_else(|| {
+                    panic!(
+                        "InlineFrameInfo.local_kinds[{}]: out of range (len={}). \
+                         Verifier should reject — ADR-006 §2.7.5.1.",
+                        j,
+                        iframe.local_kinds.len()
+                    )
+                });
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
@@ -621,7 +647,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0)],
-            local_kinds: vec![NativeKind::Dynamic],
+            local_kinds: vec![NativeKind::Int64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -637,7 +663,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0), (1, 1)],
-            local_kinds: vec![NativeKind::Dynamic, NativeKind::Int64],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
             stack_depth: 1,
             innermost_function_id: Some(3),
             inline_frames: vec![InlineFrameInfo {
@@ -665,7 +691,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 5,
             local_mapping: vec![(0, 0), (1, 1), (2, 2)],
-            local_kinds: vec![NativeKind::Dynamic, NativeKind::Int64, NativeKind::Float64],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64, NativeKind::Float64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -692,7 +718,7 @@ mod tests {
         let deopt_info = DeoptInfo {
             resume_ip: 45,
             local_mapping: vec![(20, 0), (21, 1)],
-            local_kinds: vec![NativeKind::Dynamic, NativeKind::Dynamic],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
             stack_depth: 0,
             innermost_function_id: Some(2),
             inline_frames: vec![
@@ -700,14 +726,14 @@ mod tests {
                     function_id: 0,
                     resume_ip: 5, // A's CallValue(B) at IP=5
                     local_mapping: vec![(0, 0), (1, 1)],
-                    local_kinds: vec![NativeKind::Dynamic, NativeKind::Dynamic],
+                    local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
                     stack_depth: 0,
                 },
                 InlineFrameInfo {
                     function_id: 1,
                     resume_ip: 25, // B's CallValue(C) at IP=25
                     local_mapping: vec![(10, 0)],
-                    local_kinds: vec![NativeKind::Dynamic],
+                    local_kinds: vec![NativeKind::Int64],
                     stack_depth: 0,
                 },
             ],
