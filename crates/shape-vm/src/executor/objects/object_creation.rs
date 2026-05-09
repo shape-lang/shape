@@ -11,18 +11,32 @@
 //! per-`HeapKind` push pattern, then pushes the raw `Arc::into_raw` pointer
 //! bits with `NativeKind::Ptr(HeapKind::TypedObject)`.
 //!
-//! `op_new_object` / `op_new_matrix` / `op_new_array` / `op_new_typed_array`
-//! depend on `shape_value` constructors that were deleted by the strict-typing
-//! bulldozer (`vmarray_from_vec`, `ValueWord::from_array`,
-//! `ValueWord::from_matrix`, `ValueWord::from_int_array`,
-//! `ValueWord::from_float_array`, `ValueWord::from_bool_array`). The proper
-//! reentry shape for those is the per-`HeapKind` `Arc<T>` construction path
-//! plus the kind-aware `op_new_typed_array_*` opcodes; that's Phase 2c
-//! territory per ADR-006 §2.7.4. Until then their bodies drain stack
-//! arguments via `pop_kinded` + `drop_with_kind` (preserves the stack ABI
-//! `data.len() == kinds.len()` invariant) and surface
-//! `VMError::NotImplemented` — the canonical playbook §7 #4 "no clean
-//! migration this round" shape.
+//! Wave-δ MR-string-misc body migration (2026-05-09): `op_new_matrix` and
+//! `op_new_typed_array` migrate to real bodies.
+//!
+//! - **`op_new_matrix`**: pops `rows * cols` numeric (`Float64`) bits per
+//!   the operand's `MatrixDims`; constructs
+//!   `Arc<TypedArrayData::Matrix(Arc<MatrixData>)>` via
+//!   `MatrixData::from_flat`; pushes via `Arc::into_raw + push_kinded(_,
+//!   NativeKind::Ptr(HeapKind::TypedArray))`.
+//! - **`op_new_typed_array`**: pops N elements with their kinds; if all
+//!   elements share `Int64` / `Float64` / `Bool` kind, builds the matching
+//!   `TypedArrayData::*` variant. Mixed-kind arrays would require
+//!   `TypedArrayData::HeapValue` (heterogeneous, see `op_new_array`) and
+//!   are surfaced.
+//!
+//! Two opcode bodies remain Phase-2c surfaces:
+//!
+//! - **`op_new_object`** still depends on the deleted
+//!   `create_typed_object_from_pairs` (`vm_impl/schemas.rs` ValueWord-
+//!   shaped helper, retired by Phase 2c per ADR-006 §2.7.4 / Q5).
+//! - **`op_new_array`** (untyped heterogeneous) needs a kinded projection
+//!   from `(bits, kind)` into `Arc<HeapValue>` for the
+//!   `TypedArrayData::HeapValue` variant. There is no such projection
+//!   helper today; the natural site is in `shape-value` next to the
+//!   `TypedArrayData` variants, and adding it requires a per-kind
+//!   `Arc::from_raw` + `HeapValue::*` arm wrapper that is itself a
+//!   Phase-2c constructor surface.
 //!
 //! Cross-cluster cascade (playbook §8 surface): the helper functions at
 //! the bottom of this file (`nb_to_slot_with_field_type`,
@@ -202,19 +216,12 @@ impl VirtualMachine {
     /// Stack: [...f64_values (rows*cols)] -> [matrix]
     /// Operand: MatrixDims { rows, cols }
     ///
-    /// Phase 2c (ADR-006 §2.7.4): `MatrixData` is held by
-    /// `TypedArrayData::Matrix(Arc<MatrixData>)` — a `HeapKind::TypedArray`
-    /// arm. The emit-side opcode emission pattern (one popped numeric per
-    /// matrix cell) is fine, but pushing via the deleted
-    /// `ValueWord::from_matrix` helper is no longer valid. The kinded
-    /// reentry shape is `Arc::into_raw(Arc::new(TypedArrayData::Matrix(
-    /// Arc::new(MatrixData::from_flat(...)))))` + `push_kinded(bits,
-    /// NativeKind::Ptr(HeapKind::TypedArray))`, but the matrix builtin
-    /// frontier has additional consumers (matrix-typed methods on
-    /// `TypedArrayData::Matrix`) that depend on the same migration. Until
-    /// those land, this op drains the popped slots via `pop_kinded` +
-    /// `drop_with_kind` (stack ABI invariant) and surfaces
-    /// `VMError::NotImplemented`.
+    /// Wave-δ MR-string-misc: `Arc::new(TypedArrayData::Matrix(Arc::new(
+    /// MatrixData::from_flat(...))))` + `push_kinded(_, NativeKind::Ptr(
+    /// HeapKind::TypedArray))`. Element kinds are expected to be `Float64`
+    /// per the compiler's matrix-emit contract; `Int64` is widened to
+    /// `f64` for backward compatibility (existing emit paths sometimes
+    /// push `int` literals through this op).
     pub(in crate::executor) fn op_new_matrix(
         &mut self,
         instruction: &Instruction,
@@ -225,17 +232,58 @@ impl VirtualMachine {
         };
 
         let total = (rows as usize) * (cols as usize);
+        // Pop in reverse, then reverse to recover row-major source order.
+        let mut popped: Vec<(u64, NativeKind)> = Vec::with_capacity(total);
         for _ in 0..total {
             match self.pop_kinded() {
-                Ok((bits, kind)) => drop_with_kind(bits, kind),
-                Err(_) => return Err(VMError::StackUnderflow),
+                Ok(pair) => popped.push(pair),
+                Err(_) => {
+                    for (b, k) in popped.drain(..) {
+                        drop_with_kind(b, k);
+                    }
+                    return Err(VMError::StackUnderflow);
+                }
             }
         }
-        Err(VMError::NotImplemented(format!(
-            "op_new_matrix({}×{}): MatrixData construction depends on the \
-             kinded TypedArray emit path (Phase 2c reentry — see ADR-006 §2.7.4)",
-            rows, cols
-        )))
+        popped.reverse();
+
+        let mut data =
+            shape_value::aligned_vec::AlignedVec::<f64>::with_capacity(total);
+        for (bits, kind) in popped.iter() {
+            let v = match kind {
+                NativeKind::Float64 => f64::from_bits(*bits),
+                NativeKind::Int64 => (*bits as i64) as f64,
+                NativeKind::Bool => {
+                    if *bits != 0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                _ => {
+                    // Heap kinds shouldn't reach a numeric matrix cell;
+                    // retire all popped shares and surface a TypeError.
+                    for (b, k) in popped.iter() {
+                        drop_with_kind(*b, *k);
+                    }
+                    return Err(VMError::TypeError {
+                        expected: "numeric matrix element",
+                        got: "non-numeric kind",
+                    });
+                }
+            };
+            data.push(v);
+            // Inline-scalar kinds — `drop_with_kind` is a no-op; explicit
+            // call documents the discipline.
+            drop_with_kind(*bits, *kind);
+        }
+
+        let matrix = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
+        let arr = Arc::new(
+            shape_value::heap_value::TypedArrayData::Matrix(Arc::new(matrix)),
+        );
+        let bits = Arc::into_raw(arr) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
     }
 
     /// Create a generic untyped Array from N stack elements.
@@ -279,21 +327,17 @@ impl VirtualMachine {
 
     /// Create a typed array (IntArray/FloatArray/BoolArray) from N elements on the stack.
     ///
-    /// Phase 2c (ADR-006 §2.7.4): the legacy
-    /// `ValueWord::from_int_array` / `from_float_array` / `from_bool_array`
-    /// / `from_array` constructors were deleted by the strict-typing
-    /// bulldozer; their replacement is per-kind `Arc<TypedArrayData::*>`
-    /// construction + `push_kinded(NativeKind::Ptr(HeapKind::TypedArray))`.
-    /// The bytecode compiler is also being migrated toward emitting the
-    /// kind-specific `NewTypedArrayI64` / `NewTypedArrayF64` /
-    /// `NewTypedArrayBool` opcodes (already wired in `dispatch.rs`)
-    /// instead of this dynamic-classifier shape, which makes the op
-    /// itself a Phase 2c retire-or-refactor candidate.
+    /// Wave-δ MR-string-misc: post-§2.7.7 the kind track tells us the
+    /// element kind directly — no runtime tag-bit classifier. If all N
+    /// popped elements share `Int64` / `Float64` / `Bool`, the op
+    /// constructs the matching `TypedArrayData::*` variant. Mixed-kind
+    /// arrays would require `TypedArrayData::HeapValue` (heterogeneous
+    /// `Arc<HeapValue>` payload — same Phase-2c surface as `op_new_array`).
     ///
-    /// Until that lands, the op drains the popped slots via `pop_kinded`
-    /// + `drop_with_kind` and surfaces `VMError::NotImplemented`. The
-    /// per-kind opcodes already in dispatch.rs continue to work
-    /// independently.
+    /// Empty arrays default to `TypedArrayData::I64` (an arbitrary but
+    /// stable choice; the compiler is responsible for emitting the
+    /// kind-specific `NewTypedArray{I64,F64,Bool}` opcodes when the
+    /// element type is known at compile time).
     pub(in crate::executor) fn op_new_typed_array(
         &mut self,
         instruction: &Instruction,
@@ -303,18 +347,123 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
+        // Pop in reverse, then reverse to recover declared element order.
+        let mut popped: Vec<(u64, NativeKind)> = Vec::with_capacity(count);
         for _ in 0..count {
             match self.pop_kinded() {
-                Ok((bits, kind)) => drop_with_kind(bits, kind),
-                Err(_) => return Err(VMError::StackUnderflow),
+                Ok(pair) => popped.push(pair),
+                Err(_) => {
+                    for (b, k) in popped.drain(..) {
+                        drop_with_kind(b, k);
+                    }
+                    return Err(VMError::StackUnderflow);
+                }
             }
         }
-        Err(VMError::NotImplemented(format!(
-            "op_new_typed_array({}): dynamic-classifier path retires in \
-             favour of the per-kind `NewTypedArray{{I64,F64,Bool}}` opcodes; \
-             phase-2c reentry — see ADR-006 §2.7.4",
-            count
-        )))
+        popped.reverse();
+
+        // Empty array: arbitrary stable variant (I64). The compiler's
+        // kind-specific NewTypedArray* opcodes pick the right variant
+        // when the element type is statically known.
+        if popped.is_empty() {
+            let buf = shape_value::typed_buffer::TypedBuffer::<i64>::from_vec(Vec::new());
+            let arr = Arc::new(
+                shape_value::heap_value::TypedArrayData::I64(Arc::new(buf)),
+            );
+            let bits = Arc::into_raw(arr) as u64;
+            return self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray));
+        }
+
+        // Inspect first element's kind; classify the homogeneity.
+        let first_kind = popped[0].1;
+        let all_match = popped.iter().all(|(_, k)| *k == first_kind);
+
+        if !all_match {
+            // Heterogeneous — would require TypedArrayData::HeapValue
+            // projection. Surface per playbook §7.4: same gap as
+            // op_new_array.
+            for (b, k) in popped.drain(..) {
+                drop_with_kind(b, k);
+            }
+            return Err(VMError::NotImplemented(format!(
+                "op_new_typed_array({}): heterogeneous element kinds — \
+                 needs TypedArrayData::HeapValue projection from (bits, \
+                 kind) into Arc<HeapValue> (Phase-2c — see ADR-006 §2.7.4)",
+                count
+            )));
+        }
+
+        match first_kind {
+            NativeKind::Int64 => {
+                let mut data: Vec<i64> = Vec::with_capacity(count);
+                for (bits, _kind) in popped.iter() {
+                    data.push(*bits as i64);
+                }
+                // Inline scalars; `drop_with_kind` is a no-op for Int64.
+                for (b, k) in popped.drain(..) {
+                    drop_with_kind(b, k);
+                }
+                let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
+                let arr = Arc::new(
+                    shape_value::heap_value::TypedArrayData::I64(Arc::new(buf)),
+                );
+                let bits = Arc::into_raw(arr) as u64;
+                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+            }
+            NativeKind::Float64 => {
+                let mut data =
+                    shape_value::aligned_vec::AlignedVec::<f64>::with_capacity(count);
+                for (bits, _kind) in popped.iter() {
+                    data.push(f64::from_bits(*bits));
+                }
+                for (b, k) in popped.drain(..) {
+                    drop_with_kind(b, k);
+                }
+                let buf =
+                    shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(data);
+                let arr = Arc::new(
+                    shape_value::heap_value::TypedArrayData::F64(Arc::new(buf)),
+                );
+                let bits = Arc::into_raw(arr) as u64;
+                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+            }
+            NativeKind::Bool => {
+                let mut data: Vec<u8> = Vec::with_capacity(count);
+                for (bits, _kind) in popped.iter() {
+                    data.push(if *bits != 0 { 1u8 } else { 0u8 });
+                }
+                for (b, k) in popped.drain(..) {
+                    drop_with_kind(b, k);
+                }
+                let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
+                let arr = Arc::new(
+                    shape_value::heap_value::TypedArrayData::Bool(Arc::new(buf)),
+                );
+                let bits = Arc::into_raw(arr) as u64;
+                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+            }
+            // String-kind / heap-kind arrays would require the
+            // TypedArrayData::String / TypedArrayData::HeapValue
+            // construction path. Strings are kinded as
+            // NativeKind::String — feasible to project into
+            // TypedArrayData::String, but the typical emitter already
+            // routes strings through the per-kind NewTypedArray* opcodes
+            // or through the kind-aware compiler emitter. Surface here
+            // pending an explicit emit-path partition.
+            other => {
+                for (b, k) in popped.drain(..) {
+                    drop_with_kind(b, k);
+                }
+                Err(VMError::NotImplemented(format!(
+                    "op_new_typed_array({}): element kind {:?} — needs \
+                     per-kind TypedArrayData variant construction (Phase-\
+                     2c — see ADR-006 §2.7.4); the per-kind \
+                     NewTypedArray* opcodes already cover I64/F64/Bool \
+                     in `dispatch.rs`.",
+                    count, other
+                )))
+            }
+        }
     }
 }
 

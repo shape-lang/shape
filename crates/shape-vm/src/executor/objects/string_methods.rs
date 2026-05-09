@@ -2,20 +2,26 @@
 //!
 //! V2 (`MethodFnV2`) handlers for string methods.
 //!
-//! ## Phase 1.B-vm Wave-β `M-string` migration (playbook §10)
+//! ## Phase 1.B-vm Wave-δ MR-string-misc body migration (playbook §10)
 //!
 //! Per the dispatcher contract for `STRING_METHODS` (PHF map in
-//! `method_registry.rs`), these handlers are only invoked when the receiver
-//! `args[0]` is statically `NativeKind::String` (i.e. `Arc::into_raw(Arc<
-//! String>) as u64`). The dispatcher owns one strong-count share for the
-//! receiver and drops it after the handler returns. We therefore borrow
-//! `args[0]` as `&String` via `Arc::from_raw` paired with `Arc::into_raw`
-//! (no refcount bump, no refcount release — pure borrow).
+//! `method_registry.rs`), these handlers are invoked with `args[0]` =
+//! receiver — for these handlers the receiver kind is statically
+//! `NativeKind::String` (i.e. the `Arc::into_raw(Arc<String>)` raw pointer
+//! is stored in `args[0].slot`). The dispatch shell `op_call_method`
+//! constructs the `&[KindedSlot]` slice from popped stack args; per the
+//! §2.7.10 / Q11 ABI the args slice is borrow-only and the dispatch
+//! shell owns each `KindedSlot`'s share for the call duration. Handler
+//! bodies read the receiver via `args[0].as_str()` (which dispatches on
+//! `args[0].kind`); per-arg kinds dispatch via `args[i].kind` per §2.7.6
+//! / Q8 heterogeneous-kind body pattern.
 //!
-//! Per playbook §3 pop pattern, String results are returned as
-//! `Arc::into_raw(Arc::new(...)) as u64`, transferring one fresh share to
-//! the caller. Inline scalars are returned as raw bits (`i as u64`,
-//! `b as u64`, `f.to_bits()`).
+//! Result construction uses per-`NativeKind` `KindedSlot::from_*`
+//! constructors (e.g. `KindedSlot::from_string_arc(Arc::new(s))` for
+//! string results, `KindedSlot::from_int(i)` for index results,
+//! `KindedSlot::from_bool(b)` for predicates, `KindedSlot::from_char(c)`
+//! for char results, `KindedSlot::from_typed_array(arc)` for
+//! Array<string> results).
 //!
 //! ## What was deleted
 //!
@@ -27,43 +33,63 @@
 //! - `ArgVec` / `vmarray_from_vec` / `IteratorState` (deleted dynamic
 //!   array / iterator carriers).
 //!
-//! ## What surfaces (`NotImplemented(SURFACE: ...)`)
+//! ## What remains as `NotImplemented(SURFACE)`
 //!
-//! Per playbook §7.4 (REVISED) DoD, sites that cannot be migrated cleanly
-//! within `M-string` territory surface to the supervisor rather than
-//! paper over with a forbidden pattern. The surfaced shapes are:
-//!
-//! 1. **Array results** (`split`, `graphemes`, `join` receiver-as-array)
-//!    — need a kinded `Arc<TypedArrayData>` constructor + element-kind
-//!    dispatch (ADR-006 §2.3 / §2.4 typed-Arc constructor migration).
-//!    Out of `M-string` territory; depends on the typed-array cluster.
-//! 2. **Iterator results** (`iter`) — depends on the post-§2.7.4 iterator
-//!    state representation; the legacy `IteratorState` is deleted.
-//! 3. **Char results** (`charAt` returning `Option<char>`) — `char` lives
-//!    on `NativeKind::Ptr(HeapKind::Char)` per ADR-006 §2.7 inline-scalar
-//!    payload, but the `MethodFnV2` ABI's kind-blind result channel
-//!    cannot communicate the result kind to the caller. Phase-2c follow-
-//!    up: extend `MethodFnV2` to return `(u64, NativeKind)` (or surface
-//!    via a kinded result slot).
-//! 4. **`v2_string_join` (array `.join(sep)`)** — receiver is an array,
-//!    not a string; the kind-blind ABI cannot dispatch on element kind
-//!    (same gap as `array_joins.rs` D-array-joins surfacing).
-//!
-//! See `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md` §10
-//! Wave-β `M-string` row.
+//! - **`v2_string_iter`** — depends on the post-§2.7.4 iterator state
+//!   representation; the legacy `IteratorState` carrier is deleted and
+//!   the kinded iterator state lives in the iterator cluster (Phase-2c
+//!   surface).
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{KindedSlot, VMError};
+use shape_value::heap_value::{HeapKind, TypedArrayData};
+use shape_value::{KindedSlot, NativeKind, VMError};
+use std::sync::Arc;
 
-// Pre-§2.7.9 helpers `borrow_string_arg`, `read_receiver_string`, and
-// `string_result` deleted with their callers' SURFACE migration.
-// They operated on raw `u64` bits per the kind-blind ABI; the post-§2.7.9
-// kinded form will read the receiver `Arc<String>` from `args[0].slot`
-// directly (kind statically `NativeKind::String` per dispatcher contract)
-// and return result `KindedSlot` via `KindedSlot::from_string_arc(Arc::new(s))`
-// per playbook §3 per-`HeapKind` push pattern. Wave-γ-followup body
-// migration territory.
+/// Read the receiver `&str` from `args[0]`. The dispatcher contract
+/// guarantees `args[0].kind == NativeKind::String` for STRING_METHODS
+/// entries, so this is total in practice; we still surface a TypeError
+/// rather than panic on a contract violation.
+#[inline]
+fn receiver_str<'a>(args: &'a [KindedSlot]) -> Result<&'a str, VMError> {
+    args.first()
+        .and_then(|a| a.as_str())
+        .ok_or(VMError::TypeError {
+            expected: "string receiver",
+            got: "non-string kind",
+        })
+}
+
+/// Read an `int` argument by index. The compiler proves these kinds at
+/// emit time (the `repeat`/`pad_start`/`pad_end`/`char_at` arguments are
+/// declared `int`); a kind mismatch is a runtime invariant violation.
+#[inline]
+fn int_arg(args: &[KindedSlot], idx: usize) -> Result<i64, VMError> {
+    args.get(idx)
+        .and_then(|a| a.as_i64())
+        .ok_or(VMError::TypeError {
+            expected: "int argument",
+            got: "non-int kind",
+        })
+}
+
+/// Read a `string` argument by index. Same rationale as `int_arg`.
+#[inline]
+fn str_arg<'a>(args: &'a [KindedSlot], idx: usize) -> Result<&'a str, VMError> {
+    args.get(idx)
+        .and_then(|a| a.as_str())
+        .ok_or(VMError::TypeError {
+            expected: "string argument",
+            got: "non-string kind",
+        })
+}
+
+/// Convenience: build a fresh `KindedSlot` String result from an owned
+/// `String` value.
+#[inline]
+fn string_result(s: String) -> KindedSlot {
+    KindedSlot::from_string_arc(Arc::new(s))
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 string method handlers
@@ -72,413 +98,529 @@ use shape_value::{KindedSlot, VMError};
 /// len / length
 pub fn v2_string_len(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_len — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(KindedSlot::from_int(s.chars().count() as i64))
 }
 
 /// toUpperCase / to_upper_case
 pub fn v2_string_to_upper(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_to_upper — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.to_uppercase()))
 }
 
 /// toLowerCase / to_lower_case
 pub fn v2_string_to_lower(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_to_lower — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.to_lowercase()))
 }
 
 /// trim
 pub fn v2_string_trim(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_trim — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.trim().to_string()))
 }
 
 /// trimStart / trim_start
 pub fn v2_string_trim_start(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_trim_start — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.trim_start().to_string()))
 }
 
 /// trimEnd / trim_end
 pub fn v2_string_trim_end(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_trim_end — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.trim_end().to_string()))
 }
 
 /// toString / to_string
 ///
-/// Identity on the receiver bits. The dispatcher owns the share; we hand
-/// the same `Arc::into_raw::<String>` pointer back as the result. A fresh
-/// share is implied by the v2 dispatcher's "result is a freshly-owned
-/// slot" contract — we re-bump the refcount so the result and the
-/// dispatcher's drop don't double-free.
+/// Identity on the receiver. Allocates a fresh `Arc<String>` clone of
+/// the receiver's contents; the dispatcher's caller owns the result
+/// share independently of the receiver share.
 pub fn v2_string_to_string(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_to_string — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.to_string()))
 }
 
 /// startsWith / starts_with
 pub fn v2_string_starts_with(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_starts_with — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let prefix = str_arg(args, 1)?;
+    Ok(KindedSlot::from_bool(s.starts_with(prefix)))
 }
 
 /// endsWith / ends_with
 pub fn v2_string_ends_with(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_ends_with — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let suffix = str_arg(args, 1)?;
+    Ok(KindedSlot::from_bool(s.ends_with(suffix)))
 }
 
 /// contains
 pub fn v2_string_contains(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_contains — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let needle = str_arg(args, 1)?;
+    Ok(KindedSlot::from_bool(s.contains(needle)))
 }
 
-/// indexOf / index_of
+/// indexOf / index_of — returns `i64` (-1 if not found)
 pub fn v2_string_index_of(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_index_of — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let needle = str_arg(args, 1)?;
+    let idx = match s.find(needle) {
+        Some(byte_idx) => {
+            // Translate byte offset → char offset to match the language's
+            // char-indexed semantics.
+            s[..byte_idx].chars().count() as i64
+        }
+        None => -1,
+    };
+    Ok(KindedSlot::from_int(idx))
 }
 
 /// repeat
 ///
-/// Type system has proven `args[1]` is `int` for this method, so the
-/// raw bits are a two's-complement `i64` count.
+/// Type system has proven `args[1]` is `int` for this method.
 pub fn v2_string_repeat(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_repeat — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let n = int_arg(args, 1)?;
+    if n < 0 {
+        return Err(VMError::RuntimeError(
+            "string.repeat(n): n must be non-negative".to_string(),
+        ));
+    }
+    Ok(string_result(s.repeat(n as usize)))
 }
 
 /// charAt / char_at
 ///
-/// SURFACE: `char` results live on `NativeKind::Ptr(HeapKind::Char)`
-/// per ADR-006 §2.7 inline-scalar payload. The `MethodFnV2` ABI's
-/// kind-blind result channel cannot communicate the result kind to the
-/// caller — the dispatcher would push the bits with the receiver's kind
-/// (`NativeKind::String`), which would mis-Drop the codepoint as if it
-/// were an `Arc<String>` pointer. Phase-2c follow-up: extend
-/// `MethodFnV2` to return `(u64, NativeKind)` or migrate to a kinded
-/// result-slot signature.
+/// Wave-δ MR-string-misc: the §2.7.10 / Q11 kinded `MethodFnV2` ABI
+/// carries the result kind on the returned `KindedSlot`, so
+/// `NativeKind::Ptr(HeapKind::Char)` results are first-class.
+/// Out-of-range indices return `Char('\0')` — the language semantics
+/// model `char_at` as total (the pre-§2.7.10 implementation returned
+/// `Option<char>` but the kind-blind ABI couldn't represent `None`
+/// either). Callers using `string.len()` to bound the index get the
+/// expected behavior.
 pub fn v2_string_char_at(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "charAt — SURFACE: MethodFnV2 ABI lacks kinded result channel for \
-         char results (NativeKind::Ptr(HeapKind::Char) inline-scalar \
-         payload). Pushing the codepoint with the dispatcher's String kind \
-         would mis-Drop as Arc<String>. Phase-2c follow-up: extend \
-         MethodFnV2 to return (u64, NativeKind) or kinded result slot \
-         (ADR-006 §2.7 / playbook §10 M-string)."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let i = int_arg(args, 1)?;
+    if i < 0 {
+        return Ok(KindedSlot::from_char('\0'));
+    }
+    let c = s.chars().nth(i as usize).unwrap_or('\0');
+    Ok(KindedSlot::from_char(c))
 }
 
 /// reverse
 pub fn v2_string_reverse(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_reverse — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.chars().rev().collect()))
 }
 
 /// isDigit / is_digit
 pub fn v2_string_is_digit(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_is_digit — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
+    let s = receiver_str(args)?;
+    Ok(KindedSlot::from_bool(
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
     ))
 }
 
 /// isAlpha / is_alpha
 pub fn v2_string_is_alpha(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_is_alpha — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
+    let s = receiver_str(args)?;
+    Ok(KindedSlot::from_bool(
+        !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
     ))
 }
 
 /// isAscii / is_ascii
 pub fn v2_string_is_ascii(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_is_ascii — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(KindedSlot::from_bool(s.is_ascii()))
 }
 
 /// toInt / to_int
+///
+/// Returns `0` on parse failure (matches the existing language contract;
+/// the typed `Result<int, ParseError>` form is left for a future
+/// signature change).
 pub fn v2_string_to_int(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_to_int — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let i: i64 = s.trim().parse().unwrap_or(0);
+    Ok(KindedSlot::from_int(i))
 }
 
 /// toNumber / to_number / toFloat / to_float
 pub fn v2_string_to_number(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_to_number — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let n: f64 = s.trim().parse().unwrap_or(0.0);
+    Ok(KindedSlot::from_number(n))
 }
 
-/// codePointAt / code_point_at
-///
-/// Returns `i64` (the codepoint as a 32-bit value, or `-1` for out of
-/// range), so unlike `charAt` this fits the kind-blind result channel
-/// (`NativeKind::Int64`, raw two's-complement bits).
+/// codePointAt / code_point_at — returns the codepoint as `i64` (-1 out of range)
 pub fn v2_string_code_point_at(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_code_point_at — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let i = int_arg(args, 1)?;
+    if i < 0 {
+        return Ok(KindedSlot::from_int(-1));
+    }
+    let cp = s
+        .chars()
+        .nth(i as usize)
+        .map(|c| c as i64)
+        .unwrap_or(-1);
+    Ok(KindedSlot::from_int(cp))
 }
 
 /// graphemeLen / grapheme_len
+///
+/// Returns the codepoint count (Rust's `chars().count()`). True
+/// extended-grapheme-cluster counting (Unicode UAX #29) requires a
+/// dedicated dependency; the existing `len()` semantics already use
+/// `chars().count()` so we mirror that here.
 pub fn v2_string_grapheme_len(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_grapheme_len — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(KindedSlot::from_int(s.chars().count() as i64))
 }
 
 /// padStart / pad_start
-///
-/// `args[1]` is `int` (target length); `args[2]` (optional) is `string`
-/// (fill). Both kinds are type-system proven for this method.
 pub fn v2_string_pad_start(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_pad_start — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let target_len = int_arg(args, 1)?;
+    let pad = args
+        .get(2)
+        .and_then(|a| a.as_str())
+        .unwrap_or(" ");
+    Ok(string_result(pad_to(s, target_len, pad, /*at_start=*/ true)))
 }
 
 /// padEnd / pad_end
 pub fn v2_string_pad_end(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_pad_end — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let target_len = int_arg(args, 1)?;
+    let pad = args
+        .get(2)
+        .and_then(|a| a.as_str())
+        .unwrap_or(" ");
+    Ok(string_result(pad_to(s, target_len, pad, /*at_start=*/ false)))
 }
 
-/// split
-///
-/// SURFACE: result is `Array<string>`. Constructing the kinded
-/// `Arc<TypedArrayData>` with `NativeKind::String` element kind requires
-/// the typed-array constructor surface (ADR-006 §2.3 / §2.4); out of
-/// `M-string` territory.
+/// split — `Array<string>` result via `TypedArrayData::String`
 pub fn v2_string_split(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "split — SURFACE: result is Array<string>; needs kinded \
-         Arc<TypedArrayData> constructor with NativeKind::String element \
-         kind (ADR-006 §2.3 / §2.4 typed-Arc). Out of M-string territory; \
-         depends on typed-array cluster (ARRAY_METHODS migration)."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let sep = str_arg(args, 1)?;
+    let parts: Vec<Arc<String>> = if sep.is_empty() {
+        s.chars().map(|c| Arc::new(c.to_string())).collect()
+    } else {
+        s.split(sep).map(|p| Arc::new(p.to_string())).collect()
+    };
+    let buf = shape_value::typed_buffer::TypedBuffer::from_vec(parts);
+    let arr = Arc::new(TypedArrayData::String(Arc::new(buf)));
+    Ok(KindedSlot::from_typed_array(arr))
 }
 
-/// replace
+/// replace — replace all occurrences of `from` with `to`
 pub fn v2_string_replace(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_replace — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let from = str_arg(args, 1)?;
+    let to = str_arg(args, 2)?;
+    Ok(string_result(s.replace(from, to)))
 }
 
-/// substring
+/// substring — char-indexed [start, end)
 pub fn v2_string_substring(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_substring — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let start = int_arg(args, 1)?;
+    let total = s.chars().count() as i64;
+    let end = match args.get(2).and_then(|a| a.as_i64()) {
+        Some(e) => e,
+        None => total,
+    };
+    let s_idx = start.clamp(0, total) as usize;
+    let e_idx = end.clamp(0, total) as usize;
+    if s_idx >= e_idx {
+        return Ok(string_result(String::new()));
+    }
+    let result: String = s.chars().skip(s_idx).take(e_idx - s_idx).collect();
+    Ok(string_result(result))
 }
 
-/// join
+/// join — `Array<T>` receiver, separator (`string`) argument.
 ///
-/// SURFACE: this handler's contract has the **array** as receiver
-/// (`args[0]`) and a `string` separator (`args[1]`). The receiver kind
-/// is `NativeKind::Ptr(HeapKind::TypedArray)`, not `String` — but it is
-/// registered in `STRING_METHODS` for legacy reasons. The `MethodFnV2`
-/// ABI's kind-blind args slice cannot dispatch on the array element
-/// kind without a parallel `NativeKind` track (the same gap as
-/// `array_joins.rs` D-array-joins surface). Stringifying mixed-kind
-/// elements requires per-element kind inspection, which is forbidden to
-/// fabricate locally (playbook §2.7.7 #4 / #7 / #9).
+/// Wave-δ MR-string-misc: the receiver kind here is
+/// `NativeKind::Ptr(HeapKind::TypedArray)`, dispatch on the inner
+/// `TypedArrayData::*` variant. Element stringification mirrors the
+/// language's `Display` semantics for primitive variants.
 pub fn v2_string_join(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "join — SURFACE: receiver is Array<T>, not string; MethodFnV2 \
-         ABI lacks parallel NativeKind track for element-kind dispatch \
-         (same gap as array_joins.rs D-array-joins). Per-element kind \
-         interpretation is forbidden without a kinded args slice \
-         (playbook §2.7.7 #4 / #7 / #9). Phase-2c follow-up: extend \
-         MethodFnV2 with parallel kind track, then re-implement via \
-         Arc<TypedArrayData> walk + element-kind dispatch."
-            .to_string(),
-    ))
+    let sep = str_arg(args, 1)?;
+    // Receiver must be a TypedArray. ADR-005 §1: heap dispatch goes
+    // through `as_heap_value()` + `HeapValue::*` match.
+    let arr_ref: &TypedArrayData = match args.first().map(|a| a.kind) {
+        Some(NativeKind::Ptr(HeapKind::TypedArray)) => {
+            match args[0].slot.as_heap_value() {
+                shape_value::HeapValue::TypedArray(a) => a.as_ref(),
+                _ => unreachable!("kind says TypedArray"),
+            }
+        }
+        _ => {
+            return Err(VMError::TypeError {
+                expected: "Array<T> receiver for join",
+                got: "non-array kind",
+            });
+        }
+    };
+
+    let joined = match arr_ref {
+        TypedArrayData::I64(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::F64(buf) => buf
+            .data
+            .iter()
+            .map(format_f64)
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::Bool(buf) => buf
+            .data
+            .iter()
+            .map(|v| (*v != 0).to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::I8(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::I16(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::I32(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::U8(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::U16(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::U32(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::U64(buf) => buf
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::F32(buf) => buf
+            .data
+            .iter()
+            .map(|v| format_f64(&(*v as f64)))
+            .collect::<Vec<_>>()
+            .join(sep),
+        TypedArrayData::String(buf) => buf
+            .data
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(sep),
+        // FloatSlice: same f64 storage as F64 with a window.
+        TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len,
+        } => {
+            let off = *offset as usize;
+            let n = *len as usize;
+            parent.data[off..off + n]
+                .iter()
+                .map(format_f64)
+                .collect::<Vec<_>>()
+                .join(sep)
+        }
+        // Matrix and HeapValue variants would need richer Display
+        // wiring (matrix is 2D; HeapValue join needs per-element
+        // HeapValue Display routing). Surface as a Phase-2c reentry
+        // rather than fabricate a partial Display.
+        TypedArrayData::Matrix(_) => {
+            return Err(VMError::NotImplemented(
+                "Array<Matrix>.join: matrix display in join is Phase-2c"
+                    .to_string(),
+            ));
+        }
+        TypedArrayData::HeapValue(_) => {
+            return Err(VMError::NotImplemented(
+                "Array<heap>.join: heterogeneous-element join needs \
+                 per-element HeapValue display routing (Phase-2c — see \
+                 ADR-006 §2.7.4)"
+                    .to_string(),
+            ));
+        }
+    };
+
+    Ok(string_result(joined))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 string methods: graphemes, normalize, iter
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// graphemes
+/// graphemes — same shape as `split` on a per-char boundary.
 ///
-/// SURFACE: same shape as `split` — result is `Array<string>` whose
-/// kinded `Arc<TypedArrayData>` constructor lives in the typed-array
-/// cluster.
+/// Returns `Array<string>` with one string per Unicode codepoint. True
+/// extended-grapheme-cluster splitting (UAX #29) requires a dedicated
+/// dependency; the codepoint approximation matches the existing
+/// `chars().count()` length semantics.
 pub fn v2_string_graphemes(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "graphemes — SURFACE: result is Array<string>; needs kinded \
-         Arc<TypedArrayData> constructor with NativeKind::String element \
-         kind (ADR-006 §2.3 / §2.4 typed-Arc). Out of M-string territory."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    let parts: Vec<Arc<String>> =
+        s.chars().map(|c| Arc::new(c.to_string())).collect();
+    let buf = shape_value::typed_buffer::TypedBuffer::from_vec(parts);
+    let arr = Arc::new(TypedArrayData::String(Arc::new(buf)));
+    Ok(KindedSlot::from_typed_array(arr))
 }
 
-/// normalize
+/// normalize — Unicode normalization. The `unicode-normalization` crate
+/// is not a current dependency; pre-§2.7.10 the body returned the input
+/// unchanged. Preserve that behavior.
 pub fn v2_string_normalize(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_string_normalize — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let s = receiver_str(args)?;
+    Ok(string_result(s.to_string()))
 }
 
 /// iter
@@ -499,4 +641,46 @@ pub fn v2_string_iter(
          iterator state + element-kind track."
             .to_string(),
     ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Local helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pad `s` to `target_len` *codepoints* using `pad`, at start or end.
+/// Mirrors JS String.prototype.padStart / padEnd semantics.
+fn pad_to(s: &str, target_len: i64, pad: &str, at_start: bool) -> String {
+    if target_len <= 0 || pad.is_empty() {
+        return s.to_string();
+    }
+    let s_chars = s.chars().count();
+    let target = target_len as usize;
+    if s_chars >= target {
+        return s.to_string();
+    }
+    let need = target - s_chars;
+    let pad_chars: Vec<char> = pad.chars().collect();
+    let pad_len = pad_chars.len();
+    if pad_len == 0 {
+        return s.to_string();
+    }
+    let mut prefix = String::with_capacity(need);
+    for i in 0..need {
+        prefix.push(pad_chars[i % pad_len]);
+    }
+    if at_start {
+        format!("{}{}", prefix, s)
+    } else {
+        format!("{}{}", s, prefix)
+    }
+}
+
+/// Format an f64 the same way the language's array Display does: integer
+/// values print without a fractional part when they fit cleanly.
+fn format_f64(v: &f64) -> String {
+    if v.is_finite() && *v == v.trunc() && v.abs() < 1e15 {
+        format!("{}", *v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
