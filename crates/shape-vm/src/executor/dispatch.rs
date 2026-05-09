@@ -571,7 +571,7 @@ impl VirtualMachine {
             | ReturnValueI64 | ReturnValueU64 | ReturnValueF64 | ReturnValueI32
             | ReturnValueU32 | ReturnValueI16 | ReturnValueU16 | ReturnValueI8
             | ReturnValueU8 | ReturnValueBool | ReturnValuePtr => {
-                return self.exec_control_flow(instruction);
+                return self.exec_control_flow(instruction, ctx);
             }
 
             // Variables (including reference operations)
