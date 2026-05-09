@@ -28,20 +28,19 @@
 //! - `tag_bits::*` / `is_tagged()` / the deleted W-series ValueWord
 //!   synthesizer (forbidden — playbook §4 #7).
 //!
-//! On top of those, the `MethodHandler` ABI itself
-//! (`fn(&mut VM, &mut [u64], _) -> Result<u64, VMError>`) is **kind-less in
-//! both directions**. The dispatch shell can pop a receiver via
-//! `pop_kinded()` and recover its `NativeKind`, but the handler returns a
-//! kindless `u64` and the shell would have to push the result back onto the
-//! kinded stack with a fabricated kind. That is exactly the W-series
-//! "Bool-default because Drop is a no-op" rationalization the playbook §4 #9
-//! / ADR-006 §2.7.7 names verbatim as forbidden. The clean fix is the same
-//! Wave-5b body migration that's tracked under cluster `E-builtins-backlog`:
-//! `MethodHandler` becomes
-//! `fn(&mut VM, &mut [KindedSlot], _) -> Result<KindedSlot, VMError>`. With
-//! that ABI in place this dispatch shell becomes a mechanical
-//! `pop_kinded` / `push_kinded` / `slot.as_heap_value()` rewrite per playbook
-//! §10 D-objects-mod row.
+//! On top of those, the `MethodHandler` ABI itself was **kind-less in
+//! both directions** pre-Wave-γ. ADR-006 §2.7.9 / Q11 (Wave-γ
+//! `G-method-fn-v2-abi`) flipped `MethodFnV2` to
+//! `fn(&mut VM, &[KindedSlot], _) -> Result<KindedSlot, VMError>` —
+//! the kinded carrier slice form per §2.7.1 case 4. The dispatch
+//! shell now sources every kind from the §2.7.7 stack parallel-
+//! `Vec<NativeKind>` track via `pop_kinded()` (no fabrication), and
+//! pushes the returned `KindedSlot` via `push_kinded()` (kind from
+//! the handler-returned carrier — no fabrication). The Bool-default
+//! rationalization the W-series formalized is no longer reachable.
+//! With the ABI in place this dispatch shell becomes a mechanical
+//! `pop_kinded` / `push_kinded` / `slot.as_heap_value()` rewrite per
+//! playbook §10 D-objects-mod row — Wave-γ-followup territory.
 //!
 //! Cross-cluster dependencies for the architectural close-out:
 //!
@@ -51,9 +50,13 @@
 //!    `array_joins.rs`, `concurrency_methods.rs`, `channel_methods.rs`,
 //!    `number_methods.rs`, etc.) calls `extract_heap_ref(args[0])` for
 //!    HeapValue dispatch — same shape needed here for the receiver bits.
-//! 2. `E-builtins-backlog` migrates the `MethodHandler` ABI bodies from
-//!    `&mut [u64]` / `Result<u64>` to `&mut [KindedSlot]` /
-//!    `Result<KindedSlot>` per Wave 5b template (commit `fa2bafc`).
+//! 2. Wave-γ-followup body migration: per ADR-006 §2.7.9 / Q11 the
+//!    `MethodFnV2` ABI is kinded (`&[KindedSlot]` /
+//!    `Result<KindedSlot, VMError>`); ~150 PHF handler bodies stayed
+//!    `NotImplemented(SURFACE)` after the ABI flip (Wave-γ
+//!    `G-method-fn-v2-abi` close) and are migrated body-by-body in
+//!    follow-up sub-clusters per the M-datatable Wave-β `joins.rs`
+//!    precedent at close commit `eb78699`.
 //! 3. The remaining `ValueWord::from_*` heap-construction sites
 //!    (`ValueWord::from_heap_value(HeapValue::Range { .. })`,
 //!    `ValueWord::from_type_annotated_value`, `ValueWord::from_array`, etc.)
@@ -248,66 +251,110 @@ impl VirtualMachine {
         ))
     }
 
-    /// SURFACE: CallMethod cannot be migrated in this cluster.
+    /// SURFACE: CallMethod dispatch shell — kinded ABI landed, receiver
+    /// classification + IC wiring downstream.
     ///
-    /// `op_call_method` is the central method-dispatch shell. Migrating it to
-    /// the kinded API requires ALL of:
+    /// `op_call_method` is the central method-dispatch shell. The
+    /// `MethodFnV2` ABI flip to `(&mut VM, &[KindedSlot], _) ->
+    /// Result<KindedSlot, VMError>` landed in this cluster (Wave-γ
+    /// G-method-fn-v2-abi, ADR-006 §2.7.9 / Q11); see the parent
+    /// commit's amendment to `docs/adr/006-value-and-memory-model.md`
+    /// for the architectural justification.
     ///
-    /// 1. The `MethodHandler` ABI changes from
-    ///    `fn(&mut VM, &mut [u64], _) -> Result<u64>` to
-    ///    `fn(&mut VM, &mut [KindedSlot], _) -> Result<KindedSlot>` so the
-    ///    dispatch shell can `push_kinded(result.bits, result.kind)` instead
-    ///    of fabricating a Bool-default kind on the result push (the W-series
-    ///    rationalization §2.7.7 names verbatim as forbidden). This ABI
-    ///    change is tracked under cluster E-builtins-backlog (Wave 5b
-    ///    template, commit `fa2bafc`).
-    /// 2. The receiver-classification cascade
-    ///    (`receiver_is_numeric` / `receiver_is_bool` / `receiver_is_heap` +
-    ///    inner `HeapKind` match + sub-dispatch on `Concurrency` /
-    ///    `TypedArray` / `Temporal` / `TableView` inner variants) rewrites
-    ///    from `ValueWord::is_*` / `as_heap_ref` (forbidden, playbook §4 #7)
-    ///    to `match kind { NativeKind::* => ..., NativeKind::Ptr(HeapKind::*) =>
-    ///    slot.as_heap_value() match { HeapValue::* => ... } }` per
-    ///    ADR-006 §2.7.6 / Q8.
-    /// 3. The IC fast-path call
-    ///    (`crate::executor::ic_fast_paths::method_ic_check`) takes a
-    ///    `HeapKind` from the receiver — the receiver kind here will be
-    ///    `NativeKind` after migration, with the heap discriminator nested
-    ///    inside `Ptr(HeapKind::*)`. The IC API needs an unwrap step or
-    ///    accepts `NativeKind` directly.
-    /// 4. The v2-typed-array PHF fast path
-    ///    (`v2_array_detect::as_v2_typed_array(as_vw_ref(&receiver_bits))`)
-    ///    relied on `as_vw_ref` reinterpreting `&u64` as `&ValueWord`. With
-    ///    `ValueWord` deleted the detector takes raw bits + kind directly,
-    ///    which is itself a `D-v2-array-detect` cluster cascade.
-    /// 5. The legacy stack-based calling convention (the `_` arm at line
-    ///    251 of the pre-Wave-6 body) reads `arg_count` and `method_name`
-    ///    from the stack via `pop_raw_u64` + `ValueWord::as_str`. After ABI
-    ///    migration this either becomes the kinded equivalent
-    ///    (`pop_kinded` + `String` arm match) or is deleted as legacy
-    ///    bytecode the compiler no longer emits.
-    /// 6. The `handle_typed_object_method_v2` path uses `as_heap_ref`
-    ///    (forbidden) to extract `(schema_id, slots, heap_mask)` from the
-    ///    receiver; needs `slot.as_heap_value()` + `HeapValue::TypedObject`
-    ///    match.
+    /// With the kinded ABI in place, the dispatch shell's mechanical
+    /// shape per ADR-006 §2.7.9 is:
+    ///
+    /// ```ignore
+    /// // Pop receiver + N args from the §2.7.7 kinded stack.
+    /// // Kind for each entry comes from the parallel-Vec<NativeKind>
+    /// // track populated by the producing opcode — no fabrication.
+    /// let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count + 1);
+    /// for _ in 0..(arg_count + 1) {
+    ///     let (bits, kind) = self.pop_kinded()?;
+    ///     args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    /// }
+    /// args.reverse();  // pop order is reverse of push order
+    ///
+    /// // Resolve handler: PHF lookup keyed on (receiver_kind, method_name).
+    /// // Receiver kind is `args[0].kind` per §2.7.9; for heap receivers
+    /// // unwrap to HeapKind via `Ptr(HeapKind::*)` matching, then index
+    /// // into the matching PHF map (HEAP_KIND -> PHF_REGISTRY mapping
+    /// // is the ARRAY_METHODS / DATATABLE_METHODS / etc. table).
+    /// let handler: MethodFnV2 = resolve_handler(args[0].kind, method_name_id)?;
+    ///
+    /// // Dispatch: handler reads &args, returns a kinded result.
+    /// let result: KindedSlot = handler(self, &args, ctx)?;
+    ///
+    /// // Push result back onto the kinded stack (kind from the
+    /// // returned KindedSlot — no fabrication). mem::forget skips the
+    /// // carrier-drop so the share transfers cleanly to the stack.
+    /// self.push_kinded(result.slot.into_raw(), result.kind)?;
+    /// std::mem::forget(result);
+    /// // args drops here — each KindedSlot's Drop dispatches on kind
+    /// // and releases the share via drop_with_kind. No bare vw_drop
+    /// // (forbidden #8). No Bool-default fallback (forbidden §2.7.7 #9
+    /// // / §2.7.9).
+    /// ```
+    ///
+    /// This shell body is **not yet wired** in this cluster. The ABI
+    /// flip is the deliverable of Wave-γ G-method-fn-v2-abi; the
+    /// dispatch-shell body wiring depends on:
+    ///
+    /// 1. The receiver-classification cascade
+    ///    (`receiver_is_numeric` / `receiver_is_bool` /
+    ///    `receiver_is_heap` + `HeapKind` match + sub-dispatch on
+    ///    `Concurrency` / `TypedArray` / `Temporal` / `TableView`
+    ///    inner variants). Pre-§2.7.9 this used `ValueWord::is_*` /
+    ///    `as_heap_ref` (forbidden, playbook §4 #7); post-§2.7.9 it's
+    ///    `match args[0].kind { NativeKind::* => ..., NativeKind::Ptr(
+    ///    HeapKind::*) => args[0].slot.as_heap_value() match {
+    ///    HeapValue::* => ... } }` per §2.7.6 / Q8. Wave-γ-followup
+    ///    territory (sub-cluster `D-objects-mod-receiver-class`).
+    /// 2. The IC fast-path call
+    ///    (`crate::executor::ic_fast_paths::method_ic_check`) — the
+    ///    `MethodFnV2` storage transmute through `usize` is ABI-opaque
+    ///    and the `(receiver_kind, method_name_id)` keying is
+    ///    unchanged, so the IC fast-path semantics survive the flip
+    ///    untouched. The IC unit test's `dummy_handler` constant
+    ///    signature realigns to the kinded ABI — IC sub-cluster
+    ///    follow-up.
+    /// 3. The v2-typed-array PHF fast-path detector
+    ///    (`v2_array_detect::as_v2_typed_array`) — pre-§2.7.9 this
+    ///    relied on `as_vw_ref` reinterpreting `&u64` as `&ValueWord`
+    ///    (deleted). Post-§2.7.9 the detector takes
+    ///    `(args[0].slot.bits(), args[0].kind)` directly. Wave-γ-
+    ///    followup `D-v2-array-detect` cluster row.
+    /// 4. The legacy stack-based calling convention reading
+    ///    `arg_count` + `method_name` via `pop_raw_u64` +
+    ///    `ValueWord::as_str` — either rewrites to `pop_kinded` +
+    ///    `NativeKind::String` arm match, or is deleted as legacy
+    ///    bytecode the compiler no longer emits. Wave-γ-followup
+    ///    territory.
+    /// 5. The `handle_typed_object_method_v2` path — pre-§2.7.9 used
+    ///    `as_heap_ref` (forbidden) to extract `(schema_id, slots,
+    ///    heap_mask)`; post-§2.7.9 uses `args[0].slot.as_heap_value()`
+    ///    + `HeapValue::TypedObject` match. Wave-γ-followup territory.
     ///
     /// Per playbook §7.4 + §8 surface-and-stop trigger ("Cross-cluster
-    /// migration cascade"), this body surfaces back as
-    /// `NotImplemented(SURFACE)` documenting the architectural cascade.
-    /// Method dispatch is core VM functionality; the runtime test suite will
-    /// fail until the cluster set lands together. Do not paper over.
+    /// migration cascade") this body surfaces back as
+    /// `NotImplemented(SURFACE)` until the receiver-classification
+    /// cascade lands. The ABI is no longer the blocker; the
+    /// classification rewrite is. Do not paper over.
     pub fn op_call_method(
         &mut self,
         _instruction: &Instruction,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
-            "SURFACE: op_call_method requires the MethodHandler ABI to migrate from \
-             (&mut [u64]) -> Result<u64> to (&mut [KindedSlot]) -> Result<KindedSlot> \
-             (Wave 5b body migration, cluster E-builtins-backlog). The receiver \
-             classification + HeapKind sub-dispatch then rewrites via \
-             slot.as_heap_value() + HeapValue::* match per ADR-006 §2.7.6 / Q8. \
-             See playbook §10 D-objects-mod row + §8 cross-cluster cascade."
+            "SURFACE: op_call_method body wiring depends on the receiver-\
+             classification cascade rewrite (Wave-γ-followup). The MethodFnV2 ABI \
+             flip landed in this cluster (ADR-006 §2.7.9 / Q11) — the dispatch shell \
+             now constructs `&[KindedSlot]` from popped stack args via \
+             pop_kinded() and pushes the returned KindedSlot via push_kinded() \
+             without fabricated kinds. Receiver classification + HeapKind \
+             sub-dispatch + v2-array-detect + IC fast-path realignment are \
+             downstream Wave-γ-followup territory. See ADR-006 §2.7.9 for the \
+             dispatch-shell pseudocode + sub-cluster split."
                 .into(),
         ))
     }

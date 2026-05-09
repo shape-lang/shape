@@ -6,26 +6,50 @@
 //! - Faster than large match statements (O(1) vs O(n))
 //! - Self-documenting: all methods visible in one place
 //! - Easy to maintain: add method = one line in phf_map + implementation
+//!
+//! ## ABI: kinded `&[KindedSlot]` carrier slice (ADR-006 §2.7.9 / Q11)
+//!
+//! Handlers take an `args: &[KindedSlot]` carrier slice and return
+//! `Result<KindedSlot, VMError>`. `args[0]` is the receiver, `args[1..]`
+//! are the call arguments. The dispatch shell `op_call_method` in
+//! `crates/shape-vm/src/executor/objects/mod.rs` constructs the slice
+//! from popped stack args (kind sourced from the §2.7.7 stack
+//! parallel-`Vec<NativeKind>` track — no fabrication), and pushes the
+//! returned `KindedSlot` onto the stack via `push_kinded`.
+//!
+//! Bodies dispatch on `args[i].kind` per §2.7.6 / Q8 heterogeneous-kind
+//! body pattern, going through `args[i].slot.as_heap_value()` +
+//! `HeapValue` match for heap arms (preserves ADR-005 §1
+//! single-discriminator). The pre-§2.7.9 kind-blind ABI
+//! (`args: &mut [u64]` + `Result<u64, VMError>`) is deleted; see
+//! ADR-006 §2.7.9 for the architectural ruling and the W-series
+//! defection-attractor family that ABI sat in.
 
 use crate::executor::VirtualMachine;
 use phf::phf_map;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord};
+use shape_value::{KindedSlot, VMError};
 
-/// Method handler: operates on raw u64 stack slots — no Vec, no ValueWord on the hot path.
+/// Method handler ABI — kinded carrier slice in, kinded result out
+/// (ADR-006 §2.7.9 / Q11).
 ///
-/// - `vm`: Mutable VM instance
-/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all raw u64 bits.
-///   **Mutable** so handlers can update pointers after in-place mutation
-///   (e.g. `as_heap_mut` → `Arc::make_mut` may reallocate).
-///   The dispatcher owns these bits and drops them after the handler returns.
-/// - `ctx`: Optional execution context
-/// - Returns: `Result<u64, VMError>` — raw result bits pushed onto the stack.
+/// - `vm`: Mutable VM instance.
+/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all
+///   `KindedSlot` carriers (per §2.7.1 case 4 dispatch-slice form).
+///   **Borrow-only** (`&[..]`, not `&mut [..]`): the dispatch shell
+///   owns each `KindedSlot`'s share for the call duration and
+///   releases it via the carrier's `Drop` (which dispatches to
+///   `drop_with_kind` keyed on `kind`). Handlers borrow each entry.
+/// - `ctx`: Optional execution context.
+/// - Returns: `Result<KindedSlot, VMError>` — the result carrier.
+///   The dispatch shell takes ownership of the returned `KindedSlot`'s
+///   share, pushes it onto the stack via `push_kinded`, and skips the
+///   carrier-drop via `mem::forget` to balance refcounts.
 pub type MethodFnV2 = fn(
     &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError>;
+) -> Result<KindedSlot, VMError>;
 
 /// Method handler stored in PHF maps.
 pub type MethodHandler = MethodFnV2;
@@ -631,9 +655,11 @@ pub static CHANNEL_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Conversion:** toInt, to_int, toNumber, to_number
 /// **Predicates:** isNaN, is_nan, isFinite, is_finite
 ///
-/// Methods NOT in this map (they need Vec<ValueWord> for multi-arg or string
-/// return): toFixed, to_fixed, toString, to_string, clamp — handled by the
-/// inline `handle_number_method` fallback.
+/// Pre-§2.7.9 note: methods that historically lived outside this map
+/// because they needed multi-arg or string-return shapes are now
+/// uniform under the kinded `&[KindedSlot]` carrier ABI. `toFixed`,
+/// `to_fixed`, `toString`, `to_string`, `clamp` are entered alongside
+/// the rest.
 pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "floor" => crate::executor::objects::number_methods::number_floor_v2,
     "ceil" => crate::executor::objects::number_methods::number_ceil_v2,

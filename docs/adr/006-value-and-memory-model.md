@@ -994,6 +994,336 @@ HeapKind↔HeapValue symmetry only; no caller materializes a
 return one. If a future caller needs HeapValue materialization of
 FilterExpr, the work is a separate ADR amendment with the same
 single-discriminator analysis applied to the materialization path.
+#### 2.7.10 Method-dispatch ABI kind-awareness — `MethodFnV2` over `&[KindedSlot]` (Q11 ruling)
+
+Phase 1.B-vm Wave-α `D-array-joins` (close commit `2fe4a6b`) and
+Wave-β `M-datatable` (close commit `eb78699`) surfaced that the
+§2.7.7 / §2.7.8 parallel-kind invariant stops at the method-dispatch
+boundary. The `MethodFnV2` type alias defined in
+`crates/shape-vm/src/executor/objects/method_registry.rs` is
+**kind-blind in both directions**:
+
+```rust
+// Pre-§2.7.10 (kind-blind):
+pub type MethodFnV2 = fn(
+    &mut VirtualMachine,
+    args: &mut [u64],            // raw u64 only — no NativeKind track
+    Option<&mut ExecutionContext>,
+) -> Result<u64, VMError>;        // raw u64 result — no NativeKind
+```
+
+Every PHF entry in `method_registry.rs` (~280 method handlers spread
+across `executor/objects/*_methods.rs`, `executor/objects/array_*.rs`,
+`executor/objects/datatable_methods/*.rs`, `executor/objects/concat.rs`,
+etc.) takes its receiver-and-args as a kind-blind `&mut [u64]` and
+returns a kind-blind `u64`. The dispatch shell `op_call_method` in
+`executor/objects/mod.rs` would have to fabricate a kind on the
+result push (the W-series "Bool-default because Drop is a no-op"
+rationalization §2.7.7 #9 forbids verbatim) and the handler bodies
+have no way to dispatch on per-arg `NativeKind` for receiver
+classification (heap-vs-scalar split, `HeapKind::TypedArray` vs
+`HeapKind::DataTable` vs `HeapKind::String`, etc.) without falling
+back to the deleted `tag_bits` dispatch (forbidden #4 / #7) or an
+`is_heap()` probe (forbidden #7) on the receiver bits.
+
+Across Wave-α and Wave-β migrations roughly 150 handler bodies
+collapsed to `NotImplemented(SURFACE)` — the playbook §7.4 REVISED
+correct refusal shape — waiting for the architectural ABI flip
+this ruling specifies.
+
+**Decision (Q11 ruling):** the method-dispatch ABI extends the
+§2.7.7 / §2.7.8 parallel-kind invariant by **carrying the kind on
+the carrier itself at the boundary**. `MethodFnV2` becomes:
+
+```rust
+// §2.7.10 (kinded):
+pub type MethodFnV2 = fn(
+    &mut VirtualMachine,
+    args: &[KindedSlot],         // kinded carrier per §2.7.6 dispatch-slice case
+    Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError>; // kinded result
+```
+
+`args[0]` is the receiver (kind = `NativeKind::Ptr(HeapKind::*)`
+for heap receivers, `NativeKind::String` / `Float64` / `Int64` /
+`Bool` for inline-scalar receivers, etc.); `args[1..]` are the call
+arguments in order. Handler bodies dispatch on `args[0].kind`
+(receiver classification) and on each `args[i].kind` (per-arg
+classification) per the §2.7.6 / Q8 heterogeneous-kind body
+pattern, going through `args[i].slot.as_heap_value()` + `HeapValue`
+match for heap arms (preserves ADR-005 §1 single-discriminator).
+
+**The `&[KindedSlot]` shape is exactly §2.7.1 case 4 — the
+dispatch-slice carrier.** The PHF map in `method_registry.rs` is a
+**heterogeneous-kind body** in §2.7.6 vocabulary: each handler
+expects a specific kind shape for its receiver-and-args, dispatches
+on slot kinds at entry, and returns a specific kinded result. The
+slice form is the exact carrier §2.7.1 case 4 names:
+
+> *Case 4 — dispatch slice. A function takes `&[KindedSlot]`
+> heterogeneous-kind args; the body dispatches on `slot.kind` per
+> arg. Use sites: `op_call_value` arg list, intrinsic dispatch.*
+
+`MethodFnV2` is the ~280-entry generalization of `op_call_value`'s
+heterogeneous-kind dispatch slice.
+
+**WB2.4 retain-on-read discipline at the dispatch boundary.** The
+dispatch shell `op_call_method` constructs the `&[KindedSlot]` from
+popped stack args. Per playbook §2 kind-sourcing rules + §3 pop
+pattern:
+
+```rust
+// Kind-sourcing (per playbook §2):
+//   - Receiver kind: from pop_kinded() (the producing opcode emitted
+//     it; the parallel-Vec<NativeKind> track on the stack carries it
+//     into op_call_method per §2.7.7).
+//   - Per-arg kind: from pop_kinded() (same).
+let arg_count = /* from instruction operand */;
+let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count + 1);
+for _ in 0..(arg_count + 1) {
+    let (bits, kind) = self.pop_kinded()?;
+    // SAFETY: pop_kinded transfers one share to us; we hand it to
+    // KindedSlot::new which now owns the share. The handler reads
+    // (borrows) it via the &[KindedSlot] slice; on drop, the
+    // dispatch shell (or the returned-result re-push path) releases
+    // each share through KindedSlot's Drop dispatch.
+    args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+}
+args.reverse();  // pop order is reverse of push order
+let result: KindedSlot = handler(self, &args, ctx)?;
+// args drops here — each KindedSlot's Drop releases the share via
+// drop_with_kind dispatch. No bare vw_drop(bits) (forbidden #8).
+self.push_kinded(result.slot.into_raw(), result.kind)?;
+std::mem::forget(result);  // we transferred the share onto the stack;
+                           // skip the carrier-drop to balance refcounts.
+```
+
+The dispatch shell never fabricates a kind; every kind in the
+slice and every kind on the result come from the §2.7.7 /
+§2.7.8 parallel-kind tracks. No Bool-default fallback (§2.7.7 #9),
+no tag_bits decode (§2.7.7 #4 / #7), no heap probe via deleted
+ValueWord accessors (§2.7.7 #7).
+
+**Options considered:**
+
+- **Option A: `args: &[(u64, NativeKind)]` parallel-tuple slice.**
+  Mirrors the §2.7.7 stack-side `Vec<u64>` + `Vec<NativeKind>`
+  *parallel-track* shape one level closer (a slice of (bits, kind)
+  pairs is morally a single packed buffer, not two parallel ones,
+  but it preserves the "kind alongside data, not bundled in a
+  carrier" bias). **Rejected.** §2.7.6 / Q8 named the
+  `KindedSlot` carrier as the ADR-006 vocabulary for boundary-
+  carrier shapes specifically to avoid proliferating pair / tuple
+  /shape variants across crates. Method dispatch is a boundary
+  (the single-most-common GENERIC_CARRIER site per ADR-006 §2.7.1
+  case 4 enumeration); using `&[KindedSlot]` rather than
+  `&[(u64, NativeKind)]` keeps the project's vocabulary consistent.
+  The §2.7.7 stack track is a *storage-tier* choice (8-byte slot
+  invariant matters there, see §2.7.7 forbidden shapes #2 / #3);
+  the method-dispatch carrier is a *runtime-tier* choice (no
+  storage-shape constraints) where the carrier struct is the
+  natural fit. Adopting Option A would reintroduce two ways to
+  spell the same boundary, the §2.7.6 / Q8 ruling forbids on
+  carrier-API-bound grounds.
+
+- **Option B: keep `&mut [u64]` + Bool-default fallback at the
+  dispatch shell.** Push `args[0]` with a fabricated
+  `NativeKind::Bool` because "the dispatcher already owns the
+  share, Drop is a no-op". **Rejected — forbidden by §2.7.7 #9.**
+  This is the W-series defection-attractor verbatim: the apparent
+  leak-freeness is an accident of `Bool`'s no-op Drop, not of any
+  refcount discipline. The first heap-pointer receiver pushed
+  via the shim leaks an `Arc::into_raw`'d strong count (or, on
+  the result side, mis-Drops a heap pointer as a `Bool` no-op).
+  CLAUDE.md "Renames to refuse on sight" applies verbatim; this
+  option is not a real option.
+
+- **Option C: `args: &[KindedSlot]` dispatch-slice carrier.
+  Result: `Result<KindedSlot, VMError>`.** **Accepted.** The
+  carrier is the canonical §2.7.6 / Q8 vocabulary; the slice
+  shape is the canonical §2.7.1 case 4 dispatch-slice form; every
+  handler body uses `args[i].kind` at the §2.7.6 heterogeneous-
+  kind dispatch site without indirection. The dispatch shell
+  sources every kind from the §2.7.7 stack parallel-kind track
+  (no fabricated kind); the result-push path takes the kind from
+  the handler-returned `KindedSlot.kind` (no fabricated kind).
+  The migration cost (~280 PHF handler signature flips) is the
+  cross-cluster cascade Wave-α / Wave-β surfaced; the bodies
+  themselves migrate in Wave-γ-followup once the ABI flip lands.
+
+**Forbidden shapes this rules out (mirror of §2.7.7 / §2.7.8
+forbidden lists, applied to method-dispatch ABI):**
+
+- `args: &mut [u64]` with kind decoded from the high bits of each
+  `u64` — same deleted tag_bits dispatch as §2.7.7 #4 / #7. Method
+  dispatch is post-proof: the producing opcode pushed each arg with
+  a known kind onto the §2.7.7 parallel-kind track; the dispatch
+  shell already has the kind, fabrication is forbidden.
+- `args: &mut [u64]` with an `is_heap()` probe on each entry to
+  classify heap-vs-scalar receivers — §2.7.7 #7 forbidden, the
+  deleted ValueWord-shape probe.
+- `args: &mut [u64]` + a *parallel* `&[NativeKind]` second slice
+  parameter on `MethodFnV2`. **Rejected on §2.7.6 / Q8 grounds:**
+  the carrier API bound says "kind on the carrier struct, not as
+  a parallel side-channel on the function signature". The §2.7.7
+  parallel-`Vec<NativeKind>` shape is appropriate at the
+  *storage-tier* boundary (8-byte slot constraint, two
+  allocations); at the *runtime-tier dispatch boundary* the
+  carrier-struct shape is canonical.
+- `args: &mut [KindedSlot]` (mutable). **Rejected** — handlers
+  borrow the args; the dispatch shell owns the shares. Mutability
+  invites a body to swap a `KindedSlot` in-place, which would
+  desynchronize the dispatch shell's drop accounting. `&[KindedSlot]`
+  is borrow-only, matching the dispatch contract.
+- `Vec<KindedSlot>` by-move into the handler. **Rejected** —
+  same desynchronized-drop concern. By-move would transfer
+  ownership of every share to the handler, which then has to
+  unconditionally drop or push everything. Borrow-only `&[..]` keeps
+  the share-accounting at the dispatch shell where the §2.7.7
+  invariants live.
+- Result type `(u64, NativeKind)` rather than `KindedSlot`. Same
+  Option-A rejection rationale: §2.7.6 / Q8 carrier-API-bound says
+  the project speaks `KindedSlot` at boundaries, not parallel-pair
+  variants. `KindedSlot` already has the WB2.4-correct `Drop`
+  dispatch (`drop_with_kind` keyed on `kind`); a `(u64, NativeKind)`
+  result would force every handler to call the helper explicitly.
+- **Transitional shims preserving deleted ABI-shape names** —
+  `MethodFn` / `MethodFnLegacy` / `dispatch_method_handler_raw` /
+  `call_handler_with_u64_slice` — same §2.7.7 #1 rule, the
+  W-series "borrowed bits with call-pattern invariants" defection-
+  attractor at the dispatch-shell layer. **Migrate every PHF entry
+  in-wave; do not preserve a legacy ABI as a transitional layer.**
+  The cross-cluster cascade closure is the deliverable; "just keep
+  the kindless variant for the methods that already work" is the
+  rationalization §2.7.7 forbids verbatim.
+- **Defection-attractor descriptors** — "MethodFnV2 bridge",
+  "MethodFn translator", "dispatch-slice probe", "boundary
+  adapter for handler ABI", "kind-injection helper". Per the
+  2026-05-09 user ruling broadening the W-series rename family,
+  any descriptor of the deleted kind-blind ABI that uses bridge /
+  probe / helper / hop / translator / adapter framing belongs to
+  the same defection-attractor family CLAUDE.md "Renames to refuse
+  on sight" enumerates. Describe the deleted ABI by name (the
+  pre-§2.7.10 `args: &mut [u64]` MethodFnV2) or by deletion-fate
+  (the kind-blind handler ABI), never by hypothetical role.
+
+**Performance characteristics** (mirror of §2.7.7 / §2.7.8
+analyses):
+
+- `KindedSlot` is `repr(C)` `{ slot: ValueSlot (u64), kind:
+  NativeKind (1 byte) }`. With natural alignment / padding, the
+  carrier is 16 bytes; a `&[KindedSlot]` of N args is `N * 16`
+  bytes vs. the pre-§2.7.10 `N * 8` bytes for `&mut [u64]`. **Net
+  cost:** +8 bytes per arg at the dispatch boundary. For typical
+  call patterns (1–3 args per method call), this is +8 to +24
+  bytes per dispatch — negligible. The slice itself is allocated
+  once per method call on the dispatch shell's stack frame; no
+  heap allocation, no pointer chase per arg.
+- Pop+construct: `pop_kinded()` (1 word read + 1 byte read from
+  the parallel tracks) + `KindedSlot::new(ValueSlot::from_raw,
+  kind)` (struct construction, no Drop work). One per arg.
+  Strictly the same work the §2.7.7 stack pop already does; the
+  carrier struct is just a different shape over the same bits.
+- Result push: `push_kinded(result.slot.into_raw(), result.kind)`
+  (1 word write + 1 byte write to the parallel tracks) +
+  `mem::forget(result)` to balance the carrier-drop accounting.
+  Strictly the same work the §2.7.7 stack push already does.
+- WB2.4 clone/drop within the slice: `KindedSlot::Drop` dispatches
+  on `kind` (1 byte cmpxchg target) and calls `drop_with_kind`.
+  Same dispatch table as §2.7.7 / §2.7.8; **no new dispatch
+  surface.** **Strictly faster than the deleted W-series shape**
+  (which dispatched on tag_bits before performing the same Arc
+  work).
+- IC fast path: `MethodIcHit` stores a `MethodFnV2` function
+  pointer keyed on `(receiver_kind, method_name_id)`. Pointer
+  shape is unchanged (the function-pointer-as-`usize` storage is
+  ABI-opaque); the IC keying is unchanged (`receiver_kind: u8` —
+  the lower 8 bits of `NativeKind::Ptr(HeapKind::*) as u8` — is
+  the same as it was pre-§2.7.10). The IC fast-path call site
+  constructs the `&[KindedSlot]` once per dispatch from popped
+  args; the fast-path skip is the same number of cycles it was.
+
+**Cross-check on debug builds:** for each `args[i]` constructed in
+the dispatch shell from `pop_kinded`, the kind read from the
+§2.7.7 parallel-kind track should match the producing opcode's
+emitted kind (the call-site emitter knows what kind it pushed). A
+`debug_assert_eq!` inside `op_call_method`'s arg-construction loop
+catches kind drift during development; in release builds the
+assertions compile out.
+
+**Migration scope (Wave-γ G-method-fn-v2-abi territory plus
+follow-up):**
+
+1. Type alias `MethodFnV2` in
+   `crates/shape-vm/src/executor/objects/method_registry.rs` flips
+   from `(&mut VM, &mut [u64], _) -> Result<u64, VMError>` to
+   `(&mut VM, &[KindedSlot], _) -> Result<KindedSlot, VMError>`.
+   Same flip on `MethodHandler` (which is a type alias to
+   `MethodFnV2`).
+2. Dispatch shell `op_call_method` in
+   `crates/shape-vm/src/executor/objects/mod.rs` is currently a
+   `NotImplemented(SURFACE)` stub from D-objects-mod Wave-α. Its
+   doc-comment surface text is updated to reflect that the ABI is
+   now flipped (§2.7.10 landed); the body remains a SURFACE stub
+   because the receiver-classification cascade and IC fast-path
+   wiring are downstream Wave-γ-followup territory (the kinded
+   bodies for `handle_typed_object_method_v2`, the
+   `v2_array_detect` PHF-fast-path receiver kind unwrap, and the
+   legacy stack-based calling convention all need their own
+   sub-cluster work).
+3. Every PHF handler signature (~280 across ~33 files) re-aligns:
+   `args: &mut [u64]` → `args: &[KindedSlot]`; `Result<u64,
+   VMError>` → `Result<KindedSlot, VMError>`. Bodies that were
+   already `NotImplemented(SURFACE)` keep that body; bodies that
+   had real implementations (~150 of the ~280) become
+   `NotImplemented(SURFACE)` with the migration contract
+   documented (per the M-datatable Wave-β `joins.rs` precedent at
+   close commit `eb78699`). Wave-γ-followup migrates each body
+   off SURFACE per the §2.7.6 / Q8 heterogeneous-kind body
+   pattern.
+4. IC fast-path consumer (`crates/shape-vm/src/executor/ic_fast_paths.rs`)
+   imports `MethodFnV2` for IC entry pointer storage. The
+   signature change is internal to the function-pointer type; the
+   storage shape (transmute through `usize`) is unchanged. The
+   `test_method_ic_handler_roundtrip` unit test's `dummy_handler`
+   constant signature realigns to the new ABI — minor follow-up
+   in the IC sub-cluster.
+5. Receiver classification + sub-dispatch cascade in
+   `op_call_method` (`receiver_is_numeric` / `receiver_is_bool` /
+   `receiver_is_heap` + `HeapKind` match + sub-dispatch on
+   `Concurrency` / `TypedArray` / `Temporal` / `TableView` inner
+   variants) rewrites from the deleted `ValueWord::is_*` /
+   `as_heap_ref` (forbidden) to `match args[0].kind { NativeKind::*
+   => ..., NativeKind::Ptr(HeapKind::*) => args[0].slot
+   .as_heap_value() match { HeapValue::* => ... } }` per
+   ADR-006 §2.7.6 / Q8. Wave-γ-followup territory.
+6. v2-typed-array PHF fast-path detector
+   (`v2_array_detect::as_v2_typed_array`) currently relied on
+   `as_vw_ref` reinterpreting `&u64` as `&ValueWord`. With
+   `ValueWord` deleted the detector takes raw bits + kind directly
+   — a Wave-γ-followup `D-v2-array-detect` cluster row.
+7. Legacy stack-based calling convention (the legacy `_` arm
+   reading `arg_count` and `method_name` from the stack via
+   `pop_raw_u64` + `ValueWord::as_str`) either becomes the kinded
+   equivalent (`pop_kinded` + `String` arm match) or is deleted
+   as legacy bytecode the compiler no longer emits. Wave-γ-
+   followup territory.
+
+**Cross-cluster surfaces (~280 handler signatures realigned in this
+ruling-implementation cluster, ~150 working bodies become SURFACE,
+each surfaces back into Wave-γ-followup body migration territory).**
+The architectural ABI flip is the deliverable of this ruling; the
+~150 body migrations are downstream waves (the same shape as
+M-datatable Wave-β surfaced from D-array-joins Wave-α — close
+commit `eb78699` set the per-handler precedent at one PHF entry
+pair, this ruling generalizes the same flip across the full PHF
+registry).
+
+**Out-of-scope this ruling:** Snapshot/restore of in-flight method
+calls (suspension state crossing a `MethodFnV2` boundary). Per
+§2.7.4, snapshot rebuild is Phase 2c; the kinded-ABI in-flight
+suspension shape gets its own follow-up if/when async method calls
+land in the snapshot subset.
 
 ## 3. Lifetime, ownership, and storage planning
 

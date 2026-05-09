@@ -25,7 +25,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 #[inline]
 fn surface(method: &str) -> VMError {
@@ -40,137 +40,137 @@ fn surface(method: &str) -> VMError {
 
 pub fn v2_transpose(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("transpose"))
 }
 
 pub fn v2_inverse(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("inverse"))
 }
 
 pub fn v2_determinant(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("determinant"))
 }
 
 pub fn v2_trace(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("trace"))
 }
 
 pub fn v2_shape(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("shape"))
 }
 
 pub fn v2_reshape(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("reshape"))
 }
 
 pub fn v2_row(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("row"))
 }
 
 pub fn v2_col(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("col"))
 }
 
 pub fn v2_diag(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("diag"))
 }
 
 pub fn v2_flatten(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("flatten"))
 }
 
 pub fn v2_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("sum"))
 }
 
 pub fn v2_min(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("min"))
 }
 
 pub fn v2_max(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("max"))
 }
 
 pub fn v2_mean(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("mean"))
 }
 
 pub fn v2_row_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("rowSum"))
 }
 
 pub fn v2_col_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("colSum"))
 }
 
 /// `mat.map(fn)` — apply per-element callback (v2).
 pub(crate) fn handle_map(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("map"))
 }

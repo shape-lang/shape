@@ -64,76 +64,85 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
-#[inline]
-fn surface_call_method_cascade(method: &'static str) -> VMError {
-    VMError::NotImplemented(format!(
-        "SURFACE: Instant.{}() depends on the MethodHandler ABI migration \
-         from (&mut [u64]) -> Result<u64> to (&mut [KindedSlot]) -> \
-         Result<KindedSlot>. The receiver kind is \
-         NativeKind::Ptr(HeapKind::Instant). The dispatch shell \
-         op_call_method (objects/mod.rs:299) is itself a SURFACE under \
-         cluster E-builtins-backlog; this handler becomes reachable only \
-         once that ABI flip lands. Pure-Instant logic is preserved so the \
-         re-implementation lifts from std::time::Instant directly. See \
-         playbook §10 M-datetime-instant row + ADR-006 §2.7.6 / Q8.",
-        method
-    ))
-}
+// Pre-§2.7.9 surface helper `surface_call_method_cascade` deleted —
+// the kinded ABI landed per ADR-006 §2.7.9 / Q11. Each SURFACE handler
+// body carries the §2.7.9-aware migration contract inline. Pure-Instant
+// logic continues to live in `executor/builtins/datetime_builtins.rs`,
+// so Wave-γ-followup body migrations lift from std::time::Instant
+// directly. Territory: M-datetime-instant-class.
 
 /// .elapsed() -> number (seconds as f64) — SURFACE per ABI cascade.
 pub fn v2_elapsed(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("elapsed"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_elapsed — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// .elapsed_ms() -> number — SURFACE per ABI cascade.
 pub fn v2_elapsed_ms(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("elapsed_ms"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_elapsed_ms — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// .elapsed_us() -> number — SURFACE per ABI cascade.
 pub fn v2_elapsed_us(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("elapsed_us"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_elapsed_us — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// .elapsed_ns() -> int — SURFACE per ABI cascade.
 pub fn v2_elapsed_ns(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("elapsed_ns"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_elapsed_ns — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// .duration_since(other: Instant) -> number — SURFACE per ABI cascade.
 pub fn v2_duration_since(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("duration_since"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_duration_since — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// .to_string() -> string — SURFACE per ABI cascade.
 pub fn v2_to_string(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(surface_call_method_cascade("to_string"))
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "v2_to_string — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

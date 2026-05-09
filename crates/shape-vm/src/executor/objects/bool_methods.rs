@@ -18,14 +18,14 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 /// `bool.toString()` / `bool.to_string()`.
 pub fn bool_to_string(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — bool.toString(): MethodHandler ABI needs kinded migration \
          (cluster E-builtins-backlog, Wave 5b template); receiver is \

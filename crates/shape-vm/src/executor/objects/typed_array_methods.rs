@@ -64,7 +64,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 /// Common surface error for every handler in this file.
 ///
@@ -96,144 +96,144 @@ fn surface(method: &str) -> VMError {
 /// v2 len: works for all element types (float, int, bool).
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("typed_array.len"))
 }
 
 /// v2 sum for float arrays.
 pub fn v2_float_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.sum"))
 }
 
 /// v2 sum for int arrays.
 pub fn v2_int_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.sum"))
 }
 
 /// v2 avg/mean for float arrays.
 pub fn v2_float_avg(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.avg"))
 }
 
 /// v2 avg/mean for int arrays.
 pub fn v2_int_avg(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.avg"))
 }
 
 /// v2 min for float arrays.
 pub fn v2_float_min(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.min"))
 }
 
 /// v2 min for int arrays.
 pub fn v2_int_min(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.min"))
 }
 
 /// v2 max for float arrays.
 pub fn v2_float_max(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.max"))
 }
 
 /// v2 max for int arrays.
 pub fn v2_int_max(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.max"))
 }
 
 /// v2 variance for float arrays.
 pub fn v2_float_variance(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.variance"))
 }
 
 /// v2 std (standard deviation) for float arrays.
 pub fn v2_float_std(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.std"))
 }
 
 /// v2 dot product for float arrays.
 pub fn v2_float_dot(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.dot"))
 }
 
 /// v2 norm for float arrays.
 pub fn v2_float_norm(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.norm"))
 }
 
 /// v2 bool count (count of true values).
 pub fn v2_bool_count(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<bool>.count"))
 }
 
 /// v2 bool any.
 pub fn v2_bool_any(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<bool>.any"))
 }
 
 /// v2 bool all.
 pub fn v2_bool_all(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<bool>.all"))
 }
 
@@ -244,63 +244,63 @@ pub fn v2_bool_all(
 /// v2 normalize: L2-normalize a float array (divide each element by L2 norm).
 pub(crate) fn handle_float_normalize(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.normalize"))
 }
 
 /// v2 cumsum: cumulative sum of a float array.
 pub(crate) fn handle_float_cumsum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.cumsum"))
 }
 
 /// v2 diff: consecutive differences of a float array.
 pub(crate) fn handle_float_diff(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.diff"))
 }
 
 /// v2 abs: element-wise absolute value of a float array.
 pub(crate) fn handle_float_abs(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.abs"))
 }
 
 /// v2 sqrt: element-wise square root of a float array.
 pub(crate) fn handle_float_sqrt(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.sqrt"))
 }
 
 /// v2 ln: element-wise natural logarithm of a float array.
 pub(crate) fn handle_float_ln(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.ln"))
 }
 
 /// v2 exp: element-wise exponential of a float array.
 pub(crate) fn handle_float_exp(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.exp"))
 }
 
@@ -312,72 +312,72 @@ pub(crate) fn handle_float_exp(
 /// v2 map for float arrays: apply a callback to each element.
 pub(crate) fn handle_float_map(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.map"))
 }
 
 /// v2 filter for float arrays: keep elements where callback returns truthy.
 pub(crate) fn handle_float_filter(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.filter"))
 }
 
 /// v2 forEach for float arrays: call callback on each element, return none.
 pub(crate) fn handle_float_for_each(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.forEach"))
 }
 
 /// v2 reduce for float arrays: fold with accumulator.
 pub(crate) fn handle_float_reduce(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.reduce"))
 }
 
 /// v2 find for float arrays: return first element matching predicate, or none.
 pub(crate) fn handle_float_find(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.find"))
 }
 
 /// v2 some for float arrays: return true if any element matches predicate.
 pub(crate) fn handle_float_some(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.some"))
 }
 
 /// v2 every for float arrays: return true if all elements match predicate.
 pub(crate) fn handle_float_every(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.every"))
 }
 
 /// v2 toArray for float arrays: convert typed array to generic Array.
 pub(crate) fn handle_float_to_array(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<number>.toArray"))
 }
 
@@ -388,90 +388,90 @@ pub(crate) fn handle_float_to_array(
 /// v2 abs for int arrays: element-wise absolute value.
 pub(crate) fn handle_int_abs(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.abs"))
 }
 
 /// v2 map for int arrays: apply a callback to each element.
 pub(crate) fn handle_int_map(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.map"))
 }
 
 /// v2 filter for int arrays: keep elements where callback returns truthy.
 pub(crate) fn handle_int_filter(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.filter"))
 }
 
 /// v2 forEach for int arrays: call callback on each element, return none.
 pub(crate) fn handle_int_for_each(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.forEach"))
 }
 
 /// v2 reduce for int arrays: fold with accumulator.
 pub(crate) fn handle_int_reduce(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.reduce"))
 }
 
 /// v2 find for int arrays: return first element matching predicate, or none.
 pub(crate) fn handle_int_find(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.find"))
 }
 
 /// v2 some for int arrays: return true if any element matches predicate.
 pub(crate) fn handle_int_some(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.some"))
 }
 
 /// v2 every for int arrays: return true if all elements match predicate.
 pub(crate) fn handle_int_every(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.every"))
 }
 
 /// v2 toArray for int arrays: convert typed array to generic Array.
 pub(crate) fn handle_int_to_array(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<int>.toArray"))
 }
 
 /// v2 toArray for bool arrays: convert typed array to generic Array.
 pub(crate) fn handle_bool_to_array(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("Vec<bool>.toArray"))
 }
 

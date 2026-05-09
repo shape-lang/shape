@@ -20,7 +20,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 #[inline]
 fn surface(method: &str) -> VMError {
@@ -34,80 +34,80 @@ fn surface(method: &str) -> VMError {
 
 pub fn char_is_alphabetic(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isAlphabetic"))
 }
 
 pub fn char_is_numeric(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isNumeric"))
 }
 
 pub fn char_is_alphanumeric(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isAlphanumeric"))
 }
 
 pub fn char_is_whitespace(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isWhitespace"))
 }
 
 pub fn char_is_uppercase(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isUppercase"))
 }
 
 pub fn char_is_lowercase(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isLowercase"))
 }
 
 pub fn char_is_ascii(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isAscii"))
 }
 
 pub fn char_to_uppercase(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("toUppercase"))
 }
 
 pub fn char_to_lowercase(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("toLowercase"))
 }
 
 pub fn char_to_string(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("toString"))
 }

@@ -22,7 +22,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 #[inline]
 fn surface(method: &str) -> VMError {
@@ -37,96 +37,96 @@ fn surface(method: &str) -> VMError {
 
 pub fn v2_add(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("add"))
 }
 
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("has"))
 }
 
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("delete"))
 }
 
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("size"))
 }
 
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("isEmpty"))
 }
 
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("toArray"))
 }
 
 pub fn v2_union(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("union"))
 }
 
 pub fn v2_intersection(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("intersection"))
 }
 
 pub fn v2_difference(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("difference"))
 }
 
 pub fn v2_for_each(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("forEach"))
 }
 
 pub fn v2_map(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("map"))
 }
 
 pub fn v2_filter(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("filter"))
 }

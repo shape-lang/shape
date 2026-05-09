@@ -26,7 +26,8 @@
 //! `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
+use shape_runtime::context::ExecutionContext;
 
 #[inline]
 fn surface(method: &str) -> VMError {
@@ -43,17 +44,17 @@ fn surface(method: &str) -> VMError {
 /// `indexed.between(start, end)` — filter rows where index is in [start, end] (v2).
 pub(crate) fn handle_between(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(surface("between"))
 }
 
 /// `indexed.resample(interval, { col: "agg_fn", ... })` — bucket by interval, aggregate (v2).
 pub(crate) fn handle_resample(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(surface("resample"))
 }

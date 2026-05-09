@@ -24,7 +24,8 @@
 //! push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))` against
 //! the `vm.builtin_schemas.simulate_return` schema.
 
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
+use shape_runtime::context::ExecutionContext;
 
 use crate::executor::VirtualMachine;
 
@@ -40,9 +41,9 @@ use crate::executor::VirtualMachine;
 ///   final_state, results, elements_processed, completed, event_log, seed).
 pub(crate) fn handle_simulate(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "datatable.simulate — SURFACE: phase-2c body migration. Receiver kind \
          = NativeKind::Ptr(HeapKind::DataTable). The body must (1) dispatch \

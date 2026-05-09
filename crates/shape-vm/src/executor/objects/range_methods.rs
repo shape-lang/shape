@@ -22,7 +22,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 #[inline]
 fn surface(method: &str) -> VMError {
@@ -38,17 +38,17 @@ fn surface(method: &str) -> VMError {
 /// `range.contains(value)` — check if a numeric value is within the range.
 pub fn range_contains(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("contains"))
 }
 
 /// `range.toArray()` — materialize the range into an array of integers.
 pub fn range_to_array(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(surface("toArray"))
 }
