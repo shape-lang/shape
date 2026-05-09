@@ -30,7 +30,7 @@ use crate::executor::VirtualMachine;
 #[cfg(feature = "jit")]
 use crate::type_tracking::NativeKind;
 #[cfg(feature = "jit")]
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::VMError;
 
 /// JIT context buffer size in u64 words.
 ///
@@ -124,9 +124,14 @@ impl VirtualMachine {
             });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                let vw_slice = self.stack_slice_raw(slot_idx..(slot_idx + 1));
+                // ADR-006 §2.7.7 borrow-read of the live stack slot — kind is
+                // sourced locally from `osr_entry.local_kinds` (post-proof
+                // wire-format per §2.7.5.1), so the parallel-track kind read
+                // here is discarded and only the raw bits cross the JIT
+                // boundary.
+                let (bits, _slot_kind) = self.stack_read_kinded_raw(slot_idx);
                 ctx_buf[LOCALS_U64_OFFSET + local_idx as usize] =
-                    jit_abi::marshal_arg_to_jit(&vw_slice[0], kind);
+                    jit_abi::marshal_arg_to_jit(bits, kind);
             }
         }
 
@@ -164,10 +169,17 @@ impl VirtualMachine {
             });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
+                // ADR-006 §2.7.7 kinded write: re-materialize the local from
+                // the JIT context buffer with the kind sourced from
+                // `osr_entry.local_kinds` (post-proof per §2.7.5.1).
+                // `stack_write_kinded` retires the prior occupant via
+                // `drop_with_kind` and installs the new `(bits, kind)` pair
+                // in lockstep on the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                ));
+                );
+                self.stack_write_kinded(slot_idx, unmarshaled, kind);
             }
         }
 
@@ -209,10 +221,16 @@ impl VirtualMachine {
             });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
+                // ADR-006 §2.7.7 kinded write: deopt restore from the JIT
+                // context buffer. Kind comes from `osr_entry.local_kinds`
+                // (post-proof per §2.7.5.1); `stack_write_kinded` retires
+                // the prior occupant and installs the new `(bits, kind)`
+                // pair in lockstep on the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                ));
+                );
+                self.stack_write_kinded(slot_idx, unmarshaled, kind);
             }
         }
     }
@@ -263,7 +281,13 @@ impl VirtualMachine {
             let src_idx = LOCALS_U64_OFFSET + jit_idx as usize;
             let dst_idx = base + bc_idx as usize;
             if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                self.stack_write_raw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
+                // ADR-006 §2.7.7 kinded write: deopt re-materialization.
+                // Kind sourced from `deopt_info.local_kinds` (post-proof per
+                // §2.7.5.1). `stack_write_kinded` retires the prior occupant
+                // and installs the new `(bits, kind)` pair in lockstep on
+                // the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                self.stack_write_kinded(dst_idx, unmarshaled, kind);
             }
         }
 
@@ -320,11 +344,22 @@ impl VirtualMachine {
             let locals_count = func.locals_count as usize;
             let needed = current_bp + locals_count + iframe.stack_depth as usize;
             if needed > self.stack.len() {
+                // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel
+                // kind track grow together. Sentinel pair is
+                // `(NONE_BITS, NativeKind::Bool)` per the §2.7.7 dead-slot
+                // convention — Drop/Clone are no-ops on this kind so the
+                // pre-population window is leak-free.
                 self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+                self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
             }
-            // Zero-init local slots
+            // Zero-init local slots — write the §2.7.7 dead-slot sentinel
+            // pair `(NONE_BITS, NativeKind::Bool)` through the kinded API so
+            // the parallel-kind track stays in lockstep with the data track.
+            // The slot's prior occupant is already the zero/Bool sentinel
+            // (from the resize_with above or from a prior frame teardown),
+            // so `drop_with_kind` short-circuits as a no-op.
             for j in 0..locals_count {
-                self.stack_write_raw(current_bp + j, ValueWord::none());
+                self.stack_write_kinded(current_bp + j, Self::NONE_BITS, NativeKind::Bool);
             }
 
             // Restore locals from ctx_buf using the frame's mapping
@@ -342,7 +377,11 @@ impl VirtualMachine {
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                    self.stack_write_raw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
+                    // ADR-006 §2.7.7 kinded write: inline-frame deopt
+                    // re-materialization. Kind sourced from
+                    // `iframe.local_kinds` (post-proof per §2.7.5.1).
+                    let unmarshaled = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                    self.stack_write_kinded(dst_idx, unmarshaled, kind);
                 }
             }
 
@@ -393,10 +432,16 @@ impl VirtualMachine {
         let innermost_locals = innermost_func.locals_count as usize;
         let needed = current_bp + innermost_locals + deopt_info.stack_depth as usize;
         if needed > self.stack.len() {
+            // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel kind
+            // track grow together. Same dead-slot sentinel convention as the
+            // intermediate-frame growth loop above.
             self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+            self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
         }
+        // Zero-init innermost-frame locals through the kinded API for
+        // parallel-track lockstep (§2.7.7 dead-slot sentinel pattern).
         for i in 0..innermost_locals {
-            self.stack_write_raw(current_bp + i, ValueWord::none());
+            self.stack_write_kinded(current_bp + i, Self::NONE_BITS, NativeKind::Bool);
         }
 
         // return_ip for innermost: instruction after the last inline frame's call
