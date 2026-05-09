@@ -1,382 +1,238 @@
-//! MethodFnV2 handlers for numeric (f64/i48) methods.
+//! MethodFnV2 handlers for numeric (f64/i48) methods, plus the bool / char
+//! delegation entry points the method registry routes to (`bool_to_string_v2`
+//! and the `char_*_v2` family).
 //!
-//! Each handler operates on raw `u64` NaN-boxed bits:
-//! - `args[0]` is the receiver (a number or int)
-//! - Returns a raw `u64` result
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
 //!
-//! The helper `decode_number_receiver` centralises the int-vs-float branching
-//! so individual handlers stay small.
+//! Number / Int / Char / Bool are inline-scalar `NativeKind` variants
+//! (`Float64`, `Int64`, `Ptr(HeapKind::Char)`, `Bool`) per ADR-006 §2.3 +
+//! `crates/shape-value/src/heap_variants.rs`, so a kind-correct rewrite
+//! of the bodies is possible **once the MethodHandler ABI lands the kinded
+//! `&mut [KindedSlot] -> Result<KindedSlot>` shape** (cluster
+//! E-builtins-backlog, Wave 5b template, commit `fa2bafc`). The
+//! Decimal-coercion path (`number_*_v2` accepting an `Arc<Decimal>`
+//! receiver) dispatches via `slot.as_heap_value()` + `HeapValue::Decimal`
+//! match per Q8.
+//!
+//! The pre-Wave-6 implementation imported `shape_value::tag_bits::*` (the
+//! deleted ValueWord tag dispatch — forbidden #7), the deleted
+//! `shape_value::value_word::*` constructor surface, `ValueWordExt`
+//! (forbidden #1), and `objects::raw_helpers::{extract_bool, extract_char,
+//! extract_number_coerce, extract_heap_ref, type_error}` (the entire
+//! `extract_*` family was deleted in cluster D-raw-helpers; only the
+//! FilterExpr extractor remains). Per playbook §4 #9 / ADR-006 §2.7.7 a
+//! Bool-default kinded shim preserving the call-pattern shape is
+//! forbidden; per §7.4 the correct response is `NotImplemented(SURFACE)`.
 
-use crate::executor::objects::raw_helpers::{
-    self, extract_bool, extract_char, extract_number_coerce, type_error,
-};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::tag_bits::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_INT};
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::VMError;
 
-/// Decoded receiver: the f64 value and whether the original was an inline i48.
-#[inline(always)]
-fn decode_number_receiver(raw: u64) -> Result<(f64, bool), VMError> {
-    if is_tagged(raw) && get_tag(raw) == TAG_INT {
-        let i = sign_extend_i48(get_payload(raw));
-        Ok((i as f64, true))
-    } else if !is_tagged(raw) {
-        Ok((f64::from_bits(raw), false))
-    } else {
-        // Possibly a heap Decimal — use extract_heap_ref to avoid constructing ValueWord
-        if let Some(shape_value::HeapValue::Decimal(d)) =
-            unsafe { raw_helpers::extract_heap_ref(raw) }
-        {
-            use rust_decimal::prelude::ToPrimitive;
-            Ok((d.to_f64().unwrap_or(f64::NAN), false))
-        } else {
-            Err(type_error("number or int", raw))
-        }
-    }
+#[inline]
+fn surface(method: &str, receiver: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — {}.{}(): MethodHandler ABI needs kinded migration \
+         (cluster E-builtins-backlog, Wave 5b template); receiver kind \
+         resolved per ADR-006 §2.3 / §2.7.6 (inline scalar or \
+         Ptr(HeapKind::Decimal) for cross-domain numeric).",
+        receiver, method
+    ))
 }
 
 // ---------------------------------------------------------------------------
-// floor
+// number / int methods
 // ---------------------------------------------------------------------------
+
 pub fn number_floor_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        // floor of an integer is itself
-        Ok(args[0])
-    } else {
-        Ok(ValueWord::from_f64(val.floor()).raw_bits())
-    }
+    Err(surface("floor", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// ceil
-// ---------------------------------------------------------------------------
 pub fn number_ceil_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        Ok(args[0])
-    } else {
-        Ok(ValueWord::from_f64(val.ceil()).raw_bits())
-    }
+    Err(surface("ceil", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// round
-// ---------------------------------------------------------------------------
 pub fn number_round_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        Ok(args[0])
-    } else {
-        Ok(ValueWord::from_f64(val.round()).raw_bits())
-    }
+    Err(surface("round", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// abs
-// ---------------------------------------------------------------------------
 pub fn number_abs_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        Ok(ValueWord::from_i64((val as i64).abs()).raw_bits())
-    } else {
-        Ok(ValueWord::from_f64(val.abs()).raw_bits())
-    }
+    Err(surface("abs", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// sign
-// ---------------------------------------------------------------------------
 pub fn number_sign_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        let i = val as i64;
-        let s = if i > 0 { 1 } else if i < 0 { -1 } else { 0 };
-        Ok(ValueWord::from_i64(s).raw_bits())
-    } else {
-        let s = if val > 0.0 {
-            1.0
-        } else if val < 0.0 {
-            -1.0
-        } else {
-            0.0
-        };
-        Ok(ValueWord::from_f64(s).raw_bits())
-    }
+    Err(surface("sign", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// toInt / to_int
-// ---------------------------------------------------------------------------
 pub fn number_to_int_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, _is_int) = decode_number_receiver(args[0])?;
-    Ok(ValueWord::from_i64(val as i64).raw_bits())
+    Err(surface("toInt", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// toNumber / to_number
-// ---------------------------------------------------------------------------
 pub fn number_to_number_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, _is_int) = decode_number_receiver(args[0])?;
-    Ok(ValueWord::from_f64(val).raw_bits())
+    Err(surface("toNumber", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// isNaN / is_nan
-// ---------------------------------------------------------------------------
 pub fn number_is_nan_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    // Integers are never NaN
-    let result = if is_int { false } else { val.is_nan() };
-    Ok(ValueWord::from_bool(result).raw_bits())
+    Err(surface("isNaN", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// isFinite / is_finite
-// ---------------------------------------------------------------------------
 pub fn number_is_finite_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    // Integers are always finite
-    let result = if is_int { true } else { val.is_finite() };
-    Ok(ValueWord::from_bool(result).raw_bits())
+    Err(surface("isFinite", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// toFixed / to_fixed
-// ---------------------------------------------------------------------------
 pub fn number_to_fixed_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, _is_int) = decode_number_receiver(args[0])?;
-    let decimals = if args.len() > 1 {
-        extract_number_coerce(args[1])
-            .ok_or_else(|| VMError::RuntimeError("Expected number for decimals".to_string()))?
-            as i32
-    } else {
-        2
-    };
-    Ok(
-        ValueWord::from_string(Arc::new(format!("{:.prec$}", val, prec = decimals as usize)))
-            .into_raw_bits(),
-    )
+    Err(surface("toFixed", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// toString / to_string
-// ---------------------------------------------------------------------------
 pub fn number_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    if is_int {
-        Ok(ValueWord::from_string(Arc::new((val as i64).to_string())).into_raw_bits())
-    } else {
-        Ok(ValueWord::from_string(Arc::new(val.to_string())).into_raw_bits())
-    }
+    Err(surface("toString", "number"))
 }
 
-// ---------------------------------------------------------------------------
-// clamp
-// ---------------------------------------------------------------------------
 pub fn number_clamp_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let (val, is_int) = decode_number_receiver(args[0])?;
-    let min_bits = args.get(1).copied().ok_or_else(|| VMError::InvalidArgument {
-        function: "clamp".to_string(),
-        message: "requires a min argument".to_string(),
-    })?;
-    let max_bits = args.get(2).copied().ok_or_else(|| VMError::InvalidArgument {
-        function: "clamp".to_string(),
-        message: "requires a max argument".to_string(),
-    })?;
-    let min_val = extract_number_coerce(min_bits).ok_or_else(|| VMError::InvalidArgument {
-        function: "clamp".to_string(),
-        message: "requires a min argument".to_string(),
-    })?;
-    let max_val = extract_number_coerce(max_bits).ok_or_else(|| VMError::InvalidArgument {
-        function: "clamp".to_string(),
-        message: "requires a max argument".to_string(),
-    })?;
-    if is_int {
-        let i = val as i64;
-        let lo = min_val as i64;
-        let hi = max_val as i64;
-        Ok(ValueWord::from_i64(i.max(lo).min(hi)).raw_bits())
-    } else {
-        Ok(ValueWord::from_f64(val.max(min_val).min(max_val)).raw_bits())
-    }
+    Err(surface("clamp", "number"))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Bool methods (v2 native)
-// ═══════════════════════════════════════════════════════════════════════════
+// ---------------------------------------------------------------------------
+// bool methods
+// ---------------------------------------------------------------------------
 
-/// bool.toString / bool.to_string
 pub fn bool_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    // Bool is always inline-tagged, so extract_bool is safe if dispatch routed here.
-    // But guard with a type check for robustness.
-    if !is_tagged(args[0]) {
-        return Err(type_error("bool", args[0]));
-    }
-    let b = extract_bool(args[0]);
-    Ok(ValueWord::from_string(Arc::new(b.to_string())).into_raw_bits())
+    Err(surface("toString", "bool"))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Char methods (v2 native)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Helper to extract char from raw u64
-#[inline]
-fn decode_char_receiver(raw: u64) -> Result<char, VMError> {
-    extract_char(raw).ok_or_else(|| type_error("char", raw))
-}
+// ---------------------------------------------------------------------------
+// char methods
+// ---------------------------------------------------------------------------
 
 pub fn char_is_alphabetic_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_alphabetic()).raw_bits())
+    Err(surface("isAlphabetic", "char"))
 }
 
 pub fn char_is_numeric_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_numeric()).raw_bits())
+    Err(surface("isNumeric", "char"))
 }
 
 pub fn char_is_alphanumeric_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_alphanumeric()).raw_bits())
+    Err(surface("isAlphanumeric", "char"))
 }
 
 pub fn char_is_whitespace_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_whitespace()).raw_bits())
+    Err(surface("isWhitespace", "char"))
 }
 
 pub fn char_is_uppercase_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_uppercase()).raw_bits())
+    Err(surface("isUppercase", "char"))
 }
 
 pub fn char_is_lowercase_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_lowercase()).raw_bits())
+    Err(surface("isLowercase", "char"))
 }
 
 pub fn char_is_ascii_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_bool(c.is_ascii()).raw_bits())
+    Err(surface("isAscii", "char"))
 }
 
 pub fn char_to_uppercase_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    let upper: String = c.to_uppercase().collect();
-    if upper.len() == 1 {
-        Ok(ValueWord::from_char(upper.chars().next().unwrap()).raw_bits())
-    } else {
-        Ok(ValueWord::from_string(Arc::new(upper)).into_raw_bits())
-    }
+    Err(surface("toUppercase", "char"))
 }
 
 pub fn char_to_lowercase_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    let lower: String = c.to_lowercase().collect();
-    if lower.len() == 1 {
-        Ok(ValueWord::from_char(lower.chars().next().unwrap()).raw_bits())
-    } else {
-        Ok(ValueWord::from_string(Arc::new(lower)).into_raw_bits())
-    }
+    Err(surface("toLowercase", "char"))
 }
 
 pub fn char_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(ValueWord::from_string(Arc::new(c.to_string())).into_raw_bits())
+    Err(surface("toString", "char"))
 }

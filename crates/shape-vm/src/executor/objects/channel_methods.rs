@@ -1,166 +1,88 @@
-//! Method handlers for Channel type (MPSC sender/receiver endpoints).
+//! Method handlers for the Channel type (MPSC sender/receiver endpoints).
+//!
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7), matching the
+//! `concurrency_methods.rs` close-out (Mutex/Atomic/Lazy).
+//!
+//! `Channel` payloads lived inside the deleted
+//! `HeapValue::Concurrency(ConcurrencyData::Channel(_))` arm — the
+//! `Concurrency` variant was removed from `HeapValue` per ADR-006 §2.3
+//! trim (`crates/shape-value/src/heap_variants.rs` lists no
+//! `Concurrency` variant; `ConcurrencyData` itself was deleted with the
+//! `ValueWord`-shaped per-element payloads it depended on). Re-modelling
+//! Channel + Mutex + Atomic + Lazy on top of typed-Arc HeapValue is a
+//! Phase 2c Stage C item; the `concurrency_methods` precedent calls out
+//! the exact same cascade.
+//!
+//! The pre-Wave-6 implementation used the deleted
+//! `shape_value::{ValueWord, ValueWordExt, ConcurrencyData}` surface,
+//! the deleted `ValueWord::from_bool` / `none` / `clone_from_bits`
+//! constructors, the `objects::raw_helpers::extract_heap_ref` (deleted
+//! in cluster D-raw-helpers — only the FilterExpr extractor remains),
+//! and the kindless MethodHandler ABI. Per playbook §4 #1 / #9 a
+//! Bool-default kinded shim is forbidden; per §7.4 the correct response
+//! is `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::HeapValue;
-use shape_value::{ConcurrencyData, VMError, ValueWord, ValueWordExt};
+use shape_value::VMError;
 
-use super::raw_helpers::extract_heap_ref;
-
-/// Transfer ownership of a `ValueWord` into raw u64 bits.
-///
-/// FR.4: With `ValueWord = u64` Copy, there is no destructor to suppress;
-/// the `let _ = vw;` is kept as a marker that ownership transfers to the
-/// returned bits.
 #[inline]
-fn into_raw(vw: ValueWord) -> u64 {
-    let bits = vw.raw_bits();
-    let _ = vw;
-    bits
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — Channel.{}(): Concurrency variant needs typed-Arc redesign \
+         per ADR-006 §2.3 (matches concurrency_methods.rs precedent for \
+         Mutex/Atomic/Lazy). MethodHandler ABI also needs kinded migration \
+         (cluster E-builtins-backlog, Wave 5b template).",
+        method
+    ))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V2 (MethodFnV2) handlers — raw u64 ABI
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// `sender.send(value)` — v2 ABI. args[0]=channel, args[1]=value.
 pub fn v2_channel_send(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let value = if args.len() > 1 {
-        // SAFETY: clone_from_bits increments refcount for heap values.
-        unsafe { ValueWord::clone_from_bits(args[1]) }
-    } else {
-        ValueWord::none()
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("send()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
-            shape_value::heap_value::ChannelData::Sender { tx, closed, .. } => {
-                if closed.load(std::sync::atomic::Ordering::Relaxed) {
-                    Ok(into_raw(ValueWord::from_bool(false)))
-                } else {
-                    match tx.send(value) {
-                        Ok(()) => Ok(into_raw(ValueWord::from_bool(true))),
-                        Err(_) => Ok(into_raw(ValueWord::from_bool(false))),
-                    }
-                }
-            }
-            _ => Err(VMError::RuntimeError(
-                "send() called on channel receiver (use on sender)".to_string(),
-            )),
-        },
-        _ => Err(VMError::RuntimeError(
-            "send() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("send"))
 }
 
-/// `receiver.recv()` — v2 ABI.
 pub fn v2_channel_recv(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("recv()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
-            shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
-                let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                match guard.recv() {
-                    Ok(val) => Ok(into_raw(val)),
-                    Err(_) => Ok(into_raw(ValueWord::none())),
-                }
-            }
-            _ => Err(VMError::RuntimeError(
-                "recv() called on channel sender (use on receiver)".to_string(),
-            )),
-        },
-        _ => Err(VMError::RuntimeError(
-            "recv() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("recv"))
 }
 
-/// `receiver.try_recv()` — v2 ABI.
 pub fn v2_channel_try_recv(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("try_recv()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
-            shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
-                let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                match guard.try_recv() {
-                    Ok(val) => Ok(into_raw(val)),
-                    Err(_) => Ok(into_raw(ValueWord::none())),
-                }
-            }
-            _ => Err(VMError::RuntimeError(
-                "try_recv() called on channel sender (use on receiver)".to_string(),
-            )),
-        },
-        _ => Err(VMError::RuntimeError(
-            "try_recv() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("try_recv"))
 }
 
-/// `channel.close()` — v2 ABI.
 pub fn v2_channel_close(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("close()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => {
-            data.close();
-            Ok(into_raw(ValueWord::none()))
-        }
-        _ => Err(VMError::RuntimeError(
-            "close() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("close"))
 }
 
-/// `channel.is_closed()` — v2 ABI.
 pub fn v2_channel_is_closed(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("is_closed()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => Ok(into_raw(ValueWord::from_bool(data.is_closed()))),
-        _ => Err(VMError::RuntimeError(
-            "is_closed() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("is_closed"))
 }
 
-/// `channel.is_sender()` — v2 ABI.
 pub fn v2_channel_is_sender(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("is_sender()", "channel"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => Ok(into_raw(ValueWord::from_bool(data.is_sender()))),
-        _ => Err(VMError::RuntimeError(
-            "is_sender() called on non-channel value".to_string(),
-        )),
-    }
+    Err(surface("is_sender"))
 }
