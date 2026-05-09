@@ -1,169 +1,513 @@
 //! DataTable aggregation methods: sum, mean, min, max, sort, count,
 //! describe, aggregate.
 //!
-//! ADR-006 §2.7.6 / §2.7.7 — Wave-β M-datatable cluster.
+//! ADR-006 §2.7.10 / Q11 — Wave-δ MR-datatable body migration.
 //!
-//! Bodies are placeholders (`NotImplemented(SURFACE)`) per playbook §7.4
-//! REVISED. The pre-Wave-6.5 bodies (a) closure-dispatched per row via
-//! the deleted `call_value_immediate_raw` + ValueWord-bits pipeline,
-//! (b) interpreted ValueWord-shaped agg specs via deleted
-//! `as_any_array()`/`as_str()` accessors, and (c) returned numeric /
-//! `Arc<DataTable>` results via deleted `ValueWord::from_*` constructors.
-//! The kinded re-implementation pulls the receiver and per-arg slots
-//! through the kinded carrier (`KindedSlot`), threads kinded argument
-//! lists into closure callbacks, and pushes results via `Arc::into_raw +
-//! push_kinded(bits, NativeKind::*)` per playbook §3.
+//! Receiver: `args[0].kind ∈ { NativeKind::Ptr(HeapKind::DataTable),
+//! NativeKind::Ptr(HeapKind::TableView) }`. Borrowed via
+//! `borrow_data_table` (see `common.rs`) — typed-Arc dispatch, NOT
+//! `as_heap_value()` (unsound on typed-Arc slots per Wave-γ
+//! G-heap-filter-expr soundness amendment).
+//!
+//! Form coverage:
+//!   - Column-name forms (e.g. `dt.sum("price")`, `dt.mean("volume")`) —
+//!     real bodies. Per-column kind dispatch via Arrow `DataType` match.
+//!   - Closure forms (e.g. `dt.sum(|row| row.price * row.qty)`) — SURFACE.
+//!     Closure dispatch goes through `op_call_value`, which is itself at
+//!     SURFACE in `executor/control_flow/mod.rs::op_call_value` (the
+//!     PHASE_2C_CALL_REBUILD_SURFACE constant). Per playbook §8 the
+//!     correct shape is surface-and-stop until the closure rebuild
+//!     lands.
+//!   - Object-spec aggregate (e.g. `dt.aggregate({ total: "sum" })`) —
+//!     SURFACE. Spec parsing requires HashMap dispatch which is its own
+//!     cluster.
 
-use shape_value::{KindedSlot, VMError};
+use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
 use shape_runtime::context::ExecutionContext;
+use shape_value::{DataTable, KindedSlot, NativeKind, VMError, heap_value::HeapKind};
+use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
 
-/// Helper: stub body for an aggregation handler.
-#[inline]
-fn stub(name: &str, kind_source: &str) -> VMError {
-    VMError::NotImplemented(format!(
-        "datatable.{} — SURFACE: phase-2c body migration. Receiver kind = \
-         NativeKind::Ptr(HeapKind::DataTable) (or Ptr(HeapKind::TableView) \
-         for typed/indexed variants); body re-shape requires kinded receiver \
-         dispatch via slot.as_heap_value() + HeapValue::DataTable / \
-         HeapValue::TableView match per ADR-005 §1, kinded closure callback \
-         (replaces deleted `call_value_immediate_raw`), and result push via \
-         Arc::into_raw + push_kinded per playbook §3 ({}).",
-        name, kind_source
-    ))
+use super::common::borrow_data_table;
+
+/// Per-column numeric aggregation, dispatched on Arrow `DataType` of the
+/// referenced column. Kept module-local so each handler can call it
+/// without re-implementing the column-kind cascade.
+fn col_numeric_agg(
+    dt: &DataTable,
+    col_name: &str,
+    method: &str,
+    op: AggOp,
+) -> Result<KindedSlot, VMError> {
+    let col = dt.column_by_name(col_name).ok_or_else(|| {
+        VMError::RuntimeError(format!("datatable.{}: unknown column: {}", method, col_name))
+    })?;
+    if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+        let n = f64a.len();
+        if n == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: empty column",
+                method
+            )));
+        }
+        // Treat nulls as skipped — track count of valid entries.
+        let mut count = 0usize;
+        let mut acc = 0.0f64;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for i in 0..n {
+            if f64a.is_null(i) {
+                continue;
+            }
+            let v = f64a.value(i);
+            acc += v;
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        let result = match op {
+            AggOp::Sum => acc,
+            AggOp::Mean => acc / (count as f64),
+            AggOp::Min => min,
+            AggOp::Max => max,
+        };
+        Ok(KindedSlot::from_number(result))
+    } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+        let n = i64a.len();
+        if n == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: empty column",
+                method
+            )));
+        }
+        let mut count = 0usize;
+        let mut acc: i128 = 0;
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for i in 0..n {
+            if i64a.is_null(i) {
+                continue;
+            }
+            let v = i64a.value(i);
+            acc += v as i128;
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        match op {
+            AggOp::Sum => {
+                // Sum of i64 may overflow i64 — surface as a runtime error
+                // rather than silently wrap. Callers needing a wider type
+                // can `mean` (returns f64) or pre-coerce to Float64.
+                if acc > i64::MAX as i128 || acc < i64::MIN as i128 {
+                    return Err(VMError::RuntimeError(format!(
+                        "datatable.{}: sum overflow on Int64 column",
+                        method
+                    )));
+                }
+                Ok(KindedSlot::from_int(acc as i64))
+            }
+            AggOp::Mean => Ok(KindedSlot::from_number((acc as f64) / (count as f64))),
+            AggOp::Min => Ok(KindedSlot::from_int(min)),
+            AggOp::Max => Ok(KindedSlot::from_int(max)),
+        }
+    } else if let Some(b) = col.as_any().downcast_ref::<BooleanArray>() {
+        // Count-true semantics for Bool columns. Sum/mean/min/max generalize:
+        //   sum = count_true; mean = count_true / count; min = false if any
+        //   false; max = true if any true.
+        let n = b.len();
+        let mut count = 0usize;
+        let mut count_true = 0usize;
+        for i in 0..n {
+            if b.is_null(i) {
+                continue;
+            }
+            count += 1;
+            if b.value(i) {
+                count_true += 1;
+            }
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        match op {
+            AggOp::Sum => Ok(KindedSlot::from_int(count_true as i64)),
+            AggOp::Mean => Ok(KindedSlot::from_number((count_true as f64) / (count as f64))),
+            AggOp::Min => Ok(KindedSlot::from_bool(count_true == count)),
+            AggOp::Max => Ok(KindedSlot::from_bool(count_true > 0)),
+        }
+    } else {
+        Err(VMError::RuntimeError(format!(
+            "datatable.{}: column {} is non-numeric ({:?})",
+            method,
+            col_name,
+            col.data_type()
+        )))
+    }
 }
 
-/// `dt.sum()` / `dt.sum(col)` / `dt.sum(closure)` — column-wise or
-/// closure-driven sum.
+#[derive(Debug, Clone, Copy)]
+enum AggOp {
+    Sum,
+    Mean,
+    Min,
+    Max,
+}
+
+fn dispatch_agg(
+    args: &[KindedSlot],
+    method: &str,
+    op: AggOp,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, method)?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: column name required (closure form is SURFACE — see module docs)",
+            method
+        )));
+    }
+    let arg = &args[1];
+    if let Some(name) = arg.as_str() {
+        return col_numeric_agg(dt, name, method, op);
+    }
+    if matches!(arg.kind, NativeKind::Ptr(HeapKind::Closure)) {
+        return Err(VMError::NotImplemented(format!(
+            "datatable.{} (closure form) — SURFACE: depends on op_call_value rebuild \
+             (executor/control_flow/mod.rs PHASE_2C_CALL_REBUILD_SURFACE).",
+            method
+        )));
+    }
+    Err(VMError::RuntimeError(format!(
+        "datatable.{}: arg 1 must be a column-name string, got {:?}",
+        method, arg.kind
+    )))
+}
+
+/// `dt.sum()` / `dt.sum(col)` / `dt.sum(closure)` — column-name form has a
+/// real body; closure form surfaces.
 pub(crate) fn handle_sum(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_sum — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    dispatch_agg(args, "sum", AggOp::Sum)
 }
 
 /// `dt.mean()` / `dt.mean(col)` / `dt.mean(closure)`.
 pub(crate) fn handle_mean(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_mean — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    dispatch_agg(args, "mean", AggOp::Mean)
 }
 
 /// `dt.min()` / `dt.min(col)` / `dt.min(closure)`.
 pub(crate) fn handle_min(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_min — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    dispatch_agg(args, "min", AggOp::Min)
 }
 
 /// `dt.max()` / `dt.max(col)` / `dt.max(closure)`.
 pub(crate) fn handle_max(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_max — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    dispatch_agg(args, "max", AggOp::Max)
 }
 
-/// `dt.sort(col, asc?)` — sort rows by column.
+/// `dt.sort(col)` / `dt.sort(col, asc)` — sort rows by column.
+///
+/// Real body: dispatches on the column's Arrow `DataType` and produces
+/// a permutation of the underlying RecordBatch via `arrow_select::take`.
+/// The two-arg form (`asc` flag) is supported; closure forms surface.
 pub(crate) fn handle_sort(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_sort — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
+    use arrow_array::StringArray;
+    let dt = borrow_data_table(args, "sort")?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "datatable.sort: column name required".to_string(),
+        ));
+    }
+    let arg1 = &args[1];
+    if matches!(arg1.kind, NativeKind::Ptr(HeapKind::Closure)) {
+        return Err(VMError::NotImplemented(
+            "datatable.sort (closure form) — SURFACE: depends on op_call_value rebuild."
+                .to_string(),
+        ));
+    }
+    let col_name = arg1.as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.sort: arg 1 must be column-name string, got {:?}",
+            arg1.kind
+        ))
+    })?;
+    let ascending = if let Some(s) = args.get(2) {
+        s.as_bool().unwrap_or(true)
+    } else {
+        true
+    };
+
+    let col = dt.column_by_name(col_name).ok_or_else(|| {
+        VMError::RuntimeError(format!("datatable.sort: unknown column: {}", col_name))
+    })?;
+
+    // Build the index permutation by stable sort over the column values.
+    let n = col.len();
+    let mut indices: Vec<usize> = (0..n).collect();
+
+    if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+        indices.sort_by(|&a, &b| {
+            let va = f64a.value(a);
+            let vb = f64a.value(b);
+            let ord = va
+                .partial_cmp(&vb)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+        indices.sort_by(|&a, &b| {
+            let ord = i64a.value(a).cmp(&i64a.value(b));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        indices.sort_by(|&a, &b| {
+            let ord = s.value(a).cmp(s.value(b));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(b) = col.as_any().downcast_ref::<BooleanArray>() {
+        indices.sort_by(|&a, &c| {
+            let ord = b.value(a).cmp(&b.value(c));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.sort: column {} has unsupported type {:?}",
+            col_name,
+            col.data_type()
+        )));
+    }
+
+    let idx_array =
+        arrow_array::UInt32Array::from(indices.into_iter().map(|i| i as u32).collect::<Vec<_>>());
+    let inner = dt.inner();
+    let n_cols = inner.num_columns();
+    let mut new_cols = Vec::with_capacity(n_cols);
+    for c in 0..n_cols {
+        let taken = arrow_select::take::take(inner.column(c), &idx_array, None)
+            .map_err(|e| VMError::RuntimeError(format!("datatable.sort: take: {}", e)))?;
+        new_cols.push(taken);
+    }
+    let new_batch = arrow_array::RecordBatch::try_new(inner.schema(), new_cols)
+        .map_err(|e| VMError::RuntimeError(format!("datatable.sort: {}", e)))?;
+    let new_dt = DataTable::new(new_batch);
+    let bits = Arc::into_raw(Arc::new(new_dt)) as u64;
+    Ok(KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
     ))
 }
 
 /// `dt.count()` — row count.
 pub(crate) fn handle_count(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_count — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    let dt = borrow_data_table(args, "count")?;
+    Ok(KindedSlot::from_int(dt.row_count() as i64))
 }
 
 /// `dt.describe()` — summary stats DataTable.
+///
+/// Builds a result table with one row per numeric column and columns:
+/// `column` (string), `count` (int), `mean` (number), `min` (number),
+/// `max` (number).
 pub(crate) fn handle_describe(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_describe — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTableBuilder;
+
+    let dt = borrow_data_table(args, "describe")?;
+
+    let names = dt.column_names();
+    let mut col_names = Vec::new();
+    let mut counts = Vec::new();
+    let mut means = Vec::new();
+    let mut mins = Vec::new();
+    let mut maxs = Vec::new();
+
+    for name in &names {
+        let col = match dt.column_by_name(name) {
+            Some(c) => c,
+            None => continue,
+        };
+        let (count, mean, min, max) = if let Some(f) = col.as_any().downcast_ref::<Float64Array>() {
+            let n = f.len();
+            let mut c = 0usize;
+            let mut s = 0.0f64;
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            for i in 0..n {
+                if f.is_null(i) {
+                    continue;
+                }
+                let v = f.value(i);
+                s += v;
+                if v < mn { mn = v; }
+                if v > mx { mx = v; }
+                c += 1;
+            }
+            if c == 0 { continue; }
+            (c as i64, s / (c as f64), mn, mx)
+        } else if let Some(i) = col.as_any().downcast_ref::<Int64Array>() {
+            let n = i.len();
+            let mut c = 0usize;
+            let mut s: i128 = 0;
+            let mut mn = i64::MAX;
+            let mut mx = i64::MIN;
+            for k in 0..n {
+                if i.is_null(k) {
+                    continue;
+                }
+                let v = i.value(k);
+                s += v as i128;
+                if v < mn { mn = v; }
+                if v > mx { mx = v; }
+                c += 1;
+            }
+            if c == 0 { continue; }
+            (c as i64, (s as f64) / (c as f64), mn as f64, mx as f64)
+        } else {
+            // Skip non-numeric columns silently — `describe` output is
+            // numeric-only by convention.
+            continue;
+        };
+        col_names.push(name.as_str());
+        counts.push(count);
+        means.push(mean);
+        mins.push(min);
+        maxs.push(max);
+    }
+
+    let schema = Schema::new(vec![
+        Field::new("column", DataType::Utf8, false),
+        Field::new("count", DataType::Int64, false),
+        Field::new("mean", DataType::Float64, false),
+        Field::new("min", DataType::Float64, false),
+        Field::new("max", DataType::Float64, false),
+    ]);
+    let mut b = DataTableBuilder::new(schema);
+    b.add_string_column(col_names);
+    b.add_i64_column(counts);
+    b.add_f64_column(means);
+    b.add_f64_column(mins);
+    b.add_f64_column(maxs);
+    let result = b
+        .finish()
+        .map_err(|e| VMError::RuntimeError(format!("datatable.describe: {}", e)))?;
+    let bits = Arc::into_raw(Arc::new(result)) as u64;
+    Ok(KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
     ))
 }
 
-/// `dt.aggregate({ out_col: \"fn\" | [\"fn\", \"col\"] })` — multi-aggregation.
+/// `dt.aggregate({ out_col: "fn" | ["fn", "col"] })` — multi-aggregation.
+///
+/// SURFACE: spec parsing depends on `HashMap` / `TypedObject` field
+/// inspection helpers that themselves cross into the
+/// `D-prop-access` / `D-typed-access` cluster territory; the agg-spec
+/// dispatch is best surfaced rather than partially wired.
 pub(crate) fn handle_aggregate(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "handle_aggregate — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+        "datatable.aggregate — SURFACE: agg-spec parsing (HashMap/TypedObject \
+         field walk) crosses into D-prop-access / D-typed-access cluster \
+         territory; the kinded property-access surface is itself at SURFACE \
+         (executor/objects/property_access.rs). Single-column aggregations \
+         (`dt.sum(col)`, etc.) are migrated; the multi-aggregation entry \
+         point waits on the property-access cluster's body migration."
             .to_string(),
     ))
 }
 
 /// SURFACE placeholder for the aggregation-spec parser keyed on the
-/// deleted `ValueWord` carrier. The kinded replacement takes a
-/// `&KindedSlot` and dispatches via `slot.as_heap_value()` on
-/// `HeapValue::String(arc)` / `HeapValue::TypedArray(arr)`.
+/// deleted `ValueWord` carrier.
 #[allow(dead_code)]
 pub(in crate::executor::objects) fn parse_agg_spec_kinded(
     _spec: &KindedSlot,
     _output_col: &str,
 ) -> Result<(String, String), VMError> {
     Err(VMError::NotImplemented(
-        "parse_agg_spec — SURFACE: phase-2c body migration. Spec arg kind = \
-         NativeKind::String (single-fn shorthand) or NativeKind::Ptr(HeapKind::\
-         TypedArray) (2-element [fn, col] form); kinded dispatch via \
-         slot.as_heap_value() + HeapValue::String / HeapValue::TypedArray \
-         match per ADR-005 §1."
+        "parse_agg_spec — SURFACE: depends on the property-access cluster \
+         (HashMap / TypedObject kinded field walk) per the handle_aggregate \
+         migration note."
             .to_string(),
     ))
 }
 
-/// SURFACE placeholder for the aggregation evaluator. Result is a
-/// `KindedSlot` whose kind matches the agg function (Float64 for
-/// sum/mean, Int64 for count, column-kind for min/max).
+/// Aggregation evaluator — kinded result. Wraps `col_numeric_agg` for
+/// callers (currently the unused `parse_agg_spec_kinded` follow-up;
+/// kept dead-code-allow until `handle_aggregate` lands).
 #[allow(dead_code)]
 pub(in crate::executor::objects) fn compute_aggregation_kinded(
-    _dt: &shape_value::datatable::DataTable,
-    _agg_fn: &str,
-    _source_col: &str,
+    dt: &DataTable,
+    agg_fn: &str,
+    source_col: &str,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "compute_aggregation — SURFACE: phase-2c body migration. Result kind \
-         is agg-fn-dependent: NativeKind::Float64 for sum/mean (Float64 / \
-         Int64 columns coerce to f64), NativeKind::Int64 for count, column \
-         kind for min/max. Pre-Wave-6.5 body returned ValueWord (deleted)."
-            .to_string(),
-    ))
+    let op = match agg_fn {
+        "sum" => AggOp::Sum,
+        "mean" | "avg" => AggOp::Mean,
+        "min" => AggOp::Min,
+        "max" => AggOp::Max,
+        "count" => {
+            return Ok(KindedSlot::from_int(dt.row_count() as i64));
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "compute_aggregation: unknown agg function: {}",
+                other
+            )));
+        }
+    };
+    col_numeric_agg(dt, source_col, agg_fn, op)
 }
