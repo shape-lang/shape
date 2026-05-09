@@ -155,7 +155,7 @@ fn test_integer_overflow_promotes_to_f64() {
     //
     // Before Wave-E+5 the test pushed i64::MAX, but the producer-flip
     // forces in-range i48 literals (I48_MAX = (1<<47)-1) for the typed
-    // pop_native_i64 consumer; out-of-range Constant::Int values now
+    // Int64-kinded consumer; out-of-range Constant::Int values now
     // go through the heap-BigInt path which AddInt doesn't accept.
     let i48_max = shape_value::tag_bits::I48_MAX;
     let instructions = vec![
@@ -165,7 +165,7 @@ fn test_integer_overflow_promotes_to_f64() {
     ];
     let constants = vec![Constant::Int(i48_max), Constant::Int(1)];
 
-    // Overflow result is pushed via push_raw_f64; synthesise as Float64.
+    // Overflow result is pushed kinded as Float64; synthesise as Float64.
     let result = execute_bytecode_typed(
         instructions,
         constants,
