@@ -78,8 +78,8 @@
 //! (`closure_heap_bits.is_some() == closure_heap_kind.is_some()`) is
 //! enforced via `debug_assert_eq!` at every frame-construction site.
 
-use shape_value::v2::closure_raw::OwnedClosureBlock;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::v2::closure_raw::{OwnedClosureBlock, typed_closure_function_id};
+use shape_value::{HeapValue, KindedSlot, NativeKind, ValueSlot, VMError};
 
 use super::{CallFrame, VirtualMachine};
 
@@ -435,26 +435,147 @@ impl VirtualMachine {
     /// callee's `KindedSlot.kind`. ADR-006 §2.7.11 / Q12 caller-side
     /// shape — both callee and args travel as `KindedSlot`.
     ///
-    /// **Owned by W7-cv-static (Round 2).** Per W7 playbook §4: matches
-    /// on `callee.kind` and routes — `Ptr(HeapKind::Closure)` recovers
-    /// the `OwnedClosureBlock` via `slot.as_heap_value()` +
+    /// **Filled by W7-cv-static (Round 2 close).** Per W7 playbook §4:
+    /// matches on `callee.kind` and routes — `Ptr(HeapKind::Closure)`
+    /// recovers the `OwnedClosureBlock` via `slot.as_heap_value()` +
     /// `HeapValue::ClosureRaw` (single discriminator per ADR-005 §1)
     /// and routes to `call_closure_with_nb_args_keepalive`; `UInt64`
     /// callee bits are the function-id and route to
-    /// `call_function_with_nb_args`. Other kinds fall through to a
-    /// `TypeError`. The `HeapValue::HostClosure` variant referenced in
-    /// pre-Wave-7 docs has been deleted; only `ClosureRaw` survives in
-    /// the closure-dispatch path.
+    /// `call_function_with_nb_args`. Both arms drive the callee to
+    /// completion via `execute_until_call_depth(saved_depth, ctx)`
+    /// (the call-stack-bounded run loop in `dispatch.rs`) and pop the
+    /// result from the value stack via `pop_kinded`. Other kinds fall
+    /// through to a `RuntimeError` (`VMError::TypeError` is
+    /// `&'static str`-bound and incompatible with the format!-style
+    /// dynamic-kind error message; the convention used by the existing
+    /// `op_call_value` surfaces is `RuntimeError(format!(...))`). The
+    /// `HeapValue::HostClosure` variant referenced in pre-Wave-7 docs
+    /// has been deleted; only `ClosureRaw` survives in the
+    /// closure-dispatch path.
     pub fn call_value_immediate_nb(
         &mut self,
-        _callee: &KindedSlot,
-        _args: &[KindedSlot],
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        callee: &KindedSlot,
+        args: &[KindedSlot],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_value_immediate_nb kind-threaded callee dispatch rebuild pending"
-        )
+        // Capture the call-stack depth BEFORE frame setup pushes a new
+        // frame. After the callee's `op_return` / `op_return_value`
+        // pops its frame, the call-stack depth returns to this saved
+        // value — `execute_until_call_depth(saved_depth, ctx)` is the
+        // canonical "drive callee to completion" loop (the playbook's
+        // notional `run_until_return` lives here under that name; see
+        // `dispatch.rs::execute_until_call_depth`).
+        let saved_call_depth = self.call_stack.len();
+
+        match callee.kind {
+            NativeKind::Ptr(shape_value::HeapKind::Closure) => {
+                // Recover `OwnedClosureBlock` via the §2.7.6 / Q8 heap
+                // dispatch path: `slot.as_heap_value()` returns
+                // `&HeapValue`, pattern-match the
+                // `HeapValue::ClosureRaw(block)` arm per ADR-005 §1
+                // single-discriminator. A `HeapKind::Closure` label
+                // with any other `HeapValue` payload is a
+                // construction-side bug at the producing
+                // `op_make_closure`; debug_assert in dev, surface as a
+                // RuntimeError in release (the post-§2.7.11 dispatch
+                // shell must not silently fabricate a kind — playbook
+                // §6 #6 polymorphic-fallthrough forbidden).
+                let block: &OwnedClosureBlock = match callee.slot.as_heap_value() {
+                    HeapValue::ClosureRaw(block) => block,
+                    other => {
+                        debug_assert!(
+                            false,
+                            "call_value_immediate_nb: HeapKind::Closure label with \
+                             non-ClosureRaw HeapValue payload: {:?}",
+                            other.type_name()
+                        );
+                        return Err(VMError::RuntimeError(format!(
+                            "call_value_immediate_nb: HeapKind::Closure label with \
+                             non-ClosureRaw payload: {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                // Recover the function-id from the typed closure
+                // header. `OwnedClosureBlock` has no safe public
+                // accessor for `function_id`; the canonical path is
+                // the unsafe `typed_closure_function_id(block.as_ptr())`
+                // helper used by the block's own `Debug` impl
+                // (`closure_raw.rs:215`). The block's borrow keeps
+                // the underlying header live for the duration of this
+                // read.
+                //
+                // SAFETY: `block` is a live `OwnedClosureBlock`
+                // (borrowed through the live `&HeapValue` returned by
+                // `as_heap_value()`); its `as_ptr()` points to a
+                // `TypedClosureHeader` block allocated by
+                // `alloc_typed_closure` per the construction
+                // invariant.
+                let function_id = unsafe { typed_closure_function_id(block.as_ptr()) };
+
+                // Frame setup. The B9 lockstep companion fields carry
+                // the closure-self share so `op_return` /
+                // `op_return_value` can release it via
+                // `drop_with_kind(bits, kind)` on frame teardown.
+                // `closure_heap_bits` is the raw slot bits (`Box<HeapValue>`
+                // pointer) and `closure_heap_kind` is the matching
+                // `NativeKind::Ptr(HeapKind::Closure)`.
+                self.call_closure_with_nb_args_keepalive(
+                    function_id,
+                    block,
+                    args,
+                    Some(callee.slot.raw()),
+                    Some(callee.kind),
+                )?;
+
+                // Drive the callee to completion. `execute_until_call_depth`
+                // returns when `self.call_stack.len() == saved_call_depth`
+                // (i.e. the callee's frame has been popped by `op_return`).
+                // The return value is left on the value stack by
+                // `op_return_value`; pop it via the kinded API so the
+                // share transfers cleanly into the result `KindedSlot`.
+                self.execute_until_call_depth(saved_call_depth, ctx)?;
+                let (bits, kind) = self.pop_kinded()?;
+                Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+            }
+            NativeKind::UInt64 => {
+                // Function-id callee: `callee.slot.raw()` is the
+                // function-id encoded as raw `u64` bits (§2.7.11 / Q12
+                // — `UInt64` is the §2.7.11 callee-classification kind
+                // for function references). Truncate to `u16` since
+                // `BytecodeProgram::functions` is indexed by `u16` and
+                // both Round 1 frame-setup helpers (`call_function_with_nb_args`,
+                // `call_closure_with_nb_args_keepalive`) take `func_id: u16`.
+                // A bits value that doesn't index into the function
+                // table surfaces as `VMError::InvalidCall` from
+                // `call_function_with_nb_args` itself (per its
+                // existing `program.functions.get(func_id as usize)
+                // .ok_or(VMError::InvalidCall)?` guard) — the playbook
+                // §8 surface-and-stop trigger ("UInt64 callee bits don't
+                // match a real function-id") routes through that path.
+                let function_id = callee.slot.raw() as u16;
+
+                self.call_function_with_nb_args(function_id, args)?;
+
+                // Drive callee to completion and pop the result; same
+                // pattern as the closure arm above.
+                self.execute_until_call_depth(saved_call_depth, ctx)?;
+                let (bits, kind) = self.pop_kinded()?;
+                Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+            }
+            // Match is exhaustive: Closure, UInt64, all-others-error.
+            // No polymorphic fall-through that fabricates kinds (W7
+            // playbook §6 #6 forbidden). Per §8 surface-and-stop:
+            // trait-object closure dispatch (`Ptr(HeapKind::TypedObject)`
+            // carrying a `dyn Trait` vtable) is W9 TR territory and
+            // routes through this RuntimeError until that wave lands.
+            other => Err(VMError::RuntimeError(format!(
+                "call_value_immediate_nb: callee must be \
+                 NativeKind::Ptr(HeapKind::Closure) or NativeKind::UInt64, \
+                 got {:?}",
+                other
+            ))),
+        }
     }
 
     /// Trampoline entry: call a closure by `func_id` with pre-extracted
