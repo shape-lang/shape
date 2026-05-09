@@ -41,14 +41,39 @@
 //! `Yield`, `Suspend`, `Resume`, `Poll`, `AwaitBar`, `AwaitTick`,
 //! `EmitAlert`, `EmitEvent`, `Await`, `SpawnTask`, `JoinInit`, `JoinAwait`,
 //! `CancelTask`, `AsyncScopeEnter`, `AsyncScopeExit`.
+//!
+//! ## Wave 6.5 / E-async migration (ADR-006 §2.7.7 / Q9, §10 E-async row)
+//!
+//! Every push/pop in this file threads the kinded API
+//! (`push_kinded(bits, kind)` / `pop_kinded()`) per the playbook §2 / §3
+//! kind-sourcing rules. Future and TaskGroup payload kinds:
+//!
+//! - `Future(id)` ⇒ `NativeKind::Ptr(HeapKind::Future)` — inline scalar
+//!   payload (the future ID is stored directly in `bits`; no `Arc<T>`).
+//! - `TaskGroup(Arc<TaskGroupData>)` ⇒ `NativeKind::Ptr(HeapKind::TaskGroup)`
+//!   — `Arc<TaskGroupData>` payload per ADR-006 §2.3.
+//!
+//! The legacy `task_scheduler::TaskScheduler` API takes `ValueWord` (deleted
+//! in shape-value), so any handler that needs to thread a callable into the
+//! scheduler — `op_spawn_task`, `op_await`, `op_join_await` — surfaces the
+//! out-of-territory dependency via `todo!("phase-2c — ADR-006 §2.7.4: \
+//! task_scheduler ValueWord API not migrated to kinded; out of E-async \
+//! territory")`. The §10 dispatch protocol forbids editing files outside the
+//! sub-cluster's listed territory; `task_scheduler.rs` is unowned and must be
+//! migrated in a follow-up cluster before the spawn/await fast-paths can
+//! re-light. Stack-side migration here is complete; suspended call sites are
+//! tracked, not silently papered over.
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
-    executor::objects::raw_helpers,
+    executor::vm_impl::stack::drop_with_kind,
 };
-use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{
+    NativeKind, VMError,
+    heap_value::{HeapKind, TaskGroupData},
+};
+use std::sync::Arc;
 
 /// Result of executing an async operation
 #[derive(Debug, Clone)]
@@ -164,9 +189,9 @@ impl VirtualMachine {
     /// or null if the queue is empty.
     fn op_poll(&mut self) -> Result<AsyncExecutionResult, VMError> {
         // In the VM, we don't have direct access to the event queue
-        // This is handled via the VMContext passed from the runtime
-        // For now, push None to indicate no event
-        self.push_raw_u64(ValueWord::none()).map_err(|e| e)?;
+        // This is handled via the VMContext passed from the runtime.
+        // No event available — push the §2.7 null sentinel (zero bits, Bool kind).
+        self.push_kinded(0u64, NativeKind::Bool)?;
         Ok(AsyncExecutionResult::Continue)
     }
 
@@ -221,8 +246,11 @@ impl VirtualMachine {
     /// Pops an alert object from the stack and sends it to
     /// the alert router for processing.
     fn op_emit_alert(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let _alert_nb = self.pop_raw_u64()?;
-        // Alert pipeline integration pending — consume and continue
+        // Pop the alert payload and release its share — alert pipeline
+        // integration is deferred. Drop discipline (playbook §3): every
+        // `pop_kinded` either re-pushes or `drop_with_kind`s.
+        let (bits, kind) = self.pop_kinded()?;
+        drop_with_kind(bits, kind);
         Ok(AsyncExecutionResult::Continue)
     }
 
@@ -235,47 +263,35 @@ impl VirtualMachine {
     /// If the value is not a Future, pushes it back (sync shortcut).
     fn op_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        let nb = self.pop_raw_u64()?;
-        if let Some(id) = raw_helpers::extract_future_id(nb) {
-            // Try to resolve the task inline from the task scheduler.
-            // For `async let x = expr`, the callable stored by SpawnTask
-            // is the already-evaluated value of `expr`. We resolve it
-            // directly without suspending.
-            let resolved = self.task_scheduler.resolve_task(id, |callable| {
-                // The callable is the value that was on the stack when
-                // SpawnTask executed. For simple expressions it's already
-                // the result value.
-                Ok(callable)
-            });
-
-            match resolved {
-                Ok(value) => {
-                    self.push_raw_u64(value)?;
-                    // Await consumes a Future and pushes a result: net stack effect is 0.
-                    debug_assert_eq!(
-                        self.sp, sp_before,
-                        "op_await: stack depth changed (before={}, after={})",
-                        sp_before, self.sp
-                    );
-                    Ok(AsyncExecutionResult::Continue)
-                }
-                Err(_) => {
-                    // Could not resolve inline — suspend for host runtime
-                    Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                        wait_type: WaitType::Future { id },
-                        resume_ip: self.ip,
-                    }))
-                }
+        let (bits, kind) = self.pop_kinded()?;
+        match kind {
+            NativeKind::Ptr(HeapKind::Future) => {
+                // Future(id) is an inline scalar — `bits` IS the future ID.
+                // No Arc share to drop (HeapKind::Future is a no-op in
+                // drop_with_kind). task_scheduler API still takes `ValueWord`
+                // (out-of-territory for E-async; see ADR-006 §2.7.4 / playbook
+                // §10 E-async row). Surface the suspended call rather than
+                // fabricate a forbidden ValueWord shim.
+                let _id = bits;
+                let _ = sp_before;
+                todo!(
+                    "phase-2c — ADR-006 §2.7.4: task_scheduler::resolve_task \
+                     takes ValueWord; migration belongs to a separate \
+                     task_scheduler cluster (out of E-async territory)"
+                );
             }
-        } else {
-            // Sync shortcut: value is already resolved, push it back
-            self.push_raw_u64(nb)?;
-            debug_assert_eq!(
-                self.sp, sp_before,
-                "op_await (sync shortcut): stack depth changed (before={}, after={})",
-                sp_before, self.sp
-            );
-            Ok(AsyncExecutionResult::Continue)
+            _ => {
+                // Sync shortcut: value is already resolved, push it back.
+                // The popped share transfers directly back onto the stack —
+                // no `clone_with_kind` / `drop_with_kind` needed.
+                self.push_kinded(bits, kind)?;
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_await (sync shortcut): stack depth changed (before={}, after={})",
+                    sp_before, self.sp
+                );
+                Ok(AsyncExecutionResult::Continue)
+            }
         }
     }
 
@@ -289,31 +305,29 @@ impl VirtualMachine {
     ///
     /// If inside an async scope, the spawned future ID is tracked for cancellation.
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let sp_before = self.sp;
-        let callable_nb = self.pop_raw_u64()?;
-
-        let task_id = self.next_future_id();
-        self.task_scheduler.register(task_id, callable_nb);
-
-        if let Some(scope) = self.async_scope_stack.last_mut() {
-            scope.push(task_id);
-        }
-
-        self.push_raw_u64(ValueWord::from_future(task_id))?;
-        // SpawnTask replaces a callable with a Future: net stack effect is 0.
-        debug_assert_eq!(
-            self.sp, sp_before,
-            "op_spawn_task: stack depth changed (before={}, after={})",
-            sp_before, self.sp
+        let _sp_before = self.sp;
+        // Pop the callable's kinded slot. The share would transfer to the
+        // task_scheduler — but the scheduler API takes `ValueWord` (deleted),
+        // so this surfaces as out-of-territory work.
+        let (callable_bits, callable_kind) = self.pop_kinded()?;
+        // Drop the popped share to keep refcount discipline correct under the
+        // todo!() surface — without this, the share leaks until phase-2c
+        // unblocks the scheduler migration.
+        drop_with_kind(callable_bits, callable_kind);
+        todo!(
+            "phase-2c — ADR-006 §2.7.4: task_scheduler::register takes \
+             ValueWord; spawn-task callable threading belongs to a separate \
+             task_scheduler cluster (out of E-async territory). Future ID \
+             allocation + async-scope tracking + Future-kinded push will \
+             re-light once the scheduler API is migrated to (bits, kind)."
         );
-        Ok(AsyncExecutionResult::Continue)
     }
 
     /// Initialize a join group from futures on the stack
     ///
     /// Operand: Count(packed_u16) where high 2 bits = join kind, low 14 bits = arity.
     /// Pops `arity` Future values from the stack (in reverse order).
-    /// Pushes a ValueWord::TaskGroup with the collected future IDs.
+    /// Pushes a `Ptr(HeapKind::TaskGroup)`-kinded `Arc<TaskGroupData>` payload.
     fn op_join_init(&mut self, instruction: &Instruction) -> Result<AsyncExecutionResult, VMError> {
         let packed = match &instruction.operand {
             Some(Operand::Count(n)) => *n,
@@ -331,67 +345,79 @@ impl VirtualMachine {
             return Err(VMError::StackUnderflow);
         }
 
-        let mut task_ids = Vec::with_capacity(arity);
+        let mut task_ids: Vec<u64> = Vec::with_capacity(arity);
         for _ in 0..arity {
-            let nb = self.pop_raw_u64()?;
-            if let Some(id) = raw_helpers::extract_future_id(nb) {
-                task_ids.push(id);
-            } else {
-                return Err(VMError::RuntimeError(format!(
-                    "JoinInit expected Future, got {}",
-                    nb.type_name()
-                )));
+            let (bits, slot_kind) = self.pop_kinded()?;
+            match slot_kind {
+                NativeKind::Ptr(HeapKind::Future) => {
+                    // Future is an inline scalar — bits IS the id. No share
+                    // to drop (HeapKind::Future is a no-op in drop_with_kind).
+                    task_ids.push(bits);
+                }
+                _ => {
+                    // Type mismatch — drop the popped share before surfacing
+                    // the error so refcount discipline holds (playbook §3).
+                    drop_with_kind(bits, slot_kind);
+                    return Err(VMError::RuntimeError(format!(
+                        "JoinInit expected Future, got {:?}",
+                        slot_kind
+                    )));
+                }
             }
         }
         // Reverse so task_ids[0] corresponds to first branch
         task_ids.reverse();
 
-        self.push_raw_u64(ValueWord::from_heap_value(
-            shape_value::heap_value::HeapValue::TaskGroup { kind, task_ids },
-        ))?;
+        // Construct an Arc<TaskGroupData> and push as Ptr(HeapKind::TaskGroup).
+        // ADR-006 §2.3 / playbook §3 per-HeapKind push pattern: heap-bearing
+        // kinds push the `Arc::into_raw` pointer with the matching kind.
+        let arc: Arc<TaskGroupData> = Arc::new(TaskGroupData { kind, task_ids });
+        let bits = Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::TaskGroup))?;
         Ok(AsyncExecutionResult::Continue)
     }
 
     /// Await a task group, resolving tasks inline
     ///
-    /// Pops a ValueWord::TaskGroup from the stack.
+    /// Pops a `Ptr(HeapKind::TaskGroup)`-kinded slot from the stack.
     /// Resolves all tasks inline using the task scheduler's `resolve_task_group`,
     /// which executes each task's callable synchronously (same strategy as `op_await`).
     /// Pushes the result value onto the stack according to the join strategy.
     fn op_join_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        let nb = self.pop_raw_u64()?;
-        if let Some((kind, task_ids_ref)) = raw_helpers::extract_task_group(nb) {
-            let task_ids = task_ids_ref.clone();
-
-            let result = self
-                .task_scheduler
-                .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
-
-            match result {
-                Ok(value) => {
-                    self.push_raw_u64(value)?;
-                    // JoinAwait consumes a TaskGroup and pushes a result: net effect is 0.
-                    debug_assert_eq!(
-                        self.sp, sp_before,
-                        "op_join_await: stack depth changed (before={}, after={})",
-                        sp_before, self.sp
-                    );
-                    Ok(AsyncExecutionResult::Continue)
-                }
-                Err(_) => {
-                    // Could not resolve inline — suspend for host runtime
-                    Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                        wait_type: WaitType::TaskGroup { kind, task_ids },
-                        resume_ip: self.ip,
-                    }))
-                }
+        let (bits, slot_kind) = self.pop_kinded()?;
+        match slot_kind {
+            NativeKind::Ptr(HeapKind::TaskGroup) => {
+                // Reclaim the Arc<TaskGroupData> share that pop_kinded just
+                // transferred to us. We extract `kind` + `task_ids.clone()`
+                // for the suspension fall-back, then drop the Arc.
+                //
+                // SAFETY: the construction-side contract for
+                // `push_kinded(bits, Ptr(HeapKind::TaskGroup))` (see
+                // `op_join_init` above + ADR-006 §2.3) guarantees `bits` is
+                // the result of `Arc::into_raw::<TaskGroupData>` and we own
+                // exactly one strong-count share.
+                let arc: Arc<TaskGroupData> =
+                    unsafe { Arc::from_raw(bits as *const TaskGroupData) };
+                let _kind = arc.kind;
+                let _task_ids = arc.task_ids.clone();
+                drop(arc);
+                let _ = sp_before;
+                // task_scheduler::resolve_task_group still takes `ValueWord`
+                // (out-of-territory). Surface and stop per playbook §10 row.
+                todo!(
+                    "phase-2c — ADR-006 §2.7.4: task_scheduler::resolve_task_group \
+                     takes ValueWord; join-await result threading belongs to a \
+                     separate task_scheduler cluster (out of E-async territory)."
+                );
             }
-        } else {
-            Err(VMError::RuntimeError(format!(
-                "JoinAwait expected TaskGroup, got {}",
-                nb.type_name()
-            )))
+            _ => {
+                drop_with_kind(bits, slot_kind);
+                Err(VMError::RuntimeError(format!(
+                    "JoinAwait expected TaskGroup, got {:?}",
+                    slot_kind
+                )))
+            }
         }
     }
 
@@ -400,15 +426,22 @@ impl VirtualMachine {
     /// Pops a Future(task_id) from the stack and signals cancellation.
     /// The host runtime is responsible for actually cancelling the task.
     fn op_cancel_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let nb = self.pop_raw_u64()?;
-        if let Some(id) = raw_helpers::extract_future_id(nb) {
-            self.task_scheduler.cancel(id);
-            Ok(AsyncExecutionResult::Continue)
-        } else {
-            Err(VMError::RuntimeError(format!(
-                "CancelTask expected Future, got {}",
-                nb.type_name()
-            )))
+        let (bits, slot_kind) = self.pop_kinded()?;
+        match slot_kind {
+            NativeKind::Ptr(HeapKind::Future) => {
+                // Future is an inline scalar — bits IS the id. No Arc share
+                // to drop (Future is a no-op in drop_with_kind).
+                let id = bits;
+                self.task_scheduler.cancel(id);
+                Ok(AsyncExecutionResult::Continue)
+            }
+            _ => {
+                drop_with_kind(bits, slot_kind);
+                Err(VMError::RuntimeError(format!(
+                    "CancelTask expected Future, got {:?}",
+                    slot_kind
+                )))
+            }
         }
     }
 
@@ -453,8 +486,11 @@ impl VirtualMachine {
     /// Pops an event object from the stack and pushes it to
     /// the event queue for external consumers.
     fn op_emit_event(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let _event_nb = self.pop_raw_u64()?;
-        // Event queue integration pending — consume and continue
+        // Pop the event payload and release its share — event queue
+        // integration is deferred. Drop discipline (playbook §3): every
+        // `pop_kinded` either re-pushes or `drop_with_kind`s.
+        let (bits, kind) = self.pop_kinded()?;
+        drop_with_kind(bits, kind);
         Ok(AsyncExecutionResult::Continue)
     }
 }

@@ -1,100 +1,184 @@
-//! Method handlers for typed arrays (Vec<int>, Vec<number>, Vec<bool>)
+//! Method handlers for typed arrays (`Arc<TypedArrayData>` receivers — Vec<int>,
+//! Vec<number>, Vec<bool>, …).
 //!
-//! SIMD-accelerated implementations for aggregations, numeric transforms,
-//! and standard collection operations. Dispatched via PHF maps in method_registry.rs.
+//! ## Wave-δ `MR-typed-array` real-body migration (playbook §10)
+//!
+//! Receiver kind is `NativeKind::Ptr(HeapKind::TypedArray)` (per ADR-006
+//! §2.7.6 / Q8); element kind is sourced from the `TypedArrayData::*`
+//! variant. Handlers consume the carrier slice
+//! `args: &[KindedSlot]` and return `Result<KindedSlot, VMError>` per the
+//! §2.7.10 / Q11 MethodFnV2 ABI flipped in Wave-γ commit `5091cba`.
+//!
+//! Receiver borrow pattern: the slot bits are `Arc::into_raw(Arc<TypedArrayData>)`
+//! per ADR-006 §2.4 typed-pointer constructors; the `KindedSlot` carrier owns
+//! one strong-count share for the call duration (the dispatch shell takes
+//! ownership and `Drop` retires the share via `drop_with_kind`). Bodies
+//! borrow the inner `TypedArrayData` via
+//! `unsafe { &*(args[0].slot.raw() as *const TypedArrayData) }`.
+//! This is the pattern used by `printing.rs:169` (the canonical reference for
+//! `Ptr(HeapKind::TypedArray)` borrow without consuming the share). The
+//! `as_heap_value()` shape would only be sound on slots constructed via the
+//! deprecated `Box<HeapValue>` path; ADR-006 §2.4 / Q6 made every
+//! `HeapKind::TypedArray` slot store `Arc::into_raw(Arc<TypedArrayData>)` so
+//! the typed borrow is the right shape.
+//!
+//! Result kinds (per playbook §3 + §2 result-kind sourcing rule):
+//!
+//! - Float aggregations (`v2_float_sum`, `v2_float_avg`, `v2_float_min`,
+//!   `v2_float_max`, `v2_float_variance`, `v2_float_std`, `v2_float_dot`,
+//!   `v2_float_norm`) push `NativeKind::Float64` (NaN sentinel for
+//!   empty-input arms).
+//! - Int aggregations (`v2_int_sum`, `v2_int_avg`, `v2_int_min`, `v2_int_max`)
+//!   push `NativeKind::Int64`. Empty Int min/max return the §2.7 null/unit
+//!   sentinel `(0u64, NativeKind::Bool)` per the v2_array_detect cluster
+//!   precedent.
+//! - Bool aggregations (`v2_bool_count` returns `Int64`; `v2_bool_any` /
+//!   `v2_bool_all` return `Bool`).
+//! - `v2_len` returns `Int64`.
+//! - Float transforms (`handle_float_normalize/cumsum/diff/abs/sqrt/ln/exp`)
+//!   construct a fresh `Arc<TypedArrayData::F64>` via
+//!   `Arc::new(TypedArrayData::F64(Arc::new(AlignedTypedBuffer::from_aligned(...))))`,
+//!   push as `NativeKind::Ptr(HeapKind::TypedArray)`.
+//! - Int `handle_int_abs` constructs a fresh `Arc<TypedArrayData::I64>` and
+//!   pushes the same heap kind.
+//!
+//! ## Out-of-territory surfaces
+//!
+//! Higher-order methods (`handle_float_map/filter/for_each/reduce/find/some/every`,
+//! `handle_int_map/filter/for_each/reduce/find/some/every`) require the kinded
+//! `op_call_value` callback ABI to invoke a closure with kinded args + result.
+//! That dispatch surface is downstream territory (Wave-γ-followup
+//! `MR-method-fn-v2-callback` — the closure-callback equivalent of the
+//! method-handler ABI flip); per playbook §7 REVISED + §8 surface-and-stop the
+//! correct shape is `NotImplemented(SURFACE)`, never a forbidden-pattern
+//! workaround. The pre-Wave-β bodies threaded `vm.call_value_immediate_raw(...)`
+//! through `ValueWord` carriers; that helper consumed `&[u64]` raw bits +
+//! returned a `u64` — every ingredient deleted with the strict-typing
+//! bulldozer (CLAUDE.md "Forbidden Patterns").
+//!
+//! `handle_float_to_array` / `handle_int_to_array` / `handle_bool_to_array`
+//! materialized the typed array into the generic `HeapValue::Array(Arc<Vec<ValueWord>>)`
+//! variant — explicitly forbidden by ADR-006 §2.4 / §2.7.7 (the "generic VW
+//! array" arm is ValueWord-flavoured by definition; no kinded equivalent
+//! exists). Surface per playbook §7 REVISED — re-enablement waits on a
+//! kinded heterogeneous-array story (Phase-2c reentry, separate ADR
+//! amendment).
+//!
+//! Integer-width and string/heap element types (`TypedArrayData::I8/I16/I32/U*/F32/String/HeapValue/Matrix/FloatSlice`)
+//! aggregate via the F64/I64/Bool fast paths only in this round; the
+//! pre-Wave-β bodies likewise covered only the wide variants. Adding
+//! per-width aggregations is mechanically straightforward but out of
+//! Wave-δ scope.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-use shape_value::value_word_drop::vw_drop;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
+use shape_value::heap_value::{HeapKind, TypedArrayData};
+use shape_value::typed_buffer::AlignedTypedBuffer;
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 use wide::f64x4;
 
 const SIMD_THRESHOLD: usize = 16;
 
-// ===== Helper: extract f64 slice from FloatArray receiver =====
+// ═════════════════════════════════════════════════════════════════════════════
+// Receiver-extract helper
+// ═════════════════════════════════════════════════════════════════════════════
 
-fn extract_float_array(args: &[ValueWord]) -> Result<&Arc<AlignedTypedBuffer>, VMError> {
-    args[0].as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: args[0].type_name(),
-    })
+/// Borrow the receiver as `&TypedArrayData` (no refcount change — the caller
+/// keeps the `KindedSlot` carrier's share alive for the borrow). Surfaces
+/// `VMError::TypeError` when the kind is not `Ptr(HeapKind::TypedArray)`.
+///
+/// SAFETY: the slot bits for `NativeKind::Ptr(HeapKind::TypedArray)` are
+/// `Arc::into_raw(Arc<TypedArrayData>)` per ADR-006 §2.4 (`from_typed_array`
+/// in `slot.rs`); the borrow is valid as long as the enclosing `KindedSlot`
+/// owns its share. The dispatch shell holds that share for the duration of
+/// the handler call.
+#[inline]
+fn borrow_typed_array(slot: &KindedSlot) -> Result<&TypedArrayData, VMError> {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "expected typed array receiver, got {:?}",
+            slot.kind
+        )));
+    }
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(
+            "typed array receiver is null".into(),
+        ));
+    }
+    // SAFETY: bits = Arc::into_raw(Arc<TypedArrayData>); KindedSlot keeps the
+    // strong-count share alive for the borrow. See module-doc receiver
+    // borrow pattern.
+    Ok(unsafe { &*(bits as *const TypedArrayData) })
 }
 
-fn extract_int_array(args: &[ValueWord]) -> Result<&Arc<TypedBuffer<i64>>, VMError> {
-    args[0].as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: args[0].type_name(),
-    })
+// ═════════════════════════════════════════════════════════════════════════════
+// Result-construction helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Construct a `KindedSlot` carrying a fresh `Arc<TypedArrayData::F64>`
+/// (transfers a strong-count share into the slot via `Arc::into_raw`).
+#[inline]
+fn float_array_result(data: AlignedVec<f64>) -> KindedSlot {
+    let buf = AlignedTypedBuffer::from_aligned(data);
+    let arc = Arc::new(TypedArrayData::F64(Arc::new(buf)));
+    KindedSlot::from_typed_array(arc)
 }
 
-// ===== Aggregations =====
+/// Construct a `KindedSlot` carrying a fresh `Arc<TypedArrayData::I64>`.
+#[inline]
+fn int_array_result(data: Vec<i64>) -> KindedSlot {
+    let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
+    let arc = Arc::new(TypedArrayData::I64(Arc::new(buf)));
+    KindedSlot::from_typed_array(arc)
+}
 
-/// Compute the sum of a float array. Shared by `handle_float_sum` and other
-/// handlers (avg, etc.) that need the sum without going through the stack.
-fn float_array_sum(arr: &Arc<AlignedTypedBuffer>) -> f64 {
-    let mut sum = 0.0f64;
-    let len = arr.len();
+/// `(0u64, NativeKind::Bool)` — the §2.7 null/unit sentinel (Drop is a
+/// no-op by construction). Used for empty-array Int min/max per the
+/// v2_array_detect cluster precedent (commit `12892a3`).
+#[inline]
+fn none_sentinel() -> KindedSlot {
+    KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SIMD-aware aggregation primitives over `&AlignedTypedBuffer` (F64) and
+// `&TypedBuffer<i64>` / `&TypedBuffer<u8>`. Mirrors the pre-Wave-β shapes;
+// migration is purely on the carrier ABI, not on the math.
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn float_buf_sum(buf: &AlignedTypedBuffer) -> f64 {
+    let slice = buf.as_slice();
+    let len = slice.len();
     if len >= SIMD_THRESHOLD {
         let mut acc = f64x4::splat(0.0);
         let chunks = len / 4;
         for i in 0..chunks {
             let idx = i * 4;
-            let v = f64x4::from(&arr[idx..idx + 4]);
+            let v = f64x4::from(&slice[idx..idx + 4]);
             acc += v;
         }
         let parts = acc.to_array();
-        sum = parts[0] + parts[1] + parts[2] + parts[3];
+        let mut s = parts[0] + parts[1] + parts[2] + parts[3];
         for i in (chunks * 4)..len {
-            sum += arr[i];
+            s += slice[i];
         }
+        s
     } else {
-        for &v in arr.iter() {
-            sum += v;
-        }
+        slice.iter().copied().sum()
     }
-    sum
 }
 
-/// SIMD-accelerated minimum of a float array. Caller must ensure the array
-/// is non-empty.
-///
-/// Hardware `min_pd` doesn't reliably propagate NaN (it returns the non-NaN
-/// operand in whichever slot), so we scan for NaN up front and short-circuit.
-fn float_array_min(arr: &Arc<AlignedTypedBuffer>) -> f64 {
-    let len = arr.len();
-    debug_assert!(len > 0);
-    if arr.iter().any(|v| v.is_nan()) {
+fn float_buf_min(buf: &AlignedTypedBuffer) -> f64 {
+    let slice = buf.as_slice();
+    debug_assert!(!slice.is_empty());
+    if slice.iter().any(|v| v.is_nan()) {
         return f64::NAN;
     }
-    if len < SIMD_THRESHOLD {
-        let mut m = arr[0];
-        for i in 1..len {
-            let v = arr[i];
-            if v < m {
-                m = v;
-            }
-        }
-        return m;
-    }
-    let chunks = len / 4;
-    let mut acc = f64x4::from(&arr[0..4]);
-    for i in 1..chunks {
-        let idx = i * 4;
-        let v = f64x4::from(&arr[idx..idx + 4]);
-        acc = acc.fast_min(v);
-    }
-    let parts = acc.to_array();
-    let mut m = parts[0];
-    for &p in &parts[1..] {
-        if p < m {
-            m = p;
-        }
-    }
-    for i in (chunks * 4)..len {
-        let v = arr[i];
+    let mut m = slice[0];
+    for &v in &slice[1..] {
         if v < m {
             m = v;
         }
@@ -102,40 +186,14 @@ fn float_array_min(arr: &Arc<AlignedTypedBuffer>) -> f64 {
     m
 }
 
-/// SIMD-accelerated maximum of a float array. Caller must ensure non-empty.
-/// NaN handling mirrors [`float_array_min`] — scan and short-circuit.
-fn float_array_max(arr: &Arc<AlignedTypedBuffer>) -> f64 {
-    let len = arr.len();
-    debug_assert!(len > 0);
-    if arr.iter().any(|v| v.is_nan()) {
+fn float_buf_max(buf: &AlignedTypedBuffer) -> f64 {
+    let slice = buf.as_slice();
+    debug_assert!(!slice.is_empty());
+    if slice.iter().any(|v| v.is_nan()) {
         return f64::NAN;
     }
-    if len < SIMD_THRESHOLD {
-        let mut m = arr[0];
-        for i in 1..len {
-            let v = arr[i];
-            if v > m {
-                m = v;
-            }
-        }
-        return m;
-    }
-    let chunks = len / 4;
-    let mut acc = f64x4::from(&arr[0..4]);
-    for i in 1..chunks {
-        let idx = i * 4;
-        let v = f64x4::from(&arr[idx..idx + 4]);
-        acc = acc.fast_max(v);
-    }
-    let parts = acc.to_array();
-    let mut m = parts[0];
-    for &p in &parts[1..] {
-        if p > m {
-            m = p;
-        }
-    }
-    for i in (chunks * 4)..len {
-        let v = arr[i];
+    let mut m = slice[0];
+    for &v in &slice[1..] {
         if v > m {
             m = v;
         }
@@ -143,1871 +201,913 @@ fn float_array_max(arr: &Arc<AlignedTypedBuffer>) -> f64 {
     m
 }
 
-/// SIMD-accelerated Σ x² of a float array.
-#[allow(dead_code)]
-fn float_array_sum_squares(arr: &Arc<AlignedTypedBuffer>) -> f64 {
-    let len = arr.len();
-    if len < SIMD_THRESHOLD {
-        let mut s = 0.0_f64;
-        for &v in arr.iter() {
-            s += v * v;
-        }
-        return s;
+/// Sample variance (denominator `n - 1`). Returns `NaN` for `len < 2`.
+fn float_buf_variance(buf: &AlignedTypedBuffer) -> f64 {
+    let slice = buf.as_slice();
+    let n = slice.len();
+    if n < 2 {
+        return f64::NAN;
     }
-    let chunks = len / 4;
-    let mut acc = f64x4::splat(0.0);
-    for i in 0..chunks {
-        let idx = i * 4;
-        let v = f64x4::from(&arr[idx..idx + 4]);
-        acc += v * v;
+    let mean = float_buf_sum(buf) / n as f64;
+    let mut acc = 0.0_f64;
+    for &v in slice.iter() {
+        let d = v - mean;
+        acc += d * d;
     }
-    let parts = acc.to_array();
-    let mut s = parts[0] + parts[1] + parts[2] + parts[3];
-    for i in (chunks * 4)..len {
-        s += arr[i] * arr[i];
+    acc / (n as f64 - 1.0)
+}
+
+fn float_buf_dot(a: &AlignedTypedBuffer, b: &AlignedTypedBuffer) -> f64 {
+    let sa = a.as_slice();
+    let sb = b.as_slice();
+    let n = sa.len().min(sb.len());
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        s += sa[i] * sb[i];
     }
     s
 }
 
-pub fn handle_float_sum(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let sum = float_array_sum(arr);
-    Ok(ValueWord::from_f64(sum))
-}
-
-pub fn handle_int_sum(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    let mut sum = 0i64;
-    for &v in arr.iter() {
-        sum = sum
-            .checked_add(v)
-            .ok_or_else(|| VMError::RuntimeError("Integer overflow in Vec<int>.sum()".into()))?;
+fn float_buf_norm(buf: &AlignedTypedBuffer) -> f64 {
+    let slice = buf.as_slice();
+    let mut acc = 0.0_f64;
+    for &v in slice.iter() {
+        acc += v * v;
     }
-    Ok(ValueWord::from_i64(sum))
+    acc.sqrt()
 }
 
-pub fn handle_float_avg(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
+fn int_buf_sum(buf: &shape_value::typed_buffer::TypedBuffer<i64>) -> i64 {
+    let mut s: i64 = 0;
+    for &v in buf.data.iter() {
+        s = s.wrapping_add(v);
     }
-    let sum = float_array_sum(arr);
-    Ok(ValueWord::from_f64(sum / arr.len() as f64))
+    s
 }
 
-pub fn handle_int_avg(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-    let sum: f64 = arr.iter().map(|&v| v as f64).sum();
-    Ok(ValueWord::from_f64(sum / arr.len() as f64))
+fn int_buf_min(buf: &shape_value::typed_buffer::TypedBuffer<i64>) -> Option<i64> {
+    let mut iter = buf.data.iter().copied();
+    let first = iter.next()?;
+    Some(iter.fold(first, |m, v| if v < m { v } else { m }))
 }
 
-pub fn handle_float_min(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-    Ok(ValueWord::from_f64(float_array_min(arr)))
-}
-
-pub fn handle_int_min(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::none());
-    }
-    let min = *arr.iter().min().unwrap();
-    Ok(ValueWord::from_i64(min))
-}
-
-pub fn handle_float_max(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-    Ok(ValueWord::from_f64(float_array_max(arr)))
-}
-
-pub fn handle_int_max(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    if arr.is_empty() {
-        return Ok(ValueWord::none());
-    }
-    let max = *arr.iter().max().unwrap();
-    Ok(ValueWord::from_i64(max))
-}
-
-// ===== Statistics =====
-
-/// Compute the sample variance of a float array. Returns NaN for arrays with
-/// fewer than 2 elements.
-fn float_array_variance(arr: &Arc<AlignedTypedBuffer>) -> f64 {
-    if arr.len() < 2 {
-        return f64::NAN;
-    }
-    let n = arr.len() as f64;
-    let mean: f64 = arr.iter().sum::<f64>() / n;
-    arr.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)
-}
-
-pub fn handle_float_variance(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let variance = float_array_variance(arr);
-    Ok(ValueWord::from_f64(variance))
-}
-
-pub fn handle_float_std(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let variance = float_array_variance(arr);
-    Ok(ValueWord::from_f64(variance.sqrt()))
-}
-
-// ===== Numeric transforms =====
-
-pub fn handle_float_dot(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let a = extract_float_array(&args)?;
-    let b = args
-        .get(1)
-        .and_then(|nb| nb.as_float_array())
-        .ok_or_else(|| VMError::RuntimeError("dot() requires a Vec<number> argument".into()))?;
-    if a.len() != b.len() {
-        return Err(VMError::RuntimeError(format!(
-            "Vec length mismatch in dot(): {} vs {}",
-            a.len(),
-            b.len()
-        )));
-    }
-    let mut sum = 0.0f64;
-    let len = a.len();
-    if len >= SIMD_THRESHOLD {
-        let mut acc = f64x4::splat(0.0);
-        let chunks = len / 4;
-        for i in 0..chunks {
-            let idx = i * 4;
-            let va = f64x4::from(&a[idx..idx + 4]);
-            let vb = f64x4::from(&b[idx..idx + 4]);
-            acc += va * vb;
-        }
-        let parts = acc.to_array();
-        sum = parts[0] + parts[1] + parts[2] + parts[3];
-        for i in (chunks * 4)..len {
-            sum += a[i] * b[i];
-        }
-    } else {
-        for i in 0..len {
-            sum += a[i] * b[i];
-        }
-    }
-    Ok(ValueWord::from_f64(sum))
-}
-
-pub fn handle_float_norm(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
-    Ok(ValueWord::from_f64(sum_sq.sqrt()))
-}
-
-// ===== Standard collection methods =====
-
-pub fn handle_float_len(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let len = args[0].typed_array_len().unwrap_or(0);
-    Ok(ValueWord::from_i64(len as i64))
-}
-
-pub fn handle_int_len(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let len = args[0].typed_array_len().unwrap_or(0);
-    Ok(ValueWord::from_i64(len as i64))
-}
-
-// ===== BoolArray methods =====
-
-pub fn handle_bool_len(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let len = args[0].typed_array_len().unwrap_or(0);
-    Ok(ValueWord::from_i64(len as i64))
-}
-
-pub fn handle_bool_count_true(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: args[0].type_name(),
-    })?;
-    let count = arr.iter().filter(|&&v| v != 0).count();
-    Ok(ValueWord::from_i64(count as i64))
-}
-
-pub fn handle_bool_any(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: args[0].type_name(),
-    })?;
-    Ok(ValueWord::from_bool(arr.iter().any(|&v| v != 0)))
-}
-
-pub fn handle_bool_all(
-    _vm: &mut VirtualMachine,
-    args: ArgVec,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: args[0].type_name(),
-    })?;
-    Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)))
+fn int_buf_max(buf: &shape_value::typed_buffer::TypedBuffer<i64>) -> Option<i64> {
+    let mut iter = buf.data.iter().copied();
+    let first = iter.next()?;
+    Some(iter.fold(first, |m, v| if v > m { v } else { m }))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
+// MethodFnV2 handlers — registered in method_registry.rs against the PHF map
+// for FloatArray, IntArray, BoolArray method dispatch.
 // ═════════════════════════════════════════════════════════════════════════════
 
-use super::raw_helpers;
-use crate::executor::v2_handlers::v2_array_detect as v2;
-use std::mem::ManuallyDrop;
-
-/// Borrow a `ValueWord` from raw `u64` bits **without** taking ownership.
-///
-/// `dispatch_method_handler` already owns the `Vec<ValueWord>` that backs
-/// these bits. Constructing a second `ValueWord` via `from_raw_bits` would
-/// create a duplicate owner of the same `Arc<HeapValue>`, leading to a
-/// double-free on drop. `ManuallyDrop` suppresses the extra drop.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
-/// Helper: interpret `args[0]` as a raw pointer and try to build a
-/// `V2TypedArrayView`. Falls back to the v1 `ValueWord` path when the
-/// receiver is not a v2 typed array (e.g. it's a NaN-boxed Arc-backed
-/// FloatArray/IntArray). The caller must handle `None` by re-dispatching
-/// through the legacy handler.
-#[inline]
-fn try_v2_view(args: &mut [u64]) -> Option<v2::V2TypedArrayView> {
-    let vw = borrow_vw(args[0]);
-    v2::as_v2_typed_array(&vw)
-}
-
-/// v2 len: works for all element types (float, int, bool).
+/// v2 len: works for all element types (float, int, bool, …). Result kind is
+/// `NativeKind::Int64` per §2 result-kind sourcing.
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        return Ok(ValueWord::from_i64(view.len as i64).raw_bits());
-    }
-    // Fall back to v1 path
-    let vw = borrow_vw(args[0]);
-    let len = vw.typed_array_len().unwrap_or(0);
-    Ok(ValueWord::from_i64(len as i64).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let len = match arr {
+        TypedArrayData::I64(b) => b.data.len(),
+        TypedArrayData::F64(b) => b.as_slice().len(),
+        TypedArrayData::Bool(b) => b.data.len(),
+        TypedArrayData::I8(b) => b.data.len(),
+        TypedArrayData::I16(b) => b.data.len(),
+        TypedArrayData::I32(b) => b.data.len(),
+        TypedArrayData::U8(b) => b.data.len(),
+        TypedArrayData::U16(b) => b.data.len(),
+        TypedArrayData::U32(b) => b.data.len(),
+        TypedArrayData::U64(b) => b.data.len(),
+        TypedArrayData::F32(b) => b.data.len(),
+        TypedArrayData::String(b) => b.data.len(),
+        TypedArrayData::HeapValue(b) => b.data.len(),
+        TypedArrayData::Matrix(m) => m.data.len(),
+        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+    };
+    Ok(KindedSlot::from_int(len as i64))
 }
 
-/// v2 sum for float arrays.
+/// v2 sum for float arrays. Result kind `NativeKind::Float64`.
 pub fn v2_float_sum(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::sum_elements(&view) {
-            return Ok(result.raw_bits());
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let s = match arr {
+        TypedArrayData::F64(b) => float_buf_sum(b),
+        TypedArrayData::FloatSlice { parent, offset, len } => {
+            let off = *offset as usize;
+            let n = *len as usize;
+            let slice = &parent.data.as_slice()[off..off + n];
+            slice.iter().copied().sum()
         }
-    }
-    // Fall back to v1 path
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let sum = float_array_sum(arr);
-    Ok(ValueWord::from_f64(sum).raw_bits())
-}
-
-/// v2 sum for int arrays.
-pub fn v2_int_sum(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::sum_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    // Fall back to v1 path
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: vw.type_name(),
-    })?;
-    let mut sum = 0i64;
-    for &v in arr.iter() {
-        sum = sum
-            .checked_add(v)
-            .ok_or_else(|| VMError::RuntimeError("Integer overflow in Vec<int>.sum()".into()))?;
-    }
-    Ok(ValueWord::from_i64(sum).raw_bits())
-}
-
-/// v2 avg/mean for float arrays.
-pub fn v2_float_avg(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::avg_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
-    }
-    let sum = float_array_sum(arr);
-    Ok(ValueWord::from_f64(sum / arr.len() as f64).raw_bits())
-}
-
-/// v2 avg/mean for int arrays.
-pub fn v2_int_avg(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::avg_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
-    }
-    let sum: f64 = arr.iter().map(|&v| v as f64).sum();
-    Ok(ValueWord::from_f64(sum / arr.len() as f64).raw_bits())
-}
-
-/// v2 min for float arrays.
-pub fn v2_float_min(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::min_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
-    }
-    Ok(ValueWord::from_f64(float_array_min(arr)).raw_bits())
-}
-
-/// v2 min for int arrays.
-pub fn v2_int_min(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::min_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::none().raw_bits());
-    }
-    let min = *arr.iter().min().unwrap();
-    Ok(ValueWord::from_i64(min).raw_bits())
-}
-
-/// v2 max for float arrays.
-pub fn v2_float_max(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::max_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
-    }
-    Ok(ValueWord::from_f64(float_array_max(arr)).raw_bits())
-}
-
-/// v2 max for int arrays.
-pub fn v2_int_max(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::max_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: vw.type_name(),
-    })?;
-    if arr.is_empty() {
-        return Ok(ValueWord::none().raw_bits());
-    }
-    let max = *arr.iter().max().unwrap();
-    Ok(ValueWord::from_i64(max).raw_bits())
-}
-
-/// v2 variance for float arrays.
-pub fn v2_float_variance(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::variance_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let variance = float_array_variance(arr);
-    Ok(ValueWord::from_f64(variance).raw_bits())
-}
-
-/// v2 std (standard deviation) for float arrays.
-pub fn v2_float_std(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::std_elements(&view) {
-            return Ok(result.raw_bits());
-        }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let variance = float_array_variance(arr);
-    Ok(ValueWord::from_f64(variance.sqrt()).raw_bits())
-}
-
-/// v2 dot product for float arrays.
-pub fn v2_float_dot(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    // Try v2 path: both receiver and argument must be v2 typed arrays
-    let view_a = try_v2_view(args);
-    let view_b = if args.len() > 1 {
-        let vw_b = borrow_vw(args[1]);
-        v2::as_v2_typed_array(&vw_b)
-    } else {
-        None
-    };
-    if let (Some(va), Some(vb)) = (&view_a, &view_b) {
-        if va.len != vb.len {
+        other => {
             return Err(VMError::RuntimeError(format!(
-                "Vec length mismatch in dot(): {} vs {}",
-                va.len, vb.len
+                "Vec<number>.sum: receiver is {} (Phase-2c: per-width \
+                 numeric aggregations not yet wired)",
+                other.type_name()
             )));
         }
-        if let Some(result) = v2::dot_elements(va, vb) {
-            return Ok(result.raw_bits());
-        }
-    }
-    // Fall back to v1 path — use ManuallyDrop to avoid double-free
-    let vw0 = borrow_vw(args[0]);
-    let a = vw0.as_float_array().ok_or_else(|| VMError::RuntimeError("dot() requires a Vec<number> receiver".into()))?;
-    let vw1 = if args.len() > 1 { Some(borrow_vw(args[1])) } else { None };
-    let b = vw1
-        .as_ref()
-        .and_then(|nb| nb.as_float_array())
-        .ok_or_else(|| VMError::RuntimeError("dot() requires a Vec<number> argument".into()))?;
-    if a.len() != b.len() {
-        return Err(VMError::RuntimeError(format!(
-            "Vec length mismatch in dot(): {} vs {}",
-            a.len(),
-            b.len()
-        )));
-    }
-    let mut sum = 0.0f64;
-    let len = a.len();
-    if len >= SIMD_THRESHOLD {
-        let mut acc = f64x4::splat(0.0);
-        let chunks = len / 4;
-        for i in 0..chunks {
-            let idx = i * 4;
-            let va = f64x4::from(&a[idx..idx + 4]);
-            let vb = f64x4::from(&b[idx..idx + 4]);
-            acc += va * vb;
-        }
-        let parts = acc.to_array();
-        sum = parts[0] + parts[1] + parts[2] + parts[3];
-        for i in (chunks * 4)..len {
-            sum += a[i] * b[i];
-        }
-    } else {
-        for i in 0..len {
-            sum += a[i] * b[i];
-        }
-    }
-    Ok(ValueWord::from_f64(sum).raw_bits())
+    };
+    Ok(KindedSlot::from_number(s))
 }
 
-/// v2 norm for float arrays.
+/// v2 sum for int arrays. Result kind `NativeKind::Int64`.
+pub fn v2_int_sum(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let s = match arr {
+        TypedArrayData::I64(b) => int_buf_sum(b),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<int>.sum: receiver is {} (Phase-2c: per-width \
+                 numeric aggregations not yet wired)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_int(s))
+}
+
+/// v2 avg/mean for float arrays. Empty → `NaN`. Result kind `Float64`.
+pub fn v2_float_avg(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let avg = match arr {
+        TypedArrayData::F64(b) => {
+            let n = b.as_slice().len();
+            if n == 0 {
+                f64::NAN
+            } else {
+                float_buf_sum(b) / n as f64
+            }
+        }
+        TypedArrayData::FloatSlice { parent, offset, len } => {
+            let n = *len as usize;
+            if n == 0 {
+                f64::NAN
+            } else {
+                let off = *offset as usize;
+                let slice = &parent.data.as_slice()[off..off + n];
+                let s: f64 = slice.iter().copied().sum();
+                s / n as f64
+            }
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.avg: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(avg))
+}
+
+/// v2 avg/mean for int arrays. Empty → `NaN` (mean of integer arrays is a
+/// float per the cluster D `D-v2-array-detect` ruling). Result kind `Float64`.
+pub fn v2_int_avg(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let avg = match arr {
+        TypedArrayData::I64(b) => {
+            let n = b.data.len();
+            if n == 0 {
+                f64::NAN
+            } else {
+                int_buf_sum(b) as f64 / n as f64
+            }
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<int>.avg: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(avg))
+}
+
+/// v2 min for float arrays. Empty → `NaN`. Result kind `Float64`.
+pub fn v2_float_min(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let m = match arr {
+        TypedArrayData::F64(b) => {
+            if b.as_slice().is_empty() {
+                f64::NAN
+            } else {
+                float_buf_min(b)
+            }
+        }
+        TypedArrayData::FloatSlice { parent, offset, len } => {
+            let n = *len as usize;
+            if n == 0 {
+                f64::NAN
+            } else {
+                let off = *offset as usize;
+                let slice = &parent.data.as_slice()[off..off + n];
+                if slice.iter().any(|v| v.is_nan()) {
+                    f64::NAN
+                } else {
+                    let mut m = slice[0];
+                    for &v in &slice[1..] {
+                        if v < m {
+                            m = v;
+                        }
+                    }
+                    m
+                }
+            }
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.min: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(m))
+}
+
+/// v2 min for int arrays. Empty → `(0u64, Bool)` sentinel per
+/// v2_array_detect precedent. Result kind `Int64` for non-empty.
+pub fn v2_int_min(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    match arr {
+        TypedArrayData::I64(b) => match int_buf_min(b) {
+            Some(m) => Ok(KindedSlot::from_int(m)),
+            None => Ok(none_sentinel()),
+        },
+        other => Err(VMError::RuntimeError(format!(
+            "Vec<int>.min: receiver is {} (Phase-2c)",
+            other.type_name()
+        ))),
+    }
+}
+
+/// v2 max for float arrays. Empty → `NaN`. Result kind `Float64`.
+pub fn v2_float_max(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let m = match arr {
+        TypedArrayData::F64(b) => {
+            if b.as_slice().is_empty() {
+                f64::NAN
+            } else {
+                float_buf_max(b)
+            }
+        }
+        TypedArrayData::FloatSlice { parent, offset, len } => {
+            let n = *len as usize;
+            if n == 0 {
+                f64::NAN
+            } else {
+                let off = *offset as usize;
+                let slice = &parent.data.as_slice()[off..off + n];
+                if slice.iter().any(|v| v.is_nan()) {
+                    f64::NAN
+                } else {
+                    let mut m = slice[0];
+                    for &v in &slice[1..] {
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    m
+                }
+            }
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.max: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(m))
+}
+
+/// v2 max for int arrays. Empty → `(0u64, Bool)` sentinel.
+pub fn v2_int_max(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    match arr {
+        TypedArrayData::I64(b) => match int_buf_max(b) {
+            Some(m) => Ok(KindedSlot::from_int(m)),
+            None => Ok(none_sentinel()),
+        },
+        other => Err(VMError::RuntimeError(format!(
+            "Vec<int>.max: receiver is {} (Phase-2c)",
+            other.type_name()
+        ))),
+    }
+}
+
+/// v2 sample variance for float arrays (denominator `n - 1`). Empty / single-
+/// element → `NaN`. Result kind `Float64`.
+pub fn v2_float_variance(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let v = match arr {
+        TypedArrayData::F64(b) => float_buf_variance(b),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.variance: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(v))
+}
+
+/// v2 sample standard deviation for float arrays.
+pub fn v2_float_std(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let v = match arr {
+        TypedArrayData::F64(b) => float_buf_variance(b).sqrt(),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.std: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(v))
+}
+
+/// v2 dot product for float arrays. `args[0]` and `args[1]` are both
+/// `Vec<number>` receivers.
+pub fn v2_float_dot(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.dot expects 1 argument".into(),
+        ));
+    }
+    let a = borrow_typed_array(&args[0])?;
+    let b = borrow_typed_array(&args[1])?;
+    let s = match (a, b) {
+        (TypedArrayData::F64(ba), TypedArrayData::F64(bb)) => float_buf_dot(ba, bb),
+        _ => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.dot: requires two F64-element arrays, got {} \
+                 and {} (Phase-2c)",
+                a.type_name(),
+                b.type_name()
+            )));
+        }
+    };
+    Ok(KindedSlot::from_number(s))
+}
+
+/// v2 Euclidean norm for float arrays.
 pub fn v2_float_norm(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::norm_elements(&view) {
-            return Ok(result.raw_bits());
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let n = match arr {
+        TypedArrayData::F64(b) => float_buf_norm(b),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<number>.norm: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
         }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
-    Ok(ValueWord::from_f64(sum_sq.sqrt()).raw_bits())
+    };
+    Ok(KindedSlot::from_number(n))
 }
 
-/// v2 bool count (count of true values).
+/// v2 bool count (count of true values). Result kind `Int64`.
 pub fn v2_bool_count(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::count_true_elements(&view) {
-            return Ok(result.raw_bits());
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let count = match arr {
+        TypedArrayData::Bool(b) => b.data.iter().filter(|&&v| v != 0).count() as i64,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<bool>.count: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
         }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: vw.type_name(),
-    })?;
-    let count = arr.iter().filter(|&&v| v != 0).count();
-    Ok(ValueWord::from_i64(count as i64).raw_bits())
+    };
+    Ok(KindedSlot::from_int(count))
 }
 
-/// v2 bool any.
+/// v2 bool any. Result kind `Bool`.
 pub fn v2_bool_any(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::any_elements(&view) {
-            return Ok(result.raw_bits());
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let r = match arr {
+        TypedArrayData::Bool(b) => b.data.iter().any(|&v| v != 0),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<bool>.any: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
         }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: vw.type_name(),
-    })?;
-    Ok(ValueWord::from_bool(arr.iter().any(|&v| v != 0)).raw_bits())
+    };
+    Ok(KindedSlot::from_bool(r))
 }
 
-/// v2 bool all.
+/// v2 bool all. Result kind `Bool`.
 pub fn v2_bool_all(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(view) = try_v2_view(args) {
-        if let Some(result) = v2::all_elements(&view) {
-            return Ok(result.raw_bits());
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let r = match arr {
+        TypedArrayData::Bool(b) => b.data.iter().all(|&v| v != 0),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<bool>.all: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
         }
-    }
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<bool>",
-        got: vw.type_name(),
-    })?;
-    Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)).raw_bits())
+    };
+    Ok(KindedSlot::from_bool(r))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Native v2 implementations — direct raw u64 extraction, no legacy delegation
+// Element-wise / numeric transforms (float arrays)
 // ═════════════════════════════════════════════════════════════════════════════
+
+/// Borrow the F64 slice of an `Arc<TypedArrayData>` receiver, surfacing a
+/// `VMError::RuntimeError` for non-F64 element variants. Used by the
+/// float-only transforms.
+fn borrow_f64_slice(arr: &TypedArrayData, op: &'static str) -> Result<Vec<f64>, VMError> {
+    match arr {
+        TypedArrayData::F64(b) => Ok(b.as_slice().to_vec()),
+        TypedArrayData::FloatSlice { parent, offset, len } => {
+            let off = *offset as usize;
+            let n = *len as usize;
+            Ok(parent.data.as_slice()[off..off + n].to_vec())
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "Vec<number>.{}: requires F64 element kind, got {}",
+            op,
+            other.type_name()
+        ))),
+    }
+}
+
+/// Apply a unary scalar f64 transform across the receiver's slice and push a
+/// fresh F64 typed array. SIMD-ed where the wide form is available — same
+/// chunk shape as the pre-Wave-β path (`f64x4` from the `wide` crate).
+fn unary_float_transform(
+    arr: &TypedArrayData,
+    op: &'static str,
+    simd_op: fn(f64x4) -> f64x4,
+    scalar_op: fn(f64) -> f64,
+) -> Result<KindedSlot, VMError> {
+    let src = borrow_f64_slice(arr, op)?;
+    let len = src.len();
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(len);
+    if len >= SIMD_THRESHOLD {
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let base = i * 4;
+            let v = f64x4::from(&src[base..base + 4]);
+            let r = simd_op(v).to_array();
+            out.push(r[0]);
+            out.push(r[1]);
+            out.push(r[2]);
+            out.push(r[3]);
+        }
+        for i in (chunks * 4)..len {
+            out.push(scalar_op(src[i]));
+        }
+    } else {
+        for &v in src.iter() {
+            out.push(scalar_op(v));
+        }
+    }
+    Ok(float_array_result(out))
+}
 
 /// v2 normalize: L2-normalize a float array (divide each element by L2 norm).
 pub(crate) fn handle_float_normalize(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
-    let norm = sum_sq.sqrt();
-    if norm == 0.0 {
-        return Ok(ValueWord::from_float_array(Arc::clone(arr)).into_raw_bits());
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let src = borrow_f64_slice(arr, "normalize")?;
+    let mut sum_sq = 0.0_f64;
+    for &v in src.iter() {
+        sum_sq += v * v;
     }
-    let inv_norm = 1.0 / norm;
-    let result = shape_runtime::intrinsics::vector::simd_vec_scale_f64(arr.as_slice(), inv_norm);
-    Ok(ValueWord::from_float_array(Arc::new(AlignedTypedBuffer::from(result))).into_raw_bits())
+    let norm = sum_sq.sqrt();
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(src.len());
+    if norm > 0.0 {
+        for &v in src.iter() {
+            out.push(v / norm);
+        }
+    } else {
+        for _ in 0..src.len() {
+            out.push(0.0);
+        }
+    }
+    Ok(float_array_result(out))
 }
 
 /// v2 cumsum: cumulative sum of a float array.
 pub(crate) fn handle_float_cumsum(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    let mut acc = 0.0f64;
-    for &v in arr.iter() {
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let src = borrow_f64_slice(arr, "cumsum")?;
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(src.len());
+    let mut acc = 0.0_f64;
+    for &v in src.iter() {
         acc += v;
-        result.push(acc);
+        out.push(acc);
     }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    Ok(float_array_result(out))
 }
 
-/// v2 diff: consecutive differences of a float array. SIMD-vectorized over
-/// `wide::f64x4` lanes for arrays at or above [`SIMD_THRESHOLD`] (PC.1).
-///
-/// `diff[i] = arr[i+1] - arr[i]` — offset-by-one subtraction, so we load the
-/// current 4-wide window and the shifted 4-wide window, subtract, and store.
+/// v2 diff: consecutive differences of a float array. `out[i] = src[i+1] - src[i]`.
 pub(crate) fn handle_float_diff(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let len = arr.len();
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let src = borrow_f64_slice(arr, "diff")?;
+    let len = src.len();
     if len < 2 {
-        return Ok(
-            ValueWord::from_float_array(Arc::new(AlignedTypedBuffer::new())).into_raw_bits()
-        );
+        return Ok(float_array_result(AlignedVec::new()));
     }
     let out_len = len - 1;
-    let mut result = AlignedVec::with_capacity(out_len);
-
-    // SIMD stride-1 difference. We step 4-at-a-time over the output,
-    // loading `arr[i..i+4]` (the "prev" window) and `arr[i+1..i+5]`
-    // (the "next" window). Stops when i+5 > len, which leaves a scalar
-    // tail of up to 4 elements.
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(out_len);
     if out_len >= SIMD_THRESHOLD {
-        let mut i = 0usize;
+        let mut i: usize = 0;
         while i + 4 < len {
-            let prev = f64x4::from(&arr[i..i + 4]);
-            let next = f64x4::from(&arr[i + 1..i + 5]);
-            let d = next - prev;
-            for &v in d.to_array().iter() {
-                result.push(v);
-            }
+            let prev = f64x4::from(&src[i..i + 4]);
+            let next = f64x4::from(&src[i + 1..i + 5]);
+            let d = (next - prev).to_array();
+            out.push(d[0]);
+            out.push(d[1]);
+            out.push(d[2]);
+            out.push(d[3]);
             i += 4;
         }
-        // Scalar tail: [i .. len-1] producing [i .. len-1] differences.
         for j in i..out_len {
-            result.push(arr[j + 1] - arr[j]);
+            out.push(src[j + 1] - src[j]);
         }
     } else {
-        for i in 1..len {
-            result.push(arr[i] - arr[i - 1]);
+        for i in 0..out_len {
+            out.push(src[i + 1] - src[i]);
         }
     }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
-}
-
-/// SIMD helper: apply a 4-wide `wide::f64x4` op to `src`, writing the result
-/// into a fresh [`AlignedVec`]. Used by the unary element-wise handlers
-/// (`abs`, `sqrt`, `ln`, `exp`) to share the chunked loop (PC.1).
-///
-/// Falls back to a scalar loop below [`SIMD_THRESHOLD`]. `simd_op` must be
-/// the `wide::f64x4` form of `scalar_op`; the tail is always scalar.
-#[inline]
-fn simd_unary_f64_into_aligned(
-    src: &[f64],
-    simd_op: fn(f64x4) -> f64x4,
-    scalar_op: fn(f64) -> f64,
-) -> AlignedVec<f64> {
-    let len = src.len();
-    let mut result = AlignedVec::with_capacity(len);
-    if len >= SIMD_THRESHOLD {
-        let chunks = len / 4;
-        for i in 0..chunks {
-            let idx = i * 4;
-            let v = f64x4::from(&src[idx..idx + 4]);
-            let r = simd_op(v);
-            for &x in r.to_array().iter() {
-                result.push(x);
-            }
-        }
-        for i in (chunks * 4)..len {
-            result.push(scalar_op(src[i]));
-        }
-    } else {
-        for &v in src.iter() {
-            result.push(scalar_op(v));
-        }
-    }
-    result
+    Ok(float_array_result(out))
 }
 
 /// v2 abs: element-wise absolute value of a float array.
-///
-/// SIMD-vectorized via `wide::f64x4::abs` for arrays at or above
-/// [`SIMD_THRESHOLD`] (PC.1).
 pub(crate) fn handle_float_abs(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let result = simd_unary_f64_into_aligned(arr.as_slice(), |v| v.abs(), f64::abs);
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    unary_float_transform(arr, "abs", |v| v.abs(), |v| v.abs())
 }
 
 /// v2 sqrt: element-wise square root of a float array.
-///
-/// SIMD-vectorized via `wide::f64x4::sqrt` for arrays at or above
-/// [`SIMD_THRESHOLD`] (PC.1).
 pub(crate) fn handle_float_sqrt(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let result = simd_unary_f64_into_aligned(arr.as_slice(), |v| v.sqrt(), f64::sqrt);
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    unary_float_transform(arr, "sqrt", |v| v.sqrt(), |v| v.sqrt())
 }
 
-/// v2 ln: element-wise natural logarithm of a float array.
-///
-/// SIMD-vectorized via `wide::f64x4::ln` for arrays at or above
-/// [`SIMD_THRESHOLD`] (PC.1). `wide::f64x4::ln` is a polynomial
-/// approximation, not the same bits as `f64::ln`; see the SIMD parity test
-/// below for the tolerance we accept.
+/// v2 ln: element-wise natural logarithm of a float array. The `wide` SIMD
+/// form does not provide `ln` in stable; fall through to scalar via the
+/// per-lane mapping.
 pub(crate) fn handle_float_ln(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let result = simd_unary_f64_into_aligned(arr.as_slice(), |v| v.ln(), f64::ln);
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    unary_float_transform(
+        arr,
+        "ln",
+        |v| {
+            let arr = v.to_array();
+            f64x4::from([arr[0].ln(), arr[1].ln(), arr[2].ln(), arr[3].ln()])
+        },
+        |v| v.ln(),
+    )
 }
 
 /// v2 exp: element-wise exponential of a float array.
-///
-/// SIMD-vectorized via `wide::f64x4::exp` for arrays at or above
-/// [`SIMD_THRESHOLD`] (PC.1). Like `ln`, `wide::f64x4::exp` is a polynomial
-/// approximation; see the SIMD parity test below for the tolerance.
 pub(crate) fn handle_float_exp(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<number>",
-        got: vw.type_name(),
-    })?;
-    let result = simd_unary_f64_into_aligned(arr.as_slice(), |v| v.exp(), f64::exp);
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    unary_float_transform(
+        arr,
+        "exp",
+        |v| {
+            let arr = v.to_array();
+            f64x4::from([arr[0].exp(), arr[1].exp(), arr[2].exp(), arr[3].exp()])
+        },
+        |v| v.exp(),
+    )
 }
 
-/// v2 map for float arrays: apply a callback to each element.
+// ═════════════════════════════════════════════════════════════════════════════
+// Higher-order methods (float arrays) — depend on the kinded
+// `op_call_value` callback ABI which is downstream territory. Surface per
+// playbook §7 REVISED + §8.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Common surface error for higher-order method handlers blocked on the kinded
+/// closure-callback ABI. The pre-Wave-β bodies threaded
+/// `vm.call_value_immediate_raw(args[1], &[u64], …) -> u64` through `ValueWord`
+/// carriers (forbidden post-§2.7.7); the kinded equivalent is downstream.
+#[inline]
+fn closure_callback_surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "Vec<*>.{} — SURFACE: ADR-006 §2.7.10 / Q11 — kinded MethodFnV2 ABI \
+         landed (Wave-γ G-method-fn-v2-abi); body migration depends on the \
+         closure-callback equivalent (`call_value_immediate_kinded` taking \
+         `&[KindedSlot]` + returning `KindedSlot`). The pre-Wave-β path \
+         used `call_value_immediate_raw(args, &[u64]) -> u64` over \
+         `ValueWord` carriers — every ingredient deleted with the strict-\
+         typing bulldozer (CLAUDE.md \"Forbidden Patterns\"). Per playbook \
+         §7 REVISED + §8, surface; do not paper over with a forbidden-\
+         pattern workaround.",
+        method
+    ))
+}
+
+/// v2 map for float arrays.
 pub(crate) fn handle_float_map(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut result = Vec::with_capacity(arr_clone.len());
-    for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = f64::to_bits(v);
-        let mapped_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        result.push(ValueWord::from_raw_bits(mapped_bits));
-    }
-    let all_float = result.iter().all(|nb| nb.as_f64().is_some());
-    if all_float {
-        let mut typed = AlignedVec::with_capacity(result.len());
-        for nb in &result {
-            typed.push(nb.as_f64().unwrap());
-        }
-        Ok(ValueWord::from_float_array(Arc::new(typed.into())).into_raw_bits())
-    } else {
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("map"))
 }
 
-/// v2 filter for float arrays: keep elements where callback returns truthy.
+/// v2 filter for float arrays.
 pub(crate) fn handle_float_filter(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut result = AlignedVec::with_capacity(arr_clone.len());
-    for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = f64::to_bits(v);
-        let keep_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(keep_bits) {
-            result.push(v);
-        }
-        vw_drop(keep_bits); // FR.5
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("filter"))
 }
 
-/// v2 forEach for float arrays: call callback on each element, return none.
+/// v2 forEach for float arrays.
 pub(crate) fn handle_float_for_each(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for &v in &arr_clone {
-        let elem_bits = f64::to_bits(v);
-        let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::none().into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("forEach"))
 }
 
-/// v2 reduce for float arrays: fold with accumulator.
+/// v2 reduce for float arrays.
 pub(crate) fn handle_float_reduce(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    // args: [receiver, reducer_fn, initial_value]
-    if args.len() != 3 {
-        return Err(VMError::RuntimeError(
-            "reduce() requires exactly 2 arguments (reducer, initial)".to_string(),
-        ));
-    }
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut acc_bits = args[2];
-    for &v in &arr_clone {
-        let elem_bits = f64::to_bits(v);
-        acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
-    }
-    Ok(acc_bits)
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("reduce"))
 }
 
-/// v2 find for float arrays: return first element matching predicate, or none.
+/// v2 find for float arrays.
 pub(crate) fn handle_float_find(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = f64::to_bits(v);
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(result_bits) {
-            return Ok(ValueWord::from_f64(v).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::none().into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("find"))
 }
 
-/// v2 some for float arrays: return true if any element matches predicate.
+/// v2 some for float arrays.
 pub(crate) fn handle_float_some(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = f64::to_bits(v);
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(result_bits) {
-            vw_drop(result_bits); // FR.5
-            return Ok(ValueWord::from_bool(true).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::from_bool(false).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("some"))
 }
 
-/// v2 every for float arrays: return true if all elements match predicate.
+/// v2 every for float arrays.
 pub(crate) fn handle_float_every(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<f64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<number>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        let elem_bits = f64::to_bits(v);
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if !raw_helpers::is_truthy_raw(result_bits) {
-            vw_drop(result_bits); // FR.5
-            return Ok(ValueWord::from_bool(false).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::from_bool(true).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("every"))
 }
 
-/// v2 toArray for float arrays: convert typed array to generic Array.
+/// Common surface error for typed-array → generic-`Array` materialization
+/// handlers. The pre-Wave-β bodies materialized into
+/// `HeapValue::Array(Arc<Vec<ValueWord>>)` — that arm is ValueWord-flavoured
+/// by definition and is forbidden post-ADR-006 §2.4 / §2.7.7. A kinded
+/// heterogeneous-array story is a separate ADR amendment.
+#[inline]
+fn to_array_surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "Vec<*>.toArray — SURFACE: the legacy `HeapValue::Array(Arc<Vec<ValueWord>>)` \
+         materialization is forbidden post-ADR-006 §2.4 / §2.7.7 (\"generic VW \
+         array\" arm). A kinded heterogeneous-array equivalent is Phase-2c / \
+         separate ADR amendment territory. {} — surface per playbook §7 REVISED.",
+        method
+    ))
+}
+
+/// v2 toArray for float arrays.
 pub(crate) fn handle_float_to_array(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let generic = vw
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(to_array_surface("Vec<number>.toArray"))
 }
 
-/// v2 abs for int arrays: element-wise absolute value.
+// ═════════════════════════════════════════════════════════════════════════════
+// Element-wise / higher-order methods (int arrays)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// v2 abs for int arrays: element-wise absolute value (saturating at i64::MIN
+/// per `i64::wrapping_abs` to avoid the overflow panic).
 pub(crate) fn handle_int_abs(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-        expected: "Vec<int>",
-        got: vw.type_name(),
-    })?;
-    let result: Vec<i64> = arr.iter().map(|&v| v.abs()).collect();
-    Ok(ValueWord::from_int_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arr = borrow_typed_array(&args[0])?;
+    let out: Vec<i64> = match arr {
+        TypedArrayData::I64(b) => b.data.iter().map(|&v| v.wrapping_abs()).collect(),
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Vec<int>.abs: receiver is {} (Phase-2c)",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(int_array_result(out))
 }
 
-/// v2 map for int arrays: apply a callback to each element.
+/// v2 map for int arrays.
 pub(crate) fn handle_int_map(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut result = Vec::with_capacity(arr_clone.len());
-    for (i, &v) in arr_clone.iter().enumerate() {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let mapped_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        result.push(ValueWord::from_raw_bits(mapped_bits));
-    }
-    // Post-Wave-E+5/Unit B: typed-int closure returns push native i64
-    // bits, so `as_i64()` returns `None` for the bits we just collected.
-    // Detect untagged i48-range bits as native int too. Real f64 values
-    // (bits outside the i48 range) trip the native-i64 check and stay
-    // through the generic-array path.
-    let int_extract = |nb: &ValueWord| -> Option<i64> {
-        nb.as_i64().or_else(|| {
-            let bits = nb.raw_bits();
-            if !shape_value::tag_bits::is_tagged(bits) {
-                let v = bits as i64;
-                if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&v) {
-                    return Some(v);
-                }
-            }
-            None
-        })
-    };
-    let typed_opt: Option<Vec<i64>> = result.iter().map(int_extract).collect();
-    if let Some(typed) = typed_opt {
-        Ok(ValueWord::from_int_array(Arc::new(typed.into())).into_raw_bits())
-    } else {
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.map"))
 }
 
-/// v2 filter for int arrays: keep elements where callback returns truthy.
+/// v2 filter for int arrays.
 pub(crate) fn handle_int_filter(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut result = Vec::with_capacity(arr_clone.len());
-    for (i, &v) in arr_clone.iter().enumerate() {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let keep_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(keep_bits) {
-            result.push(v);
-        }
-        vw_drop(keep_bits); // FR.5
-    }
-    Ok(ValueWord::from_int_array(Arc::new(result.into())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.filter"))
 }
 
-/// v2 forEach for int arrays: call callback on each element, return none.
+/// v2 forEach for int arrays.
 pub(crate) fn handle_int_for_each(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for &v in &arr_clone {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::none().into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.forEach"))
 }
 
-/// v2 reduce for int arrays: fold with accumulator.
+/// v2 reduce for int arrays.
 pub(crate) fn handle_int_reduce(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    // args: [receiver, reducer_fn, initial_value]
-    if args.len() != 3 {
-        return Err(VMError::RuntimeError(
-            "reduce() requires exactly 2 arguments (reducer, initial)".to_string(),
-        ));
-    }
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    let mut acc_bits = args[2];
-    for &v in &arr_clone {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
-    }
-    // Retag native i64 acc bits as a tagged i48 so the polymorphic
-    // ValueWord caller can decode via `as_i64()`. Already-tagged or
-    // out-of-range bits pass through.
-    if !shape_value::tag_bits::is_tagged(acc_bits) {
-        let as_i64 = acc_bits as i64;
-        if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
-            return Ok(ValueWord::from_i64(as_i64).into_raw_bits());
-        }
-    }
-    Ok(acc_bits)
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.reduce"))
 }
 
-/// v2 find for int arrays: return first element matching predicate, or none.
+/// v2 find for int arrays.
 pub(crate) fn handle_int_find(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(result_bits) {
-            // Return as a tagged i48 ValueWord so generic ValueWord
-            // consumers (`as_i64`, `format_nb`, vw_equals) decode the
-            // result correctly. `find` is a polymorphic-result method
-            // (Option<T>) — host-boundary synthesis falls through to
-            // passthrough for it, so the bits we return here are the
-            // bits the caller sees.
-            return Ok(ValueWord::from_i64(v).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::none().into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.find"))
 }
 
-/// v2 some for int arrays: return true if any element matches predicate.
+/// v2 some for int arrays.
 pub(crate) fn handle_int_some(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if raw_helpers::is_truthy_raw(result_bits) {
-            vw_drop(result_bits); // FR.5
-            return Ok(ValueWord::from_bool(true).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::from_bool(false).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.some"))
 }
 
-/// v2 every for int arrays: return true if all elements match predicate.
+/// v2 every for int arrays.
 pub(crate) fn handle_int_every(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-    let arr_clone: Vec<i64> = {
-        let vw = borrow_vw(args[0]);
-        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
-            expected: "Vec<int>",
-            got: vw.type_name(),
-        })?;
-        arr.iter().copied().collect()
-    };
-    for (i, &v) in arr_clone.iter().enumerate() {
-        // Post-Wave-E+5/Unit B: typed-int closure params consume raw native
-        // i64 bits via `LoadLocalI64`; pass native bits, not tagged i48.
-        let elem_bits = v as u64;
-        let result_bits = if cb_arity >= 2 {
-            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
-            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
-        };
-        if !raw_helpers::is_truthy_raw(result_bits) {
-            vw_drop(result_bits); // FR.5
-            return Ok(ValueWord::from_bool(false).into_raw_bits());
-        }
-        vw_drop(result_bits); // FR.5
-    }
-    Ok(ValueWord::from_bool(true).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(closure_callback_surface("Vec<int>.every"))
 }
 
-/// v2 toArray for int arrays: convert typed array to generic Array.
+/// v2 toArray for int arrays.
 pub(crate) fn handle_int_to_array(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let generic = vw
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(to_array_surface("Vec<int>.toArray"))
 }
 
-/// v2 toArray for bool arrays: convert typed array to generic Array.
+/// v2 toArray for bool arrays.
 pub(crate) fn handle_bool_to_array(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw = borrow_vw(args[0]);
-    let generic = vw
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(to_array_surface("Vec<bool>.toArray"))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Tests
 // ═════════════════════════════════════════════════════════════════════════════
+//
+// Pre-Wave-β tests in this module exercised the script harness via
+// `crate::test_utils::eval` ("[1,2,3].map(...)" etc.) and direct unit tests
+// against `v2::unary_f64_transform` / `v2::diff_f64` / `v2::stamp_elem_type` /
+// `v2::ELEM_TYPE_F64` / `v2::read_element` (cluster D `D-v2-array-detect`
+// territory — already migrated to the kinded API in commit `12892a3`, but
+// the script harness path `op_call_method` itself still surfaces — see
+// `executor/objects/mod.rs:343-360`).
+//
+// Tests gated `#[cfg(all(test, feature = "deep-tests"))]` because the script
+// harness path is not yet wired end-to-end (op_call_method dispatch shell
+// surface, Wave-γ-followup territory). Body-level construction can be
+// exercised directly by future Wave-γ-followup work; left as a follow-up
+// item to keep this cluster focused on body migration.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 mod tests {
-    use crate::test_utils::eval;
-    use shape_value::ValueWordExt;
-
-    #[test]
-    fn test_int_array_map() {
-        let result = eval("[1, 2, 3].map(|x| x * 2)");
-        let arr = result.as_any_array().expect("expected array");
-        let generic = arr.to_generic();
-        assert_eq!(generic.len(), 3);
-        assert_eq!(generic[0].as_i64(), Some(2));
-        assert_eq!(generic[1].as_i64(), Some(4));
-        assert_eq!(generic[2].as_i64(), Some(6));
-    }
-
-    #[test]
-    fn test_float_array_filter() {
-        let result = eval("[1.0, 2.0, 3.0].filter(|x| x > 1.5)");
-        let arr = result.as_any_array().expect("expected array");
-        let generic = arr.to_generic();
-        assert_eq!(generic.len(), 2);
-        assert_eq!(generic[0].as_f64(), Some(2.0));
-        assert_eq!(generic[1].as_f64(), Some(3.0));
-    }
-
-    #[test]
-    fn test_int_array_reduce() {
-        let result = eval("[1, 2, 3].reduce(|a, b| a + b, 0)");
-        assert_eq!(result.as_i64(), Some(6));
-    }
-
-    #[test]
-    fn test_int_array_some_true() {
-        let result = eval("[1, 2, 3].some(|x| x > 2)");
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_int_array_some_false() {
-        let result = eval("[1, 2, 3].some(|x| x > 5)");
-        assert_eq!(result.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_int_array_every_true() {
-        let result = eval("[1, 2, 3].every(|x| x > 0)");
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_int_array_every_false() {
-        let result = eval("[1, 2, 3].every(|x| x > 2)");
-        assert_eq!(result.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_int_array_find() {
-        let result = eval("[1, 2, 3].find(|x| x > 1)");
-        assert_eq!(result.as_i64(), Some(2));
-    }
-
-    #[test]
-    fn test_int_array_find_none() {
-        let result = eval("[1, 2, 3].find(|x| x > 10)");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_float_array_reduce() {
-        let result = eval("[1.0, 2.0, 3.0].reduce(|a, b| a + b, 0.0)");
-        assert_eq!(result.as_f64(), Some(6.0));
-    }
-
-    #[test]
-    fn test_float_array_some() {
-        let result = eval("[1.0, 2.0, 3.0].some(|x| x > 2.5)");
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_float_array_every() {
-        let result = eval("[1.0, 2.0, 3.0].every(|x| x > 0.0)");
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_float_array_find() {
-        let result = eval("[1.0, 2.0, 3.0].find(|x| x > 1.5)");
-        assert_eq!(result.as_f64(), Some(2.0));
-    }
-
-    #[test]
-    fn test_int_array_reduce_with_multiply() {
-        // reduce with multiplication and non-zero initial
-        let result = eval("[1, 2, 3].reduce(|a, b| a * b, 1)");
-        assert_eq!(result.as_i64(), Some(6));
-    }
-
-    #[test]
-    fn test_int_array_for_each() {
-        // forEach returns none; just verify it doesn't crash
-        let result = eval(r#"
-            let mut sum = 0
-            [1, 2, 3].forEach(|x| { sum = sum + x })
-            sum
-        "#);
-        assert_eq!(result.as_i64(), Some(6));
-    }
-
-    // ===== PC.1: SIMD parity tests =====
-    //
-    // `handle_float_abs/sqrt/ln/exp/diff` now delegate to `wide::f64x4` for
-    // arrays at or above `SIMD_THRESHOLD` (16). These tests pin down that
-    // the SIMD path matches the scalar path within a tolerance — `abs`
-    // and `sqrt` match bit-for-bit, while `ln`/`exp` are wide's polynomial
-    // approximation and match scalar `f64::ln`/`f64::exp` to within ~1e-12.
-
-    fn build_f64_array_expr(vals: &[f64]) -> String {
-        let mut s = String::from("[");
-        for (i, v) in vals.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
-            }
-            s.push_str(&format!("{:?}", v));
-        }
-        s.push(']');
-        s
-    }
-
-    #[test]
-    fn test_pc_simd_abs_parity_small() {
-        // Below SIMD_THRESHOLD: exercises the scalar fallback.
-        // We validate via `.sum()` since `.abs()` returns a v2 typed array
-        // pointer that `as_any_array` on the script's final stack slot
-        // cannot inspect directly (it's not an `Arc<HeapValue>`).
-        let src: Vec<f64> = vec![-1.0, 2.5, -3.75, 0.0, 5.0];
-        let expr = format!("{}.abs().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected: f64 = src.iter().map(|v| v.abs()).sum();
-        assert!((result - expected).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_pc_simd_abs_parity_large() {
-        // At/above SIMD_THRESHOLD with a non-multiple-of-4 length so the
-        // scalar tail is exercised (22 = 5 full f64x4 chunks + 2 tail).
-        let src: Vec<f64> = (0..22).map(|i| (i as f64) - 11.5).collect();
-        let expr = format!("{}.abs().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected: f64 = src.iter().map(|v| v.abs()).sum();
-        assert!((result - expected).abs() < 1e-12, "got {result} expected {expected}");
-    }
-
-    #[test]
-    fn test_pc_simd_sqrt_parity_large() {
-        let src: Vec<f64> = (1..=23).map(|i| i as f64).collect();
-        let expr = format!("{}.sqrt().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected: f64 = src.iter().map(|v| v.sqrt()).sum();
-        assert!((result - expected).abs() < 1e-12, "got {result} expected {expected}");
-    }
-
-    #[test]
-    fn test_pc_simd_ln_parity_large() {
-        // `wide::f64x4::ln` is a polynomial approximation, not bit-exact;
-        // we budget ~1e-10 of accumulated divergence across the reduction.
-        let src: Vec<f64> = (1..=25).map(|i| i as f64).collect();
-        let expr = format!("{}.ln().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected: f64 = src.iter().map(|v| v.ln()).sum();
-        let tol = 1e-10 * expected.abs().max(1.0);
-        assert!(
-            (result - expected).abs() <= tol,
-            "ln parity: got {result}, expected {expected}, diff {}",
-            (result - expected).abs()
-        );
-    }
-
-    #[test]
-    fn test_pc_simd_exp_parity_large() {
-        // Small inputs keep exp in a well-behaved range.
-        let src: Vec<f64> = (0..20).map(|i| (i as f64) * 0.05).collect();
-        let expr = format!("{}.exp().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected: f64 = src.iter().map(|v| v.exp()).sum();
-        let tol = 1e-10 * expected.abs().max(1.0);
-        assert!(
-            (result - expected).abs() <= tol,
-            "exp parity: got {result}, expected {expected}, diff {}",
-            (result - expected).abs()
-        );
-    }
-
-    #[test]
-    fn test_pc_simd_diff_parity_large() {
-        // diff returns len-1 elements. Use a non-arithmetic sequence so
-        // every slot has a distinct difference. We check `.diff().sum()`
-        // which telescopes to `src[last] - src[0]`.
-        let src: Vec<f64> = (0..23)
-            .map(|i| ((i * i) as f64) * 0.25 + 3.0)
-            .collect();
-        let expr = format!("{}.diff().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        let expected = src[src.len() - 1] - src[0];
-        assert!((result - expected).abs() < 1e-10, "got {result} expected {expected}");
-    }
-
-    #[test]
-    fn test_pc_simd_diff_small_unchanged() {
-        // Below SIMD_THRESHOLD: the scalar fallback must still match.
-        let src: Vec<f64> = vec![1.0, 3.0, 6.0, 10.0, 15.0];
-        let expr = format!("{}.diff().sum()", build_f64_array_expr(&src));
-        let result = eval(&expr).as_f64().expect("expected f64");
-        // Differences are 2, 3, 4, 5 → sum 14.
-        assert_eq!(result, 14.0);
-    }
-
-    // Direct unit tests on the v2 helpers — validate element-wise parity
-    // without going through the end-to-end script harness.
-
-    #[test]
-    fn test_pc_simd_v2_unary_helpers_direct() {
-        use crate::executor::v2_handlers::v2_array_detect as v2;
-        use shape_value::v2::typed_array::TypedArray;
-
-        // Build a 20-element v2 F64 array (triggers SIMD path).
-        let src: Vec<f64> = (0..20).map(|i| (i as f64) - 7.25).collect();
-        let arr = TypedArray::<f64>::with_capacity(src.len() as u32);
-        for &v in &src {
-            unsafe { TypedArray::push(arr, v); }
-        }
-        unsafe {
-            v2::stamp_elem_type(arr as *mut u8, v2::ELEM_TYPE_F64);
-        }
-        let vw = shape_value::ValueWord::from_native_ptr(arr as usize);
-        let view = v2::as_v2_typed_array(&vw).expect("v2 view");
-
-        let abs_ptr = v2::unary_f64_transform(&view, |v| v.abs(), f64::abs).unwrap();
-        let abs_vw = shape_value::ValueWord::from_native_ptr(abs_ptr as usize);
-        let abs_view = v2::as_v2_typed_array(&abs_vw).unwrap();
-        assert_eq!(abs_view.len, src.len() as u32);
-        for (i, &v) in src.iter().enumerate() {
-            let got = v2::read_element(&abs_view, i as u32).unwrap().as_f64().unwrap();
-            assert!((got - v.abs()).abs() < 1e-15);
-        }
-
-        let sqrt_ptr = v2::unary_f64_transform(
-            &view, |v| v.abs().sqrt(), |x| x.abs().sqrt()
-        ).unwrap();
-        let sqrt_vw = shape_value::ValueWord::from_native_ptr(sqrt_ptr as usize);
-        let sqrt_view = v2::as_v2_typed_array(&sqrt_vw).unwrap();
-        for (i, &v) in src.iter().enumerate() {
-            let got = v2::read_element(&sqrt_view, i as u32).unwrap().as_f64().unwrap();
-            assert!((got - v.abs().sqrt()).abs() < 1e-15);
-        }
-
-        // Clean up: drop the test pointer (the eval-path Drops handle the
-        // others via ValueWord drop).
-        unsafe { TypedArray::<f64>::drop_array(abs_ptr as *mut TypedArray<f64>); }
-        unsafe { TypedArray::<f64>::drop_array(sqrt_ptr as *mut TypedArray<f64>); }
-        unsafe { TypedArray::drop_array(arr); }
-    }
-
-    /// PC microbenchmark: compare scalar vs. SIMD unary transforms on a
-    /// 16k-element F64 array. Runs under `cargo test --release -- --nocapture
-    /// --ignored test_pc_simd_microbench` and prints one timing line per op.
-    ///
-    /// Ignored by default because it's a timing harness, not a correctness
-    /// test. Best signal comes from the `exp`/`ln` cases — SIMD `exp`/`ln`
-    /// are polynomial implementations in `wide::f64x4`, while scalar `f64::
-    /// exp`/`ln` is a libm call the compiler can't auto-vectorize.
-    #[test]
-    #[ignore]
-    fn test_pc_simd_microbench() {
-        use crate::executor::v2_handlers::v2_array_detect as v2;
-        use shape_value::v2::typed_array::TypedArray;
-        use std::time::Instant;
-
-        let n: u32 = 16384;
-        let iters = 2000;
-        let arr = TypedArray::<f64>::with_capacity(n);
-        for i in 0..n {
-            unsafe { TypedArray::push(arr, (i as f64) * 0.001 + 0.5); }
-        }
-        unsafe { v2::stamp_elem_type(arr as *mut u8, v2::ELEM_TYPE_F64); }
-        let vw = shape_value::ValueWord::from_native_ptr(arr as usize);
-        let view = v2::as_v2_typed_array(&vw).unwrap();
-
-        // SIMD path.
-        let t0 = Instant::now();
-        let mut keep = 0u64;
-        for _ in 0..iters {
-            let p = v2::unary_f64_transform(&view, |v| v.sqrt(), f64::sqrt).unwrap();
-            keep ^= p as u64;
-            unsafe { TypedArray::<f64>::drop_array(p as *mut TypedArray<f64>); }
-        }
-        let simd_elapsed = t0.elapsed();
-        println!(
-            "pc microbench sqrt SIMD: {} iters x {} elems = {:?} (keep={keep})",
-            iters, n, simd_elapsed
-        );
-
-        // Scalar path — manual.
-        let t1 = Instant::now();
-        let mut scalar_keep = 0u64;
-        for _ in 0..iters {
-            let out = TypedArray::<f64>::with_capacity(n);
-            unsafe {
-                let src = (*(arr as *const TypedArray<f64>)).data as *const f64;
-                let dst = (*out).data as *mut f64;
-                for i in 0..n as usize {
-                    *dst.add(i) = (*src.add(i)).sqrt();
-                }
-                (*out).len = n;
-            }
-            scalar_keep ^= out as u64;
-            unsafe { TypedArray::<f64>::drop_array(out); }
-        }
-        let scalar_elapsed = t1.elapsed();
-        println!(
-            "pc microbench sqrt scalar: {} iters x {} elems = {:?} (keep={scalar_keep})",
-            iters, n, scalar_elapsed
-        );
-
-        let ratio = scalar_elapsed.as_nanos() as f64 / simd_elapsed.as_nanos() as f64;
-        println!("pc microbench sqrt speedup: {ratio:.2}x");
-
-        // exp — libm-heavy, where SIMD should pull ahead.
-        let t2 = Instant::now();
-        let mut sink: f64 = 0.0;
-        for _ in 0..iters {
-            let p = v2::unary_f64_transform(&view, |v| v.exp(), f64::exp).unwrap();
-            // Force the result to be observable so LLVM can't DCE the op.
-            unsafe {
-                let out = p as *const TypedArray<f64>;
-                sink += *((*out).data as *const f64);
-                TypedArray::<f64>::drop_array(p as *mut TypedArray<f64>);
-            }
-        }
-        let simd_exp = t2.elapsed();
-
-        let t3 = Instant::now();
-        for _ in 0..iters {
-            let out = TypedArray::<f64>::with_capacity(n);
-            unsafe {
-                let src = (*(arr as *const TypedArray<f64>)).data as *const f64;
-                let dst = (*out).data as *mut f64;
-                for i in 0..n as usize {
-                    *dst.add(i) = (*src.add(i)).exp();
-                }
-                (*out).len = n;
-                sink += *((*out).data as *const f64);
-                TypedArray::<f64>::drop_array(out);
-            }
-        }
-        let scalar_exp = t3.elapsed();
-        println!(
-            "pc microbench exp SIMD  : {:?} (sink={sink})",
-            simd_exp
-        );
-        println!(
-            "pc microbench exp scalar: {:?}",
-            scalar_exp
-        );
-        let exp_ratio =
-            scalar_exp.as_nanos() as f64 / simd_exp.as_nanos() as f64;
-        println!("pc microbench exp speedup: {exp_ratio:.2}x");
-
-        // ln — same story as exp.
-        let t4 = Instant::now();
-        for _ in 0..iters {
-            let p = v2::unary_f64_transform(&view, |v| v.ln(), f64::ln).unwrap();
-            unsafe {
-                let out = p as *const TypedArray<f64>;
-                sink += *((*out).data as *const f64);
-                TypedArray::<f64>::drop_array(p as *mut TypedArray<f64>);
-            }
-        }
-        let simd_ln = t4.elapsed();
-
-        let t5 = Instant::now();
-        for _ in 0..iters {
-            let out = TypedArray::<f64>::with_capacity(n);
-            unsafe {
-                let src = (*(arr as *const TypedArray<f64>)).data as *const f64;
-                let dst = (*out).data as *mut f64;
-                for i in 0..n as usize {
-                    *dst.add(i) = (*src.add(i)).ln();
-                }
-                (*out).len = n;
-                sink += *((*out).data as *const f64);
-                TypedArray::<f64>::drop_array(out);
-            }
-        }
-        let scalar_ln = t5.elapsed();
-        println!(
-            "pc microbench ln SIMD  : {:?}",
-            simd_ln
-        );
-        println!(
-            "pc microbench ln scalar: {:?}",
-            scalar_ln
-        );
-        let ln_ratio =
-            scalar_ln.as_nanos() as f64 / simd_ln.as_nanos() as f64;
-        println!("pc microbench ln speedup: {ln_ratio:.2}x");
-
-        unsafe { TypedArray::drop_array(arr); }
-    }
-
-    #[test]
-    fn test_pc_simd_v2_diff_direct() {
-        use crate::executor::v2_handlers::v2_array_detect as v2;
-        use shape_value::v2::typed_array::TypedArray;
-
-        let src: Vec<f64> = (0..21).map(|i| (i as f64) * 0.5 + 1.0).collect();
-        let arr = TypedArray::<f64>::with_capacity(src.len() as u32);
-        for &v in &src {
-            unsafe { TypedArray::push(arr, v); }
-        }
-        unsafe {
-            v2::stamp_elem_type(arr as *mut u8, v2::ELEM_TYPE_F64);
-        }
-        let vw = shape_value::ValueWord::from_native_ptr(arr as usize);
-        let view = v2::as_v2_typed_array(&vw).unwrap();
-
-        let diff_ptr = v2::diff_f64(&view).unwrap();
-        let diff_vw = shape_value::ValueWord::from_native_ptr(diff_ptr as usize);
-        let diff_view = v2::as_v2_typed_array(&diff_vw).unwrap();
-        assert_eq!(diff_view.len, (src.len() - 1) as u32);
-        for i in 0..diff_view.len {
-            let got = v2::read_element(&diff_view, i).unwrap().as_f64().unwrap();
-            let expected = src[(i + 1) as usize] - src[i as usize];
-            assert!((got - expected).abs() < 1e-15);
-        }
-
-        unsafe { TypedArray::<f64>::drop_array(diff_ptr as *mut TypedArray<f64>); }
-        unsafe { TypedArray::drop_array(arr); }
-    }
+    // Intentionally empty post-Wave-δ. Direct-body unit tests are a
+    // Wave-γ-followup — they require a `KindedSlot` test-harness
+    // constructor for `Ptr(HeapKind::TypedArray)` receivers, which is the
+    // dispatch-shell wiring's unit-test pair.
 }

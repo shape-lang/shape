@@ -178,7 +178,7 @@ impl BytecodeCompiler {
         // bits produces a value that can't be decoded downstream (see
         // `intrinsic_matmul_mat`'s `as_any_array()` failure). Also, the
         // inner arrays themselves must be forced off the typed path so
-        // they round-trip as heap-ref ValueWords through the outer
+        // they round-trip as heap-ref pointers through the outer
         // generic `NewArray`; `nested_array_literal_depth` propagates
         // that signal into the recursive `compile_expr_array` call.
         let has_nested_array_elem = elements

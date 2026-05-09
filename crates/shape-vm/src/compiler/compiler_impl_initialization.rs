@@ -40,7 +40,7 @@ impl BytecodeCompiler {
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
             last_expr_numeric_type: None,
-            top_level_program_return_kind: crate::type_tracking::StorageHint::Unknown,
+            top_level_program_return_kind: None,
             current_expr_result_mode: ExprResultMode::Value,
             last_expr_reference_result: ExprReferenceResult::default(),
             local_callable_pass_modes: HashMap::new(),

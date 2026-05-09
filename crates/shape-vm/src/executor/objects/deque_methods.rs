@@ -1,182 +1,114 @@
-//! Method handlers for the Deque (double-ended queue) collection type.
+//! Method handlers for the Deque collection type.
 //!
-//! Methods: pushBack, pushFront, popBack, popFront, peekBack, peekFront,
-//! size, len, length, isEmpty, toArray, get
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//!
+//! `Deque` is **not** a surviving `HeapKind` variant per ADR-006 §2.3 trim
+//! (`crates/shape-value/src/heap_variants.rs`); the heterogeneous-element
+//! `DequeData` payload depended on the deleted `ValueWord` per-element
+//! representation. Re-introducing Deque requires a typed-Arc replacement —
+//! a monomorphized `TypedDeque<T>` per element kind (mirroring
+//! `TypedArrayData`). That is a Phase 2c Stage C item, not a Wave-β
+//! migration.
+//!
+//! The pre-Wave-6 implementation used the deleted `ValueWord::from_deque`,
+//! `as_deque_mut`, `raw_helpers::extract_deque` (deleted in cluster
+//! D-raw-helpers), `vmarray_from_vec`, plus the kindless MethodHandler
+//! ABI. Per playbook §4 #1 / #9 a Bool-default kinded shim is forbidden;
+//! per §7.4 the correct response is `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::{KindedSlot, VMError};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
-// ═══════════════════════════════════════════════════════════════════════════
+#[inline]
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — Deque.{}(): Deque is not a surviving HeapKind variant per \
+         ADR-006 §2.3 trim; needs typed-Arc replacement (TypedDeque<T>). \
+         MethodHandler ABI also needs kinded migration (cluster \
+         E-builtins-backlog, Wave 5b template).",
+        method
+    ))
+}
 
-use super::raw_helpers::{extract_deque, extract_number_coerce};
-
-/// Deque.pushBack(item) -> Deque [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push_back(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
-    if let Some(deque_data) = extract_deque(args[0]) {
-        let mut new_data = deque_data.clone();
-        new_data.items.push_back(item);
-        // `DequeData` has a custom Drop (Wave 4 WC.1), so move
-        // `items` out via `take_items()` before dropping `new_data`.
-        Ok(ValueWord::from_deque(new_data.take_items().into()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("pushBack", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("pushBack"))
 }
 
-/// Deque.pushFront(item) -> Deque [v2] — always clones
 pub fn v2_push_front(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
-    if let Some(deque_data) = extract_deque(args[0]) {
-        let mut new_data = deque_data.clone();
-        new_data.items.push_front(item);
-        Ok(ValueWord::from_deque(new_data.take_items().into()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("pushFront", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("pushFront"))
 }
 
-/// Deque.popBack() -> value [v2] — always clones
 pub fn v2_pop_back(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(deque_data) = extract_deque(args[0]) {
-        let mut new_data = deque_data.clone();
-        Ok(match new_data.items.pop_back() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("popBack", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("popBack"))
 }
 
-/// Deque.popFront() -> value [v2] — always clones
 pub fn v2_pop_front(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(deque_data) = extract_deque(args[0]) {
-        let mut new_data = deque_data.clone();
-        Ok(match new_data.items.pop_front() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("popFront", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("popFront"))
 }
 
-/// Deque.peekBack() -> value [v2]
 pub fn v2_peek_back(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        Ok(match data.items.back() {
-            Some(item) => item.clone().into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("peekBack", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("peekBack"))
 }
 
-/// Deque.peekFront() -> value [v2]
 pub fn v2_peek_front(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        Ok(match data.items.front() {
-            Some(item) => item.clone().into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("peekFront", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("peekFront"))
 }
 
-/// Deque.size() / Deque.len() / Deque.length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("size", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("size"))
 }
 
-/// Deque.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("isEmpty", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isEmpty"))
 }
 
-/// Deque.toArray() -> array [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        let arr: Vec<ValueWord> = data.items.iter().cloned().collect();
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("toArray", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toArray"))
 }
 
-/// Deque.get(index) -> value [v2]
 pub fn v2_get(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_deque(args[0]) {
-        let idx = extract_number_coerce(args[1])
-            .map(|n| n as i64)
-            .ok_or_else(|| {
-                VMError::RuntimeError("Deque.get requires an integer index".to_string())
-            })?;
-        let idx = if idx < 0 {
-            (data.items.len() as i64 + idx) as usize
-        } else {
-            idx as usize
-        };
-        Ok(match data.items.get(idx) {
-            Some(item) => item.clone().into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("get", "Deque"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("get"))
 }

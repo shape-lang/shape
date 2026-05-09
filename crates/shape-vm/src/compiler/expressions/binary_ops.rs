@@ -236,7 +236,11 @@ impl BytecodeCompiler {
         if let Expr::Identifier(name, _) = expr {
             if let Some(local_idx) = self.resolve_local(name) {
                 if let Some(info) = self.type_tracker.get_local_type(local_idx) {
-                    if info.storage_hint == crate::type_tracking::StorageHint::Int64 {
+                    // Post-§2.7.5.1: `info.storage_hint` is
+                    // `Option<StorageHint>`; `Some(Int64)` is the proven-Int
+                    // case, anything else (including `None` for
+                    // not-yet-proven) falls through to the safe Number path.
+                    if info.storage_hint == Some(crate::type_tracking::StorageHint::Int64) {
                         return NumericType::Int;
                     }
                 }
@@ -280,11 +284,12 @@ impl BytecodeCompiler {
                     return None;
                 }
                 let info = self.type_tracker.get_local_type(local_idx)?;
-                if info.storage_hint != crate::type_tracking::StorageHint::Unknown {
-                    Some(info.storage_hint)
-                } else {
-                    None
-                }
+                // Per ADR-006 §2.7.5.1, `NativeKind::Unknown` was deleted —
+                // the in-memory analysis state for "not yet known" is held
+                // as `Option<StorageHint>` on `info.storage_hint` itself.
+                // Returning that field flat propagates `None` (not yet
+                // proven) through this getter's `Option` return type.
+                info.storage_hint
             }
             Expr::Literal(Literal::Int(_), _) => Some(crate::type_tracking::StorageHint::Int64),
             Expr::Literal(Literal::Number(_), _) => {

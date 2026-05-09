@@ -1,180 +1,26 @@
-//! DateTime constructor builtin implementations.
+//! DateTime helpers shared with `executor/window_join.rs`.
 //!
-//! Handles: DateTimeParse, DateTimeFromEpoch
-
-use crate::executor::VirtualMachine;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-
-impl VirtualMachine {
-    /// Parse a datetime string. Supports ISO 8601, RFC 2822, RFC 3339,
-    /// and common date formats.
-    pub(in crate::executor) fn builtin_datetime_parse(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        let s = args
-            .first()
-            .and_then(|a| a.as_str())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "string",
-                got: args.first().map_or("missing", |a| a.type_name()),
-            })?;
-
-        // Try RFC 3339 / ISO 8601 with timezone
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-            return Ok(ValueWord::from_time(dt));
-        }
-
-        // Try RFC 2822
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
-            return Ok(ValueWord::from_time(dt));
-        }
-
-        // Try common formats with explicit timezone info
-        let formats_with_tz = [
-            "%Y-%m-%d %H:%M:%S %z",
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%d %H:%M:%S%z",
-        ];
-        for fmt in &formats_with_tz {
-            if let Ok(dt) = chrono::DateTime::parse_from_str(s, fmt) {
-                return Ok(ValueWord::from_time(dt));
-            }
-        }
-
-        // Try date-only and datetime formats (assume UTC)
-        let naive_formats = [
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%Y/%m/%d %H:%M:%S",
-            "%Y/%m/%d",
-            "%m/%d/%Y %H:%M:%S",
-            "%m/%d/%Y",
-            "%d-%m-%Y",
-            "%d/%m/%Y",
-        ];
-        for fmt in &naive_formats {
-            if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
-                let dt = naive.and_utc().fixed_offset();
-                return Ok(ValueWord::from_time(dt));
-            }
-            // Try as date-only (midnight)
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(s, fmt) {
-                let naive = date
-                    .and_hms_opt(0, 0, 0)
-                    .expect("midnight should always be valid");
-                let dt = naive.and_utc().fixed_offset();
-                return Ok(ValueWord::from_time(dt));
-            }
-        }
-
-        Err(VMError::RuntimeError(format!(
-            "Cannot parse '{}' as a datetime. Supported formats: ISO 8601, RFC 2822, YYYY-MM-DD, etc.",
-            s
-        )))
-    }
-
-    /// Create a DateTime from milliseconds since Unix epoch.
-    pub(in crate::executor) fn builtin_datetime_from_epoch(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        let ms = args
-            .first()
-            .and_then(|a| a.as_number_coerce())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number",
-                got: args.first().map_or("missing", |a| a.type_name()),
-            })? as i64;
-
-        let dt = chrono::DateTime::from_timestamp_millis(ms)
-            .ok_or_else(|| VMError::RuntimeError(format!("Invalid epoch milliseconds: {}", ms)))?;
-        Ok(ValueWord::from_time_utc(dt))
-    }
-
-    /// Create a DateTime from individual components (year, month, day, hour?, minute?, second?).
-    /// All times are interpreted as UTC.
-    pub(in crate::executor) fn builtin_datetime_from_parts(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        let year = args
-            .first()
-            .and_then(|a| a.as_number_coerce())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number (year)",
-                got: args.first().map_or("missing", |a| a.type_name()),
-            })? as i32;
-
-        let month = args
-            .get(1)
-            .and_then(|a| a.as_number_coerce())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number (month)",
-                got: args.get(1).map_or("missing", |a| a.type_name()),
-            })? as u32;
-
-        let day = args
-            .get(2)
-            .and_then(|a| a.as_number_coerce())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number (day)",
-                got: args.get(2).map_or("missing", |a| a.type_name()),
-            })? as u32;
-
-        let hour = args
-            .get(3)
-            .and_then(|a| a.as_number_coerce())
-            .unwrap_or(0.0) as u32;
-
-        let minute = args
-            .get(4)
-            .and_then(|a| a.as_number_coerce())
-            .unwrap_or(0.0) as u32;
-
-        let second = args
-            .get(5)
-            .and_then(|a| a.as_number_coerce())
-            .unwrap_or(0.0) as u32;
-
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Invalid date: year={}, month={}, day={}",
-                year, month, day
-            ))
-        })?;
-
-        let naive_dt = date.and_hms_opt(hour, minute, second).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Invalid time: hour={}, minute={}, second={}",
-                hour, minute, second
-            ))
-        })?;
-
-        let dt = naive_dt.and_utc();
-        Ok(ValueWord::from_time_utc(dt))
-    }
-
-    /// Create a DateTime from seconds since Unix epoch (not milliseconds).
-    pub(in crate::executor) fn builtin_datetime_from_unix_secs(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        let secs = args
-            .first()
-            .and_then(|a| a.as_number_coerce())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number",
-                got: args.first().map_or("missing", |a| a.type_name()),
-            })? as i64;
-
-        let dt = chrono::DateTime::from_timestamp(secs, 0)
-            .ok_or_else(|| VMError::RuntimeError(format!("Invalid epoch seconds: {}", secs)))?;
-        Ok(ValueWord::from_time_utc(dt))
-    }
-}
+//! Wave 5e (phase-1b-vm) defers the body migration of the DateTime
+//! constructor builtins (`DateTimeNow`, `DateTimeUtc`, `DateTimeParse`,
+//! `DateTimeFromEpoch`, `DateTimeFromParts`, `DateTimeFromUnixSecs`). The
+//! previous bodies (`builtin_datetime_parse` etc.) lived as
+//! `(ArgVec) -> Result<ValueWord, VMError>` impl-blocks on `VirtualMachine`
+//! and called into the deleted `ValueWord` / `ValueWordExt` machinery
+//! (`as_str`, `as_number_coerce`, `from_time`, `from_time_utc`,
+//! `type_name`). They are unreachable today — the corresponding arms in
+//! `vm_impl/builtins.rs` are `todo!`-stubbed for Wave 5e — and have been
+//! retired here to clear the forbidden-pattern hits in this file.
+//!
+//! Wave 5e re-introduces the bodies as `&[KindedSlot] -> Result<KindedSlot,
+//! VMError>` per the §2.7.6 / Q8 carrier-API bound; they will live in
+//! `vm_impl/builtins.rs` directly (terminal-shape constructors that wrap
+//! `chrono::DateTime` into `KindedSlot::from_*`).
+//!
+//! What remains in this file: two pure chrono helpers used by the live
+//! `executor/window_join.rs` path — `ast_duration_to_chrono` and
+//! `parse_datetime_string`. They take and return chrono values directly
+//! (no `ValueWord` / `ArgVec` / `KindedSlot` surface) and so are
+//! unaffected by the kinded-API migration.
 
 /// Convert an AST Duration to a chrono::Duration.
 ///
@@ -205,7 +51,10 @@ pub fn ast_duration_to_chrono(duration: &shape_ast::ast::Duration) -> chrono::Du
 }
 
 /// Parse a datetime string into a chrono DateTime.
-/// Shared logic used by both `builtin_datetime_parse` and `handle_eval_datetime_expr`.
+///
+/// Shared logic; previously called from both `builtin_datetime_parse`
+/// (deferred to Wave 5e — see module doc) and `handle_eval_datetime_expr`
+/// (also Wave 5e). Today the live caller is `executor/window_join.rs`.
 pub fn parse_datetime_string(s: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, String> {
     // Try RFC 3339 / ISO 8601 with timezone
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {

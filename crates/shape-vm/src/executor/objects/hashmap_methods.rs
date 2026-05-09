@@ -1,688 +1,510 @@
 //! HashMap method handlers for the PHF method registry.
 //!
-//! ## Collision Safety
-//! All lookups scan the bucket `Vec<usize>` from `HashMapData.index` and check
-//! `keys[idx].vw_equals(&key)` for each candidate, so hash collisions never
-//! cause silent data loss.
+//! ## Wave-δ MR-hashmap-readonly migration (2026-05-09)
+//!
+//! Per ADR-006 §2.7.10 / Q11 (Wave-γ G-method-fn-v2-abi close commit
+//! `5091cba`) the `MethodFnV2` ABI is kinded: handlers take
+//! `args: &[KindedSlot]` and return `Result<KindedSlot, VMError>`. This
+//! Wave-δ pass migrates the 9 read-only handlers (`get`, `has`, `keys`,
+//! `values`, `entries`, `len`, `isEmpty`, `getOrDefault`, `toArray`) to
+//! real bodies on top of the post-§2.7.4 `HashMapData` shape
+//! (`Arc<TypedBuffer<Arc<String>>>` keys + `Arc<TypedBuffer<Arc<HeapValue>>>`
+//! values + eager bucket-index for O(1) lookup; see
+//! `shape_value::heap_value::HashMapData`).
+//!
+//! Receiver dispatch follows §2.7.6 / Q8: kind check on `args[0].kind ==
+//! NativeKind::Ptr(HeapKind::HashMap)`, then `args[0].slot.as_heap_value()`
+//! pattern-matched against `HeapValue::HashMap(arc)` (single-discriminator
+//! per ADR-005 §1 — no per-heap-variant `KindedSlot` accessor).
+//!
+//! Per-arg key kind classification follows the same shape: `args[1].kind`
+//! against `NativeKind::String | NativeKind::Ptr(HeapKind::String)`, then
+//! `as_str()` for the borrow.
+//!
+//! Result construction follows playbook §3:
+//! - `len` / `isEmpty` → inline-scalar `KindedSlot::from_int` / `from_bool`.
+//! - `get` / `getOrDefault` value-side → re-wrap the `Arc<HeapValue>` value
+//!   into a per-FieldType `KindedSlot` arm (`from_string_arc`,
+//!   `from_typed_array`, etc.) — same `heap_value_to_slot` pattern as
+//!   `executor/builtins/array_ops.rs:156`.
+//! - `keys` → `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`.
+//! - `values` → `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
+//! - `entries` / `toArray` → outer `TypedArrayData::HeapValue` with each
+//!   element a 2-element inner array (`[key, value]`) wrapped as
+//!   `Arc::new(HeapValue::TypedArray(Arc::new(TypedArrayData::HeapValue(
+//!   ..))))` — same shape as `array_ops::builtin_zip` at line 376.
+//!
+//! ## Still-surfaced handlers (3 mutation + 1 iter + 5 closure-callback)
+//!
+//! - **`set` / `delete` / `merge`** remain `NotImplemented(SURFACE: phase-2c
+//!   — HashMapData typed-buffer mutation API rebuild)`. The post-§2.7.4
+//!   `HashMapData` deliberately drops the legacy mutation API:
+//!   `Arc::make_mut`-driven `keys.push` / `values.push` / shape-id transition
+//!   was deleted alongside the `Vec<ValueWord>` storage shape. Buffer-aware
+//!   insert / remove / merge over `Arc<TypedBuffer<…>>` is a phase-2c
+//!   workstream tracked under ADR-006 §2.7.4 + the homogeneous-typed
+//!   HashMap workstream (see also `executor/objects/typed_access.rs:202`'s
+//!   `MapSetStrI64` SURFACE referencing the same gap).
+//!
+//! - **`iter`** remains `NotImplemented(SURFACE: phase-2c)` — the legacy
+//!   `IteratorState` struct is deleted; the kinded HashMap-iteration shape
+//!   (per-entry key + value kind dispatch over the typed buffers) is a
+//!   phase-2c follow-up under ADR-006 §2.7.4.
+//!
+//! - **`forEach` / `filter` / `map` / `reduce` / `groupBy`** remain
+//!   `NotImplemented(SURFACE: phase-2c — closure-call kinded dispatch
+//!   rebuild)`. Same architectural blocker as the M-datatable Wave-β
+//!   `joins.rs` handlers (commit `eb78699`): the closure-callback path
+//!   would need `vm.call_value_immediate_*` to thread `&[KindedSlot]` /
+//!   return `KindedSlot`, but every entry point in `call_convention.rs`
+//!   (`call_value_immediate_nb`, `call_value_immediate_raw`,
+//!   `call_function_with_raw_args`, `call_closure_with_raw_args`,
+//!   `call_function_from_stack`, `call_closure_with_nb_args`,
+//!   `call_closure_with_nb_args_keepalive`, `jit_trampoline_call_closure`)
+//!   is itself a `todo!("phase-2c — ADR-006 §2.7.8 cluster B-round-2: …
+//!   kinded-arg + kinded-cell rebuild pending")`. Surface and stop per
+//!   playbook §8 cross-cluster cascade — do not paper over with a
+//!   forbidden-pattern call path.
+//!
+//! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / Q8 / Q11 + playbook §3 / §7 / §10.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
-use crate::memory::{record_heap_write, write_barrier_vw};
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::HashMapData;
-use shape_value::value_word_drop::vw_drop;
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use std::collections::HashMap;
+use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::typed_buffer::TypedBuffer;
+use shape_value::{KindedSlot, NativeKind, VMError};
+use std::sync::Arc;
 
-// ─── Helpers ─────────────────────────────────────────────────────────
+// ── Local helpers ─────────────────────────────────────────────────────────
 
-/// Scan a bucket for the index of a key that equals `needle`.
 #[inline]
-fn bucket_find(keys: &[ValueWord], bucket: &[usize], needle: &ValueWord) -> Option<usize> {
-    bucket
-        .iter()
-        .copied()
-        .find(|&idx| keys[idx].vw_equals(needle))
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
+}
+
+/// Project the receiver `KindedSlot` to the inner `Arc<HashMapData>` via
+/// the §2.7.6 / Q8 single-discriminator path: kind gate on
+/// `Ptr(HeapKind::HashMap)`, then `slot.as_heap_value()` matched against
+/// `HeapValue::HashMap(arc)`. The receiver retains its share — the caller
+/// borrows through the `&Arc<HashMapData>` and never decrements.
+#[inline]
+fn as_hashmap(slot: &KindedSlot) -> Result<&Arc<HashMapData>, VMError> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
+        return Err(type_error(format!(
+            "HashMap method receiver must be a HashMap (got kind {:?})",
+            slot.kind
+        )));
+    }
+    match slot.slot.as_heap_value() {
+        HeapValue::HashMap(arc) => Ok(arc),
+        other => Err(type_error(format!(
+            "HashMap method receiver kind says HashMap but heap arm is {:?}",
+            other.kind()
+        ))),
+    }
+}
+
+/// Borrow a `&str` key from a `KindedSlot` whose kind is `String` /
+/// `Ptr(HeapKind::String)`. Returns a `TypeError` for non-string kinds.
+/// The slot retains its share — the borrow is bounded by the carrier's
+/// lifetime per `KindedSlot::as_str` / the §2.7.6 / Q8 dispatch path.
+#[inline]
+fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
+    match slot.kind {
+        NativeKind::String => slot
+            .as_str()
+            .ok_or_else(|| type_error("HashMap key kind=String but slot bits null")),
+        NativeKind::Ptr(HeapKind::String) => match slot.slot.as_heap_value() {
+            HeapValue::String(s) => Ok(s.as_str()),
+            _ => Err(type_error(
+                "HashMap key kind=Ptr(String) but heap arm mismatched",
+            )),
+        },
+        _ => Err(type_error(format!(
+            "HashMap key must be a string (got kind {:?})",
+            slot.kind
+        ))),
+    }
+}
+
+/// Convert an `Arc<HeapValue>` value (as stored in `HashMapData::values`)
+/// to a `KindedSlot` via the matching per-FieldType constructor. Mirrors
+/// `executor/builtins/array_ops.rs::heap_value_to_slot` (the canonical
+/// `TypedArrayData::HeapValue` element re-wrapping path).
+fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
+    match hv.as_ref() {
+        HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
+        HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
+        HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
+        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        HeapValue::Char(c) => KindedSlot::from_char(*c),
+        // Other heap arms — fall back to `none()` (Bool-kind null sentinel).
+        // Same coverage gap as `array_ops::heap_value_to_slot`; widening is
+        // tracked alongside the `KindedSlot::from_*` constructor build-out.
+        _ => KindedSlot::none(),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
+// Read-only handlers — Wave-δ MR-hashmap-readonly migration
 // ═══════════════════════════════════════════════════════════════════════════
-
-use crate::executor::objects::raw_helpers;
-
-/// Reconstruct an owned ValueWord from raw bits by cloning (incrementing refcount).
-///
-/// Used by mutating methods (set, delete, merge) that need `&mut self`.
-#[inline]
-fn own_vw(raw: u64) -> ValueWord {
-    unsafe { ValueWord::clone_from_bits(raw) }
-}
 
 /// HashMap.get(key) -> value | none
 pub fn v2_get(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = raw_helpers::extract_hashmap_data(args[0]) {
-        // Shape-guarded fast path for string keys
-        if let Some(ks) = raw_helpers::extract_str(args[1]) {
-            if let Some(val) = data.shape_get(ks) {
-                return Ok(val.clone().into_raw_bits());
-            }
-        }
-        // Fallback: hash-based lookup with a borrowed key for hashing/equality
-        let key = own_vw(args[1]);
-        let hash = key.vw_hash();
-        let result = if let Some(bucket) = data.index.get(&hash) {
-            bucket_find(&data.keys, bucket, &key)
-                .map(|idx| data.values[idx].clone())
-                .unwrap_or_else(ValueWord::none)
-        } else {
-            ValueWord::none()
-        };
-        Ok(result.into_raw_bits())
-    } else {
-        Err(type_mismatch_error("get", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.get() requires exactly 1 argument (key)",
+        ));
     }
-}
-
-/// HashMap.set(key, value) -> HashMap (returns new or mutated HashMap)
-pub fn v2_set(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let key = own_vw(args[1]);
-    let value = own_vw(args[2]);
-
-    // Try mutable fast-path via an owned clone.
-    let mut receiver = own_vw(args[0]);
-    if let Some(data) = receiver.as_hashmap_mut() {
-        let hash = key.vw_hash();
-        if let Some(bucket) = data.index.get(&hash) {
-            if let Some(idx) = bucket_find(&data.keys, bucket, &key) {
-                record_heap_write();
-                write_barrier_vw(&data.keys[idx], &key);
-                write_barrier_vw(&data.values[idx], &value);
-                data.keys[idx] = key;
-                data.values[idx] = value;
-                return Ok(receiver.into_raw_bits());
-            }
-        }
-        // New key: transition shape if string key, else drop to dictionary mode
-        if let Some(shape_id) = data.shape_id {
-            if let Some(ks) = key.as_str() {
-                let prop_hash = shape_value::hash_property_name(ks);
-                data.shape_id = shape_value::shape_transition(shape_id, prop_hash);
-            } else {
-                data.shape_id = None;
-            }
-        }
-        let idx = data.keys.len();
-        data.keys.push(key);
-        data.values.push(value);
-        data.index.entry(hash).or_default().push(idx);
-        return Ok(receiver.into_raw_bits());
-    }
-
-    // Slow path: clone everything.
-    if let Some((old_keys, old_values, old_index)) = raw_helpers::extract_hashmap(args[0]) {
-        let mut keys = old_keys.clone();
-        let mut values = old_values.clone();
-        let mut index = old_index.clone();
-
-        let hash = key.vw_hash();
-        if let Some(bucket) = index.get(&hash) {
-            if let Some(idx) = bucket_find(&keys, bucket, &key) {
-                keys[idx] = key;
-                values[idx] = value;
-                return Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits());
-            }
-        }
-        let idx = keys.len();
-        keys.push(key);
-        values.push(value);
-        index.entry(hash).or_default().push(idx);
-        Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("set", "HashMap"))
+    let map = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?;
+    match map.get(key) {
+        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        None => Ok(KindedSlot::none()),
     }
 }
 
 /// HashMap.has(key) -> bool
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, _, index)) = raw_helpers::extract_hashmap(args[0]) {
-        let key = own_vw(args[1]);
-        let hash = key.vw_hash();
-        let found = index
-            .get(&hash)
-            .map(|bucket| bucket_find(keys, bucket, &key).is_some())
-            .unwrap_or(false);
-        Ok(ValueWord::from_bool(found).raw_bits())
-    } else {
-        Err(type_mismatch_error("has", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.has() requires exactly 1 argument (key)",
+        ));
     }
+    let map = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?;
+    Ok(KindedSlot::from_bool(map.contains_key(key)))
 }
 
-/// HashMap.delete(key) -> HashMap (returns new or mutated HashMap)
-pub fn v2_delete(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let key = own_vw(args[1]);
-    let hash = key.vw_hash();
-
-    // Mutable fast-path via owned clone
-    let mut receiver = own_vw(args[0]);
-    if let Some(data) = receiver.as_hashmap_mut() {
-        if let Some(bucket) = data.index.get(&hash).cloned() {
-            if let Some(idx) = bucket_find(&data.keys, &bucket, &key) {
-                data.shape_id = None;
-                let last = data.keys.len() - 1;
-                if idx != last {
-                    record_heap_write();
-                    write_barrier_vw(&data.keys[idx], &data.keys[last]);
-                    write_barrier_vw(&data.values[idx], &data.values[last]);
-                    data.keys.swap(idx, last);
-                    data.values.swap(idx, last);
-                    let swapped_hash = data.keys[idx].vw_hash();
-                    if let Some(b) = data.index.get_mut(&swapped_hash) {
-                        if let Some(pos) = b.iter().position(|&x| x == last) {
-                            b[pos] = idx;
-                        }
-                    }
-                }
-                data.keys.pop();
-                data.values.pop();
-                if let Some(b) = data.index.get_mut(&hash) {
-                    b.retain(|&x| x != last);
-                    if b.is_empty() {
-                        data.index.remove(&hash);
-                    }
-                }
-                return Ok(receiver.into_raw_bits());
-            }
-        }
-        return Ok(receiver.into_raw_bits());
-    }
-
-    // Slow path: clone without the deleted key
-    if let Some((old_keys, old_values, old_index)) = raw_helpers::extract_hashmap(args[0]) {
-        if let Some(bucket) = old_index.get(&hash) {
-            if let Some(idx) = bucket_find(old_keys, bucket, &key) {
-                let keys: Vec<ValueWord> = old_keys
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != idx)
-                    .map(|(_, v)| v.clone())
-                    .collect();
-                let values: Vec<ValueWord> = old_values
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != idx)
-                    .map(|(_, v)| v.clone())
-                    .collect();
-                let index = HashMapData::rebuild_index(&keys);
-                return Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits());
-            }
-        }
-        Ok(own_vw(args[0]).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("delete", "HashMap"))
-    }
-}
-
-/// HashMap.keys() -> Array
+/// HashMap.keys() -> Array<string>
+///
+/// Returns an `Array<string>` reusing the receiver's keys buffer
+/// (`Arc<TypedBuffer<Arc<String>>>`) — single Arc bump on the buffer, no
+/// per-element clone. Wraps the buffer as
+/// `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`.
 pub fn v2_keys(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let arr = shape_value::vmarray_from_value_words(keys.clone());
-        Ok(ValueWord::from_array(arr).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("keys", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.keys() takes no arguments"));
     }
+    let map = as_hashmap(&args[0])?;
+    let arr = TypedArrayData::String(Arc::clone(&map.keys));
+    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
-/// HashMap.values() -> Array
+/// HashMap.values() -> Array<value>
+///
+/// Returns an `Array<heap>` reusing the receiver's values buffer
+/// (`Arc<TypedBuffer<Arc<HeapValue>>>`) — single Arc bump on the buffer.
+/// Wraps as `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
 pub fn v2_values(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((_, values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let arr = shape_value::vmarray_from_value_words(values.clone());
-        Ok(ValueWord::from_array(arr).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("values", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.values() takes no arguments"));
     }
+    let map = as_hashmap(&args[0])?;
+    let arr = TypedArrayData::HeapValue(Arc::clone(&map.values));
+    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
-/// HashMap.entries() -> Array of [key, value] pairs
+/// HashMap.entries() -> Array<[key, value]>
+///
+/// Each entry is a 2-element inner array `[key, value]` stored as
+/// `HeapValue::TypedArray(Arc<TypedArrayData::HeapValue>)`. The outer
+/// array is a `TypedArrayData::HeapValue` of those `Arc<HeapValue>` entries.
+/// Same shape as `array_ops::builtin_zip` (line 376).
 pub fn v2_entries(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let entries: Vec<ValueWord> = keys
-            .iter()
-            .zip(values.iter())
-            .map(|(k, v)| {
-                let pair = shape_value::vmarray_from_value_words(vec![k.clone(), v.clone()]);
-                ValueWord::from_array(pair)
-            })
-            .collect();
-        let arr = shape_value::vmarray_from_value_words(entries);
-        Ok(ValueWord::from_array(arr).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("entries", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.entries() takes no arguments"));
     }
+    build_entries_array(&args[0])
 }
 
 /// HashMap.len() -> int
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
-        Ok(ValueWord::from_i64(keys.len() as i64).raw_bits())
-    } else {
-        Err(type_mismatch_error("len", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.len() takes no arguments"));
     }
+    let map = as_hashmap(&args[0])?;
+    Ok(KindedSlot::from_int(map.len() as i64))
 }
 
 /// HashMap.isEmpty() -> bool
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
-        Ok(ValueWord::from_bool(keys.is_empty()).raw_bits())
-    } else {
-        Err(type_mismatch_error("isEmpty", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.isEmpty() takes no arguments"));
     }
-}
-
-/// HashMap.merge(other) -> HashMap (other wins on conflict)
-pub fn v2_merge(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    use shape_value::value_word_drop::vw_clone;
-
-    let (base_keys, base_values, _) = raw_helpers::extract_hashmap(args[0])
-        .ok_or_else(|| type_mismatch_error("merge", "HashMap"))?;
-    let (other_keys, other_values, _) = raw_helpers::extract_hashmap(args[1])
-        .ok_or_else(|| VMError::RuntimeError("merge argument must be a HashMap".to_string()))?;
-
-    // B6.2: `Vec<ValueWord>::clone` on `Vec<u64>` is a bit-copy — the new
-    // Vec aliases the old Vec's heap-ref shares. Use `vw_clone` per
-    // element so the returned HashMap owns independent shares.
-    let mut keys: Vec<ValueWord> = base_keys.iter().map(|&b| vw_clone(b)).collect();
-    let mut values: Vec<ValueWord> = base_values.iter().map(|&b| vw_clone(b)).collect();
-    let mut index = HashMapData::rebuild_index(&keys);
-
-    for (ok, ov) in other_keys.iter().zip(other_values.iter()) {
-        let hash = ok.vw_hash();
-        if let Some(bucket) = index.get(&hash) {
-            if let Some(idx) = bucket_find(&keys, bucket, ok) {
-                // Replacing an existing entry: release the current share
-                // before overwriting, and retain from the other map.
-                shape_value::value_word_drop::vw_drop(keys[idx]);
-                shape_value::value_word_drop::vw_drop(values[idx]);
-                keys[idx] = vw_clone(*ok);
-                values[idx] = vw_clone(*ov);
-                continue;
-            }
-        }
-        let idx = keys.len();
-        keys.push(vw_clone(*ok));
-        values.push(vw_clone(*ov));
-        index.entry(hash).or_default().push(idx);
-    }
-
-    Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits())
+    let map = as_hashmap(&args[0])?;
+    Ok(KindedSlot::from_bool(map.is_empty()))
 }
 
 /// HashMap.getOrDefault(key, default) -> value
+///
+/// Same value-side dispatch as `get`; on miss the kinded `default` slot is
+/// returned by clone (refcount bump for heap arms via `KindedSlot::clone`).
 pub fn v2_get_or_default(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, values, index)) = raw_helpers::extract_hashmap(args[0]) {
-        let key = own_vw(args[1]);
-        let hash = key.vw_hash();
-        let result = if let Some(bucket) = index.get(&hash) {
-            bucket_find(keys, bucket, &key)
-                .map(|idx| values[idx].clone())
-                .unwrap_or_else(|| own_vw(args[2]))
-        } else {
-            own_vw(args[2])
-        };
-        Ok(result.into_raw_bits())
-    } else {
-        Err(type_mismatch_error("getOrDefault", "HashMap"))
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 3 {
+        return Err(type_error(
+            "HashMap.getOrDefault() requires exactly 2 arguments (key, default)",
+        ));
+    }
+    let map = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?;
+    match map.get(key) {
+        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        None => Ok(args[2].clone()),
     }
 }
 
-/// HashMap.toArray() -> Array of [key, value] pairs (alias for entries)
+/// HashMap.toArray() -> Array<[key, value]>
+///
+/// Alias for `entries()`.
 pub fn v2_to_array(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    v2_entries(vm, args, ctx)
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 1 {
+        return Err(type_error("HashMap.toArray() takes no arguments"));
+    }
+    build_entries_array(&args[0])
+}
+
+/// Shared body for `entries()` / `toArray()`. Builds the per-entry
+/// 2-element inner arrays + the outer `TypedArrayData::HeapValue` wrapper.
+fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
+    let map = as_hashmap(receiver)?;
+    let n = map.len();
+    let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
+        let value_arc: Arc<HeapValue> = Arc::clone(&map.values.data[i]);
+        let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
+            Arc::new(HeapValue::String(key_arc)),
+            value_arc,
+        ])));
+        pairs.push(Arc::new(HeapValue::TypedArray(Arc::new(inner))));
+    }
+    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(pairs)));
+    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V2 closure-based HashMap methods
+// Mutation handlers — phase-2c HashMapData typed-buffer mutation API rebuild
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// HashMap.forEach(fn(key, value)) -> unit [v2]
+/// HashMap.set(key, value) -> HashMap
+pub fn v2_set(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.set — SURFACE: phase-2c — HashMapData typed-buffer mutation \
+         API rebuild. The post-§2.7.4 HashMapData (Arc<TypedBuffer<Arc<String>>> \
+         keys + Arc<TypedBuffer<Arc<HeapValue>>> values + eager bucket-index) \
+         deliberately dropped the legacy `Arc::make_mut`-driven `keys.push` / \
+         `values.push` / shape-id transition path. Buffer-aware insert is a \
+         phase-2c workstream tracked under ADR-006 §2.7.4 alongside the \
+         homogeneous-typed HashMap workstream — see \
+         `executor/objects/typed_access.rs:202` (MapSetStrI64) for the \
+         canonical SURFACE referencing the same gap."
+            .into(),
+    ))
+}
+
+/// HashMap.delete(key) -> HashMap
+pub fn v2_delete(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.delete — SURFACE: phase-2c — HashMapData typed-buffer \
+         mutation API rebuild. Same buffer-aware mutation gap as set(): the \
+         post-§2.7.4 HashMapData has no remove path on Arc<TypedBuffer<…>>. \
+         Tracked alongside the homogeneous-typed HashMap workstream under \
+         ADR-006 §2.7.4."
+            .into(),
+    ))
+}
+
+/// HashMap.merge(other) -> HashMap
+pub fn v2_merge(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.merge — SURFACE: phase-2c — HashMapData typed-buffer \
+         mutation API rebuild. Merge is a bulk insert; same buffer-aware \
+         mutation gap as set() / delete(). Tracked alongside the \
+         homogeneous-typed HashMap workstream under ADR-006 §2.7.4."
+            .into(),
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Closure-based handlers — phase-2c closure-call kinded dispatch rebuild
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The closure-callback path needs `vm.call_value_immediate_*` to thread
+// `&[KindedSlot]` / return `KindedSlot`, but every entry point in
+// `call_convention.rs` is itself a phase-2c `todo!()` (see
+// `call_value_immediate_nb`, `call_value_immediate_raw`,
+// `call_function_with_raw_args`, `call_closure_with_raw_args`,
+// `call_function_from_stack`, `call_closure_with_nb_args`,
+// `call_closure_with_nb_args_keepalive`, `jit_trampoline_call_closure`).
+// Surface and stop per playbook §8 cross-cluster cascade — same precedent
+// as the M-datatable Wave-β `joins.rs` close (commit `eb78699`).
+
+/// HashMap.forEach(fn(key, value)) -> unit
 pub fn v2_for_each(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let keys = keys.clone();
-        let values = values.clone();
-        for (k, v) in keys.iter().zip(values.iter()) {
-            let result_bits = vm.call_value_immediate_raw(args[1], &[k.raw_bits(), v.raw_bits()], ctx.as_deref_mut())?;
-            // FR.4: real release (was no-op drop of Copy u64).
-            vw_drop(result_bits);
-        }
-        Ok(ValueWord::unit().raw_bits())
-    } else {
-        Err(type_mismatch_error("forEach", "HashMap"))
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.forEach — SURFACE: phase-2c — closure-call kinded dispatch \
+         rebuild (ADR-006 §2.7.8 cluster B-round-2). The callback path needs \
+         `vm.call_value_immediate_*` to thread `&[KindedSlot]` / return \
+         `KindedSlot`, but every call_convention.rs entry point is itself a \
+         phase-2c `todo!()`. Same architectural blocker as the M-datatable \
+         Wave-β `joins.rs` close (commit `eb78699`)."
+            .into(),
+    ))
 }
 
-/// HashMap.filter(fn(key, value) -> bool) -> HashMap [v2]
+/// HashMap.filter(fn(key, value) -> bool) -> HashMap
 pub fn v2_filter(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((old_keys, old_values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let old_keys = old_keys.clone();
-        let old_values = old_values.clone();
-        let mut keys = Vec::new();
-        let mut values = Vec::new();
-
-        for (k, v) in old_keys.iter().zip(old_values.iter()) {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[k.raw_bits(), v.raw_bits()], ctx.as_deref_mut())?;
-            if raw_helpers::is_truthy_raw(result_bits) {
-                keys.push(k.clone());
-                values.push(v.clone());
-            }
-            // FR.4: real release (was no-op drop of Copy u64).
-            vw_drop(result_bits);
-        }
-
-        Ok(ValueWord::from_hashmap_pairs(keys, values).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("filter", "HashMap"))
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.filter — SURFACE: phase-2c — closure-call kinded dispatch \
+         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
+         forEach: the predicate-callback path depends on the kinded \
+         call_value rebuild plus the buffer-aware HashMapData construction \
+         path that the mutation handlers also need (the filter result is a \
+         new HashMap built from a subset of the entries). Surface and stop \
+         per playbook §8."
+            .into(),
+    ))
 }
 
-/// HashMap.map(fn(key, value) -> new_value) -> HashMap [v2]
+/// HashMap.map(fn(key, value) -> new_value) -> HashMap
 pub fn v2_map(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((old_keys, old_values, old_index)) = raw_helpers::extract_hashmap(args[0]) {
-        let old_keys = old_keys.clone();
-        let old_values = old_values.clone();
-        let old_index = old_index.clone();
-        let mut new_values = Vec::with_capacity(old_values.len());
-
-        for (k, v) in old_keys.iter().zip(old_values.iter()) {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[k.raw_bits(), v.raw_bits()], ctx.as_deref_mut())?;
-            new_values.push(ValueWord::from_raw_bits(result_bits));
-        }
-
-        Ok(ValueWord::from_hashmap(old_keys.clone(), new_values, old_index).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("map", "HashMap"))
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.map — SURFACE: phase-2c — closure-call kinded dispatch \
+         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
+         forEach/filter: closure-callback path + buffer-aware HashMapData \
+         construction (transformed-values map) both pending. Surface and \
+         stop per playbook §8."
+            .into(),
+    ))
 }
 
-/// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value [v2]
+/// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value
 pub fn v2_reduce(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let keys = keys.clone();
-        let values = values.clone();
-        let mut acc_bits = raw_helpers::clone_raw_bits(args[2]);
-        for (k, v) in keys.iter().zip(values.iter()) {
-            let result_bits = vm.call_value_immediate_raw(
-                args[1],
-                &[acc_bits, k.raw_bits(), v.raw_bits()],
-                ctx.as_deref_mut(),
-            )?;
-            // FR.4: real release of old accumulator (was no-op).
-            vw_drop(acc_bits);
-            acc_bits = result_bits;
-        }
-        Ok(acc_bits)
-    } else {
-        Err(type_mismatch_error("reduce", "HashMap"))
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.reduce — SURFACE: phase-2c — closure-call kinded dispatch \
+         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
+         forEach: the accumulator-callback path depends on the kinded \
+         call_value rebuild — the result is a single accumulated value, no \
+         HashMap construction needed, but the per-entry callback still \
+         routes through the deleted `call_value_immediate_*` path. Surface \
+         and stop per playbook §8."
+            .into(),
+    ))
 }
 
-/// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap> [v2]
+/// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap>
 pub fn v2_group_by(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some((keys, values, _)) = raw_helpers::extract_hashmap(args[0]) {
-        let keys = keys.clone();
-        let values = values.clone();
-
-        // group_key -> (keys, values) for each sub-hashmap
-        let mut groups: Vec<(ValueWord, Vec<ValueWord>, Vec<ValueWord>)> = Vec::new();
-        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::new();
-
-        for (k, v) in keys.iter().zip(values.iter()) {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[k.raw_bits(), v.raw_bits()], ctx.as_deref_mut())?;
-            let group_key = ValueWord::from_raw_bits(result_bits);
-            let gk_hash = group_key.vw_hash();
-
-            let found = if let Some(bucket) = group_index.get(&gk_hash) {
-                bucket
-                    .iter()
-                    .copied()
-                    .find(|&gi| groups[gi].0.vw_equals(&group_key))
-            } else {
-                None
-            };
-
-            if let Some(gi) = found {
-                groups[gi].1.push(k.clone());
-                groups[gi].2.push(v.clone());
-            } else {
-                let gi = groups.len();
-                groups.push((group_key, vec![k.clone()], vec![v.clone()]));
-                group_index.entry(gk_hash).or_default().push(gi);
-            }
-        }
-
-        // Build outer HashMap: group_key -> inner HashMap
-        let outer_keys: Vec<ValueWord> = groups.iter().map(|(gk, _, _)| gk.clone()).collect();
-        let outer_values: Vec<ValueWord> = groups
-            .into_iter()
-            .map(|(_, ks, vs)| ValueWord::from_hashmap_pairs(ks, vs))
-            .collect();
-
-        Ok(ValueWord::from_hashmap_pairs(outer_keys, outer_values).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("groupBy", "HashMap"))
-    }
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.groupBy — SURFACE: phase-2c — closure-call kinded dispatch \
+         rebuild (ADR-006 §2.7.8 cluster B-round-2). Compounds the \
+         forEach/filter blocker: groupBy needs both the kinded call_value \
+         rebuild AND the buffer-aware HashMapData construction path (it \
+         produces nested HashMaps grouped by the key-extractor's return \
+         value). Surface and stop per playbook §8."
+            .into(),
+    ))
 }
 
-/// HashMap.iter() -> Iterator [v2]
+// ═══════════════════════════════════════════════════════════════════════════
+// Iterator handler — phase-2c IteratorState rebuild
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// HashMap.iter() -> Iterator
 pub fn v2_iter(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    use shape_value::heap_value::IteratorState;
-    let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
-    let result = ValueWord::from_iterator(Box::new(IteratorState {
-        source: receiver,
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    Ok(result.into_raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "HashMap.iter — SURFACE: phase-2c (ADR-006 §2.7.4). The legacy \
+         IteratorState struct is deleted; the kinded HashMap-iteration \
+         shape (per-entry key + value kind dispatch over the typed buffers) \
+         is a phase-2c follow-up workstream."
+            .into(),
+    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use shape_value::{ValueWord, ValueWordExt};
-    use shape_value::heap_value::HashMapData;
-    use std::sync::Arc;
-
-    fn nb_str(s: &str) -> ValueWord {
-        ValueWord::from_string(Arc::new(s.to_string()))
-    }
-
-    /// Build a test HashMap: {"a": 1, "b": 2, "c": 3}
-    fn test_hashmap() -> ValueWord {
-        let keys = vec![nb_str("a"), nb_str("b"), nb_str("c")];
-        let values = vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_i64(2),
-            ValueWord::from_i64(3),
-        ];
-        ValueWord::from_hashmap_pairs(keys, values)
-    }
-
-    // ===== Collision safety unit tests =====
-
-    #[test]
-    fn test_find_key_with_equality_check() {
-        let keys = vec![nb_str("alpha"), nb_str("beta")];
-        let values = vec![ValueWord::from_i64(1), ValueWord::from_i64(2)];
-        let index = HashMapData::rebuild_index(&keys);
-
-        let data = HashMapData {
-            keys,
-            values,
-            index,
-            shape_id: None,
-        };
-        assert_eq!(data.find_key(&nb_str("alpha")), Some(0));
-        assert_eq!(data.find_key(&nb_str("beta")), Some(1));
-        assert_eq!(data.find_key(&nb_str("gamma")), None);
-    }
-
-    #[test]
-    fn test_collision_bucket_chaining() {
-        let k1 = nb_str("key1");
-        let k2 = nb_str("key2");
-        let keys = vec![k1.clone(), k2.clone()];
-        let values = vec![ValueWord::from_i64(10), ValueWord::from_i64(20)];
-
-        // Force both into same bucket to simulate collision
-        let h1 = k1.vw_hash();
-        let h2 = k2.vw_hash();
-        let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
-        index.insert(h1, vec![0, 1]);
-        if h2 != h1 {
-            index.insert(h2, vec![1]);
-        }
-
-        let data = HashMapData {
-            keys,
-            values,
-            index,
-            shape_id: None,
-        };
-        assert_eq!(data.find_key(&k1), Some(0));
-        assert_eq!(data.find_key(&k2), Some(1));
-    }
-
-    #[test]
-    fn test_set_does_not_lose_data_on_hash_collision() {
-        let hm = test_hashmap();
-        let (keys, _, _) = hm.as_hashmap().unwrap();
-        assert_eq!(keys.len(), 3);
-    }
-
-    #[test]
-    fn test_has_checks_equality_not_just_hash() {
-        let keys = vec![nb_str("x")];
-        let values = vec![ValueWord::from_i64(1)];
-        let hm = ValueWord::from_hashmap_pairs(keys, values);
-        let (keys_ref, _, index) = hm.as_hashmap().unwrap();
-
-        let hash = nb_str("x").vw_hash();
-        let bucket = index.get(&hash).unwrap();
-        assert!(bucket_find(keys_ref, bucket, &nb_str("x")).is_some());
-        assert!(bucket_find(keys_ref, bucket, &nb_str("y")).is_none());
-    }
-
-    #[test]
-    fn test_delete_preserves_other_entries() {
-        let new_keys = vec![nb_str("a"), nb_str("c")];
-        let new_values = vec![ValueWord::from_i64(1), ValueWord::from_i64(3)];
-        let new_index = HashMapData::rebuild_index(&new_keys);
-        let data = HashMapData {
-            keys: new_keys,
-            values: new_values,
-            index: new_index,
-            shape_id: None,
-        };
-        assert_eq!(data.find_key(&nb_str("a")), Some(0));
-        assert_eq!(data.find_key(&nb_str("c")), Some(1));
-        assert_eq!(data.find_key(&nb_str("b")), None);
-    }
-
-    #[test]
-    fn test_rebuild_index_produces_correct_buckets() {
-        let keys = vec![nb_str("a"), nb_str("b"), nb_str("c")];
-        let index = HashMapData::rebuild_index(&keys);
-
-        for (i, k) in keys.iter().enumerate() {
-            let hash = k.vw_hash();
-            let bucket = index.get(&hash).unwrap();
-            assert!(bucket.contains(&i));
-        }
-    }
-
-    #[test]
-    fn test_from_hashmap_pairs_round_trip() {
-        let keys = vec![nb_str("x"), nb_str("y")];
-        let values = vec![ValueWord::from_i64(10), ValueWord::from_i64(20)];
-        let hm = ValueWord::from_hashmap_pairs(keys, values);
-
-        let (k, v, idx) = hm.as_hashmap().unwrap();
-        assert_eq!(k.len(), 2);
-        assert_eq!(v.len(), 2);
-        assert!(idx.get(&nb_str("x").vw_hash()).is_some());
-        assert!(idx.get(&nb_str("y").vw_hash()).is_some());
-    }
-
-    #[test]
-    fn test_integer_key_hash_consistency() {
-        let k1 = ValueWord::from_i64(42);
-        let k2 = ValueWord::from_i64(42);
-        assert_eq!(k1.vw_hash(), k2.vw_hash());
-        assert!(k1.vw_equals(&k2));
-    }
-
-    #[test]
-    fn test_empty_hashmap_find_key() {
-        let hm = ValueWord::empty_hashmap();
-        let (keys, _, index) = hm.as_hashmap().unwrap();
-        assert!(keys.is_empty());
-        assert!(index.is_empty());
-    }
-}
+//
+// The pre-Wave-β unit tests exercised the legacy `Vec<ValueWord>`
+// HashMapData shape (`HashMapData::find_key`, `rebuild_index`,
+// `vw_hash` / `vw_equals` collision-bucket chaining,
+// `as_hashmap` / `from_hashmap_pairs` / `empty_hashmap`, and the
+// per-handler `v2_*` bodies). Every dependency is deleted with the
+// strict-typing bulldozer. Wave-δ MR-hashmap-readonly tests are
+// exercised via the bytecode-level integration suites once the dispatch
+// shell (`op_call_method`) wires through to these handlers; the local
+// unit-test harness re-instatement is a phase-2c follow-up tracked
+// under cluster `E-builtins-backlog` alongside the sibling typed-array
+// V2 handler test backfills.

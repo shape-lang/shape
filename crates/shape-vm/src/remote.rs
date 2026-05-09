@@ -25,17 +25,27 @@
 //! correct semantic for distributed computing — a **send-copy** model.
 
 use serde::{Deserialize, Serialize};
-use shape_runtime::snapshot::{
-    SerializableVMValue, SnapshotStore, nanboxed_to_serializable, serializable_to_nanboxed,
-    serializable_to_nanboxed_with_layouts,
-};
+use shape_runtime::snapshot::{SerializableVMValue, SnapshotStore};
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::ValueWord;
 
 use shape_wire::WireValue;
 
 use crate::bytecode::{BytecodeProgram, FunctionBlob, FunctionHash, Program};
-use crate::executor::{VMConfig, VirtualMachine};
+
+// `execute_inner` / `execute_inner_with_runtimes` previously called
+// `VirtualMachine::new` / `load_program` / `populate_module_objects` /
+// `execute_*` / and round-tripped each argument and return value through
+// `serializable_to_nanboxed_with_layouts` / `nanboxed_to_serializable`.
+// Both round-trip helpers are deleted (see `crates/shape-runtime/src/snapshot.rs:649`
+// "The slot-(de)serialization functions ... were deleted in Phase 2b") and
+// their replacement is a kind-threaded `slot_to_serializable(bits, kind, store)`
+// pair scheduled for the Phase-2c snapshot rebuild (ADR-006 §2.7.4). The
+// execute paths are stubbed at the entry below; the rebuild lands the
+// kind-threaded serializer + a `Vec<KindedSlot>` arg pipeline together.
+//
+// Imports `VMConfig` / `VirtualMachine` are pulled in lazily inside
+// `execute_remote_call*` so the file still compiles when those are the
+// only consumers and the `execute_inner*` bodies are stubbed.
 
 /// Request to execute a function on a remote VM.
 ///
@@ -66,8 +76,8 @@ pub struct RemoteCallRequest {
     pub arguments: Vec<SerializableVMValue>,
 
     /// Closure upvalues, if calling a closure. These are value-copied from
-    /// the sender's upvalue slots (whether the local representation is a
-    /// SharedCell, a typed frame-pointer capture, or a plain ValueWord).
+    /// the sender's upvalue slots regardless of the local storage class
+    /// (SharedCell, typed frame-pointer capture, or inline scalar).
     pub upvalues: Option<Vec<SerializableVMValue>>,
 
     /// Type schema registry — sent separately because `BytecodeProgram`
@@ -532,9 +542,8 @@ pub fn program_from_blobs_by_hash(
         native_struct_layouts: source.native_struct_layouts.clone(),
         debug_info: source.debug_info.clone(),
         // Closure spec §14.6 (H6.5): propagate the per-name layout side-
-        // table. Remote-stream origins that lack the side-table fall
-        // back to the legacy HeapValue::Closure variant in the VM
-        // producer.
+        // table. Remote-stream origins that lack the side-table fail
+        // hard at the VM producer; there is no legacy fallback.
         closure_function_layouts_by_name: source
             .content_addressed
             .as_ref()
@@ -568,12 +577,17 @@ pub fn program_from_blobs(
 /// This is the entry point for the receiving side. It:
 /// 1. Reconstructs the `BytecodeProgram` and populates its `TypeSchemaRegistry`
 /// 2. Creates a full `VirtualMachine` with the program
-/// 3. Converts serialized arguments back to `ValueWord`
+/// 3. Materializes serialized arguments as kinded VM slots
 /// 4. Calls the function by name or ID
 /// 5. Converts the result back to `SerializableVMValue`
 ///
-/// The `store` is used for `SerializableVMValue` ↔ `ValueWord` conversion
+/// The `store` is used for `SerializableVMValue` ↔ slot conversion
 /// (needed for `BlobRef`-backed values like DataTable).
+///
+/// Phase-2c deferral: the slot/serializable round-trip is currently
+/// stubbed (see `execute_inner` body). The dispatch entry continues to
+/// exist so callers compile through the deferral; invocation surfaces
+/// the gap at runtime.
 pub fn execute_remote_call(
     request: RemoteCallRequest,
     store: &SnapshotStore,
@@ -605,392 +619,40 @@ pub fn execute_remote_call_with_runtimes(
 }
 
 fn execute_inner(
-    request: RemoteCallRequest,
-    store: &SnapshotStore,
+    _request: RemoteCallRequest,
+    _store: &SnapshotStore,
 ) -> Result<SerializableVMValue, RemoteCallError> {
-    // 1. Reconstruct program with type schemas.
-    // Prefer content-addressed blobs when present — they carry only the
-    // transitive closure of the called function, so deserialization is cheaper.
-    let mut program = if let Some(blobs) = request.function_blobs {
-        let entry_hash = request
-            .function_hash
-            .or_else(|| {
-                if let Some(fid) = request.function_id {
-                    request
-                        .program
-                        .function_blob_hashes
-                        .get(fid as usize)
-                        .copied()
-                        .flatten()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                // Legacy fallback by unique function name.
-                request.program.content_addressed.as_ref().and_then(|ca| {
-                    let mut matches = ca.function_store.iter().filter_map(|(hash, blob)| {
-                        if blob.name == request.function_name {
-                            Some(*hash)
-                        } else {
-                            None
-                        }
-                    });
-                    let first = matches.next()?;
-                    if matches.next().is_some() {
-                        None
-                    } else {
-                        Some(first)
-                    }
-                })
-            })
-            .ok_or_else(|| RemoteCallError {
-                message: format!(
-                    "Could not resolve entry hash for remote function '{}'",
-                    request.function_name
-                ),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-
-        // Reconstruct a content-addressed Program from the minimal blobs,
-        // then link it into a BytecodeProgram the VM can execute.
-        let ca_program = program_from_blobs_by_hash(blobs, entry_hash, &request.program)
-            .ok_or_else(|| RemoteCallError {
-                message: format!(
-                    "Could not reconstruct program from blobs for '{}'",
-                    request.function_name
-                ),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-        // Link the content-addressed program into a flat BytecodeProgram
-        let linked = crate::linker::link(&ca_program).map_err(|e| RemoteCallError {
-            message: format!("Linker error: {}", e),
-            kind: RemoteErrorKind::RuntimeError,
-        })?;
-        // Convert LinkedProgram to BytecodeProgram for the existing VM path
-        crate::linker::linked_to_bytecode_program(&linked)
-    } else {
-        request.program
-    };
-    program.type_schema_registry = request.type_schemas;
-
-    // 2. Convert arguments from serializable form — layout-aware so that
-    // any closure-typed arg is rebuilt through the program's
-    // `closure_function_layouts` side-table (A.2B). A missing layout
-    // surfaces a hard error per the v2 closure closeout directive.
-    let closure_layouts_snapshot = program.closure_function_layouts.clone();
-    let args: Vec<ValueWord> = request
-        .arguments
-        .iter()
-        .map(|sv| {
-            serializable_to_nanboxed_with_layouts(sv, store, &closure_layouts_snapshot).map_err(
-                |e| RemoteCallError {
-                    message: format!("Failed to deserialize argument: {}", e),
-                    kind: RemoteErrorKind::ArgumentError,
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 3. Create VM and load program
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    vm.populate_module_objects();
-
-    // 4. Execute — closure or named function
+    // Phase-2c deferral (ADR-006 §2.7.4): the body needs the kind-threaded
+    // `slot_to_serializable` / `serializable_to_slot` pair that replaces
+    // the deleted `nanboxed_to_serializable` / `serializable_to_nanboxed`
+    // / `serializable_to_nanboxed_with_layouts` round-trip. Until that
+    // pair lands (per `crates/shape-runtime/src/snapshot.rs:649`), the
+    // VM dispatch path can't materialize args without re-introducing
+    // forbidden ValueWord shapes. The deferral surfaces the gap at
+    // first invocation rather than serializing wrong values.
     //
-    // Dispatch priority:
-    //   1. Closure call (upvalues present) — needs function_id for upvalue binding
-    //   2. Hash-first — preferred for non-closure calls because function_id from the
-    //      client may be stale after blob-based relinking on the server
-    //   3. Function ID — fallback when no hash is available (legacy path)
-    //   4. Function name — last resort
-    let result = if let Some(ref upvalue_data) = request.upvalues {
-        // Closure call: reconstruct upvalues as Upvalue structs
-        let upvalues: Vec<shape_value::Upvalue> = upvalue_data
-            .iter()
-            .map(|sv| {
-                let nb = serializable_to_nanboxed_with_layouts(
-                    sv,
-                    store,
-                    &closure_layouts_snapshot,
-                )
-                .map_err(|e| RemoteCallError {
-                    message: format!("Failed to deserialize upvalue: {}", e),
-                    kind: RemoteErrorKind::ArgumentError,
-                })?;
-                Ok(shape_value::Upvalue::new(nb))
-            })
-            .collect::<Result<Vec<_>, RemoteCallError>>()?;
-
-        let function_id = request.function_id.ok_or_else(|| RemoteCallError {
-            message: "Closure call requires function_id".to_string(),
-            kind: RemoteErrorKind::FunctionNotFound,
-        })?;
-
-        vm.execute_closure(function_id, upvalues, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else if let Some(hash) = request.function_hash {
-        // Hash-first call path — resolve the function by its content hash
-        // in the server's linked program. This is correct even when the program
-        // was reconstructed from blobs (where client-side function_ids are stale).
-        let func_id = vm
-            .program()
-            .function_blob_hashes
-            .iter()
-            .enumerate()
-            .find_map(|(idx, maybe_hash)| {
-                if maybe_hash == &Some(hash) {
-                    Some(idx as u16)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| RemoteCallError {
-                message: format!("Function hash not found in program: {}", hash),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else if let Some(func_id) = request.function_id {
-        // Call by function ID (legacy — only valid when program was not reconstructed)
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else {
-        // Call by name
-        vm.execute_function_by_name(&request.function_name, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    };
-
-    // 5. Serialize result
-    nanboxed_to_serializable(&result, store).map_err(|e| RemoteCallError {
-        message: format!("Failed to serialize result: {}", e),
-        kind: RemoteErrorKind::RuntimeError,
-    })
+    // The pre-bulldozer dispatch contract (closure → hash → id → name,
+    // with layout-aware arg/upvalue round-trip via
+    // `serializable_to_nanboxed_with_layouts`) is captured in the
+    // git history at the parent commit of the Wave-β
+    // R-transport-remote close — the Phase-2c rebuilder consults that
+    // commit when the kind-threaded serializer pair lands.
+    todo!("phase-2c — typed-module-exports rebuild — see ADR-006 §2.7.4 + addendum")
 }
 
 fn execute_inner_with_runtimes(
-    request: RemoteCallRequest,
-    store: &SnapshotStore,
-    language_runtimes: &std::collections::HashMap<
+    _request: RemoteCallRequest,
+    _store: &SnapshotStore,
+    _language_runtimes: &std::collections::HashMap<
         String,
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
 ) -> Result<SerializableVMValue, RemoteCallError> {
-    // 1. Reconstruct program with type schemas (same logic as execute_inner)
-    let mut program = if let Some(blobs) = request.function_blobs {
-        let entry_hash = request
-            .function_hash
-            .or_else(|| {
-                if let Some(fid) = request.function_id {
-                    request
-                        .program
-                        .function_blob_hashes
-                        .get(fid as usize)
-                        .copied()
-                        .flatten()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                request.program.content_addressed.as_ref().and_then(|ca| {
-                    let mut matches = ca.function_store.iter().filter_map(|(hash, blob)| {
-                        if blob.name == request.function_name {
-                            Some(*hash)
-                        } else {
-                            None
-                        }
-                    });
-                    let first = matches.next()?;
-                    if matches.next().is_some() {
-                        None
-                    } else {
-                        Some(first)
-                    }
-                })
-            })
-            .ok_or_else(|| RemoteCallError {
-                message: format!(
-                    "Could not resolve entry hash for remote function '{}'",
-                    request.function_name
-                ),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-
-        let ca_program = program_from_blobs_by_hash(blobs, entry_hash, &request.program)
-            .ok_or_else(|| RemoteCallError {
-                message: format!(
-                    "Could not reconstruct program from blobs for '{}'",
-                    request.function_name
-                ),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-        let linked = crate::linker::link(&ca_program).map_err(|e| RemoteCallError {
-            message: format!("Linker error: {}", e),
-            kind: RemoteErrorKind::RuntimeError,
-        })?;
-        crate::linker::linked_to_bytecode_program(&linked)
-    } else {
-        request.program
-    };
-    program.type_schema_registry = request.type_schemas;
-
-    // 2. Convert arguments from serializable form — layout-aware so
-    // closure-typed args are rebuilt via the program's
-    // `closure_function_layouts` side-table (A.2B).
-    let closure_layouts_snapshot = program.closure_function_layouts.clone();
-    let args: Vec<ValueWord> = request
-        .arguments
-        .iter()
-        .map(|sv| {
-            serializable_to_nanboxed_with_layouts(sv, store, &closure_layouts_snapshot).map_err(
-                |e| RemoteCallError {
-                    message: format!("Failed to deserialize argument: {}", e),
-                    kind: RemoteErrorKind::ArgumentError,
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 3. Create VM and load program
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    vm.populate_module_objects();
-
-    // 4. Link foreign functions from pre-loaded language runtimes
-    if !vm.program.foreign_functions.is_empty() && !language_runtimes.is_empty() {
-        let entries = vm.program.foreign_functions.clone();
-        let mut handles = Vec::with_capacity(entries.len());
-
-        for (idx, entry) in entries.iter().enumerate() {
-            // Skip native ABI entries (not supported in remote context)
-            if entry.native_abi.is_some() {
-                handles.push(None);
-                continue;
-            }
-
-            if let Some(lang_runtime) = language_runtimes.get(&entry.language) {
-                vm.program.foreign_functions[idx].dynamic_errors =
-                    lang_runtime.has_dynamic_errors();
-
-                let compiled = lang_runtime
-                    .compile(
-                        &entry.name,
-                        &entry.body_text,
-                        &entry.param_names,
-                        &entry.param_types,
-                        entry.return_type.as_deref(),
-                        entry.is_async,
-                    )
-                    .map_err(|e| RemoteCallError {
-                        message: format!(
-                            "Failed to compile foreign function '{}': {}",
-                            entry.name, e
-                        ),
-                        kind: RemoteErrorKind::RuntimeError,
-                    })?;
-                handles.push(Some(crate::executor::ForeignFunctionHandle::Runtime {
-                    runtime: std::sync::Arc::clone(lang_runtime),
-                    compiled,
-                }));
-            } else {
-                return Err(RemoteCallError {
-                    message: format!(
-                        "No language runtime for '{}' on this server. \
-                         Install the {} extension.",
-                        entry.language, entry.language
-                    ),
-                    kind: RemoteErrorKind::RuntimeError,
-                });
-            }
-        }
-        vm.foreign_fn_handles = handles;
-    }
-
-    // 5. Execute — closure or named function (same dispatch priority as execute_inner)
-    let result = if let Some(ref upvalue_data) = request.upvalues {
-        let upvalues: Vec<shape_value::Upvalue> = upvalue_data
-            .iter()
-            .map(|sv| {
-                let nb = serializable_to_nanboxed_with_layouts(
-                    sv,
-                    store,
-                    &closure_layouts_snapshot,
-                )
-                .map_err(|e| RemoteCallError {
-                    message: format!("Failed to deserialize upvalue: {}", e),
-                    kind: RemoteErrorKind::ArgumentError,
-                })?;
-                Ok(shape_value::Upvalue::new(nb))
-            })
-            .collect::<Result<Vec<_>, RemoteCallError>>()?;
-
-        let function_id = request.function_id.ok_or_else(|| RemoteCallError {
-            message: "Closure call requires function_id".to_string(),
-            kind: RemoteErrorKind::FunctionNotFound,
-        })?;
-
-        vm.execute_closure(function_id, upvalues, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else if let Some(hash) = request.function_hash {
-        // Hash-first: resolve by content hash in the server's linked program.
-        // Client-side function_ids are stale after blob-based relinking.
-        let func_id = vm
-            .program()
-            .function_blob_hashes
-            .iter()
-            .enumerate()
-            .find_map(|(idx, maybe_hash)| {
-                if maybe_hash == &Some(hash) {
-                    Some(idx as u16)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| RemoteCallError {
-                message: format!("Function hash not found in program: {}", hash),
-                kind: RemoteErrorKind::FunctionNotFound,
-            })?;
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else if let Some(func_id) = request.function_id {
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    } else {
-        vm.execute_function_by_name(&request.function_name, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
-    };
-
-    // 6. Serialize result
-    nanboxed_to_serializable(&result, store).map_err(|e| RemoteCallError {
-        message: format!("Failed to serialize result: {}", e),
-        kind: RemoteErrorKind::RuntimeError,
-    })
+    // Phase-2c deferral (ADR-006 §2.7.4): same kind-threaded
+    // `slot_to_serializable` / `serializable_to_slot` dependency as
+    // `execute_inner` plus the foreign-function language-runtime hookup.
+    // Both halves wait for the Phase-2c snapshot rebuild.
+    todo!("phase-2c — typed-module-exports rebuild — see ADR-006 §2.7.4 + addendum")
 }
 
 /// Compute a SHA-256 hash of a `BytecodeProgram` for caching.
@@ -1791,7 +1453,6 @@ mod tests {
     use crate::bytecode::{FunctionBlob, FunctionHash, Instruction, OpCode, Program};
     use crate::compiler::BytecodeCompiler;
     use shape_abi_v1::PermissionSet;
-    use shape_value::ValueWordExt;
     use std::collections::HashMap;
 
     /// Helper: compile Shape source to BytecodeProgram
@@ -1842,43 +1503,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_remote_call_simple_function() {
-        let bytecode = compile(
-            r#"
-            function add(a, b) { a + b }
-        "#,
-        );
-        let store = temp_store();
-
-        let request = build_call_request(
-            &bytecode,
-            "add",
-            vec![
-                SerializableVMValue::Number(10.0),
-                SerializableVMValue::Number(32.0),
-            ],
-        );
-
-        let response = execute_remote_call(request, &store);
-        match response.result {
-            Ok(SerializableVMValue::Number(n)) => assert_eq!(n, 42.0),
-            other => panic!("Expected Number(42.0), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_remote_call_function_not_found() {
-        let bytecode = compile("function foo() { 1 }");
-        let store = temp_store();
-
-        let request = build_call_request(&bytecode, "nonexistent", vec![]);
-
-        let response = execute_remote_call(request, &store);
-        assert!(response.result.is_err());
-        let err = response.result.unwrap_err();
-        assert!(matches!(err.kind, RemoteErrorKind::RuntimeError));
-    }
+    // The pre-bulldozer end-to-end execute tests
+    // (`test_remote_call_simple_function`, `test_remote_call_function_not_found`)
+    // drove `execute_remote_call`, which is currently a phase-2c stub
+    // (see `execute_inner` body). Re-author them once the kind-threaded
+    // `slot_to_serializable` / `serializable_to_slot` round-trip lands
+    // (ADR-006 §2.7.4 + addendum); both depend on the snapshot-side
+    // rebuild plus a `Vec<KindedSlot>` arg pipeline through the VM
+    // entrypoints.
 
     #[test]
     fn test_program_hash_deterministic() {
@@ -2379,106 +2011,18 @@ mod tests {
         assert!(matches!(args[0], SerializableVMValue::Int(42)));
     }
 
-    #[test]
-    fn test_extract_sidecars_large_typed_array() {
-        let store = temp_store();
-
-        // Create a large float array (2MB of f64 data)
-        let data = vec![0f64; 256 * 1024]; // 256K * 8 bytes = 2 MB
-        let aligned = shape_value::AlignedVec::from_vec(data);
-        let buf = shape_value::AlignedTypedBuffer::from_aligned(aligned);
-        let nb = shape_value::ValueWord::from_float_array(std::sync::Arc::new(buf));
-        let serialized = shape_runtime::snapshot::nanboxed_to_serializable(&nb, &store).unwrap();
-
-        let mut args = vec![serialized];
-        let sidecars = extract_sidecars(&mut args, &store);
-        assert_eq!(
-            sidecars.len(),
-            1,
-            "should extract one sidecar for 2MB array"
-        );
-        assert!(
-            matches!(args[0], SerializableVMValue::SidecarRef { .. }),
-            "original should be replaced with SidecarRef"
-        );
-        assert!(
-            sidecars[0].data.len() >= 1024 * 1024,
-            "sidecar data should be >= 1MB"
-        );
-    }
-
-    #[test]
-    fn test_reassemble_sidecars_roundtrip() {
-        let store = temp_store();
-
-        // Create a large float array
-        let data: Vec<f64> = (0..256 * 1024).map(|i| i as f64).collect();
-        let aligned = shape_value::AlignedVec::from_vec(data.clone());
-        let buf = shape_value::AlignedTypedBuffer::from_aligned(aligned);
-        let nb = shape_value::ValueWord::from_float_array(std::sync::Arc::new(buf));
-        let original = shape_runtime::snapshot::nanboxed_to_serializable(&nb, &store).unwrap();
-
-        let mut args = vec![original.clone()];
-        let sidecars = extract_sidecars(&mut args, &store);
-        assert_eq!(sidecars.len(), 1);
-
-        // Build sidecar map for reassembly
-        let sidecar_map: HashMap<u32, BlobSidecar> =
-            sidecars.into_iter().map(|s| (s.sidecar_id, s)).collect();
-
-        // Reassemble
-        reassemble_sidecars(&mut args, &sidecar_map, &store).unwrap();
-
-        // The reassembled value should deserialize to the same data
-        let restored = shape_runtime::snapshot::serializable_to_nanboxed(&args[0], &store).unwrap();
-        // cold-path: as_heap_ref retained — test assertion on deserialized value
-        let hv = restored.as_heap_ref().unwrap(); // cold-path
-        match hv {
-            shape_value::heap_value::HeapValue::TypedArray(shape_value::TypedArrayData::F64(a)) => {
-                assert_eq!(a.len(), 256 * 1024);
-                assert!((a.as_slice()[0] - 0.0).abs() < f64::EPSILON);
-                assert!((a.as_slice()[1000] - 1000.0).abs() < f64::EPSILON);
-            }
-            // reassemble produces DataTable wrapper, which is also valid
-            _ => {
-                // The reassembled blob may come back as DataTable BlobRef
-                // since reassemble uses a generic DataTable wrapper.
-                // This is acceptable — the raw data is preserved.
-            }
-        }
-    }
-
-    #[test]
-    fn test_extract_sidecars_nested_in_array() {
-        let store = temp_store();
-
-        // Create a large float array nested in an Array
-        let data = vec![0f64; 256 * 1024]; // 2 MB
-        let aligned = shape_value::AlignedVec::from_vec(data);
-        let buf = shape_value::AlignedTypedBuffer::from_aligned(aligned);
-        let nb = shape_value::ValueWord::from_float_array(std::sync::Arc::new(buf));
-        let serialized = shape_runtime::snapshot::nanboxed_to_serializable(&nb, &store).unwrap();
-
-        let mut args = vec![SerializableVMValue::Array(vec![
-            SerializableVMValue::Int(1),
-            serialized,
-            SerializableVMValue::String("end".to_string()),
-        ])];
-
-        let sidecars = extract_sidecars(&mut args, &store);
-        assert_eq!(sidecars.len(), 1, "should find nested large blob");
-
-        // Verify the array structure is preserved with SidecarRef inside
-        match &args[0] {
-            SerializableVMValue::Array(items) => {
-                assert_eq!(items.len(), 3);
-                assert!(matches!(items[0], SerializableVMValue::Int(1)));
-                assert!(matches!(items[1], SerializableVMValue::SidecarRef { .. }));
-                assert!(matches!(items[2], SerializableVMValue::String(_)));
-            }
-            _ => panic!("Expected Array wrapper to be preserved"),
-        }
-    }
+    // Sidecar extraction/reassembly tests that constructed input via the
+    // deleted `ValueWord::from_float_array` + `nanboxed_to_serializable`
+    // pair (`test_extract_sidecars_large_typed_array`,
+    // `test_reassemble_sidecars_roundtrip`,
+    // `test_extract_sidecars_nested_in_array`) belong to the Phase-2c
+    // typed-module-exports rebuild. Re-author once the kind-threaded
+    // `slot_to_serializable` round-trip lands. Pure
+    // `SerializableVMValue`-shaped sidecar coverage is preserved below
+    // (`test_extract_sidecars_no_large_blobs`,
+    // `test_sidecar_ref_serialization_roundtrip`) — those exercise
+    // `extract_sidecars` / `reassemble_sidecars` without crossing the
+    // slot boundary.
 
     #[test]
     fn test_sidecar_ref_serialization_roundtrip() {
@@ -2731,83 +2275,16 @@ mod tests {
         }
     }
 
-    /// Track A.2B: a closure payload serialised through
-    /// `nanboxed_to_serializable` round-trips through
-    /// `serializable_to_nanboxed_with_layouts` when the receiver
-    /// supplies a matching `closure_function_layouts` slice. The wire
-    /// schema carries `function_id: u32` and `type_id: u32` so the
-    /// receiver can look up the capture signature without walking the
-    /// producer's upvalue bits.
-    #[test]
-    fn test_a2b_closure_arg_roundtrip_with_layouts() {
-        use shape_value::heap_value::HeapValue;
-        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-        use shape_value::v2::closure_raw::{
-            OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
-        };
-        use shape_value::v2::concrete_type::ConcreteType;
-
-        let store = temp_store();
-
-        // Minimal closure: one F64 capture. Mirrors a value the client
-        // would send across the wire as a call argument.
-        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(
-            &[ConcreteType::F64],
-            &[CaptureKind::Immutable],
-        ));
-        let original_nb = unsafe {
-            let ptr = alloc_typed_closure(17, 42, &layout);
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(3.14).into_raw_bits());
-            let owned =
-                OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
-            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
-        };
-
-        // Outbound wire encode — use msgpack-compat rmp_serde (the same
-        // codec cross-node transports use today via `state.deserialize`).
-        let serialized = shape_runtime::snapshot::nanboxed_to_serializable(&original_nb, &store)
-            .expect("closure must serialise for cross-node transport");
-        let bytes = rmp_serde::to_vec(&serialized).expect("wire rmp_serde encode");
-        let decoded: SerializableVMValue =
-            rmp_serde::from_slice(&bytes).expect("wire rmp_serde decode");
-        match &decoded {
-            SerializableVMValue::Closure {
-                function_id,
-                type_id,
-                upvalues,
-            } => {
-                assert_eq!(*function_id, 17);
-                assert_eq!(*type_id, 42);
-                assert_eq!(upvalues.len(), 1);
-            }
-            other => panic!("expected Closure on the wire, got {:?}", other),
-        }
-
-        // Receiver-side reconstruction via the layout registry.
-        let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; 18];
-        layouts[17] = Some(std::sync::Arc::clone(&layout));
-        let restored = shape_runtime::snapshot::serializable_to_nanboxed_with_layouts(
-            &decoded, &store, &layouts,
-        )
-        .expect("layout-aware replay must succeed");
-        let handle = restored
-            .as_closure_handle()
-            .expect("restored value is a closure");
-        assert_eq!(handle.function_id(), 17);
-        assert_eq!(handle.type_id(), 42);
-        assert_eq!(handle.capture_count(), 1);
-        assert_eq!(handle.capture_as_value(0).as_f64(), Some(3.14));
-
-        // No layout → hard error. No legacy fallback.
-        let err = shape_runtime::snapshot::serializable_to_nanboxed_with_layouts(
-            &decoded,
-            &store,
-            &[],
-        )
-        .expect_err("missing layout must hard-error");
-        assert!(
-            err.to_string().contains("no ClosureLayout registered"),
-            "error surfaces missing-layout: {err}"
-        );
-    }
+    // Track A.2B: a closure payload serialised through the slot/serializable
+    // round-trip and replayed through the receiver's
+    // `closure_function_layouts` slice. The pre-bulldozer test
+    // (`test_a2b_closure_arg_roundtrip_with_layouts`) constructed the
+    // closure via deleted ValueWord constructors
+    // (`from_f64` + `into_raw_bits` + `from_heap_value(HeapValue::ClosureRaw(_))`)
+    // and round-tripped it through the deleted
+    // `nanboxed_to_serializable` / `serializable_to_nanboxed_with_layouts`
+    // pair. Re-author against the kind-threaded slot pipeline once the
+    // Phase-2c snapshot rebuild lands (ADR-006 §2.7.4 + addendum). The
+    // wire schema (`function_id: u32`, `type_id: u32`, `upvalues: Vec<…>`)
+    // is preserved verbatim.
 }

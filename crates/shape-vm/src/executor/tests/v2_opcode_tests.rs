@@ -7,24 +7,8 @@
 use super::*;
 use crate::bytecode::*;
 use shape_value::VMError;
-use shape_value::ValueWordExt;
-
 /// Helper: execute bytecode with top-level local variable slots.
-fn exec_with_locals(
-    instructions: Vec<Instruction>,
-    constants: Vec<Constant>,
-    num_locals: u16,
-) -> Result<shape_value::ValueWord, VMError> {
-    let program = BytecodeProgram {
-        instructions,
-        constants,
-        top_level_locals_count: num_locals,
-        ..Default::default()
-    };
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    vm.execute(None).map(|nb| nb.clone())
-}
+// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 // ===== Typed Array: f64 =====
 

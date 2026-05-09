@@ -8,7 +8,6 @@
 //! Integration into the actual opcode emission paths will happen separately.
 
 use crate::type_tracking::{NativeKind, TypeTracker};
-use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 
 /// Check if an array literal has a proven homogeneous element type.
@@ -137,10 +136,10 @@ fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Op
     let mut kind: Option<NativeKind> = None;
 
     for elem in elements {
+        // ADR-006 §2.7.7: NativeKind::Unknown/Dynamic were deleted with the
+        // bulldozer; any kind returned here is post-proof, so no filter check
+        // is needed.
         let elem_kind = expr_storage_hint(elem, type_tracker)?;
-        if elem_kind == NativeKind::Unknown || elem_kind == NativeKind::Dynamic {
-            return None;
-        }
 
         match kind {
             Some(prev) if prev != elem_kind => return None,

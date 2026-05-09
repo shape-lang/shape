@@ -1,161 +1,249 @@
 //! Array sort operations
 //!
 //! Handles: order_by, then_by, join_str
+//!
+//! ## Wave-δ `MR-array-sort-sets-joins` body migration (ADR-006 §2.7.10 / Q11)
+//!
+//! Receiver enters as
+//! `args[0]: KindedSlot { kind: NativeKind::Ptr(HeapKind::TypedArray) }`;
+//! payload recovery via ADR-005 §1 single-discriminator dispatch through
+//! `args[0].slot.as_heap_value()` + `HeapValue::TypedArray(arc)` match
+//! (Wave 5b precedent in `executor/builtins/array_ops.rs`).
+//!
+//! `joinStr` does not require a closure callback: it iterates a typed
+//! array element-by-element, stringifies per-arm, and concatenates with a
+//! separator pulled from `args[1]: KindedSlot { kind: NativeKind::String }`.
+//! Body migrated.
+//!
+//! `orderBy` / `thenBy` take a comparator-closure that returns `int`
+//! (negative / zero / positive). The closure-callback path
+//! (`executor/call_convention.rs::call_value_immediate_*` and
+//! `executor/control_flow/mod.rs::op_call_value`) is itself
+//! `NotImplemented(SURFACE)` post-§2.7.10 (Phase-2c rebuild — kinded
+//! callee dispatch + `&[KindedSlot]` arg-slice on the runtime side).
+//! Surface per playbook §7.4 REVISED.
 
+use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::nb_to_string_coerce;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-use std::mem::ManuallyDrop;
+use shape_value::{
+    HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, VMError,
+};
 use std::sync::Arc;
 
-use super::raw_helpers;
+// ═══════════════════════════════════════════════════════════════════════════
+// Local helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Borrow a ValueWord from raw u64 bits without taking ownership.
 #[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
 }
 
-/// Compare two ValueWord values for ordering
-fn compare_nb_values(a: &ValueWord, b: &ValueWord) -> std::cmp::Ordering {
-    if let (Some(na), Some(nb)) = (a.as_number_coerce(), b.as_number_coerce()) {
-        return na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+#[inline]
+fn as_typed_array(slot: &KindedSlot) -> Option<&Arc<TypedArrayData>> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
+        return None;
     }
-    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-        return sa.cmp(sb);
+    match slot.slot.as_heap_value() {
+        HeapValue::TypedArray(arc) => Some(arc),
+        _ => None,
     }
-    a.type_name().cmp(b.type_name())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 handlers — args are &[u64], result is returned as u64
-// ═══════════════════════════════════════════════════════════════════════════
-
-pub(crate) fn handle_order_by_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.is_empty() || args.len() > 3 {
-        return Err(VMError::RuntimeError(
-            "order_by() requires 1-3 arguments (array, key_func, direction?)".to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| {
-            VMError::RuntimeError("order_by() requires an array as receiver".to_string())
-        })?
-        .to_generic();
-
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "order_by() requires a key function".to_string(),
-        ));
-    }
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "order_by() second argument must be a function".to_string(),
-        ));
-    }
-
-    let descending = if args.len() == 3 {
-        let dir_vw = borrow_vw(args[2]);
-        if let Some(s) = dir_vw.as_str() {
-            s.eq_ignore_ascii_case("desc")
-        } else if let Some(b) = dir_vw.as_bool() {
-            b
-        } else {
-            false
+/// Stringify a single element of `arr` at `idx` in the canonical
+/// per-arm format. Mirrors the pre-Wave-6 join semantics: integer/float
+/// formatting, bool as "true"/"false", string passthrough.
+fn element_to_string(arr: &TypedArrayData, idx: usize, out: &mut String) -> Result<(), VMError> {
+    use std::fmt::Write as _;
+    match arr {
+        TypedArrayData::I64(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
         }
-    } else {
-        false
-    };
-
-    let mut keyed: Vec<(ValueWord, ValueWord)> = Vec::with_capacity(array.len());
-    for (index, nb) in array.iter().enumerate() {
-        let key_bits = vm.call_value_immediate_raw(
-            args[1],
-            &[nb.raw_bits(), ValueWord::from_f64(index as f64).into_raw_bits()],
-            ctx.as_deref_mut(),
-        )?;
-        keyed.push((ValueWord::from_raw_bits(key_bits), nb.clone()));
-    }
-
-    let len = keyed.len();
-    for i in 0..len {
-        for j in 0..len.saturating_sub(1).saturating_sub(i) {
-            let should_swap = {
-                let (key_a, _) = &keyed[j];
-                let (key_b, _) = &keyed[j + 1];
-                let cmp = compare_nb_values(key_a, key_b);
-                if descending {
-                    cmp == std::cmp::Ordering::Less
-                } else {
-                    cmp == std::cmp::Ordering::Greater
-                }
-            };
-            if should_swap {
-                keyed.swap(j, j + 1);
+        TypedArrayData::F64(buf) => {
+            let v = buf.data[idx];
+            // Match the Display contract used elsewhere in the runtime
+            // (TypedArrayData::F64 in heap_value.rs:996): integer-valued
+            // f64s render as integers when |v| < 1e15.
+            if v == v.trunc() && v.abs() < 1e15 {
+                write!(out, "{}", v as i64).map_err(|e| type_error(e.to_string()))
+            } else {
+                write!(out, "{}", v).map_err(|e| type_error(e.to_string()))
             }
         }
+        TypedArrayData::Bool(buf) => {
+            let b = buf.data[idx] != 0;
+            write!(out, "{}", b).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::I8(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::I16(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::I32(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::U8(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::U16(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::U32(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::U64(buf) => {
+            write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
+        }
+        TypedArrayData::F32(buf) => {
+            let v = buf.data[idx];
+            if v == v.trunc() && v.abs() < 1e15 {
+                write!(out, "{}", v as i64).map_err(|e| type_error(e.to_string()))
+            } else {
+                write!(out, "{}", v).map_err(|e| type_error(e.to_string()))
+            }
+        }
+        TypedArrayData::String(buf) => {
+            out.push_str(buf.data[idx].as_str());
+            Ok(())
+        }
+        TypedArrayData::HeapValue(_)
+        | TypedArrayData::Matrix(_)
+        | TypedArrayData::FloatSlice { .. } => Err(type_error(format!(
+            "joinStr: TypedArrayData variant {} not part of the Wave-δ joinStr migration \
+             (Phase-2c reentry — heterogeneous-heap / matrix / float-slice element \
+             stringification needs per-NativeKind formatter dispatch via the kinded \
+             output-adapter path, not yet wired through the MethodFnV2 handler tier)",
+            arr.type_name()
+        ))),
     }
-
-    // `keyed` is only consumed on the success path (after the `?` points
-    // above). Moving its value-column into an ArgVec is defensive only; there
-    // are no further `?` before consumption. NOTE: `keyed: Vec<(ValueWord,
-    // ValueWord)>` itself still leaks on error paths above — the key column
-    // (call-return owned) and value column (bit-copy) both survive any error
-    // drop. Matching pre-Wave4 leak semantics.
-    let sorted: ArgVec = ArgVec::from_vec(keyed.into_iter().map(|(_, v)| v).collect());
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted.into_inner())).into_raw_bits())
 }
 
+fn array_len(arr: &TypedArrayData) -> Result<usize, VMError> {
+    Ok(match arr {
+        TypedArrayData::I64(b) => b.len(),
+        TypedArrayData::F64(b) => b.len(),
+        TypedArrayData::Bool(b) => b.len(),
+        TypedArrayData::I8(b) => b.len(),
+        TypedArrayData::I16(b) => b.len(),
+        TypedArrayData::I32(b) => b.len(),
+        TypedArrayData::U8(b) => b.len(),
+        TypedArrayData::U16(b) => b.len(),
+        TypedArrayData::U32(b) => b.len(),
+        TypedArrayData::U64(b) => b.len(),
+        TypedArrayData::F32(b) => b.len(),
+        TypedArrayData::String(b) => b.len(),
+        TypedArrayData::HeapValue(b) => b.len(),
+        TypedArrayData::Matrix(m) => m.data.len(),
+        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2 (native ABI) handlers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// v2 `orderBy` — sort an array by a key function (optionally with direction).
+///
+/// args: [array, key_fn, direction?]
+///
+/// **SURFACE — Wave-δ closure-callback dependency.** The kinded
+/// `MethodFnV2` ABI landed (Wave-γ G-method-fn-v2-abi); however the
+/// closure-callback path needed to invoke `key_fn(elem)` per element
+/// (`call_value_immediate_*` in `executor/call_convention.rs`,
+/// `op_call_value` in `executor/control_flow/mod.rs`) is itself
+/// `NotImplemented(SURFACE)` post-§2.7.10 pending the kinded callee
+/// dispatch + `&[KindedSlot]` arg-slice rebuild (ADR-006 §2.7.4 / §2.7.8
+/// Phase-2c). Without it the handler cannot invoke the user's comparator.
+pub(crate) fn handle_order_by_v2(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "orderBy — SURFACE: closure-callback path unmigrated. \
+         The kinded MethodFnV2 ABI landed (ADR-006 §2.7.10 / Q11), but \
+         `call_value_immediate_*` / `op_call_value` (executor/call_convention.rs, \
+         executor/control_flow/mod.rs) still return NotImplemented(SURFACE) \
+         pending the kinded callee dispatch + `&[KindedSlot]` arg-slice rebuild \
+         per ADR-006 §2.7.4 / §2.7.8. Body shape: `args[0]` = receiver \
+         (Ptr(HeapKind::TypedArray)), `args[1]` = comparator closure \
+         (Ptr(HeapKind::Closure)), `args[2]?` = direction; iterate elements as \
+         indexed pairs and stably sort via `slice::sort_by` driving the closure \
+         callback (signum of the int return)."
+            .to_string(),
+    ))
+}
+
+/// v2 `thenBy` — sort an already-ordered array by a secondary key.
+///
+/// args: [array, key_fn, direction?]
+///
+/// **SURFACE — Wave-δ closure-callback dependency.** Same blocker as
+/// `orderBy`; bodies share the comparator-closure callback shape.
 pub(crate) fn handle_then_by_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    handle_order_by_v2(vm, args, ctx)
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "thenBy — SURFACE: closure-callback path unmigrated. \
+         Same blocker as orderBy: kinded `call_value_immediate_*` / \
+         `op_call_value` dispatch is Phase-2c rebuild territory (ADR-006 \
+         §2.7.4 / §2.7.8). Body shape mirrors orderBy with the receiver \
+         already partially-ordered (the secondary-key sort is stable)."
+            .to_string(),
+    ))
 }
 
+/// v2 `joinStr` — join array elements into a single string with a separator.
+///
+/// args: [array, separator]
+///
+/// Receiver kind = `NativeKind::Ptr(HeapKind::TypedArray)`; separator kind
+/// = `NativeKind::String`. Element stringification dispatches on the
+/// `TypedArrayData::*` arm (no closure callback). The result is a fresh
+/// `Arc<String>` carried as `KindedSlot::from_string_arc`.
 pub(crate) fn handle_join_str_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(VMError::RuntimeError(
-            "join_str() requires 1-2 arguments (array, separator?)".to_string(),
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "joinStr() requires 2 arguments (array, separator)",
         ));
     }
+    let arc = as_typed_array(&args[0])
+        .ok_or_else(|| type_error("joinStr(): receiver must be an Array"))?;
+    let arr = arc.as_ref();
 
-    let receiver = borrow_vw(args[0]);
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| {
-            VMError::RuntimeError("join_str() requires an array as receiver".to_string())
-        })?
-        .to_generic();
-
-    let sep_vw = if args.len() == 2 {
-        Some(borrow_vw(args[1]))
-    } else {
-        None
+    let sep: &str = match args[1].kind {
+        NativeKind::String => args[1]
+            .as_str()
+            .ok_or_else(|| type_error("joinStr(): separator slot kind=String but bits empty"))?,
+        _ => {
+            return Err(type_error(format!(
+                "joinStr(): separator must be a string, got {:?}",
+                args[1].kind
+            )));
+        }
     };
 
-    let separator = match &sep_vw {
-        Some(vw) => vw.as_str().ok_or_else(|| {
-            VMError::RuntimeError("join_str() separator must be a string".to_string())
-        })?,
-        None => ",",
-    };
-
-    let strings: Vec<String> = array.iter().map(|nb| nb_to_string_coerce(nb)).collect();
-
-    let result = strings.join(separator);
-    Ok(ValueWord::from_string(Arc::new(result)).into_raw_bits())
+    let len = array_len(arr)?;
+    let mut out = String::new();
+    for i in 0..len {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        element_to_string(arr, i, &mut out)?;
+    }
+    Ok(KindedSlot::from_string_arc(Arc::new(out)))
 }
+
+// Tests intentionally not added in this file: handler tests need a
+// minimal `VirtualMachine` instance and the dispatch shell
+// (`op_call_method`) is itself a §2.7.10 SURFACE pending the
+// receiver-classification cascade. Test coverage for `joinStr` lands
+// alongside the dispatch-shell rebuild via the same harness pattern as
+// `executor/builtins/array_ops.rs::tests` (Wave 5b body migrations).

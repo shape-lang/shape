@@ -712,85 +712,104 @@ define_opcodes! {
     // Closure Spec Phase D typed mutable-capture opcodes
     // (`LoadCaptureMutPtr<T>` / `StoreCaptureMutPtr<T>` for
     // F64/I64/I32/Bool/Ptr). Track A.1C.3 retired them in favour of the
-    // A.1B dynamic-ValueWord path (`LoadOwnedMutableCapture` /
-    // `StoreOwnedMutableCapture`, `LoadSharedCapture` /
-    // `StoreSharedCapture`) which handles every let-mut / var capture
-    // universally. These byte values are intentionally left unassigned
-    // to keep the A.1B opcodes below at their original values.
+    // dynamic-cell path on the A.1B opcodes below (which handle every
+    // let-mut / var capture uniformly). These byte values are
+    // intentionally left unassigned to keep the A.1B opcodes below at
+    // their original values.
 
     // ===== Track A.1B: CaptureKind::OwnedMutable / CaptureKind::Shared =====
     //
     // These opcodes implement Track A's three-way CaptureKind split (see
-    // `crates/shape-value/src/v2/closure_layout.rs` — `CaptureKind`):
+    // `crates/shape-value/src/v2/closure_layout.rs` — `CaptureKind`).
     //
-    // - `OwnedMutable`: `let mut` by-move captures. The closure's capture
-    //   slot holds `*mut ValueWord` from `Box::into_raw(Box::new(initial))`.
-    //   Exactly one closure owns the box; no sharing, no lock. Released by
-    //   `release_typed_closure` via `Box::from_raw`.
-    // - `Shared`: `var` captures shared across nested closures. The slot
-    //   holds `*const SharedCell` from
-    //   `Arc::into_raw(Arc::new(parking_lot::Mutex::new(initial)))`. Each
-    //   reader/writer acquires the parking_lot mutex; refcount released by
-    //   `Arc::from_raw` on closure Drop.
+    // The closure cell layout grew a parallel-`NativeKind` track per
+    // ADR-006 §2.7.8 / Q10: each cell records the kind of its 8-byte
+    // payload (e.g. `*mut i64`, `*mut f64`, raw heap-Arc pointer bits +
+    // `NativeKind::Ptr(HeapKind::*)`) alongside the bits, so cell load /
+    // store dispatches via `clone_with_kind` / `drop_with_kind` without
+    // re-probing tag bits. The pre-Wave-6.5 dynamic-tag word that these
+    // cells held has been deleted along with `ValueWord`; per-FieldKind
+    // typed cells (Wave B and the typed counterpart opcodes
+    // 0x140-0x166 below) are the canonical storage shape, with the
+    // Track A.1B opcodes here remaining for the migration tail until
+    // every emit site flips per Wave E.
+    //
+    // - `OwnedMutable`: `let mut` by-move captures. The closure's
+    //   capture slot holds raw `*mut <T>` cell pointer bits paired with
+    //   the cell's payload-kind from `ClosureLayout::capture_inner_kinds`.
+    //   Exactly one closure owns the cell; no sharing, no lock.
+    //   Released by `release_typed_closure` via the matching kind's
+    //   `Box::from_raw`.
+    // - `Shared`: `var` captures shared across nested closures. The
+    //   slot holds `*const SharedCell` pointer bits + the inner-payload
+    //   `NativeKind`. Each reader/writer acquires the parking_lot mutex;
+    //   refcount released by `Arc::from_raw` on closure Drop.
     //
     // A.1B's interpreter binds the raw pointer bits into
     // `frame.upvalues[i]` (bypassing `Upvalue::get`/`set`'s SharedCell
-    // auto-deref — those are for the retired-in-A.1C legacy variant). The
-    // new opcodes below read the raw bits directly and dereference the
-    // pointer. Operand width: `Local(u16)` like every other capture op.
+    // auto-deref — those are for the retired-in-A.1C legacy variant).
+    // The new opcodes below read the raw bits directly and dereference
+    // the pointer. Operand width: `Local(u16)` like every other capture
+    // op.
     //
     // SAFETY invariants (enforced per-opcode via `ClosureLayout`
     // `owned_mutable_capture_mask` / `shared_capture_mask` at compile
     // time):
-    //   * `LoadOwnedMutableCapture{i}` / `StoreOwnedMutableCapture{i}` are
-    //     only emitted when the current function's capture `i` has
-    //     `CaptureKind::OwnedMutable` in its layout. The upvalue at index
-    //     `i` MUST contain raw `*mut ValueWord` bits (see A.1B
-    //     `op_make_closure` allocation path + A.1B
-    //     `call_closure_with_nb_args` upvalue plumbing).
+    //   * `LoadOwnedMutableCapture{i}` / `StoreOwnedMutableCapture{i}`
+    //     are only emitted when the current function's capture `i` has
+    //     `CaptureKind::OwnedMutable` in its layout. The upvalue at
+    //     index `i` MUST contain raw `*mut <T>` pointer bits matching
+    //     the cell's `inner_kind` (see A.1B `op_make_closure` allocation
+    //     path + A.1B `call_closure_with_nb_args` upvalue plumbing).
     //   * Likewise for `LoadSharedCapture` / `StoreSharedCapture` — the
     //     upvalue holds `*const SharedCell` bits and reads/writes take
     //     the parking_lot mutex.
     //
-    // A.1D and A.1E add Cranelift lowerings; until then the JIT bails to
-    // the interpreter for any function that contains these opcodes.
+    // A.1D and A.1E add Cranelift lowerings; until then the JIT bails
+    // to the interpreter for any function that contains these opcodes.
     //
-    // See `docs/v2-closure-specialization.md` §14.7 for the landed Track A
-    // plan.
+    // See `docs/v2-closure-specialization.md` §14.7 for the landed
+    // Track A plan and ADR-006 §2.7.8 / Q10 for the cell-storage
+    // parallel-kind discipline.
 
-    /// Load a ValueWord through an `OwnedMutable` capture's `*mut ValueWord`
-    /// cell. Operand: Local(idx). Pushes the dereferenced value.
+    /// Load through an `OwnedMutable` capture's `*mut <T>` cell.
+    /// Operand: Local(idx). Pushes the dereferenced cell payload as
+    /// raw 8 bytes paired with the cell's `inner_kind` (sourced from
+    /// `ClosureLayout::capture_inner_kinds`).
     LoadOwnedMutableCapture = 0x132, Variable, pops: 0, pushes: 1;
-    /// Store a ValueWord through an `OwnedMutable` capture's `*mut ValueWord`
-    /// cell. Operand: Local(idx). Pops the value to write.
+    /// Store through an `OwnedMutable` capture's `*mut <T>` cell.
+    /// Operand: Local(idx). Pops the value to write (raw 8 bytes +
+    /// payload kind from the kinded stack ABI; ADR-006 §2.7.7).
     StoreOwnedMutableCapture = 0x133, Variable, pops: 1, pushes: 0;
-    /// Load a ValueWord through a `Shared` capture's
-    /// `*const parking_lot::Mutex<ValueWord>` cell — takes the mutex for
-    /// the read only. Operand: Local(idx). Pushes the inner value.
+    /// Load through a `Shared` capture's `*const SharedCell` cell —
+    /// takes the parking_lot mutex for the read only. Operand:
+    /// Local(idx). Pushes the inner payload as raw 8 bytes + cell's
+    /// inner-payload kind.
     LoadSharedCapture = 0x134, Variable, pops: 0, pushes: 1;
-    /// Store a ValueWord through a `Shared` capture's
-    /// `*const parking_lot::Mutex<ValueWord>` cell — takes the mutex for
-    /// the write only. Operand: Local(idx). Pops the value to write.
+    /// Store through a `Shared` capture's `*const SharedCell` cell —
+    /// takes the parking_lot mutex for the write only. Operand:
+    /// Local(idx). Pops the value to write (raw bits + inner-payload
+    /// kind).
     StoreSharedCapture = 0x135, Variable, pops: 1, pushes: 0;
 
     // ===== Phase 3c Wave D.1: per-FieldKind OwnedMutable capture opcodes =====
     //
-    // Typed counterparts of the legacy single-form `LoadOwnedMutableCapture`
-    // (0x132) / `StoreOwnedMutableCapture` (0x133), which both treat the
-    // closure cell as a `*mut ValueWord` (8-byte tagged word).
+    // Typed counterparts of the dynamic-cell `LoadOwnedMutableCapture`
+    // (0x132) / `StoreOwnedMutableCapture` (0x133) above, which dispatch
+    // via the cell's `inner_kind` recorded on the closure layout.
     //
-    // The Wave B storage migration replaced the `Box<ValueWord>` cell with
-    // per-FieldKind `Box<T>` cells (see
+    // The Wave B storage migration replaced the dynamic-cell payload
+    // with per-FieldKind `Box<T>` cells (see
     // `shape_value::v2::closure_raw::alloc_owned_mutable_<kind>`). Each
     // typed cell holds a native scalar (`i64`, `f64`, `i8`, `bool`,
-    // ValueWord-bits, ...) without any tag overhead. The 22 opcodes below
-    // are the typed load/store path for those cells, one pair per
-    // FieldKind, in the canonical order:
+    // raw heap-Arc pointer bits, ...) without any tag overhead. The 22
+    // opcodes below are the typed load/store path for those cells, one
+    // pair per FieldKind, in the canonical order:
     //
     //   I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr
     //
-    // Operand layout: `Local(u16)` — same capture-array index as the legacy
-    // opcodes. The capture's `inner_kind` (recorded in
+    // Operand layout: `Local(u16)` — same capture-array index as the
+    // 0x132/0x133 opcodes. The capture's `inner_kind` (recorded in
     // `ClosureLayout::capture_inner_kinds`) selects the typed opcode the
     // compiler emits at this site (Wave E).
     //
@@ -799,22 +818,24 @@ define_opcodes! {
     //   * `Load/StoreOwnedMutableCapture<Kind>{i}` is emitted only when
     //     the current function's capture `i` has
     //     `CaptureKind::OwnedMutable` AND `inner_kind == FieldKind::<Kind>`.
-    //     The upvalue at index `i` MUST contain raw `*mut <T>` bits matching
-    //     `<Kind>` (see Wave B's `alloc_owned_mutable_<kind>` allocator and
-    //     the per-kind init path in `op_make_closure`).
-    //   * The legacy `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture`
-    //     (0x132/0x133) remain live and emit-compatible: any function the
-    //     compiler has not yet migrated to the typed path keeps using the
-    //     dynamic ValueWord cell + ValueWord opcodes. Wave G removes the
-    //     legacy opcodes once Wave E flips every emit site.
+    //     The upvalue at index `i` MUST contain raw `*mut <T>` bits
+    //     matching `<Kind>` (see Wave B's `alloc_owned_mutable_<kind>`
+    //     allocator and the per-kind init path in `op_make_closure`).
+    //   * The dynamic-cell `LoadOwnedMutableCapture` /
+    //     `StoreOwnedMutableCapture` (0x132/0x133) remain live and
+    //     emit-compatible until Wave E flips every emit site to the
+    //     typed path; Wave G then removes 0x132/0x133.
     //
-    // Stack effect: Load reads the typed cell and pushes a raw native value
-    // onto the stack via the matching `push_raw_<kind>` / `push_raw_u64`
-    // helper (sub-i64 ints sign- or zero-extended into the i64 path,
-    // matching the existing typed-opcode convention in `arithmetic/`).
-    // Store pops a native value via the matching `pop_raw_<kind>` /
-    // `pop_raw_u64` helper, truncates as needed for sub-i64 widths, and
-    // writes through the typed cell.
+    // Stack effect: Load reads the typed cell and pushes a raw native
+    // value onto the stack via `push_kinded(bits, NativeKind::<Kind>)`
+    // (sub-i64 ints sign- or zero-extended into the i64 path, matching
+    // the existing typed-opcode convention in `arithmetic/`). Store
+    // pops a native value via `pop_kinded() -> (bits, NativeKind::<Kind>)`,
+    // truncates as needed for sub-i64 widths, and writes through the
+    // typed cell. The pre-Wave-6.5 transitional stack shims (the W-series
+    // "borrowed slot with call-pattern invariants" defection-attractor)
+    // were deleted per ADR-006 §2.7.7; every push site sources kind
+    // locally from the opcode's payload-kind suffix.
 
     /// Load `i64` through an `OwnedMutable` capture's `*mut i64` cell.
     /// Operand: Local(idx). Pushes the dereferenced i64 onto the stack as
@@ -858,10 +879,11 @@ define_opcodes! {
     LoadOwnedMutableCaptureBool = 0x149, Variable, pops: 0, pushes: 1;
     /// Load `Ptr` through an `OwnedMutable` capture's `*mut u64` cell.
     /// Operand: Local(idx). Pushes the dereferenced 8-byte pointer-shaped
-    /// payload as raw u64 (a ValueWord bit pattern carrying a NaN-boxed
-    /// heap share or owned heap pointer). Refcount retain semantics for
-    /// `Ptr` payloads are the caller's responsibility — matches the
-    /// `read_owned_mutable_ptr` contract: this opcode does NOT clone.
+    /// payload as raw u64 (raw heap-Arc pointer bits paired with the
+    /// cell's `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.8). Refcount
+    /// retain semantics for `Ptr` payloads are the caller's responsibility
+    /// — matches the `read_owned_mutable_ptr` contract: this opcode does
+    /// NOT clone.
     LoadOwnedMutableCapturePtr = 0x14A, Variable, pops: 0, pushes: 1;
 
     /// Store `i64` through an `OwnedMutable` capture's `*mut i64` cell.
@@ -902,8 +924,8 @@ define_opcodes! {
     /// writes it into the cell.
     StoreOwnedMutableCaptureBool = 0x154, Variable, pops: 1, pushes: 0;
     /// Store `Ptr` through an `OwnedMutable` capture's `*mut u64` cell.
-    /// Operand: Local(idx). Pops a raw u64 (a ValueWord bit pattern
-    /// carrying a NaN-boxed heap share or owned heap pointer) and writes
+    /// Operand: Local(idx). Pops a raw u64 (heap-Arc pointer bits +
+    /// `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.7) and writes
     /// it into the cell. Refcount semantics are the caller's
     /// responsibility — matches the `write_owned_mutable_ptr` contract:
     /// this opcode does NOT release the previous payload nor retain the
@@ -928,10 +950,13 @@ define_opcodes! {
     //
     // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
     // Load reads from the lock-gated cell and pushes a raw native value
-    // onto the stack via the matching `push_raw_<kind>`/`push_raw_u64`
-    // helper. Store pops a native value via the matching
-    // `pop_raw_<kind>`/`pop_raw_u64` helper, then writes it through the
-    // lock-gated helper.
+    // onto the stack via `push_kinded(bits, NativeKind::<Kind>)`. Store
+    // pops a native value via `pop_kinded() -> (bits, NativeKind::<Kind>)`,
+    // then writes it through the lock-gated helper. The pre-Wave-6.5
+    // transitional stack shims (the W-series "borrowed slot with
+    // call-pattern invariants" defection-attractor) were deleted per
+    // ADR-006 §2.7.7; every push site sources kind locally from the
+    // opcode's payload-kind suffix.
     //
     // SAFETY invariants — enforced by the compiler (Wave E codegen):
     //   * `LoadSharedCapture<Kind>` / `StoreSharedCapture<Kind>` are only
@@ -992,8 +1017,9 @@ define_opcodes! {
     /// Operand: Local(idx).
     LoadSharedCaptureBool = 0x15F, Variable, pops: 0, pushes: 1;
     /// Load a `Ptr` through a `Shared` capture cell — locks, reads the 8
-    /// payload bytes as a raw u64 (a ValueWord bit pattern carrying a
-    /// NaN-boxed Arc/Box pointer), unlocks, pushes the raw bits. Refcount
+    /// payload bytes as a raw u64 (heap-Arc pointer bits paired with the
+    /// cell's `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.8 / Q10),
+    /// unlocks, pushes the raw bits. Refcount
     /// retain semantics for `Ptr` payloads are the caller's
     /// responsibility (the helper does NOT clone — match the
     /// `read_shared_ptr` contract).
@@ -1041,7 +1067,8 @@ define_opcodes! {
     /// Operand: Local(idx).
     StoreSharedCaptureBool = 0x16A, Variable, pops: 1, pushes: 0;
     /// Store a `Ptr` through a `Shared` capture cell — pops raw 8-byte
-    /// bits (a ValueWord), locks, writes the payload, unlocks. The
+    /// bits (heap-Arc pointer bits + `NativeKind::Ptr(HeapKind::*)` per
+    /// ADR-006 §2.7.7), locks, writes the payload, unlocks. The
     /// caller is responsible for refcount semantics on Ptr payloads —
     /// matches the `write_shared_ptr` contract: this opcode does NOT
     /// release the previous payload nor retain the new one.
@@ -1055,8 +1082,10 @@ define_opcodes! {
     // I16, U16, I8, U8, Bool, Ptr) we have a Load/Store pair that:
     //
     // * reads / writes the local slot at `bp + idx` directly as raw 8-byte
-    //   bits, with no NaN-box tag check, no ValueWord wrapping, no
-    //   `clone_from_bits`, no SharedCell auto-deref.
+    //   bits paired with the slot's `NativeKind` from
+    //   `FrameDescriptor.slots[idx]`, with no `clone_from_bits`, no
+    //   SharedCell auto-deref, and no tag-bit decode (the deleted
+    //   ValueWord dispatch path).
     // * skips refcount management even for the `Ptr` kind — refcount
     //   semantics are the IR's responsibility (matches D.1 / D.2 Ptr
     //   contract; the c-stdlib-msgpack pattern from commit afb1651 is the
@@ -1072,14 +1101,21 @@ define_opcodes! {
     //     the low N bits of the 8-byte slot; the upper bits are
     //     unspecified. Producers must zero/sign-extend appropriately
     //     (matches D.1 store-side truncation convention).
-    //   * For `Ptr` slots, neither Load nor Store performs `vw_clone` /
-    //     `vw_drop`. The IR pairs each typed Ptr load/store with the
+    //   * For `Ptr` slots, neither Load nor Store performs the deleted
+    //     `vw_clone` / `vw_drop` (their post-§2.7.7 replacements
+    //     `clone_with_kind` / `drop_with_kind` are not auto-invoked
+    //     here either). The IR pairs each typed Ptr load/store with the
     //     matching retain/release before/after.
     //
     // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
     // Load reads from the local slot and pushes a raw native value onto
-    // the stack via `push_raw_u64`. Store pops a native value via
-    // `pop_raw_u64`, then writes the raw 8-byte bits to the slot.
+    // the stack via `push_kinded(bits, NativeKind::<Kind>)`. Store pops a
+    // native value via `pop_kinded() -> (bits, NativeKind::<Kind>)`, then
+    // writes the raw 8-byte bits to the slot. The pre-Wave-6.5
+    // transitional stack shims (the W-series "borrowed slot with
+    // call-pattern invariants" defection-attractor) were deleted per
+    // ADR-006 §2.7.7; every push site sources kind locally from the
+    // opcode's payload-kind suffix.
     //
     // The legacy `LoadLocal` (0x50) / `StoreLocal` (0x51) stay live for
     // unproven-type positions; the typed forms are dead until Wave E+4
@@ -1119,10 +1155,11 @@ define_opcodes! {
     /// Load `bool` from local slot — reads low byte (zero ⇒ false;
     /// non-zero ⇒ true) and pushes the raw 8 bytes back. Operand: Local(idx).
     LoadLocalBool = 0x175, Variable, pops: 0, pushes: 1;
-    /// Load `Ptr` from local slot — reads raw 8 bytes (a ValueWord bit
-    /// pattern carrying a NaN-boxed Arc/Box pointer) and pushes them.
-    /// The handler does NOT clone/retain — refcount semantics are the
-    /// caller's responsibility. Operand: Local(idx).
+    /// Load `Ptr` from local slot — reads raw 8 bytes (heap-Arc pointer
+    /// bits paired with the slot's `NativeKind::Ptr(HeapKind::*)` per
+    /// ADR-006 §2.7.7) and pushes them. The handler does NOT clone /
+    /// retain — refcount semantics are the caller's responsibility.
+    /// Operand: Local(idx).
     LoadLocalPtr = 0x176, Variable, pops: 0, pushes: 1;
 
     /// Store `i64` to local slot — pops raw i64, writes 8 bytes to slot.
@@ -1162,11 +1199,11 @@ define_opcodes! {
     /// canonical 0 or 1 in the slot's low byte (any nonzero pop ⇒ 1).
     /// Operand: Local(idx).
     StoreLocalBool = 0x180, Variable, pops: 1, pushes: 0;
-    /// Store `Ptr` to local slot — pops raw 8 bytes (a ValueWord bit
-    /// pattern carrying a NaN-boxed Arc/Box pointer) and writes them
-    /// to the slot. The handler does NOT release the previous payload
-    /// nor retain the new one — refcount semantics are the caller's
-    /// responsibility (matches the D.1 / D.2 Ptr contract).
+    /// Store `Ptr` to local slot — pops raw 8 bytes (heap-Arc pointer
+    /// bits + `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.7) and
+    /// writes them to the slot. The handler does NOT release the
+    /// previous payload nor retain the new one — refcount semantics are
+    /// the caller's responsibility (matches the D.1 / D.2 Ptr contract).
     /// Operand: Local(idx).
     StoreLocalPtr = 0x181, Variable, pops: 1, pushes: 0;
 
@@ -1184,9 +1221,14 @@ define_opcodes! {
     //     `module_bindings[idx]`.
     //
     // Stack convention mirrors Wave D (typed OwnedMutable opcodes
-    // 0x140-0x155): Load pushes via `push_raw_u64` with the native value
-    // sign- or zero-extended into the 8-byte stack slot. Store pops via
-    // `pop_raw_u64` and reinterprets the low bits as the declared type.
+    // 0x140-0x155): Load pushes via `push_kinded(bits, NativeKind::<Kind>)`
+    // with the native value sign- or zero-extended into the 8-byte stack
+    // slot. Store pops via `pop_kinded() -> (bits, NativeKind::<Kind>)`
+    // and reinterprets the low bits as the declared type. The pre-Wave-6.5
+    // transitional stack shims (the W-series "borrowed slot with
+    // call-pattern invariants" defection-attractor) were deleted per
+    // ADR-006 §2.7.7; every push site sources kind locally from the
+    // opcode's payload-kind suffix.
     //
     // The legacy `LoadModuleBinding` (0x52) / `StoreModuleBinding` (0x53)
     // remain live for unproven-type module bindings; the typed opcodes
@@ -1197,14 +1239,17 @@ define_opcodes! {
     //   * `LoadModuleBinding<Kind>` / `StoreModuleBinding<Kind>` are only
     //     emitted when the module binding at index `idx` has a static
     //     type matching `<Kind>` and has only ever been written by typed
-    //     stores of the same kind (i.e. never aliased through a legacy
-    //     `StoreModuleBinding` that may install a heap-tagged ValueWord
-    //     subject to `vw_drop` semantics on subsequent legacy writes).
+    //     stores of the same kind (i.e. never aliased through the legacy
+    //     `StoreModuleBinding` polymorphic path that may install a
+    //     heap-tagged payload subject to refcount-dispatch semantics on
+    //     subsequent legacy writes).
     //   * For Ptr, refcount management lives in the IR — the load does
     //     not retain and the store does not release. Wave E+4 pairs
-    //     `LoadModuleBindingPtr` with `vw_clone` and `StoreModuleBindingPtr`
-    //     with `vw_drop` of the prior payload (matches the
-    //     c-stdlib-msgpack pattern from commit afb1651).
+    //     `LoadModuleBindingPtr` with `clone_with_kind` and
+    //     `StoreModuleBindingPtr` with `drop_with_kind` of the prior
+    //     payload (the post-§2.7.7 dispatch table; the deleted
+    //     `vw_clone` / `vw_drop` precursors used the now-removed
+    //     tag_bits dispatch internally and were retired with that path).
     //
     // Opcode codes 0x182..=0x197 (22 codes total). Ordering matches Wave
     // D: I64, U64, F64, I32, U32, I16, U16, I8, U8, Bool, Ptr — Loads
@@ -1249,10 +1294,11 @@ define_opcodes! {
     /// ModuleBinding(idx).
     LoadModuleBindingBool = 0x18B, Variable, pops: 0, pushes: 1;
     /// Load a `Ptr` from `module_bindings[idx]` — reads the 8-byte slot
-    /// as raw u64 (a ValueWord bit pattern carrying a NaN-boxed
-    /// Arc/Box pointer) and pushes. Refcount retain semantics for Ptr
-    /// payloads are the caller's responsibility — this opcode does NOT
-    /// `vw_clone`. Operand: ModuleBinding(idx).
+    /// as raw u64 (heap-Arc pointer bits paired with the binding's
+    /// `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.7) and pushes.
+    /// Refcount retain semantics for Ptr payloads are the caller's
+    /// responsibility — this opcode does NOT `clone_with_kind`.
+    /// Operand: ModuleBinding(idx).
     LoadModuleBindingPtr = 0x18C, Variable, pops: 0, pushes: 1;
 
     /// Store an `i64` to `module_bindings[idx]` — pops raw i64 bits,
@@ -1292,11 +1338,12 @@ define_opcodes! {
     /// non-zero bit pattern ⇒ true), writes the 8-byte slot as 0 or 1.
     /// Operand: ModuleBinding(idx).
     StoreModuleBindingBool = 0x196, Variable, pops: 1, pushes: 0;
-    /// Store a `Ptr` to `module_bindings[idx]` — pops raw 8-byte bits (a
-    /// ValueWord carrying a NaN-boxed Arc/Box pointer) and writes the
-    /// slot. The caller is responsible for refcount semantics — this
-    /// opcode does NOT release the previous payload nor retain the new
-    /// one. Operand: ModuleBinding(idx).
+    /// Store a `Ptr` to `module_bindings[idx]` — pops raw 8-byte bits
+    /// (heap-Arc pointer bits + `NativeKind::Ptr(HeapKind::*)` per
+    /// ADR-006 §2.7.7) and writes the slot. The caller is responsible
+    /// for refcount semantics — this opcode does NOT release the
+    /// previous payload nor retain the new one. Operand:
+    /// ModuleBinding(idx).
     StoreModuleBindingPtr = 0x197, Variable, pops: 1, pushes: 0;
 
     // ===== Wave E+3: per-FieldKind typed `ReturnValue<Kind>` opcodes =====
@@ -1343,8 +1390,9 @@ define_opcodes! {
     ReturnValueU8 = 0x1A0, Control, pops: 1, pushes: 0;
     /// Return with `bool` value — pops 1 raw bool, frame-cleans, pushes 1.
     ReturnValueBool = 0x1A1, Control, pops: 1, pushes: 0;
-    /// Return with `Ptr` value — pops 1 raw 8-byte ValueWord pointer
-    /// payload, frame-cleans, pushes 1. Ownership transfer is by raw
+    /// Return with `Ptr` value — pops 1 raw 8-byte heap-Arc pointer
+    /// payload (paired with `NativeKind::Ptr(HeapKind::*)` per ADR-006
+    /// §2.7.7), frame-cleans, pushes 1. Ownership transfer is by raw
     /// bit-level pass-through; the handler does NOT retain or release.
     ReturnValuePtr = 0x1A2, Control, pops: 1, pushes: 0;
 
@@ -1353,16 +1401,22 @@ define_opcodes! {
     // These are the *outer-scope* counterpart to A.1B's capture-side
     // `LoadSharedCapture` / `StoreSharedCapture`. A.1B handles reads and
     // writes seen from *inside* a nested closure. A.1C handles the
-    // owning-frame side of the same `Arc<parking_lot::Mutex<ValueWord>>`
+    // owning-frame side of the same `Arc<parking_lot::Mutex<SharedCell>>`
     // cell: allocating it when the `var` binding is introduced, reading
     // and writing it from code executing in the declaring frame, and
-    // releasing the Arc strong share at scope exit.
+    // releasing the Arc strong share at scope exit. The `SharedCell`
+    // payload carries an inner-payload `NativeKind` per ADR-006 §2.7.8
+    // / Q10 (the cell-storage parallel-kind extension); the deleted
+    // dynamic-tag word that the cell historically held was retired with
+    // the rest of the ValueWord layer.
     //
     // Operand layout: `Local(u16)` — indexes the declaring frame's
     // **stack slots** (not a capture-array index), i.e. the same
     // addressing mode as `LoadLocal` / `StoreLocal`. After
     // `AllocSharedLocal`, slot `slot` holds raw `*const SharedCell`
-    // pointer bits (NOT a NaN-tagged ValueWord). Neither `LoadLocal` nor
+    // pointer bits (NOT inline-scalar bits — the slot's
+    // `NativeKind::Ptr(HeapKind::SharedCell)` is the parallel-track
+    // discriminator). Neither `LoadLocal` nor
     // `StoreLocal` may be used on such a slot — only the four opcodes
     // below. The compiler in A.1C.2 is responsible for emitting the
     // right opcode per reference after a `var` binding is promoted to
@@ -1400,19 +1454,21 @@ define_opcodes! {
     // containing any of these four opcodes so they run on the
     // interpreter.
 
-    /// Pop the top-of-stack `ValueWord` as the initial value, allocate a
-    /// fresh `Arc<parking_lot::Mutex<ValueWord>>`, and store the
-    /// `Arc::into_raw` pointer bits into local slot `slot`. Operand:
-    /// Local(idx). Sole allocator for Shared locals.
+    /// Pop the top-of-stack value (raw bits + payload `NativeKind`),
+    /// allocate a fresh `Arc<parking_lot::Mutex<SharedCell>>`, and store
+    /// the `Arc::into_raw` pointer bits into local slot `slot`.
+    /// Operand: Local(idx). Sole allocator for Shared locals.
     AllocSharedLocal = 0x136, Variable, pops: 1, pushes: 0;
     /// Read the SharedCell pointer bits from local slot `slot`, take
-    /// the parking_lot mutex for a read, clone the inner ValueWord bits,
+    /// the parking_lot mutex for a read, clone the inner cell payload
+    /// (raw bits + the cell's inner `NativeKind` per ADR-006 §2.7.8),
     /// drop the guard, push onto the stack. Operand: Local(idx).
     LoadSharedLocal = 0x137, Variable, pops: 0, pushes: 1;
-    /// Pop a ValueWord from the stack, read the SharedCell pointer bits
-    /// from local slot `slot`, take the parking_lot mutex for a write,
-    /// overwrite the inner ValueWord bits, drop the guard. The slot's
-    /// pointer bits are NOT modified. Operand: Local(idx).
+    /// Pop a value (raw bits + payload `NativeKind`), read the
+    /// SharedCell pointer bits from local slot `slot`, take the
+    /// parking_lot mutex for a write, overwrite the inner cell
+    /// payload, drop the guard. The slot's pointer bits are NOT
+    /// modified. Operand: Local(idx).
     StoreSharedLocal = 0x138, Variable, pops: 1, pushes: 0;
     /// Read the SharedCell pointer bits from local slot `slot`,
     /// reconstruct `Arc::from_raw`, drop the Arc (one atomic
@@ -1426,11 +1482,13 @@ define_opcodes! {
     //
     // Parallel module-binding counterpart to A.1C.1's local-slot Shared
     // opcodes. Module `var` bindings captured mutably by closures are
-    // promoted into `Arc<parking_lot::Mutex<ValueWord>>` (same
-    // `SharedCell` type) stored in `module_bindings[idx]` as raw
-    // pointer bits. The addressing mode is `Operand::ModuleBinding(u16)`
-    // instead of `Operand::Local(u16)`; semantics otherwise mirror the
-    // local counterparts.
+    // promoted into `Arc<parking_lot::Mutex<SharedCell>>` (same
+    // `SharedCell` type — see ADR-006 §2.7.8 / Q10 for the cell-storage
+    // parallel-kind extension that replaces the deleted dynamic-tag
+    // word) stored in `module_bindings[idx]` as raw pointer bits. The
+    // addressing mode is `Operand::ModuleBinding(u16)` instead of
+    // `Operand::Local(u16)`; semantics otherwise mirror the local
+    // counterparts.
     //
     // Lifecycle:
     //   1. `AllocSharedModuleBinding { idx }` — sole allocator. Pops
@@ -1455,28 +1513,31 @@ define_opcodes! {
     //     fire on a slot whose bits were installed by
     //     `AllocSharedModuleBinding`. Plain `LoadModuleBinding` /
     //     `StoreModuleBinding` must not be emitted for a promoted
-    //     slot — they would read raw pointer bits as a ValueWord.
+    //     slot — they would treat the raw `*const SharedCell`
+    //     pointer bits as inline-scalar payload bits and dispatch
+    //     would mis-route via the parallel-kind track.
     //
     // A.1D / A.1E will lower these into Cranelift IR. Until then, the
     // JIT preflight gate rejects functions containing any of these
     // three opcodes so they run on the interpreter.
 
-    /// Pop the top-of-stack `ValueWord` as the initial value, allocate a
-    /// fresh `Arc<parking_lot::Mutex<ValueWord>>`, and store the
-    /// `Arc::into_raw` pointer bits into `module_bindings[idx]`.
-    /// Operand: ModuleBinding(idx). Sole allocator for Shared module
-    /// bindings.
+    /// Pop the top-of-stack value (raw bits + payload `NativeKind`),
+    /// allocate a fresh `Arc<parking_lot::Mutex<SharedCell>>`, and
+    /// store the `Arc::into_raw` pointer bits into
+    /// `module_bindings[idx]`. Operand: ModuleBinding(idx). Sole
+    /// allocator for Shared module bindings.
     AllocSharedModuleBinding = 0x13A, Variable, pops: 1, pushes: 0;
     /// Read the SharedCell pointer bits from `module_bindings[idx]`,
-    /// take the parking_lot mutex for a read, clone the inner ValueWord
-    /// bits, drop the guard, push onto the stack. Operand:
+    /// take the parking_lot mutex for a read, clone the inner cell
+    /// payload (raw bits + the cell's inner `NativeKind` per ADR-006
+    /// §2.7.8), drop the guard, push onto the stack. Operand:
     /// ModuleBinding(idx).
     LoadSharedModuleBinding = 0x13B, Variable, pops: 0, pushes: 1;
-    /// Pop a ValueWord from the stack, read the SharedCell pointer bits
-    /// from `module_bindings[idx]`, take the parking_lot mutex for a
-    /// write, overwrite the inner ValueWord bits, drop the guard. The
-    /// slot's pointer bits are NOT modified. Operand:
-    /// ModuleBinding(idx).
+    /// Pop a value (raw bits + payload `NativeKind`), read the
+    /// SharedCell pointer bits from `module_bindings[idx]`, take the
+    /// parking_lot mutex for a write, overwrite the inner cell
+    /// payload, drop the guard. The slot's pointer bits are NOT
+    /// modified. Operand: ModuleBinding(idx).
     StoreSharedModuleBinding = 0x13C, Variable, pops: 1, pushes: 0;
 
     // ===== Closure Spec Phase F: escape-fallback dispatch =====
@@ -1609,8 +1670,10 @@ define_opcodes! {
     // R5.1C adds compiler emission behind `SHAPE_V2_TYPED_BITWISE=1`.
     //
     // These opcodes are the int-typed siblings of the existing dynamic
-    // `BitAnd`/`BitOr`/`BitXor`/`BitShl`/`BitShr`/`BitNot` operations and
-    // begin closing out the bitwise slice of `exec_arithmetic_dynamic_fallback`.
+    // `BitAnd`/`BitOr`/`BitXor`/`BitShl`/`BitShr`/`BitNot` operations,
+    // closing out the bitwise slice that historically routed through
+    // `exec_arithmetic_dynamic_fallback` (the deleted dynamic-arith
+    // handler family).
     //
     // Operand: none (simple instruction). Binary variants pop 2 / push 1;
     // `BitNotInt` is unary: pop 1 / push 1. Shift semantics match Shape's
@@ -1638,12 +1701,13 @@ define_opcodes! {
 
     // ===== R5.5: Typed string+scalar concatenation =====
     //
-    // Typed siblings of the dynamic `AddDynamic` handler's string-coercion
-    // branch (`exec_arithmetic_dynamic_fallback` → `try_heap_arithmetic`,
-    // Case 2 "string + scalar"). Pops a heap-tagged string LHS and a
-    // raw-scalar RHS, pushes a newly-allocated string. The compiler emits
-    // these (R5.5) when `BinaryOp::Add` is proved to have a `string` LHS
-    // and an `int` / `number` / `bool` RHS, bypassing the dynamic fallback.
+    // Typed siblings of the legacy `AddDynamic` handler's string-coercion
+    // branch (the deleted `exec_arithmetic_dynamic_fallback` →
+    // `try_heap_arithmetic` Case 2 "string + scalar" path). Pops a heap
+    // string LHS and a raw-scalar RHS, pushes a newly-allocated string.
+    // The compiler emits these (R5.5) when `BinaryOp::Add` is proved to
+    // have a `string` LHS and an `int` / `number` / `bool` RHS, in lieu
+    // of the deleted dynamic fallback.
     //
     // Semantics match the pre-R5.5 fallback for int/number:
     //   * int → `format!("{}{}", lhs, rhs_i64)`
@@ -2797,8 +2861,9 @@ mod tests {
     }
 
     /// R5.5: neither trusted nor v2-typed (they still allocate a heap
-    /// `StringObj` through the regular ValueWord pipeline). Mirrors
-    /// `StringConcatTyped`'s classification.
+    /// `StringObj` through the regular polymorphic-allocate pipeline,
+    /// the post-§2.7.7 successor to the deleted ValueWord-backed alloc
+    /// path). Mirrors `StringConcatTyped`'s classification.
     #[test]
     fn r55_string_scalar_concat_opcodes_not_classified_as_trusted_or_v2() {
         for op in [

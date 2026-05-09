@@ -2,6 +2,12 @@
 
 Generated: 2026-04-09
 
+**STATUS (2026-05-09):** Historical analysis. The `ValueWord` carrier and the
+mandatory-shim API (`push_raw_u64` family) have been deleted as of phase-1b-vm
+Wave 6.5 substep-1 (commit `11efd9c`). Code samples and reference counts below
+describe the pre-deletion state for context; current code uses the kinded API
+per ADR-006 §2.7.7.
+
 ## Executive Summary
 
 Full removal of `ValueWord` (Stage 6 of the v2 runtime plan) is blocked by
@@ -116,7 +122,9 @@ Key sites:
 **What blocks replacement**: Nothing structural. This is mechanical work: replace
 `pop_vw() -> ValueWord -> .as_i64()` with `pop_raw_i64()` and
 `push_vw(ValueWord::from_i64(x))` with `push_raw_i64(x)`. The raw stack ops
-already exist (`push_raw_f64`, `push_raw_i64`, `push_raw_u64`, `pop_raw_u64`).
+existed pre-substep-1 (`push_raw_f64`, `push_raw_i64`, `push_raw_u64`,
+`pop_raw_u64` — all deleted by Wave 6.5 substep-1, commit `11efd9c`; replaced
+by the kinded API per ADR-006 §2.7.7).
 
 ### (b) Needs typed opcode first
 

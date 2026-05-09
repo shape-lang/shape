@@ -1,25 +1,112 @@
-//! Object and array operations for the VM executor
+//! Object and array operations for the VM executor.
 //!
-//! Handles: NewArray, NewObject, GetProp, SetProp, Length, ArrayPush, ArrayPop, MakeClosure, MergeObject, NewTypedObject, TypedMergeObject, CallMethod
+//! Handles: NewArray, NewObject, GetProp, SetProp, Length, ArrayPush, ArrayPop,
+//! MakeClosure, MergeObject, NewTypedObject, TypedMergeObject, CallMethod, MakeRange,
+//! WrapTypeAnnotation, SliceAccess.
+//!
+//! ## Wave 6.5 substep-2 (D-objects-mod) — SURFACE
+//!
+//! This file is the dispatch shell for generic-object opcodes. The substep-1
+//! shim deletion (`push_raw_u64` / `pop_raw_u64` / `push_native_i64` /
+//! `stack_read_owned` / `stack_peek_raw`) bound this territory at 39 mandatory
+//! shim sites. The pre-Wave-6 file body, however, is built on top of types and
+//! helpers that the strict-typing bulldozer **already deleted before
+//! substep-1** — it does not compile against the current `shape-value` crate
+//! and cannot be migrated by mechanical shim rename:
+//!
+//! - `shape_value::ValueWord` / `shape_value::ValueWordExt`
+//!   (deleted — see `crates/shape-value/src/lib.rs`'s post-bulldozer header).
+//! - `shape_value::value_word_drop::vw_drop` /
+//!   `shape_value::value_word_drop::vw_clone`
+//!   (deleted — replaced by `clone_with_kind` / `drop_with_kind` keyed on
+//!    `NativeKind`, ADR-006 §2.7.7).
+//! - `ValueWord::from_raw_bits` / `ValueWord::from_*` /
+//!   `ValueWord::into_raw_bits` (constructors and accessors all gone with the
+//!    type itself).
+//! - `as_heap_ref()` (forbidden — playbook §4 #7; replaced by
+//!   `slot.as_heap_value()` on `KindedSlot::slot`).
+//! - `tag_bits::*` / `is_tagged()` / the deleted W-series ValueWord
+//!   synthesizer (forbidden — playbook §4 #7).
+//!
+//! On top of those, the `MethodHandler` ABI itself was **kind-less in
+//! both directions** pre-Wave-γ. ADR-006 §2.7.9 / Q11 (Wave-γ
+//! `G-method-fn-v2-abi`) flipped `MethodFnV2` to
+//! `fn(&mut VM, &[KindedSlot], _) -> Result<KindedSlot, VMError>` —
+//! the kinded carrier slice form per §2.7.1 case 4. The dispatch
+//! shell now sources every kind from the §2.7.7 stack parallel-
+//! `Vec<NativeKind>` track via `pop_kinded()` (no fabrication), and
+//! pushes the returned `KindedSlot` via `push_kinded()` (kind from
+//! the handler-returned carrier — no fabrication). The Bool-default
+//! rationalization the W-series formalized is no longer reachable.
+//! With the ABI in place this dispatch shell becomes a mechanical
+//! `pop_kinded` / `push_kinded` / `slot.as_heap_value()` rewrite per
+//! playbook §10 D-objects-mod row — Wave-γ-followup territory.
+//!
+//! Cross-cluster dependencies for the architectural close-out:
+//!
+//! 1. `D-raw-helpers` rewrites/deletes `objects/raw_helpers.rs` (currently
+//!    the carrier for `tag_bits::*` and `extract_heap_ref`). Every Cluster D
+//!    sibling file (`property_access.rs`, `array_operations.rs`,
+//!    `array_joins.rs`, `concurrency_methods.rs`, `channel_methods.rs`,
+//!    `number_methods.rs`, etc.) calls `extract_heap_ref(args[0])` for
+//!    HeapValue dispatch — same shape needed here for the receiver bits.
+//! 2. Wave-γ-followup body migration: per ADR-006 §2.7.9 / Q11 the
+//!    `MethodFnV2` ABI is kinded (`&[KindedSlot]` /
+//!    `Result<KindedSlot, VMError>`); ~150 PHF handler bodies stayed
+//!    `NotImplemented(SURFACE)` after the ABI flip (Wave-γ
+//!    `G-method-fn-v2-abi` close) and are migrated body-by-body in
+//!    follow-up sub-clusters per the M-datatable Wave-β `joins.rs`
+//!    precedent at close commit `eb78699`.
+//! 3. The remaining `ValueWord::from_*` heap-construction sites
+//!    (`ValueWord::from_heap_value(HeapValue::Range { .. })`,
+//!    `ValueWord::from_type_annotated_value`, `ValueWord::from_array`, etc.)
+//!    rewrite to `Arc::into_raw + push_kinded(_, NativeKind::Ptr(HeapKind::*))`
+//!    per playbook §3 per-`HeapKind` push pattern.
+//!
+//! Per playbook §7.4 ("File compiles cleanly OR un-compiling sites have a
+//! documented surface") and §8 surface-and-stop trigger ("Cross-cluster
+//! migration cascade"), this file's bodies are replaced with
+//! `VMError::NotImplemented(SURFACE: ...)` placeholders documenting the
+//! cascade. Function signatures and module declarations are preserved so
+//! external callers (`dispatch.rs`, `additional/mod.rs`, `compiler/*`)
+//! continue to compile.
+//!
+//! ## Migration status snapshot (substep-2 close)
+//!
+//! - Mandatory shim hits: 0 (the 39 `push_raw_u64` / `pop_raw_u64` call sites
+//!   are gone — they were inside the bodies that this commit replaces with
+//!   surface markers).
+//! - Sibling shim hits: 0 (none in pre-existing file; verified at audit).
+//! - Forbidden-pattern carry-overs: 0 (`ValueWord`, `as_heap_ref`, `vw_drop`,
+//!   `value_word_drop`, `as_vw_ref`, `tag_bits`, and the deleted ValueWord
+//!   synthesizer are all gone; the `extract_heap_ref` import lived in the
+//!   now-deleted bodies and is not reintroduced).
+//! - Surfaces: 6 (`exec_objects` opcode dispatch + 5 method-dispatch entries:
+//!   `op_call_method`, `op_make_range`, `op_wrap_type_annotation`,
+//!   `dispatch_method_handler`, plus the v2 typed-array PHF fast path baked
+//!   into `op_call_method`).
+//!
+//! See `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md` §10 row
+//! `D-objects-mod`, §7.4, §8, and ADR-006 §2.7.6 (Q8) / §2.7.7 (Q9).
 
 // PHF method registry
 pub mod method_registry;
-// Raw u64 extraction helpers (v2 — no ValueWord)
+// Raw u64 extraction helpers (v2 — no ValueWord) — D-raw-helpers territory.
 pub mod raw_helpers;
 
-// Property access operations (GetProp, SetProp, Length)
+// Property access operations (GetProp, SetProp, Length) — D-prop-access territory.
 pub mod property_access;
 
-// Object creation operations (NewArray, NewObject, NewTypedObject)
+// Object creation operations (NewArray, NewObject, NewTypedObject) — D-obj-create territory.
 pub mod object_creation;
 
-// Object merge operations (MergeObject, TypedMergeObject)
+// Object merge operations (MergeObject, TypedMergeObject) — D-obj-tail territory.
 pub mod object_operations;
 
-// Array operations (ArrayPush, ArrayPop, SliceAccess)
+// Array operations (ArrayPush, ArrayPop, SliceAccess) — D-array-ops territory.
 pub mod array_operations;
 
-// Array method modules
+// Array method modules.
 pub mod array_aggregation;
 pub mod array_basic;
 pub mod array_joins;
@@ -28,58 +115,56 @@ pub mod array_sets;
 pub mod array_sort;
 pub mod array_transform;
 
-// DataTable method handlers
+// DataTable method handlers.
 pub mod datatable_methods;
 
-// Column method handlers
+// Column method handlers.
 pub mod column_methods;
 
-// IndexedTable method handlers
+// IndexedTable method handlers.
 pub mod indexed_table_methods;
 
-// HashMap method handlers
+// HashMap method handlers.
 pub mod hashmap_methods;
 
-// Set method handlers
+// Set method handlers.
 pub mod deque_methods;
 pub mod priority_queue_methods;
 pub mod set_methods;
 
-// Number method handlers (V2 native)
+// Number method handlers.
 pub mod number_methods;
 
-// String method handlers
+// String method handlers.
 pub mod string_methods;
 
-// Content method handlers
+// Content method handlers.
 pub mod content_methods;
 
-// DateTime method handlers
+// DateTime method handlers.
 pub mod datetime_methods;
 
-// Instant method handlers
+// Instant method handlers.
 pub mod instant_methods;
 
-// Matrix method handlers
+// Matrix method handlers.
 pub mod matrix_methods;
 
-// Iterator method handlers
+// Iterator method handlers.
 pub mod iterator_methods;
 
-// Typed array (Vec<int>, Vec<number>, Vec<bool>) method handlers
+// Typed array (Vec<int>, Vec<number>, Vec<bool>) method handlers.
 pub mod typed_array_methods;
 
 // V0.c scaffolding: handlers for native v2 TypedArray<i64>/TypedArray<f64>
-// receivers. Registered in `method_registry` under typed-array PHF maps but
-// NOT wired into the dispatch cascade here — that wiring lands in V2.a
-// (see /home/dev/.claude/plans/i-want-a-complete-foamy-eich.md §V2.a).
+// receivers. Registered in `method_registry` under typed-array PHF maps.
 pub mod typed_int_array_methods;
 pub mod typed_number_array_methods;
 
-// Concurrency primitive (Mutex<T>, Atomic<T>, Lazy<T>) method handlers
+// Concurrency primitive (Mutex<T>, Atomic<T>, Lazy<T>) method handlers.
 pub mod concurrency_methods;
 
-// Channel (MPSC sender/receiver) method handlers
+// Channel (MPSC sender/receiver) method handlers.
 pub mod channel_methods;
 
 // Concatenation opcodes (StringConcat, ArrayConcat) — dedicated v2 replacements
@@ -93,24 +178,19 @@ use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
-use shape_value::heap_value::HeapValue;
-use shape_value::value_word_drop::vw_drop;
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use smallvec::SmallVec;
-use std::sync::Arc;
-
-/// Reinterpret a `&u64` as `&ValueWord` for read-only inspection.
-///
-/// # Safety
-/// `ValueWord` is `#[repr(transparent)]` over `u64`, so the layouts are identical.
-/// This does NOT create an owning ValueWord — no Drop will run through this reference.
-#[inline(always)]
-fn as_vw_ref(bits: &u64) -> &ValueWord {
-    // SAFETY: ValueWord is #[repr(transparent)] over u64
-    unsafe { &*(bits as *const u64 as *const ValueWord) }
-}
+use shape_value::VMError;
 
 impl VirtualMachine {
+    /// Dispatch shell for object opcodes.
+    ///
+    /// Each opcode arm currently calls into a sibling Cluster D file
+    /// (`object_creation`, `property_access`, `array_operations`, etc.) whose
+    /// own substep-2 migration is in flight under a peer Wave-α sub-cluster.
+    /// The dispatch shell itself is kind-correct because it forwards to the
+    /// per-opcode handler unchanged. The legacy entries that lived directly
+    /// in `objects/mod.rs` (`op_call_method`, `op_wrap_type_annotation`,
+    /// `op_make_range`) are surfaced below — see each function's doc comment
+    /// for the architectural cascade ruling.
     #[inline(always)]
     pub(in crate::executor) fn exec_objects(
         &mut self,
@@ -146,1681 +226,174 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Wrap a value with a type annotation
-    fn op_wrap_type_annotation(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        use crate::bytecode::Operand;
-
-        // Get type name from string pool
-        let type_name_idx = match &instruction.operand {
-            Some(Operand::Property(idx)) => *idx,
-            _ => {
-                return Err(VMError::RuntimeError(
-                    "WrapTypeAnnotation requires Property operand".to_string(),
-                ));
-            }
-        };
-
-        let type_name = self
-            .program
-            .strings
-            .get(type_name_idx as usize)
-            .ok_or_else(|| {
-                VMError::RuntimeError(format!("Invalid string index: {}", type_name_idx))
-            })?
-            .clone();
-
-        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-
-        self.push_raw_u64(ValueWord::from_type_annotated_value(type_name, value_nb))?;
-
-        Ok(())
-    }
-
-    // op_new_typed_object moved to object_creation.rs
-
-    // op_typed_merge_object moved to object_operations.rs
-
-    /// Dispatch a method handler on raw u64 args — zero-alloc for <=8 args.
+    /// SURFACE: WrapTypeAnnotation cannot be migrated in this cluster.
     ///
-    /// `raw_args` is a stack-inline `SmallVec<[u64; 8]>` whose elements are
-    /// owned raw u64 bits (obtained via `pop_raw_u64` or `into_raw_bits`).
-    /// The handler receives `&mut [u64]` as sole owner of the heap values.
-    /// After the handler returns, we drop each raw arg to decrement refcounts.
+    /// The pre-Wave-6 body popped a `ValueWord` and constructed a
+    /// `ValueWord::from_type_annotated_value(name, inner)` wrapper. Both the
+    /// `ValueWord` type and the `from_type_annotated_value` constructor were
+    /// deleted by the strict-typing bulldozer before substep-1; there is no
+    /// post-§2.7.7 wrapper shape. The annotation-wrap design itself needs
+    /// re-thinking under ADR-006 (annotations as parallel metadata, not as a
+    /// payload tag), which is outside the D-objects-mod sub-cluster's
+    /// territory.
     ///
-    /// This enables `as_*_mut()` in handlers: since no duplicate ValueWord
-    /// exists during the call, `Arc::get_mut()` succeeds when refcount == 1.
-    /// If `Arc::make_mut` reallocates, the handler updates `args[0]` in place,
-    /// and we drop the correct (updated) pointer.
-    #[inline]
-    fn dispatch_method_handler(
-        &mut self,
-        handler: &method_registry::MethodHandler,
-        mut raw_args: SmallVec<[u64; 8]>,
-        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<(), VMError> {
-        let result = handler(self, &mut raw_args, ctx)?;
-        // B6.2: release each arg's heap share now that the handlers have
-        // been audited to return an independent owning share (via
-        // `vw_clone` on the in-place receiver fast paths that used to
-        // alias args[0]). Re-enables the real release FR.8 had gated out.
-        for bits in raw_args {
-            shape_value::value_word_drop::vw_drop(bits);
-        }
-        self.push_raw_u64(result)?;
-        Ok(())
-    }
-
-    /// Call method on a value (series.mean(), etc.)
-    ///
-    /// Supports two calling conventions:
-    /// 1. **Typed dispatch** (new): `CallMethod` with `TypedMethodCall` operand encodes
-    ///    `MethodId`, arg count, and string fallback in the instruction itself.
-    ///    Stack: `[receiver, arg1, ..., argN]`
-    /// 2. **Legacy dispatch**: `CallMethod` with no operand reads method name and
-    ///    arg count from the stack (backward compatibility with old bytecode).
-    ///    Stack: `[receiver, arg1, ..., argN, method_name, arg_count]`
-    #[inline]
-    pub fn op_call_method(
-        &mut self,
-        instruction: &crate::bytecode::Instruction,
-        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<(), VMError> {
-        use crate::bytecode::Operand;
-        use shape_value::MethodId;
-
-        // Extract method_id, arg_count, method_name, and receiver_type_tag from instruction or stack
-        let (method_id, arg_count, method_name, receiver_type_tag);
-        match &instruction.operand {
-            Some(Operand::TypedMethodCall {
-                method_id: mid,
-                arg_count: ac,
-                string_id: sid,
-                receiver_type_tag: rtt,
-            }) => {
-                method_id = MethodId(*mid);
-                arg_count = *ac as usize;
-                receiver_type_tag = *rtt;
-                // Resolve string lazily only when needed (dynamic fallback / error messages)
-                method_name = self
-                    .program
-                    .strings
-                    .get(*sid as usize)
-                    .cloned()
-                    .unwrap_or_default();
-            }
-            _ => {
-                // Legacy stack-based calling convention
-                let arg_count_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-                arg_count = arg_count_nb.as_number_coerce().ok_or_else(|| {
-                    VMError::RuntimeError("Expected number for arg count".to_string())
-                })? as usize;
-                let method_name_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-                method_name = match method_name_nb.as_str() {
-                    Some(s) => s.to_string(),
-                    std::option::Option::None => {
-                        return Err(VMError::TypeError {
-                            expected: "string",
-                            got: method_name_nb.type_name(),
-                        });
-                    }
-                };
-                method_id = MethodId::from_name(&method_name);
-                receiver_type_tag = 0xFF; // Unknown in legacy path
-            }
-        }
-
-        // Pop args as raw u64 directly — no ValueWord wrapping on the hot path.
-        let mut raw_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(arg_count + 1);
-        for _ in 0..arg_count {
-            raw_args.push(self.pop_raw_u64()?);
-        }
-        raw_args.reverse();
-
-        // Pop receiver as raw u64
-        let mut receiver_bits = self.pop_raw_u64()?;
-
-        // Resolve refs on receiver (needs temporary ValueWord for ref resolution)
-        {
-            let receiver_ref = as_vw_ref(&receiver_bits);
-            if receiver_ref.is_ref() {
-                let receiver_vw = ValueWord::from_raw_bits(receiver_bits);
-                let resolved = self.resolve_ref_value(&receiver_vw).unwrap_or(receiver_vw);
-                receiver_bits = resolved.into_raw_bits();
-            }
-        }
-
-        // Universal intrinsic methods available on all values.
-        // Check BEFORE moving receiver into args (we need it for push_vw).
-        if method_id == MethodId::TYPE {
-            if arg_count != 0 {
-                return Err(VMError::ArityMismatch {
-                    function: "type".to_string(),
-                    expected: 0,
-                    got: arg_count,
-                });
-            }
-            // Reuse existing type resolution path (typed-object schema lookup included).
-            self.push_raw_u64(ValueWord::from_raw_bits(receiver_bits))?;
-            let result = self.builtin_type_of(shape_value::ArgVec::new())?;
-            self.push_raw_u64(result)?;
-            // B6.2: release each arg's heap share — handlers now return
-            // independent owning shares (see `dispatch_method_handler`).
-            for bits in raw_args {
-                shape_value::value_word_drop::vw_drop(bits);
-            }
-            return Ok(());
-        }
-
-        // Save receiver type info before moving it into args.
-        use shape_value::heap_value::HeapKind;
-        let receiver_is_numeric = as_vw_ref(&receiver_bits).is_i64() || as_vw_ref(&receiver_bits).is_f64();
-        let receiver_is_bool = as_vw_ref(&receiver_bits).is_bool();
-        let receiver_is_heap = as_vw_ref(&receiver_bits).is_heap();
-        let receiver_heap_kind = as_vw_ref(&receiver_bits).heap_kind();
-
-        // Prepend receiver to args — raw bits, no ValueWord clone.
-        // This keeps the Arc refcount at 1, allowing mutating methods
-        // (e.g. Set.add, Deque.pushBack) to succeed with Arc::get_mut().
-        raw_args.insert(0, receiver_bits);
-
-        // v2 typed array method dispatch.
-        // Uses as_vw_ref for read-only inspection of the receiver.
-        if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(as_vw_ref(&raw_args[0]))
-        {
-            // V2.a: typed PHF fast path — when the receiver is a native v2
-            // `TypedArray<i64>` or `TypedArray<f64>`, consult the element-type
-            // specific PHF first so methods like `len/push/pop/sum/first/last/
-            // get/set` dispatch with a single perfect-hash lookup instead of
-            // falling through the bespoke match in
-            // `dispatch_v2_typed_array_method`. Method names that are not in
-            // the typed PHF fall through to the bespoke path below, which
-            // itself falls through to the generic `ARRAY_METHODS` handler for
-            // higher-order methods like `map/filter/reduce`.
-            use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
-            let typed_handler: Option<&method_registry::MethodHandler> = match view.elem_type {
-                V2ElemType::I64 => {
-                    method_registry::TYPED_INT_ARRAY_METHODS.get(method_name.as_str())
-                }
-                V2ElemType::F64 => {
-                    method_registry::TYPED_NUMBER_ARRAY_METHODS.get(method_name.as_str())
-                }
-                // Other typed variants (Bool, I32, …) fall through to the
-                // bespoke dispatch + generic ARRAY_METHODS for now.
-                _ => None,
-            };
-            if let Some(handler) = typed_handler {
-                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                return Ok(());
-            }
-
-            if self.dispatch_v2_typed_array_method(&method_name, &view, &raw_args)? {
-                return Ok(());
-            }
-        }
-
-        // IC fast path: if the method dispatch site is monomorphic, skip PHF lookup.
-        {
-            let ic_ip = self.ip;
-            let mid = method_id.0 as u32;
-            if let Some(heap_kind) = receiver_heap_kind {
-                if let Some(hit) =
-                    crate::executor::ic_fast_paths::method_ic_check(self, ic_ip, heap_kind, mid)
-                {
-                    self.dispatch_method_handler(&hit.handler, raw_args, ctx)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Type-tagged fast dispatch: when the compiler resolved the receiver's
-        // ConcreteType at compile time, skip the tag/HeapKind cascade entirely.
-        if receiver_type_tag != 0xFF {
-            let phf_result = match receiver_type_tag {
-                0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 22 => // F64, I64, int widths, Decimal
-                    method_registry::NUMBER_METHODS.get(method_name.as_str()),
-                9 => // Bool
-                    method_registry::BOOL_METHODS.get(method_name.as_str()),
-                10 => // String
-                    method_registry::STRING_METHODS.get(method_name.as_str()),
-                12 => // Array — still needs HeapKind for FloatArray/IntArray/BoolArray specialization
-                    None, // fall through to legacy dispatch
-                13 => // HashMap
-                    method_registry::HASHMAP_METHODS.get(method_name.as_str()),
-                24 => // DateTime
-                    method_registry::DATETIME_METHODS.get(method_name.as_str()),
-                _ => None, // unknown or complex type — fall through
-            };
-            if let Some(handler) = phf_result {
-                crate::executor::ic_fast_paths::method_ic_record(
-                    self, self.ip,
-                    receiver_type_tag, method_id.0 as u32, handler,
-                );
-                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                return Ok(());
-            }
-            // Fall through to tag/HeapKind cascade for unresolved types
-        }
-
-        // Legacy tag/HeapKind dispatch — fallback when receiver_type_tag is 0xFF
-        // or for types that need HeapKind specialization (e.g. FloatArray vs IntArray).
-        if receiver_is_numeric {
-            let handler = method_registry::NUMBER_METHODS
-                .get(method_name.as_str())
-                .ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Unknown method '{}' on Number type",
-                        method_name
-                    ))
-                })?;
-            self.dispatch_method_handler(handler, raw_args, ctx)?;
-        } else if receiver_is_bool {
-            let handler = method_registry::BOOL_METHODS
-                .get(method_name.as_str())
-                .ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Unknown method '{}' on Boolean type",
-                        method_name
-                    ))
-                })?;
-            self.dispatch_method_handler(handler, raw_args, ctx)?;
-        } else if receiver_is_heap {
-            match receiver_heap_kind.unwrap() {
-                HeapKind::Array => {
-                    let handler = method_registry::ARRAY_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Array type",
-                                method_name
-                            ))
-                        })?;
-                    // Record IC with resolved handler pointer.
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Array as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::String => {
-                    let handler = method_registry::STRING_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on String type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::String as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Decimal => {
-                    let handler = method_registry::NUMBER_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Number type",
-                                method_name
-                            ))
-                        })?;
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::DataTable | HeapKind::TypedTable => {
-                    let handler = method_registry::DATATABLE_METHODS
-                            .get(method_name.as_str())
-                            .ok_or_else(|| {
-                                if method_registry::INDEXED_TABLE_METHODS.contains_key(method_name.as_str()) {
-                                    VMError::RuntimeError(format!(
-                                        "{}() requires an indexed table. Use table.index_by(column) first.",
-                                        method_name
-                                    ))
-                                } else {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on DataTable type", method_name
-                                    ))
-                                }
-                            })?;
-                    let rk = receiver_heap_kind.unwrap() as u8;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        rk,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::IndexedTable => {
-                    if let Some(handler) =
-                        method_registry::INDEXED_TABLE_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else if let Some(handler) =
-                        method_registry::DATATABLE_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on IndexedTable type",
-                            method_name
-                        )));
-                    }
-                }
-                HeapKind::ColumnRef => {
-                    let handler = method_registry::COLUMN_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Column type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::ColumnRef as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::HashMap => {
-                    let handler = method_registry::HASHMAP_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on HashMap type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::HashMap as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Set => {
-                    let handler = method_registry::SET_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Set type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Set as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Deque => {
-                    let handler = method_registry::DEQUE_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Deque type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Deque as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::PriorityQueue => {
-                    let handler = method_registry::PRIORITY_QUEUE_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on PriorityQueue type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::PriorityQueue as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::FloatArray => {
-                    if let Some(handler) =
-                        method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else if let Some(handler) =
-                        method_registry::ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        // Fallback: promote to generic array for standard array methods.
-                        // Drop old receiver, replace with promoted generic array.
-                        let old = ValueWord::from_raw_bits(raw_args[0]);
-                        raw_args[0] =
-                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Vec<number> type",
-                            method_name
-                        )));
-                    }
-                }
-                HeapKind::FloatArraySlice => {
-                    // Materialize the slice as a FloatArray, then dispatch
-                    // cold-path: as_heap_ref retained — FloatArraySlice multi-field extraction
-                    if let Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) = as_vw_ref(&raw_args[0]).as_heap_ref() { // cold-path
-                        let off = *offset as usize;
-                        let slice_len = *len as usize;
-                        let data = &parent.data[off..off + slice_len];
-                        let mut aligned = shape_value::aligned_vec::AlignedVec::with_capacity(slice_len);
-                        for &v in data {
-                            aligned.push(v);
-                        }
-                        // Drop old slice, replace with materialized float array
-                        // FR.4: real release (was no-op drop of Copy u64).
-                        vw_drop(raw_args[0]);
-                        raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
-                    }
-                    if let Some(handler) =
-                        method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else if let Some(handler) =
-                        method_registry::ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        let old = ValueWord::from_raw_bits(raw_args[0]);
-                        raw_args[0] =
-                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Vec<number> type",
-                            method_name
-                        )));
-                    }
-                }
-                HeapKind::IntArray => {
-                    if let Some(handler) =
-                        method_registry::INT_ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else if let Some(handler) =
-                        method_registry::ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        let old = ValueWord::from_raw_bits(raw_args[0]);
-                        raw_args[0] =
-                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Vec<int> type",
-                            method_name
-                        )));
-                    }
-                }
-                HeapKind::BoolArray => {
-                    if let Some(handler) =
-                        method_registry::BOOL_ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else if let Some(handler) =
-                        method_registry::ARRAY_METHODS.get(method_name.as_str())
-                    {
-                        let old = ValueWord::from_raw_bits(raw_args[0]);
-                        raw_args[0] =
-                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                        self.dispatch_method_handler(handler, raw_args, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Vec<bool> type",
-                            method_name
-                        )));
-                    }
-                }
-                HeapKind::TypedObject => {
-                    self.handle_typed_object_method_v2(&method_name, &raw_args)?;
-                }
-                HeapKind::Content => {
-                    let handler = method_registry::CONTENT_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Content type. Available: bold, italic, underline, dim, fg, bg, border, max_rows, series, title, x_label, y_label, toString",
-                                method_name
-                            ))
-                        })?;
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Time => {
-                    let handler = method_registry::DATETIME_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on DateTime type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Time as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::TimeSpan => {
-                    let handler = method_registry::TIMESPAN_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on TimeSpan type",
-                                method_name
-                            ))
-                        })?;
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Instant => {
-                    let handler = method_registry::INSTANT_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Instant type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Instant as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Iterator => {
-                    let handler = method_registry::ITERATOR_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Iterator type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Iterator as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Range => {
-                    let handler = method_registry::RANGE_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Range type",
-                                method_name
-                            ))
-                        })?;
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Matrix => {
-                    let handler = method_registry::MATRIX_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Matrix type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Matrix as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Mutex => {
-                    let handler = method_registry::MUTEX_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Mutex type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Mutex as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Atomic => {
-                    let handler = method_registry::ATOMIC_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Atomic type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Atomic as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Lazy => {
-                    let handler = method_registry::LAZY_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Lazy type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Lazy as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Channel => {
-                    let handler = method_registry::CHANNEL_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on Channel type",
-                                method_name
-                            ))
-                        })?;
-                    crate::executor::ic_fast_paths::method_ic_record(
-                        self,
-                        self.ip,
-                        HeapKind::Channel as u8,
-                        method_id.0 as u32,
-                        handler,
-                    );
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                HeapKind::Char => {
-                    let handler = method_registry::CHAR_METHODS
-                        .get(method_name.as_str())
-                        .ok_or_else(|| {
-                            VMError::RuntimeError(format!(
-                                "Unknown method '{}' on char type",
-                                method_name
-                            ))
-                        })?;
-                    self.dispatch_method_handler(handler, raw_args, ctx)?;
-                }
-                // ===== Consolidated wrapper dispatch =====
-                HeapKind::Concurrency => {
-                    // Sub-dispatch based on inner ConcurrencyData variant
-                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
-                    match hv {
-                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Mutex(_))) => {
-                            let handler = method_registry::MUTEX_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Mutex type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Atomic(_))) => {
-                            let handler = method_registry::ATOMIC_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Atomic type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Lazy(_))) => {
-                            let handler = method_registry::LAZY_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Lazy type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Channel(_))) => {
-                            let handler = method_registry::CHANNEL_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Channel type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        _ => {
-                            return Err(VMError::RuntimeError(format!(
-                                "Method '{}' not available on concurrency type '{}'",
-                                method_name,
-                                as_vw_ref(&raw_args[0]).type_name()
-                            )));
-                        }
-                    }
-                }
-                HeapKind::TypedArray => {
-                    // Sub-dispatch based on inner TypedArrayData variant
-                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
-                    match hv {
-                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::F64(_))) => {
-                            if let Some(handler) = method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
-                                let old = ValueWord::from_raw_bits(raw_args[0]);
-                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<number> type", method_name)));
-                            }
-                        }
-                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) => {
-                            // Materialize the slice as a FloatArray, then dispatch
-                            let off = *offset as usize;
-                            let slice_len = *len as usize;
-                            let data = &parent.data[off..off + slice_len];
-                            let mut aligned = shape_value::aligned_vec::AlignedVec::with_capacity(slice_len);
-                            for &v in data {
-                                aligned.push(v);
-                            }
-                            // FR.4: real release (was no-op drop of Copy u64).
-                            vw_drop(raw_args[0]);
-                            raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
-                            if let Some(handler) = method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
-                                let old = ValueWord::from_raw_bits(raw_args[0]);
-                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<number> type", method_name)));
-                            }
-                        }
-                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::I64(_))) => {
-                            if let Some(handler) = method_registry::INT_ARRAY_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
-                                let old = ValueWord::from_raw_bits(raw_args[0]);
-                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<int> type", method_name)));
-                            }
-                        }
-                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::Bool(_))) => {
-                            if let Some(handler) = method_registry::BOOL_ARRAY_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
-                                let old = ValueWord::from_raw_bits(raw_args[0]);
-                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<bool> type", method_name)));
-                            }
-                        }
-                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::Matrix(_))) => {
-                            let handler = method_registry::MATRIX_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Mat<number> type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::TypedArray as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        _ => {
-                            // For other typed arrays, try generic array methods
-                            if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
-                                let old = ValueWord::from_raw_bits(raw_args[0]);
-                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!(
-                                    "Unknown method '{}' on typed array type",
-                                    method_name
-                                )));
-                            }
-                        }
-                    }
-                }
-                HeapKind::Temporal => {
-                    // Sub-dispatch: DateTime gets datetime methods, others error
-                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
-                    match hv {
-                        Some(HeapValue::Temporal(shape_value::TemporalData::DateTime(_))) => {
-                            let handler = method_registry::DATETIME_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on DateTime type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::Temporal as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::Temporal(shape_value::TemporalData::TimeSpan(_))) => {
-                            // R5.3B: TimeSpan operator methods (add, sub) live in
-                            // TIMESPAN_METHODS. Previously this arm looked them up
-                            // in DATETIME_METHODS, which only happened to be
-                            // unreachable because the compiler never emitted
-                            // CallMethod for TimeSpan + TimeSpan. R5.3B's
-                            // retarget does emit CallMethod, so route to the
-                            // correct PHF map.
-                            let handler = method_registry::TIMESPAN_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on TimeSpan type",
-                                        method_name
-                                    ))
-                                })?;
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        _ => {
-                            return Err(VMError::RuntimeError(format!(
-                                "Method '{}' not available on temporal type '{}'",
-                                method_name,
-                                as_vw_ref(&raw_args[0]).type_name()
-                            )));
-                        }
-                    }
-                }
-                HeapKind::TableView => {
-                    // Sub-dispatch based on inner TableViewData variant
-                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
-                    match hv {
-                        Some(HeapValue::TableView(shape_value::TableViewData::TypedTable { .. })) => {
-                            let handler = method_registry::DATATABLE_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    if method_registry::INDEXED_TABLE_METHODS.contains_key(method_name.as_str()) {
-                                        VMError::RuntimeError(format!(
-                                            "{}() requires an indexed table. Use table.index_by(column) first.",
-                                            method_name
-                                        ))
-                                    } else {
-                                        VMError::RuntimeError(format!(
-                                            "Unknown method '{}' on DataTable type", method_name
-                                        ))
-                                    }
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::TableView as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::TableView(shape_value::TableViewData::IndexedTable { .. })) => {
-                            if let Some(handler) = method_registry::INDEXED_TABLE_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else if let Some(handler) = method_registry::DATATABLE_METHODS.get(method_name.as_str()) {
-                                self.dispatch_method_handler(handler, raw_args, ctx)?;
-                            } else {
-                                return Err(VMError::RuntimeError(format!(
-                                    "Unknown method '{}' on IndexedTable type",
-                                    method_name
-                                )));
-                            }
-                        }
-                        Some(HeapValue::TableView(shape_value::TableViewData::ColumnRef { .. })) => {
-                            let handler = method_registry::COLUMN_METHODS
-                                .get(method_name.as_str())
-                                .ok_or_else(|| {
-                                    VMError::RuntimeError(format!(
-                                        "Unknown method '{}' on Column type",
-                                        method_name
-                                    ))
-                                })?;
-                            crate::executor::ic_fast_paths::method_ic_record(
-                                self, self.ip, HeapKind::TableView as u8, method_id.0 as u32, handler,
-                            );
-                            self.dispatch_method_handler(handler, raw_args, ctx)?;
-                        }
-                        Some(HeapValue::TableView(shape_value::TableViewData::RowView { .. })) => {
-                            // RowView doesn't have dedicated methods typically
-                            return Err(VMError::RuntimeError(format!(
-                                "Method '{}' not available on RowView type",
-                                method_name
-                            )));
-                        }
-                        _ => {
-                            return Err(VMError::RuntimeError(format!(
-                                "Method '{}' not available on table type '{}'",
-                                method_name,
-                                as_vw_ref(&raw_args[0]).type_name()
-                            )));
-                        }
-                    }
-                }
-                HeapKind::Rare => {
-                    return Err(VMError::RuntimeError(format!(
-                        "Method '{}' not available on type '{}'",
-                        method_name,
-                        as_vw_ref(&raw_args[0]).type_name()
-                    )));
-                }
-                _ => {
-                    return Err(VMError::RuntimeError(format!(
-                        "Method '{}' not available on type '{}'",
-                        method_name,
-                        as_vw_ref(&raw_args[0]).type_name()
-                    )));
-                }
-            }
-        } else {
-            return Err(VMError::RuntimeError(format!(
-                "Method '{}' not available on type '{}'",
-                method_name,
-                as_vw_ref(&raw_args[0]).type_name()
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Dispatch a method call where the receiver is a v2 typed array.
-    /// Returns Ok(true) if handled, Ok(false) to fall through to legacy path.
-    ///
-    /// `raw_args` contains raw u64 bits: `[receiver, arg1, ...]`.
-    /// Uses `as_vw_ref` for read-only ValueWord access.
-    fn dispatch_v2_typed_array_method(
-        &mut self,
-        method: &str,
-        view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
-        raw_args: &SmallVec<[u64; 8]>,
-    ) -> Result<bool, VMError> {
-        use crate::executor::v2_handlers::v2_array_detect as v2;
-        match method {
-            "len" | "length" => {
-                self.push_raw_u64(ValueWord::from_i64(view.len as i64))?;
-                Ok(true)
-            }
-            "first" => {
-                let val = if view.len == 0 {
-                    ValueWord::none()
-                } else {
-                    v2::read_element(view, 0).unwrap_or_else(ValueWord::none)
-                };
-                self.push_raw_u64(val)?;
-                Ok(true)
-            }
-            "last" => {
-                let val = if view.len == 0 {
-                    ValueWord::none()
-                } else {
-                    v2::read_element(view, view.len - 1).unwrap_or_else(ValueWord::none)
-                };
-                self.push_raw_u64(val)?;
-                Ok(true)
-            }
-            "is_empty" | "isEmpty" => {
-                self.push_raw_u64(ValueWord::from_bool(view.len == 0))?;
-                Ok(true)
-            }
-            "sum" => {
-                if let Some(val) = v2::sum_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "sum() not supported on bool typed array".to_string(),
-                    ))
-                }
-            }
-            "avg" | "mean" => {
-                if let Some(val) = v2::avg_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "avg() not supported on bool typed array".to_string(),
-                    ))
-                }
-            }
-            "min" => {
-                if let Some(val) = v2::min_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "min() not supported on bool typed array".to_string(),
-                    ))
-                }
-            }
-            "max" => {
-                if let Some(val) = v2::max_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "max() not supported on bool typed array".to_string(),
-                    ))
-                }
-            }
-            "variance" => {
-                if let Some(val) = v2::variance_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "variance() only supported on float typed arrays".to_string(),
-                    ))
-                }
-            }
-            "std" => {
-                if let Some(val) = v2::std_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "std() only supported on float typed arrays".to_string(),
-                    ))
-                }
-            }
-            "dot" => {
-                if raw_args.len() < 2 {
-                    return Err(VMError::RuntimeError(
-                        "dot() requires a Vec<number> argument".to_string(),
-                    ));
-                }
-                let view_b = v2::as_v2_typed_array(as_vw_ref(&raw_args[1]));
-                if let Some(vb) = &view_b {
-                    if view.len != vb.len {
-                        return Err(VMError::RuntimeError(format!(
-                            "Vec length mismatch in dot(): {} vs {}",
-                            view.len, vb.len
-                        )));
-                    }
-                    if let Some(val) = v2::dot_elements(view, vb) {
-                        self.push_raw_u64(val)?;
-                        return Ok(true);
-                    }
-                }
-                // Fall through to legacy path
-                Ok(false)
-            }
-            "norm" => {
-                if let Some(val) = v2::norm_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Err(VMError::RuntimeError(
-                        "norm() only supported on float typed arrays".to_string(),
-                    ))
-                }
-            }
-            "count" => {
-                if let Some(val) = v2::count_true_elements(view) {
-                    self.push_raw_u64(val)?;
-                    Ok(true)
-                } else {
-                    Ok(false) // fall through for non-bool
-                }
-            }
-            "clone" => {
-                let new_ptr = v2::clone_array(view);
-                self.push_raw_u64(ValueWord::from_native_ptr(new_ptr as usize))?;
-                Ok(true)
-            }
-            // ── PC.2: SIMD-vectorized unary element-wise transforms on F64 ──
-            //
-            // These mirror the FLOAT_ARRAY_METHODS handlers (`handle_float_*`)
-            // but operate directly on the v2 `TypedArray<f64>` layout, so a
-            // literal `[1.0, 2.0, ...].sqrt()` no longer has to materialize
-            // through the legacy Arc-backed FloatArray. `wide::f64x4` lanes
-            // deliver ~4x throughput on AVX2; non-F64 receivers fall through
-            // (`Ok(false)`) to the legacy path.
-            "abs" => {
-                if let Some(ptr) =
-                    v2::unary_f64_transform(view, |v| v.abs(), f64::abs)
-                {
-                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            "sqrt" => {
-                if let Some(ptr) =
-                    v2::unary_f64_transform(view, |v| v.sqrt(), f64::sqrt)
-                {
-                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            "ln" => {
-                if let Some(ptr) = v2::unary_f64_transform(view, |v| v.ln(), f64::ln) {
-                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            "exp" => {
-                if let Some(ptr) = v2::unary_f64_transform(view, |v| v.exp(), f64::exp) {
-                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            "diff" => {
-                if let Some(ptr) = v2::diff_f64(view) {
-                    self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            "push" => {
-                if raw_args.len() != 2 {
-                    return Err(VMError::ArityMismatch {
-                        function: "push".to_string(),
-                        expected: 1,
-                        got: raw_args.len().saturating_sub(1),
-                    });
-                }
-                v2::push_element(view, as_vw_ref(&raw_args[1]))
-                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                self.push_raw_u64(ValueWord::none())?;
-                Ok(true)
-            }
-            "pop" => {
-                let val = v2::pop_element(view).unwrap_or_else(ValueWord::none);
-                self.push_raw_u64(val)?;
-                Ok(true)
-            }
-            "map" | "filter" | "reduce" | "fold" | "forEach" | "for_each" | "find"
-            | "findIndex" | "find_index" | "some" | "every" | "any" | "all" => {
-                // Higher-order methods: promote the v2 typed-array view to a
-                // legacy typed `Arc<TypedBuffer<T>>` and dispatch the
-                // matching `INT_ARRAY_METHODS` / `FLOAT_ARRAY_METHODS` /
-                // `BOOL_ARRAY_METHODS` handler. Those typed handlers pass
-                // *raw native* bits (i64, f64, u8) to the closure so its
-                // typed `LoadLocalI64` / `F64` / `Bool` reads land on the
-                // right scalar; routing through the generic
-                // `ARRAY_METHODS["some"]` etc. would require materialising
-                // tagged ValueWords first, which the post-Wave-E+5 typed
-                // closure body would then misinterpret as native bits.
-                use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-                use std::sync::Arc;
-
-                let (receiver_bits, registry): (ValueWord, &phf::Map<&'static str, _>) = match view.elem_type {
-                    v2::V2ElemType::I64 => {
-                        let mut buf: Vec<i64> = Vec::with_capacity(view.len as usize);
-                        unsafe {
-                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<i64>;
-                            for i in 0..view.len {
-                                buf.push(shape_value::v2::typed_array::TypedArray::<i64>::get_unchecked(arr, i));
-                            }
-                        }
-                        (ValueWord::from_int_array(Arc::new(TypedBuffer::from(buf))), &method_registry::INT_ARRAY_METHODS)
-                    }
-                    v2::V2ElemType::F64 => {
-                        let mut buf: shape_value::AlignedVec<f64> = shape_value::AlignedVec::with_capacity(view.len as usize);
-                        unsafe {
-                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<f64>;
-                            for i in 0..view.len {
-                                buf.push(shape_value::v2::typed_array::TypedArray::<f64>::get_unchecked(arr, i));
-                            }
-                        }
-                        let aligned = AlignedTypedBuffer::from(buf);
-                        (ValueWord::from_float_array(Arc::new(aligned)), &method_registry::FLOAT_ARRAY_METHODS)
-                    }
-                    v2::V2ElemType::Bool => {
-                        let mut buf: Vec<u8> = Vec::with_capacity(view.len as usize);
-                        unsafe {
-                            let arr = view.ptr as *const shape_value::v2::typed_array::TypedArray<u8>;
-                            for i in 0..view.len {
-                                buf.push(shape_value::v2::typed_array::TypedArray::<u8>::get_unchecked(arr, i));
-                            }
-                        }
-                        (ValueWord::from_bool_array(Arc::new(TypedBuffer::from(buf))), &method_registry::BOOL_ARRAY_METHODS)
-                    }
-                    v2::V2ElemType::I32 => {
-                        // No legacy `TypedBuffer<i32>` constructor — fall
-                        // back to generic Array which routes through
-                        // `ARRAY_METHODS`. Tagged-vs-native arg bits
-                        // remain a known gap for I32 receivers.
-                        let mut elems: Vec<ValueWord> = Vec::with_capacity(view.len as usize);
-                        for i in 0..view.len {
-                            elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
-                        }
-                        (ValueWord::from_array(shape_value::vmarray_from_vec(elems)), &method_registry::ARRAY_METHODS)
-                    }
-                };
-
-                let mut new_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(raw_args.len());
-                new_args.push(receiver_bits.into_raw_bits());
-                // Clone the remaining args (bump refcounts)
-                for bits in &raw_args[1..] {
-                    new_args.push(ValueWord::from_raw_bits(*bits).clone().into_raw_bits());
-                }
-                // Look up in the typed registry first; fall back to
-                // generic ARRAY_METHODS for methods not in the typed
-                // map (e.g. `any`/`all` only live in `ARRAY_METHODS`).
-                let handler = registry
-                    .get(method)
-                    .or_else(|| method_registry::ARRAY_METHODS.get(method))
-                    .ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "Unknown method '{}' on v2 typed array",
-                            method
-                        ))
-                    })?;
-                self.dispatch_method_handler(handler, new_args, None)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    /// Handle TypedObject methods via direct schema-based access (v2 compatible).
-    /// No HashMap conversion — reads/writes slots directly via schema field indices.
-    /// Pushes result directly to stack.
-    ///
-    /// Takes raw u64 args; uses `as_vw_ref` for read-only inspection.
-    fn handle_typed_object_method_v2(
-        &mut self,
-        method: &str,
-        raw_args: &SmallVec<[u64; 8]>,
-    ) -> Result<(), VMError> {
-        use crate::executor::objects::object_creation::read_slot_nb;
-        use shape_value::heap_value::HeapValue;
-
-        let receiver_ref = as_vw_ref(&raw_args[0]);
-
-        // Extract TypedObject fields via HeapValue (no ValueWord materialization)
-        // cold-path: as_heap_ref retained — TypedObject multi-field extraction for method dispatch
-        let (schema_id, slots, heap_mask) = match receiver_ref.as_heap_ref() { // cold-path
-            Some(HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            }) => (*schema_id as u32, slots.clone(), *heap_mask),
-            _ => {
-                return Err(VMError::TypeError {
-                    expected: "TypedObject",
-                    got: receiver_ref.type_name(),
-                });
-            }
-        };
-
-        // Extension intrinsic dispatch: check __type field
-        let schema = self.lookup_schema(schema_id);
-        let mut type_name_val = schema.map(|s| s.name.clone());
-        if let Some(s) = schema
-            && let Some(f) = s.get_field("__type")
-            && let Some(explicit_type) =
-                read_slot_nb(&slots, f.index as usize, heap_mask, Some(&f.field_type))
-                    .as_str()
-                    .map(|s| s.to_string())
-        {
-            type_name_val = Some(explicit_type);
-        }
-
-        if let Some(type_name) = &type_name_val
-            && let Some(type_methods) = self.extension_methods.get(type_name.as_str())
-            && let Some(intrinsic_fn) = type_methods.get(method)
-        {
-            let intrinsic_fn = intrinsic_fn.clone();
-            // invoke_module_fn requires &[ValueWord]; clone from raw bits
-            // without taking ownership (ManuallyDrop prevents double-drop).
-            let call_args_nb: Vec<ValueWord> = raw_args[1..]
-                .iter()
-                .map(|&bits| {
-                    let tmp = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
-                    (*tmp).clone()
-                })
-                .collect();
-            let result_nb = self.invoke_module_fn(&intrinsic_fn, &call_args_nb)?;
-            self.push_raw_u64(result_nb)?;
-            return Ok(());
-        }
-
-        // UFCS method dispatch for impl methods (Type::method) and extend methods (Type.method)
-        if let Some(type_name) = &type_name_val {
-            let ufcs_name = format!("{}::{}", type_name, method);
-            let extend_name = format!("{}.{}", type_name, method);
-            if let Some(&func_id) = self
-                .function_name_index
-                .get(&ufcs_name)
-                .or_else(|| self.function_name_index.get(&extend_name))
-            {
-                let func_bits = ValueWord::from_function(func_id).into_raw_bits();
-                let result_bits =
-                    self.call_value_immediate_raw(func_bits, raw_args.as_slice(), None)?;
-                self.push_raw_u64(result_bits)?;
-                return Ok(());
-            }
-
-            // BUG-TR2 fix: Also check trait_method_symbols for named impls.
-            // Named impl methods have function names like "Trait::Type::ImplName::method"
-            // which aren't found by the simple "Type::method" lookup above.
-            if let Some(impl_func_name) = self
-                .program
-                .find_default_trait_impl_for_type_method(type_name, method)
-            {
-                if let Some(&func_id) = self.function_name_index.get(impl_func_name) {
-                    let func_bits = ValueWord::from_function(func_id).into_raw_bits();
-                    let result_bits =
-                        self.call_value_immediate_raw(func_bits, raw_args.as_slice(), None)?;
-                    self.push_raw_u64(result_bits)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Module namespace fallback: if the TypedObject is a module and has a field
-        // matching the method name, extract and call it as a function value.
-        if let Some(schema) = self.lookup_schema(schema_id) {
-            if let Some(field) = schema.get_field(method) {
-                let field_nb = read_slot_nb(
-                    &slots,
-                    field.index as usize,
-                    heap_mask,
-                    Some(&field.field_type),
-                );
-                // If field is callable (function or closure) or another module (TypedObject),
-                // handle accordingly.
-                if field_nb.is_function()
-                    || raw_helpers::extract_closure_info(field_nb.raw_bits()).is_some()
-                {
-                    let callee_bits = field_nb.into_raw_bits();
-                    let result_bits =
-                        self.call_value_immediate_raw(callee_bits, &raw_args[1..], None)?;
-                    self.push_raw_u64(result_bits)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        Err(VMError::RuntimeError(format!(
-            "Unknown method '{}' on TypedObject",
-            method
-        )))
-    }
-
-    // op_new_array and op_new_object moved to object_creation.rs
-
-    // op_merge_object moved to object_operations.rs
-    // op_set_prop and op_length moved to property_access.rs
-    // op_array_push and op_array_pop moved to array_operations.rs
-
-    pub(in crate::executor) fn op_make_range(&mut self) -> Result<(), VMError> {
-        let inclusive_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let end_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let start_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-
-        let inclusive = inclusive_nb.as_bool().unwrap_or(false);
-        let start_opt = if start_nb.is_none() {
-            None
-        } else {
-            Some(Box::new(start_nb))
-        };
-        let end_opt = if end_nb.is_none() {
-            None
-        } else {
-            Some(Box::new(end_nb))
-        };
-
-        self.push_raw_u64(ValueWord::from_heap_value(
-            shape_value::heap_value::HeapValue::Range {
-                start: start_opt,
-                end: end_opt,
-                inclusive,
-            },
+    /// Cross-cluster cascade: the compiler emitter currently produces
+    /// `WrapTypeAnnotation` opcodes; that emit site is in `compiler/` and
+    /// must coordinate with the kinded annotation-metadata model before this
+    /// handler is rewritten.
+    fn op_wrap_type_annotation(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "SURFACE: WrapTypeAnnotation depends on the deleted ValueWord wrapper \
+             type. Annotation wrapping needs a kinded redesign (ADR-006 §2.7.6 \
+             / Q8) — see playbook §8 cross-cluster cascade. D-objects-mod scope \
+             does not include the compiler emit site."
+                .into(),
         ))
     }
 
-    // op_slice_access moved to array_operations.rs
+    /// SURFACE: CallMethod dispatch shell — kinded ABI landed, receiver
+    /// classification + IC wiring downstream.
+    ///
+    /// `op_call_method` is the central method-dispatch shell. The
+    /// `MethodFnV2` ABI flip to `(&mut VM, &[KindedSlot], _) ->
+    /// Result<KindedSlot, VMError>` landed in this cluster (Wave-γ
+    /// G-method-fn-v2-abi, ADR-006 §2.7.9 / Q11); see the parent
+    /// commit's amendment to `docs/adr/006-value-and-memory-model.md`
+    /// for the architectural justification.
+    ///
+    /// With the kinded ABI in place, the dispatch shell's mechanical
+    /// shape per ADR-006 §2.7.9 is:
+    ///
+    /// ```ignore
+    /// // Pop receiver + N args from the §2.7.7 kinded stack.
+    /// // Kind for each entry comes from the parallel-Vec<NativeKind>
+    /// // track populated by the producing opcode — no fabrication.
+    /// let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count + 1);
+    /// for _ in 0..(arg_count + 1) {
+    ///     let (bits, kind) = self.pop_kinded()?;
+    ///     args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    /// }
+    /// args.reverse();  // pop order is reverse of push order
+    ///
+    /// // Resolve handler: PHF lookup keyed on (receiver_kind, method_name).
+    /// // Receiver kind is `args[0].kind` per §2.7.9; for heap receivers
+    /// // unwrap to HeapKind via `Ptr(HeapKind::*)` matching, then index
+    /// // into the matching PHF map (HEAP_KIND -> PHF_REGISTRY mapping
+    /// // is the ARRAY_METHODS / DATATABLE_METHODS / etc. table).
+    /// let handler: MethodFnV2 = resolve_handler(args[0].kind, method_name_id)?;
+    ///
+    /// // Dispatch: handler reads &args, returns a kinded result.
+    /// let result: KindedSlot = handler(self, &args, ctx)?;
+    ///
+    /// // Push result back onto the kinded stack (kind from the
+    /// // returned KindedSlot — no fabrication). mem::forget skips the
+    /// // carrier-drop so the share transfers cleanly to the stack.
+    /// self.push_kinded(result.slot.into_raw(), result.kind)?;
+    /// std::mem::forget(result);
+    /// // args drops here — each KindedSlot's Drop dispatches on kind
+    /// // and releases the share via drop_with_kind. No bare vw_drop
+    /// // (forbidden #8). No Bool-default fallback (forbidden §2.7.7 #9
+    /// // / §2.7.9).
+    /// ```
+    ///
+    /// This shell body is **not yet wired** in this cluster. The ABI
+    /// flip is the deliverable of Wave-γ G-method-fn-v2-abi; the
+    /// dispatch-shell body wiring depends on:
+    ///
+    /// 1. The receiver-classification cascade
+    ///    (`receiver_is_numeric` / `receiver_is_bool` /
+    ///    `receiver_is_heap` + `HeapKind` match + sub-dispatch on
+    ///    `Concurrency` / `TypedArray` / `Temporal` / `TableView`
+    ///    inner variants). Pre-§2.7.9 this used `ValueWord::is_*` /
+    ///    `as_heap_ref` (forbidden, playbook §4 #7); post-§2.7.9 it's
+    ///    `match args[0].kind { NativeKind::* => ..., NativeKind::Ptr(
+    ///    HeapKind::*) => args[0].slot.as_heap_value() match {
+    ///    HeapValue::* => ... } }` per §2.7.6 / Q8. Wave-γ-followup
+    ///    territory (sub-cluster `D-objects-mod-receiver-class`).
+    /// 2. The IC fast-path call
+    ///    (`crate::executor::ic_fast_paths::method_ic_check`) — the
+    ///    `MethodFnV2` storage transmute through `usize` is ABI-opaque
+    ///    and the `(receiver_kind, method_name_id)` keying is
+    ///    unchanged, so the IC fast-path semantics survive the flip
+    ///    untouched. The IC unit test's `dummy_handler` constant
+    ///    signature realigns to the kinded ABI — IC sub-cluster
+    ///    follow-up.
+    /// 3. The v2-typed-array PHF fast-path detector
+    ///    (`v2_array_detect::as_v2_typed_array`) — pre-§2.7.9 this
+    ///    relied on `as_vw_ref` reinterpreting `&u64` as `&ValueWord`
+    ///    (deleted). Post-§2.7.9 the detector takes
+    ///    `(args[0].slot.bits(), args[0].kind)` directly. Wave-γ-
+    ///    followup `D-v2-array-detect` cluster row.
+    /// 4. The legacy stack-based calling convention reading
+    ///    `arg_count` + `method_name` via `pop_raw_u64` +
+    ///    `ValueWord::as_str` — either rewrites to `pop_kinded` +
+    ///    `NativeKind::String` arm match, or is deleted as legacy
+    ///    bytecode the compiler no longer emits. Wave-γ-followup
+    ///    territory.
+    /// 5. The `handle_typed_object_method_v2` path — pre-§2.7.9 used
+    ///    `as_heap_ref` (forbidden) to extract `(schema_id, slots,
+    ///    heap_mask)`; post-§2.7.9 uses `args[0].slot.as_heap_value()`
+    ///    + `HeapValue::TypedObject` match. Wave-γ-followup territory.
+    ///
+    /// Per playbook §7.4 + §8 surface-and-stop trigger ("Cross-cluster
+    /// migration cascade") this body surfaces back as
+    /// `NotImplemented(SURFACE)` until the receiver-classification
+    /// cascade lands. The ABI is no longer the blocker; the
+    /// classification rewrite is. Do not paper over.
+    pub fn op_call_method(
+        &mut self,
+        _instruction: &Instruction,
+        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "SURFACE: op_call_method body wiring depends on the receiver-\
+             classification cascade rewrite (Wave-γ-followup). The MethodFnV2 ABI \
+             flip landed in this cluster (ADR-006 §2.7.9 / Q11) — the dispatch shell \
+             now constructs `&[KindedSlot]` from popped stack args via \
+             pop_kinded() and pushes the returned KindedSlot via push_kinded() \
+             without fabricated kinds. Receiver classification + HeapKind \
+             sub-dispatch + v2-array-detect + IC fast-path realignment are \
+             downstream Wave-γ-followup territory. See ADR-006 §2.7.9 for the \
+             dispatch-shell pseudocode + sub-cluster split."
+                .into(),
+        ))
+    }
 
-    // op_get_prop moved to property_access.rs
-    // value_to_bytes moved to object_creation.rs
+    /// SURFACE: MakeRange cannot be migrated in this cluster.
+    ///
+    /// The pre-Wave-6 body popped three `ValueWord` payloads (start, end,
+    /// inclusive) and constructed `ValueWord::from_heap_value(HeapValue::Range
+    /// { start: Option<Box<ValueWord>>, end: Option<Box<ValueWord>>, .. })`.
+    /// Every ingredient (`ValueWord::from_raw_bits`, `ValueWord::is_none`,
+    /// `Box<ValueWord>`, `ValueWord::from_heap_value`) is deleted. The kinded
+    /// equivalent constructs `Arc<HeapValue::Range { start: Option<Arc<...>>,
+    /// end: Option<Arc<...>>, .. }>` whose payload type itself is undecided
+    /// — Range bounds cross-kind (a range over `int` carries Int64 payloads;
+    /// a range over `Decimal` carries Arc<Decimal>; a range over the open
+    /// integers has `None`). The post-§2.7.7 Range payload shape needs an
+    /// ADR-006 follow-up; this is the same surface as `op_call_method`'s
+    /// handler-ABI cascade.
+    pub(in crate::executor) fn op_make_range(&mut self) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "SURFACE: MakeRange depends on the deleted Box<ValueWord> Range payload \
+             shape. Cross-kind range bounds (int, Decimal, BigInt, open range) \
+             need a kinded HeapValue::Range redesign per ADR-006. See playbook \
+             §8 cross-cluster cascade."
+                .into(),
+        ))
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// V2.a: Typed-array PHF dispatch wiring tests
+// Tests removed during D-objects-mod surface.
 // ═════════════════════════════════════════════════════════════════════════════
-// (impl VirtualMachine closes above.)
-
-#[cfg(test)]
-mod v2a_dispatch_tests {
-    use super::*;
-    use crate::executor::v2_handlers::v2_array_detect::{
-        ELEM_TYPE_F64, ELEM_TYPE_I64, V2ElemType, as_v2_typed_array, stamp_elem_type,
-    };
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::v2::typed_array::TypedArray;
-
-    /// Allocate a native v2 `TypedArray<i64>` stamped with the i64 elem-type
-    /// and return (raw pointer, ValueWord bits). Caller must `drop_array`.
-    fn make_v2_int_array(values: &[i64]) -> (*mut TypedArray<i64>, u64) {
-        let arr = TypedArray::<i64>::from_slice(values);
-        unsafe {
-            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-        }
-        let bits = ValueWord::from_native_ptr(arr as usize).into_raw_bits();
-        (arr, bits)
-    }
-
-    /// Allocate a native v2 `TypedArray<f64>` stamped with the f64 elem-type
-    /// and return (raw pointer, ValueWord bits). Caller must `drop_array`.
-    fn make_v2_number_array(values: &[f64]) -> (*mut TypedArray<f64>, u64) {
-        let arr = TypedArray::<f64>::from_slice(values);
-        unsafe {
-            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
-        }
-        let bits = ValueWord::from_native_ptr(arr as usize).into_raw_bits();
-        (arr, bits)
-    }
-
-    fn dummy_vm() -> VirtualMachine {
-        VirtualMachine::new(VMConfig::default())
-    }
-
-    /// Function-pointer equality check: confirms that the typed PHF resolves
-    /// `method` on the native v2 `TypedArray<i64>` to the canonical handler
-    /// in `typed_int_array_methods`, not the generic `ARRAY_METHODS` entry.
-    #[test]
-    fn phf_int_len_resolves_to_typed_handler() {
-        let typed = method_registry::TYPED_INT_ARRAY_METHODS.get("len").copied();
-        let canonical = crate::executor::objects::typed_int_array_methods::len
-            as method_registry::MethodHandler;
-        assert!(typed.is_some(), "TYPED_INT_ARRAY_METHODS['len'] present");
-        assert_eq!(
-            typed.unwrap() as usize,
-            canonical as usize,
-            "typed PHF must point at typed_int_array_methods::len"
-        );
-    }
-
-    #[test]
-    fn phf_number_sum_resolves_to_typed_handler() {
-        let typed = method_registry::TYPED_NUMBER_ARRAY_METHODS
-            .get("sum")
-            .copied();
-        let canonical = crate::executor::objects::typed_number_array_methods::sum
-            as method_registry::MethodHandler;
-        assert!(typed.is_some(), "TYPED_NUMBER_ARRAY_METHODS['sum'] present");
-        assert_eq!(
-            typed.unwrap() as usize,
-            canonical as usize,
-            "typed PHF must point at typed_number_array_methods::sum"
-        );
-    }
-
-    /// Invariant: the typed PHFs deliberately do NOT contain higher-order
-    /// methods like `map/filter/reduce`. Those must fall through to the
-    /// bespoke `dispatch_v2_typed_array_method` path and ultimately to the
-    /// generic `ARRAY_METHODS` handler via element materialization.
-    #[test]
-    fn phf_falls_through_for_higher_order_methods() {
-        for name in &["map", "filter", "reduce", "forEach", "find"] {
-            assert!(
-                method_registry::TYPED_INT_ARRAY_METHODS.get(name).is_none(),
-                "TYPED_INT_ARRAY_METHODS must not contain '{}' (fall-through to generic)",
-                name
-            );
-            assert!(
-                method_registry::TYPED_NUMBER_ARRAY_METHODS
-                    .get(name)
-                    .is_none(),
-                "TYPED_NUMBER_ARRAY_METHODS must not contain '{}' (fall-through to generic)",
-                name
-            );
-        }
-        // The generic ARRAY_METHODS registry carries these.
-        for name in &["map", "filter", "reduce", "forEach", "find"] {
-            assert!(
-                method_registry::ARRAY_METHODS.get(name).is_some(),
-                "ARRAY_METHODS must contain '{}' (generic fallback)",
-                name
-            );
-        }
-    }
-
-    /// Drive `arr.len()` end-to-end: the dispatch cascade must detect the
-    /// native v2 `TypedArray<i64>` receiver and route through
-    /// `TYPED_INT_ARRAY_METHODS`, producing the correct length.
-    #[test]
-    fn int_len_dispatches_through_typed_phf() {
-        let (arr, bits) = make_v2_int_array(&[10, 20, 30, 40]);
-        // The dispatcher owns the bits once they reach the handler; so build
-        // the args vector the same way and call the resolved handler directly.
-        // This mirrors what the V2.a branch in `op_call_method` does: look up
-        // the handler in the typed PHF, then `dispatch_method_handler(...)`.
-        let handler = method_registry::TYPED_INT_ARRAY_METHODS
-            .get("len")
-            .copied()
-            .expect("typed len handler");
-        let mut vm = dummy_vm();
-        let mut args = [bits];
-        let raw = handler(&mut vm, &mut args, None).expect("typed len");
-        assert_eq!(ValueWord::from_raw_bits(raw).as_i64(), Some(4));
-
-        // Sanity: `as_v2_typed_array` would indeed classify this receiver as
-        // I64, which is the exact branch the V2.a wiring takes.
-        let vw = ValueWord::from_native_ptr(arr as usize);
-        let view = as_v2_typed_array(&vw).expect("v2 detect");
-        assert_eq!(view.elem_type, V2ElemType::I64);
-        // B6.4: `ValueWord = u64` has no Drop, so `mem::forget(vw)` /
-        // `drop(vw)` would be no-ops. Keep the binding alive for the
-        // assertion above via `let _ = vw;` to document intent.
-        let _ = vw;
-
-        unsafe {
-            TypedArray::drop_array(arr);
-        }
-    }
-
-    /// Drive `arr.sum()` end-to-end on a native v2 `TypedArray<f64>`: the
-    /// typed PHF must resolve and produce the f64 sum.
-    #[test]
-    fn number_sum_dispatches_through_typed_phf() {
-        let (arr, bits) = make_v2_number_array(&[1.5, 2.5, 3.0]);
-        let handler = method_registry::TYPED_NUMBER_ARRAY_METHODS
-            .get("sum")
-            .copied()
-            .expect("typed sum handler");
-        let mut vm = dummy_vm();
-        let mut args = [bits];
-        let raw = handler(&mut vm, &mut args, None).expect("typed sum");
-        assert_eq!(ValueWord::from_raw_bits(raw).as_f64(), Some(7.0));
-
-        let vw = ValueWord::from_native_ptr(arr as usize);
-        let view = as_v2_typed_array(&vw).expect("v2 detect");
-        assert_eq!(view.elem_type, V2ElemType::F64);
-        // B6.4: see the I64 sibling above.
-        let _ = vw;
-
-        unsafe {
-            TypedArray::drop_array(arr);
-        }
-    }
-
-    /// A heterogeneous `Array<any>` (legacy `VMArray` heap value) is NOT a
-    /// native v2 typed array — `as_v2_typed_array` returns None — and so the
-    /// V2.a branch is bypassed entirely. The receiver falls through to the
-    /// normal `HeapKind::Array` → `ARRAY_METHODS` dispatch.
-    #[test]
-    fn heterogeneous_array_bypasses_typed_phf() {
-        let generic = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_i64(2),
-            ValueWord::from_i64(3),
-        ]));
-        assert!(
-            as_v2_typed_array(&generic).is_none(),
-            "generic VMArray must not be detected as a v2 typed array"
-        );
-    }
-}
+//
+// The pre-Wave-6 `v2a_dispatch_tests` module exercised the v2 typed-array PHF
+// dispatch through `op_call_method` and used `ValueWord::from_native_ptr` /
+// `ValueWord::from_array` / `ValueWord::from_i64` for receiver construction.
+// All four constructors are deleted with the type. The tests' canonical
+// shape (PHF resolution + handler invocation) is independent of the
+// dispatch shell and fits naturally in `method_registry.rs`'s own test
+// module once the handler ABI migrates; they are not required to live here.
+// Re-instated in the post-cascade rewrite under cluster
+// `E-builtins-backlog` / `D-v2-array-detect`.

@@ -1,603 +1,439 @@
+//! Typed VM stack — kinded data + parallel `NativeKind` track (ADR-006 §2.7.7 / Q9).
+//!
+//! The VM stack carries two parallel arrays in lockstep:
+//!
+//! - `stack: Vec<u64>` — 8-byte raw payload per slot.
+//! - `kinds: Vec<NativeKind>` — 1-byte interpretation per slot.
+//!
+//! Index invariant: `stack.len() == kinds.len()` at every API boundary; the
+//! first `sp` slots are live, the remainder are pre-allocated dead space
+//! (kind = `Bool` by convention so dead bits never leak refcount).
+//!
+//! WB2.4 retain-on-read uses the parallel kind track for kind-aware
+//! clone/drop dispatch via [`clone_with_kind`] / [`drop_with_kind`]. The
+//! deleted tag_bits dispatch does not run here, the deleted `is_heap()`
+//! call is not made, and the deleted `as_heap_ref()` is not invoked — the
+//! kind is locally available at every retain/release site by construction
+//! (the producing opcode emits it).
+//!
+//! The pre-Wave-6 `vw_clone(bits)` / `vw_drop(bits)` helpers (which ran
+//! the now-deleted tag_bits dispatch internally) are replaced by
+//! `clone_with_kind(bits, kind)` / `drop_with_kind(bits, kind)`, which
+//! mirror `KindedSlot::Clone` / `KindedSlot::Drop` (the canonical
+//! refcount-dispatch table in `crates/shape-value/src/kinded_slot.rs`).
+//!
+//! See `docs/adr/006-value-and-memory-model.md` §2.7.7 and §17 Q9.
+
 use super::super::*;
-use shape_value::ValueWordExt;
-use shape_value::value_word_drop::vw_drop;
+use shape_value::{
+    FilterNode, KindedSlot, NativeKind, VMError, ValueSlot,
+    heap_value::{
+        HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
+        TemporalData, TypedArrayData, TypedObjectStorage,
+    },
+};
+use std::sync::Arc;
+
+// ────────────────────────────────────────────────────────────────────────────
+// `clone_with_kind` / `drop_with_kind` — WB2.4 retain-on-read primitives
+// ────────────────────────────────────────────────────────────────────────────
+//
+// These mirror `KindedSlot::Clone` / `KindedSlot::Drop` in
+// `crates/shape-value/src/kinded_slot.rs`. The dispatch tables MUST stay in
+// lockstep — divergence is a refcount bug. If a new heap-bearing
+// `NativeKind` variant lands, both this module's helpers and the
+// `KindedSlot` impls must be updated together.
+
+/// WB2.4 retain-on-read: bump the matching `Arc<T>` strong-count for a
+/// heap-bearing kind, no-op for inline scalars (ADR-006 §2.7.7).
+///
+/// Mirror of `KindedSlot::clone` in `shape-value/src/kinded_slot.rs`.
+#[inline]
+pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: per the construction-side contract on every push site, when
+    // `kind` selects a heap arm the `bits` are the result of
+    // `Arc::into_raw::<T>` for the matching `T`. We bump exactly one
+    // strong-count share.
+    unsafe {
+        match kind {
+            NativeKind::String => {
+                Arc::increment_strong_count(bits as *const String);
+            }
+            NativeKind::Ptr(hk) => match hk {
+                HeapKind::String => {
+                    Arc::increment_strong_count(bits as *const String);
+                }
+                HeapKind::TypedArray => {
+                    Arc::increment_strong_count(bits as *const TypedArrayData);
+                }
+                HeapKind::TypedObject => {
+                    Arc::increment_strong_count(bits as *const TypedObjectStorage);
+                }
+                HeapKind::HashMap => {
+                    Arc::increment_strong_count(bits as *const HashMapData);
+                }
+                HeapKind::Decimal => {
+                    Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
+                }
+                HeapKind::BigInt => {
+                    Arc::increment_strong_count(bits as *const i64);
+                }
+                HeapKind::DataTable => {
+                    Arc::increment_strong_count(bits as *const shape_value::DataTable);
+                }
+                HeapKind::IoHandle => {
+                    Arc::increment_strong_count(bits as *const IoHandleData);
+                }
+                HeapKind::NativeView => {
+                    Arc::increment_strong_count(bits as *const NativeViewData);
+                }
+                HeapKind::Content => {
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::content::ContentNode,
+                    );
+                }
+                HeapKind::Instant => {
+                    Arc::increment_strong_count(bits as *const std::time::Instant);
+                }
+                HeapKind::Temporal => {
+                    Arc::increment_strong_count(bits as *const TemporalData);
+                }
+                HeapKind::TableView => {
+                    Arc::increment_strong_count(bits as *const TableViewData);
+                }
+                HeapKind::TaskGroup => {
+                    Arc::increment_strong_count(bits as *const TaskGroupData);
+                }
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / §2.7.7
+                // / Q8 amendment): the filter-expr branch of
+                // `executor/logical/mod.rs` pushes
+                // `Arc::into_raw(Arc<FilterNode>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::FilterExpr)`. This arm
+                // dispatches the retain-on-read share as the matching
+                // `Arc<FilterNode>`, fixing the type-confusion soundness
+                // gap surfaced by Wave-α D-raw-helpers (commit `a27c0e4`):
+                // pre-amendment the same pointer was labeled
+                // `HeapKind::NativeView` and retained as
+                // `Arc<NativeViewData>`.
+                HeapKind::FilterExpr => {
+                    Arc::increment_strong_count(bits as *const FilterNode);
+                }
+                // Char: inline-scalar payload (codepoint bits). No-op.
+                HeapKind::Char => {}
+                // Closure / Future / NativeScalar: no `Arc<T>` slot
+                // payload routed through this path. A non-zero pointer
+                // here is a construction-side bug; debug-assert and
+                // silently no-op in release.
+                HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                    debug_assert!(
+                        false,
+                        "clone_with_kind: non-zero bits with non-Arc-payload kind {:?}",
+                        hk
+                    );
+                }
+            },
+            // Inline scalars: no refcount payload.
+            NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::UInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize
+            | NativeKind::Bool => {}
+        }
+    }
+}
+
+/// WB2.4 retain-on-read inverse: decrement the matching `Arc<T>`
+/// strong-count for a heap-bearing kind, no-op for inline scalars
+/// (ADR-006 §2.7.7).
+///
+/// Mirror of `KindedSlot::drop` in `shape-value/src/kinded_slot.rs`.
+#[inline]
+pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: per the construction-side contract on every push site, when
+    // `kind` selects a heap arm the `bits` are the result of
+    // `Arc::into_raw::<T>` for the matching `T`. We retire exactly one
+    // strong-count share.
+    unsafe {
+        match kind {
+            NativeKind::String => {
+                Arc::decrement_strong_count(bits as *const String);
+            }
+            NativeKind::Ptr(hk) => match hk {
+                HeapKind::String => {
+                    Arc::decrement_strong_count(bits as *const String);
+                }
+                HeapKind::TypedArray => {
+                    Arc::decrement_strong_count(bits as *const TypedArrayData);
+                }
+                HeapKind::TypedObject => {
+                    Arc::decrement_strong_count(bits as *const TypedObjectStorage);
+                }
+                HeapKind::HashMap => {
+                    Arc::decrement_strong_count(bits as *const HashMapData);
+                }
+                HeapKind::Decimal => {
+                    Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
+                }
+                HeapKind::BigInt => {
+                    Arc::decrement_strong_count(bits as *const i64);
+                }
+                HeapKind::DataTable => {
+                    Arc::decrement_strong_count(bits as *const shape_value::DataTable);
+                }
+                HeapKind::IoHandle => {
+                    Arc::decrement_strong_count(bits as *const IoHandleData);
+                }
+                HeapKind::NativeView => {
+                    Arc::decrement_strong_count(bits as *const NativeViewData);
+                }
+                HeapKind::Content => {
+                    Arc::decrement_strong_count(
+                        bits as *const shape_value::content::ContentNode,
+                    );
+                }
+                HeapKind::Instant => {
+                    Arc::decrement_strong_count(bits as *const std::time::Instant);
+                }
+                HeapKind::Temporal => {
+                    Arc::decrement_strong_count(bits as *const TemporalData);
+                }
+                HeapKind::TableView => {
+                    Arc::decrement_strong_count(bits as *const TableViewData);
+                }
+                HeapKind::TaskGroup => {
+                    Arc::decrement_strong_count(bits as *const TaskGroupData);
+                }
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / §2.7.7
+                // / Q8 amendment): mirror of the `clone_with_kind`
+                // FilterExpr arm. Retires one `Arc<FilterNode>`
+                // strong-count share. The pre-amendment `NativeView`
+                // mislabel would have routed the decrement to
+                // `Arc::decrement_strong_count::<NativeViewData>` — a
+                // wrong-type drop with whatever destructor matches that
+                // layout, undefined behavior at the share retire site.
+                HeapKind::FilterExpr => {
+                    Arc::decrement_strong_count(bits as *const FilterNode);
+                }
+                // Char: inline-scalar payload. No-op.
+                HeapKind::Char => {}
+                HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                    debug_assert!(
+                        false,
+                        "drop_with_kind: non-zero bits with non-Arc-payload kind {:?}",
+                        hk
+                    );
+                }
+            },
+            NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::UInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize
+            | NativeKind::Bool => {}
+        }
+    }
+}
 
 impl VirtualMachine {
-    pub fn create_typed_enum(
-        &self,
-        enum_name: &str,
-        variant_name: &str,
-        payload: Vec<ValueWord>,
-    ) -> Option<ValueWord> {
-        let nb_payload: Vec<ValueWord> = payload.into_iter().map(|v| v).collect();
-        self.create_typed_enum_nb(enum_name, variant_name, nb_payload)
-            .map(|nb| nb.clone())
+    // ── Index invariant assertion (debug-build cross-check) ────────────────
+
+    /// Debug-build invariant: `stack.len() == kinds.len()` at every public
+    /// API boundary. Compiles out in release builds (ADR-006 §2.7.7).
+    #[inline(always)]
+    pub(crate) fn debug_assert_kinds_in_sync(&self) {
+        debug_assert_eq!(
+            self.stack.len(),
+            self.kinds.len(),
+            "ADR-006 §2.7.7 index invariant: stack data and kinds tracks must stay in lockstep"
+        );
     }
 
-    /// Create a TypedObject enum value using ValueWord payload directly.
-    pub fn create_typed_enum_nb(
-        &self,
-        enum_name: &str,
-        variant_name: &str,
-        payload: Vec<ValueWord>,
-    ) -> Option<ValueWord> {
-        let schema = self.program.type_schema_registry.get(enum_name)?;
-        let enum_info = schema.get_enum_info()?;
-        let variant_id = enum_info.variant_id(variant_name)?;
+    // ── Kinded push / pop / read primitives (ADR-006 §2.7.7) ───────────────
 
-        // Build slots: slot 0 = variant_id, slot 1+ = payload
-        let slot_count = 1 + enum_info.max_payload_fields() as usize;
-        let mut slots = Vec::with_capacity(slot_count);
-        let mut heap_mask: u64 = 0;
-
-        // Slot 0: variant discriminator is an i64 field (`__variant`).
-        slots.push(ValueSlot::from_int(variant_id as i64));
-
-        // Payload slots
-        for (i, nb) in payload.into_iter().enumerate() {
-            let slot_idx = 1 + i;
-            if nb.is_f64() {
-                slots.push(ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)));
-            } else if nb.is_i64() {
-                slots.push(ValueSlot::from_number(nb.as_i64().unwrap_or(0) as f64));
-            } else if nb.is_bool() {
-                slots.push(ValueSlot::from_bool(nb.as_bool().unwrap_or(false)));
-            } else if nb.is_none() {
-                slots.push(ValueSlot::none());
-            // cold-path: as_heap_ref retained — enum payload slot extraction
-            } else if let Some(hv) = nb.as_heap_ref() { // cold-path
-                slots.push(ValueSlot::from_heap(hv.clone()));
-                heap_mask |= 1u64 << slot_idx;
-            } else {
-                // Function/ModuleFunction/Unit/other inline types: store as int slot
-                let id = nb
-                    .as_function_id()
-                    .or_else(|| nb.as_module_function().map(|u| u as u16))
-                    .unwrap_or(0);
-                slots.push(ValueSlot::from_int(id as i64));
-            }
-        }
-
-        // Fill remaining payload slots with None
-        while slots.len() < slot_count {
-            slots.push(ValueSlot::none());
-        }
-
-        Some(ValueWord::from_heap_value(HeapValue::TypedObject {
-            schema_id: schema.id as u64,
-            slots: slots.into_boxed_slice(),
-            heap_mask,
-        }))
-    }
-
-    // === Raw u64 stack constants ===
-
-    /// The raw u64 bit pattern for `ValueWord::none()`.
-    /// This is `TAG_BASE | (TAG_NONE << 48) = 0xFFFB_0000_0000_0000`.
-    pub(crate) const NONE_BITS: u64 = 0xFFFB_0000_0000_0000u64;
-
-    /// Cold path for push_raw_u64: grow the stack or return StackOverflow.
+    /// Cold path for `push_kinded`: grow the stack or return `StackOverflow`.
+    /// Releases the overflow-dropped share via `drop_with_kind` (FR.1 / WB2.x).
     #[cold]
     #[inline(never)]
-    pub fn push_raw_u64_slow(&mut self, bits: u64) -> Result<(), VMError> {
+    pub(crate) fn push_kinded_slow(
+        &mut self,
+        bits: u64,
+        kind: NativeKind,
+    ) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
-            // Release any heap ref held by the overflow-dropped push bits.
-            // FR.1: with `ValueWord = u64` Copy, the prior
-            // `drop(ValueWord::from_raw_bits(bits))` was a no-op and leaked
-            // heap refs on overflow. Retain-on-read is now in place
-            // (WB2.1+), so call the real helper.
-            vw_drop(bits);
+            // Release the share that would have been pushed.
+            drop_with_kind(bits, kind);
             return Err(VMError::StackOverflow);
         }
         let new_len = self.sp * 2 + 1;
         self.stack.reserve(new_len - self.stack.len());
+        self.kinds.reserve(new_len - self.kinds.len());
         while self.stack.len() < new_len {
-            self.stack.push(Self::NONE_BITS);
+            self.stack.push(0u64);
+            self.kinds.push(NativeKind::Bool);
         }
         self.stack[self.sp] = bits;
+        self.kinds[self.sp] = kind;
+        self.sp += 1;
+        self.debug_assert_kinds_in_sync();
+        Ok(())
+    }
+
+    /// Push a value onto the typed VM stack with its `NativeKind`
+    /// (ADR-006 §2.7.7). The bits' interpretation is recorded in the
+    /// parallel kinds track in lockstep with the data slot.
+    ///
+    /// **Ownership**: the caller transfers one strong-count share (for
+    /// heap-bearing kinds) into the slot. The slot retires the share via
+    /// `drop_with_kind` on subsequent overwrite / pop / VM teardown.
+    #[inline(always)]
+    pub(crate) fn push_kinded(&mut self, bits: u64, kind: NativeKind) -> Result<(), VMError> {
+        if self.sp >= self.stack.len() {
+            return self.push_kinded_slow(bits, kind);
+        }
+        unsafe {
+            let dptr = self.stack.as_mut_ptr().add(self.sp);
+            let kptr = self.kinds.as_mut_ptr().add(self.sp);
+            std::ptr::write(dptr, bits);
+            std::ptr::write(kptr, kind);
+        }
         self.sp += 1;
         Ok(())
     }
 
-    /// Pop and materialize a ValueWord from the stack (convenience for tests and legacy callers).
-    pub fn pop(&mut self) -> Result<ValueWord, VMError> {
-        self.pop_raw_u64()
+    /// Pop the topmost slot from the typed VM stack, returning the raw bits
+    /// **plus** their `NativeKind` (ADR-006 §2.7.7).
+    ///
+    /// **Ownership**: the slot's strong-count share (for heap-bearing kinds)
+    /// transfers to the caller. The caller is responsible for retiring it
+    /// via `drop_with_kind` (or transferring it elsewhere). Pop does NOT
+    /// auto-drop — the bits are handed out live.
+    #[inline(always)]
+    pub(crate) fn pop_kinded(&mut self) -> Result<(u64, NativeKind), VMError> {
+        if self.sp == 0 {
+            return Err(VMError::StackUnderflow);
+        }
+        self.sp -= 1;
+        let (bits, kind);
+        unsafe {
+            let dptr = self.stack.as_mut_ptr().add(self.sp);
+            let kptr = self.kinds.as_mut_ptr().add(self.sp);
+            bits = std::ptr::read(dptr as *const u64);
+            kind = std::ptr::read(kptr as *const NativeKind);
+            // Replace the dead slot with safe sentinel bits. Bool kind +
+            // zero bits = no-op for `drop_with_kind` if anyone reads it.
+            std::ptr::write(dptr, 0u64);
+            std::ptr::write(kptr, NativeKind::Bool);
+        }
+        Ok((bits, kind))
     }
 
-    // === Indexed stack access helpers (ValueWord ↔ u64) ===
-
-    /// Read a bit-copy of the `ValueWord` at `stack[idx]` without removing it.
+    /// Read an **owning share** of the slot at `idx` as a `KindedSlot`
+    /// (ADR-006 §2.7.7). Bumps the underlying `Arc<T>` strong-count via
+    /// `clone_with_kind` so the returned `KindedSlot` has an independent
+    /// share; the slot itself stays live on the stack.
     ///
-    /// **WB2 NOTE (retain-on-read contract).** Because `ValueWord` is a
-    /// `u64` alias and `u64: Copy`, this is a plain bit copy — the
-    /// returned bits share the same Arc ref (if any) as the stack slot.
-    /// The caller must treat the value as a **borrow** of the slot:
-    /// valid only while the slot remains live, and the caller must NOT
-    /// invoke `vw_drop` on the returned bits.
-    ///
-    /// If the caller needs an independent **owning share** (to push back
-    /// onto the stack, hand to a collector, etc.), use
-    /// [`stack_read_owned`] instead, which bumps the refcount via
-    /// `vw_clone`.
-    #[inline(always)]
-    pub(crate) fn stack_read_raw(&self, idx: usize) -> ValueWord {
-        self.stack[idx]
+    /// Use this at every site that hands a slot to a runtime-tier carrier
+    /// (`Vec<KindedSlot>` for builtin args, snapshot serialization, etc.).
+    #[inline]
+    pub(crate) fn read_owned_kinded(&self, idx: usize) -> KindedSlot {
+        debug_assert!(idx < self.sp, "read_owned_kinded: idx out of live range");
+        let bits = self.stack[idx];
+        let kind = self.kinds[idx];
+        clone_with_kind(bits, kind);
+        KindedSlot::new(ValueSlot::from_raw(bits), kind)
     }
 
-    /// Read an **owning share** of the `ValueWord` at `stack[idx]`.
-    ///
-    /// WB2.1 (retain-on-read): returns `vw_clone(bits)` so the caller
-    /// owns an independent refcount on any heap-tagged payload. Use
-    /// this at every site that pushes the read value back onto the
-    /// stack, stores it into a local, or otherwise transfers it to a
-    /// consumer that expects to own the share.
-    ///
-    /// Scalars (int / float / bool / unit / function-id) pass through
-    /// unchanged — `vw_clone` is a no-op on non-heap tags.
+    /// Read the raw bits + kind at `idx` as a borrow (no refcount change).
+    /// The caller MUST NOT drop the returned bits — the slot still owns
+    /// the share. Symmetric to the pre-Wave-6 borrow-only stack read shim.
     #[inline(always)]
-    pub(crate) fn stack_read_owned(&self, idx: usize) -> ValueWord {
-        shape_value::value_word_drop::vw_clone(self.stack[idx])
+    pub(crate) fn stack_read_kinded_raw(&self, idx: usize) -> (u64, NativeKind) {
+        (self.stack[idx], self.kinds[idx])
     }
 
-    /// Write a `ValueWord` into `stack[idx]`.
-    ///
-    /// Releases the previous occupant via `vw_drop`. Retain-on-read is
-    /// in place (WB2.1+ `stack_read_owned` / `binding_read_owned`), so
-    /// borrow-only readers (`stack_read_raw`) MUST NOT `vw_drop` the
-    /// returned bits — this call is the sole release site for the slot's
-    /// logical share.
-    ///
-    /// **B6.1 aliasing audit.** The prior FR.7 gate-out was driven by a
-    /// double-free in `test_print_uses_default_display_impl` — the
-    /// trait-dispatched TypedObject print path had a caller that wrote
-    /// an aliased bit-copy without a paired retain. The canonical
-    /// aliasing site was `trait_dispatch::resolve_print_handler` at
-    /// `objects/property_access.rs` (see B6.1 note); the caller now
-    /// retains via `vw_clone` before handing bits to `stack_write_raw`,
-    /// so this release is safe.
+    /// Write a fresh kinded value into `stack[idx]`, releasing the previous
+    /// occupant via `drop_with_kind`. The new slot owns the strong-count
+    /// share transferred in by the caller (ADR-006 §2.7.7).
     #[inline(always)]
-    pub(crate) fn stack_write_raw(&mut self, idx: usize, value: ValueWord) {
+    pub(crate) fn stack_write_kinded(&mut self, idx: usize, bits: u64, kind: NativeKind) {
         let old_bits = self.stack[idx];
-        vw_drop(old_bits);
-        self.stack[idx] = value.into_raw_bits();
+        let old_kind = self.kinds[idx];
+        drop_with_kind(old_bits, old_kind);
+        self.stack[idx] = bits;
+        self.kinds[idx] = kind;
     }
 
-    /// Take ownership of the `ValueWord` at `stack[idx]`, replacing the slot
-    /// with `NONE_BITS`.  Does NOT drop the old value — the caller owns it.
+    /// Take ownership of the slot at `idx`, replacing it with the
+    /// zero/Bool sentinel. Does NOT drop — the caller owns the bits.
     #[inline(always)]
-    pub(crate) fn stack_take_raw(&mut self, idx: usize) -> ValueWord {
+    pub(crate) fn stack_take_kinded(&mut self, idx: usize) -> (u64, NativeKind) {
         let bits = self.stack[idx];
-        self.stack[idx] = Self::NONE_BITS;
-        ValueWord::from_raw_bits(bits)
+        let kind = self.kinds[idx];
+        self.stack[idx] = 0u64;
+        self.kinds[idx] = NativeKind::Bool;
+        (bits, kind)
     }
 
-    /// Peek at the raw u64 bits in `stack[idx]` and call a method on a
-    /// *temporary* `ValueWord` reference. No refcount change occurs.
-    ///
-    /// This is useful for read-only inspection (e.g. `.tag()`, `.is_i64()`,
-    /// `.as_heap_ref()`) without paying a clone cost.
-    ///
-    /// # Safety
-    /// The closure must NOT store the `&ValueWord` reference beyond the call.
-    #[inline(always)]
-    pub(crate) fn stack_peek_raw<F, R>(&self, idx: usize, f: F) -> R
-    where
-        F: FnOnce(&ValueWord) -> R,
-    {
-        let bits = self.stack[idx];
-        // FR.1: `ValueWord = u64` is Copy, so the temporary has no Drop
-        // hook. We intentionally leak (no-op) to document the "borrow, do
-        // not release" contract — the slot still owns the heap share.
-        let tmp = ValueWord::from_raw_bits(bits);
-        let result = f(&tmp);
-        let _ = tmp;
-        result
+    /// Truncate the stack to `len` slots, dropping the share for every
+    /// removed slot via `drop_with_kind` (ADR-006 §2.7.7 WB2.4).
+    #[inline]
+    pub(crate) fn truncate_stack(&mut self, len: usize) {
+        if len >= self.sp {
+            return;
+        }
+        for i in len..self.sp {
+            let bits = self.stack[i];
+            let kind = self.kinds[i];
+            drop_with_kind(bits, kind);
+            self.stack[i] = 0u64;
+            self.kinds[i] = NativeKind::Bool;
+        }
+        self.sp = len;
+        self.debug_assert_kinds_in_sync();
     }
 
-    /// Get a read-only `&[ValueWord]` view of a stack range.
-    ///
-    /// # Safety
-    /// ValueWord is `#[repr(transparent)]` over `u64`, so this transmute is safe.
-    /// The returned slice must NOT be used to take ownership or drop ValueWords —
-    /// it is a borrow-only view.
-    #[inline(always)]
-    pub(crate) fn stack_slice_raw(&self, range: std::ops::Range<usize>) -> &[ValueWord] {
-        let slice = &self.stack[range];
-        // SAFETY: ValueWord is #[repr(transparent)] over u64.
-        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
-    }
-
-    /// Peek at the top N raw u64 values on the stack without popping.
-    ///
-    /// Returns a slice `&[u64]` of the topmost `count` stack slots, with
-    /// `slice[0]` being the deepest (pushed first) and `slice[count-1]`
-    /// being the top of stack. This is the natural order for method args
-    /// where the receiver was pushed first.
-    ///
-    /// Used by `MethodFnV2` native handlers to read args directly from
-    /// the stack without allocating a `Vec<ValueWord>`.
-    #[inline(always)]
-    pub(crate) fn peek_args_slice(&self, count: usize) -> Result<&[u64], VMError> {
-        if count > self.sp {
-            return Err(VMError::StackUnderflow);
-        }
-        let start = self.sp - count;
-        Ok(&self.stack[start..self.sp])
-    }
-
-    /// Get a read-only `&[ValueWord]` view of the module_bindings.
-    #[inline(always)]
-    pub(crate) fn bindings_slice_raw(&self) -> &[ValueWord] {
-        let slice = &self.module_bindings;
-        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
-    }
-
-    // === Module binding helpers (same pattern as stack) ===
-
-    /// Read a bit-copy of the `ValueWord` at `module_bindings[idx]` without
-    /// bumping any Arc refcount. Same borrow semantics as `stack_read_raw`
-    /// (see that comment).
-    #[inline(always)]
-    pub(crate) fn binding_read_raw(&self, idx: usize) -> ValueWord {
-        self.module_bindings[idx]
-    }
-
-    /// Read an **owning share** of the `ValueWord` at
-    /// `module_bindings[idx]`. WB2.1 companion to [`stack_read_owned`]
-    /// — see that comment for the retain-on-read rationale.
-    #[inline(always)]
-    pub(crate) fn binding_read_owned(&self, idx: usize) -> ValueWord {
-        shape_value::value_word_drop::vw_clone(self.module_bindings[idx])
-    }
-
-    /// Write a `ValueWord` into `module_bindings[idx]`.
-    ///
-    /// Releases the previous occupant via `vw_drop`, matching
-    /// `stack_write_raw`. Callers that read with `binding_read_raw`
-    /// (borrow) must NOT release the returned bits; use
-    /// `binding_read_owned` when an owning share is needed.
-    #[inline(always)]
-    pub(crate) fn binding_write_raw(&mut self, idx: usize, value: ValueWord) {
-        let old_bits = self.module_bindings[idx];
-        vw_drop(old_bits);
-        self.module_bindings[idx] = value.into_raw_bits();
-    }
-
-    /// Take ownership of the `ValueWord` at `module_bindings[idx]`, replacing
-    /// the slot with `NONE_BITS`.
-    #[inline(always)]
-    pub(crate) fn binding_take_raw(&mut self, idx: usize) -> ValueWord {
-        let bits = self.module_bindings[idx];
-        self.module_bindings[idx] = Self::NONE_BITS;
-        ValueWord::from_raw_bits(bits)
-    }
-
-    // --- Raw typed stack tag checks (peek without popping) ---
-
-    /// Check whether the top two stack values are both inline i48 integers.
-    /// Used by typed int opcodes to select the raw fast path vs NaN-boxed fallback.
-    #[inline(always)]
-    pub(crate) fn stack_top_both_i48(&self) -> bool {
-        if self.sp < 2 {
-            return false;
-        }
-        // Peek at raw bits without touching ValueWord Clone/Drop.
-        unsafe {
-            let ptr = self.stack.as_ptr();
-            let b_bits = std::ptr::read(ptr.add(self.sp - 1) as *const u64);
-            let a_bits = std::ptr::read(ptr.add(self.sp - 2) as *const u64);
-            shape_value::tag_bits::is_tagged(a_bits)
-                && shape_value::tag_bits::get_tag(a_bits) == shape_value::tag_bits::TAG_INT
-                && shape_value::tag_bits::is_tagged(b_bits)
-                && shape_value::tag_bits::get_tag(b_bits) == shape_value::tag_bits::TAG_INT
-        }
-    }
-
-    /// Check whether the top stack value is an inline i48 integer.
-    #[inline(always)]
-    pub(crate) fn stack_top_is_i48(&self) -> bool {
-        if self.sp == 0 {
-            return false;
-        }
-        unsafe {
-            let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            shape_value::tag_bits::is_tagged(bits)
-                && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_INT
-        }
-    }
-
-    /// Check whether the top two stack values are both plain f64 (not tagged).
-    /// Used by typed number opcodes to select the raw fast path vs NaN-boxed fallback.
-    #[inline(always)]
-    pub(crate) fn stack_top_both_f64(&self) -> bool {
-        if self.sp < 2 {
-            return false;
-        }
-        unsafe {
-            let ptr = self.stack.as_ptr();
-            let b_bits = std::ptr::read(ptr.add(self.sp - 1) as *const u64);
-            let a_bits = std::ptr::read(ptr.add(self.sp - 2) as *const u64);
-            !shape_value::tag_bits::is_tagged(a_bits) && !shape_value::tag_bits::is_tagged(b_bits)
-        }
-    }
-
-    /// Check whether the top stack value is a plain f64 (not tagged).
-    #[inline(always)]
-    pub(crate) fn stack_top_is_f64(&self) -> bool {
-        if self.sp == 0 {
-            return false;
-        }
-        unsafe {
-            let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            !shape_value::tag_bits::is_tagged(bits)
-        }
-    }
-
-    /// Check whether the top stack value is a NaN-boxed bool.
-    #[inline(always)]
-    pub(crate) fn stack_top_is_bool(&self) -> bool {
-        if self.sp == 0 {
-            return false;
-        }
-        unsafe {
-            let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
-            shape_value::tag_bits::is_tagged(bits)
-                && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_BOOL
-        }
-    }
-
-    // --- Stack helper naming convention (post-E+5.2) ---
-    //
-    // - `push_raw_u64`/`pop_raw_u64`: untyped 8-byte transport, no semantic.
-    // - `push_raw_f64`/`pop_raw_f64`: plain f64 bits, no tagging.
-    // - `push_tagged_i64`/`pop_tagged_i64`: NaN-tagged i48 ValueWord. Use when
-    //   the consumer expects a tagged ValueWord (today's arithmetic +
-    //   comparison opcodes pre-E+5.3 / pre-E+5.4).
-    // - `push_tagged_bool`/`pop_tagged_bool`: NaN-tagged bool ValueWord.
-    // - `push_native_i64`/`pop_native_i64`: raw native i64 bits, no tagging.
-    //   Use when the consumer expects native bits (E+5.3+ typed arithmetic
-    //   after the flip).
-    // - `push_native_bool`/`pop_native_bool`: raw native 0/1 bits.
-    //
-    // The tagged_* helpers bypass ValueWord construction/destruction entirely
-    // by inlining the NaN-box encode/decode.  The caller (typed opcodes)
-    // guarantees the value on the stack has the declared type, so we can
-    // reinterpret the raw u64 bits directly.
-
-    /// Pop an i64 from the stack, decoding a NaN-tagged i48 ValueWord.
-    ///
-    /// Reads the raw u64 bits, sign-extends the 48-bit payload to i64, and
-    /// writes a None sentinel over the slot.  No ValueWord Clone/Drop overhead.
-    ///
-    /// # Safety contract
-    /// The compiler must have proven the value is `int` (i48 inline) and that
-    /// the consumer expects a tagged ValueWord (not raw native bits).  Use
-    /// `pop_native_i64` if the producer wrote raw native bits without tagging.
-    /// If the value is not i48-tagged, the result is garbage (but memory-safe).
-    #[inline(always)]
-    pub(crate) fn pop_tagged_i64(&mut self) -> Result<i64, VMError> {
-        if self.sp == 0 {
-            return Err(VMError::StackUnderflow);
-        }
-        self.sp -= 1;
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let bits = std::ptr::read(ptr as *const u64);
-            // Write None sentinel (non-heap, so no Drop needed on previous value
-            // since we know it was an inline i48).
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(shape_value::tag_bits::sign_extend_i48(
-                shape_value::tag_bits::get_payload(bits),
-            ))
-        }
-    }
-
-    /// Push an i64 onto the stack as a NaN-tagged i48 ValueWord.
-    ///
-    /// Values must be in the i48 range [-2^47, 2^47-1].
-    /// Writes the raw tagged u64 directly into the stack slot.  Use
-    /// `push_native_i64` if you want truly raw native bits without tagging
-    /// (E+5.3+ typed arithmetic after the flip).
-    #[inline(always)]
-    pub(crate) fn push_tagged_i64(&mut self, value: i64) -> Result<(), VMError> {
-        if self.sp >= self.stack.len() {
-            // Cold path: grow via push_raw_u64_slow
-            return self.push_raw_u64(ValueWord::from_i64(value));
-        }
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            // Construct tagged i48 inline: TAG_BASE | (TAG_INT << 48) | (payload & PAYLOAD_MASK)
-            let payload = (value as u64) & shape_value::tag_bits::PAYLOAD_MASK;
-            let bits = shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_INT, payload).raw();
-            std::ptr::write(ptr, bits);
-        }
-        self.sp += 1;
-        Ok(())
-    }
-
-    /// Pop an f64 from the stack, assuming the top-of-stack is a plain f64.
-    ///
-    /// Reads the raw u64 bits and reinterprets as f64.  No ValueWord overhead.
-    ///
-    /// # Safety contract
-    /// The compiler must have proven the value is `number` (plain f64).
-    /// If the value is tagged (not a plain f64), the result is garbage (but memory-safe).
-    #[inline(always)]
-    pub(crate) fn pop_raw_f64(&mut self) -> Result<f64, VMError> {
-        if self.sp == 0 {
-            return Err(VMError::StackUnderflow);
-        }
-        self.sp -= 1;
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let bits = std::ptr::read(ptr as *const u64);
-            // Write None sentinel (the previous value was a plain f64, no heap Drop).
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(f64::from_bits(bits))
-        }
-    }
-
-    /// Pop a raw u64 from the stack with no interpretation.
-    ///
-    /// This is used by v2 typed handlers that store raw native pointers / values
-    /// directly in stack slots, bypassing ValueWord semantics entirely.  No
-    /// Drop is run on the popped slot — the caller owns the bits.
-    ///
-    /// # Safety contract
-    /// The slot must contain a value placed by a v2 raw push (not a heap-tagged
-    /// ValueWord), or the caller must be otherwise aware that no Arc refcount
-    /// is being released.
-    #[inline(always)]
-    pub fn pop_raw_u64(&mut self) -> Result<u64, VMError> {
-        if self.sp == 0 {
-            return Err(VMError::StackUnderflow);
-        }
-        self.sp -= 1;
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let bits = std::ptr::read(ptr as *const u64);
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(bits)
-        }
-    }
-
-    /// Push a raw u64 onto the stack with no NaN-box tagging.
-    ///
-    /// Companion to `pop_raw_u64` — used by v2 typed handlers that store
-    /// raw native pointers / values in stack slots.
-    #[inline(always)]
-    pub fn push_raw_u64(&mut self, bits: u64) -> Result<(), VMError> {
-        if self.sp >= self.stack.len() {
-            return self.push_raw_u64_slow(bits);
-        }
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            std::ptr::write(ptr, bits);
-        }
-        self.sp += 1;
-        Ok(())
-    }
-
-    /// Pop a bool from the stack, decoding a NaN-tagged bool ValueWord.
-    ///
-    /// Reads the raw u64 bits and decodes the bool payload.  No ValueWord overhead.
-    ///
-    /// # Safety contract
-    /// The compiler must have proven the value is `bool` and that the consumer
-    /// expects a tagged ValueWord (not raw native bits).  Use `pop_native_bool`
-    /// if the producer wrote raw native bits without tagging.
-    /// If the value is not bool-tagged, the result is garbage (but memory-safe).
-    #[inline(always)]
-    pub(crate) fn pop_tagged_bool(&mut self) -> Result<bool, VMError> {
-        if self.sp == 0 {
-            return Err(VMError::StackUnderflow);
-        }
-        self.sp -= 1;
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let bits = std::ptr::read(ptr as *const u64);
-            // Write None sentinel — bool is inline, no heap Drop needed.
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            // Bool payload is bit 0; nonzero = true.
-            Ok(shape_value::tag_bits::get_payload(bits) != 0)
-        }
-    }
-
-    /// Push a bool onto the stack as a NaN-tagged bool ValueWord.
-    ///
-    /// Writes the raw tagged u64 directly into the stack slot — no ValueWord
-    /// construction/Drop overhead.  Use `push_native_bool` if you want raw
-    /// native 0/1 bits without tagging (E+5.4+ typed comparisons after the flip).
-    #[inline(always)]
-    pub(crate) fn push_tagged_bool(&mut self, value: bool) -> Result<(), VMError> {
-        if self.sp >= self.stack.len() {
-            // Cold path: grow via push_raw_u64_slow
-            return self.push_raw_u64(ValueWord::from_bool(value));
-        }
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            let bits = shape_value::ValueBits::make_tagged(shape_value::tag_bits::TAG_BOOL, value as u64).raw();
-            std::ptr::write(ptr, bits);
-        }
-        self.sp += 1;
-        Ok(())
-    }
-
-    pub(crate) fn push_raw_f64(&mut self, value: f64) -> Result<(), VMError> {
-        if self.sp >= self.stack.len() {
-            // Cold path: grow via push_raw_u64_slow
-            return self.push_raw_u64(ValueWord::from_f64(value));
-        }
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            let bits = if value.is_nan() {
-                shape_value::tag_bits::CANONICAL_NAN
-            } else {
-                value.to_bits()
-            };
-            std::ptr::write(ptr, bits);
-        }
-        self.sp += 1;
-        Ok(())
-    }
-
-    // --- Native (truly raw) typed stack ops — dead code today, used by E+5.3+ ---
-    //
-    // These push/pop raw native bits with no NaN-boxing or i48 sign extension.
-    // The compiler must arrange for the producer and consumer to agree on the
-    // native encoding — these helpers never produce a tagged ValueWord.
-
-    /// Push an i64 onto the stack as RAW NATIVE BITS — no NaN-boxing, no tagging.
-    ///
-    /// Used by E+5.3+ typed-arithmetic opcodes after the flip; the compiler
-    /// must have arranged for the consumer to expect native bits, not tagged.
-    #[inline(always)]
-    pub fn push_native_i64(&mut self, value: i64) -> Result<(), VMError> {
-        if self.sp >= self.stack.len() {
-            return self.push_raw_u64_slow(value as u64);
-        }
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            std::ptr::write(ptr, value as u64); // raw bits, no tagging
-        }
-        self.sp += 1;
-        Ok(())
-    }
-
-    /// Pop a raw i64 from the stack — no NaN-decoding, no sign-extension from i48.
-    ///
-    /// The compiler must have proven the slot was last written by
-    /// `push_native_i64` or equivalent.  Performs a raw transmute of the 8-byte
-    /// slot bits to i64.
-    #[inline(always)]
-    pub fn pop_native_i64(&mut self) -> Result<i64, VMError> {
-        if self.sp == 0 {
-            return Err(VMError::StackUnderflow);
-        }
-        self.sp -= 1;
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let bits = std::ptr::read(ptr as *const u64);
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(bits as i64) // raw transmute, no decode
-        }
-    }
-
-    /// Push a bool onto the stack as RAW NATIVE BITS — 0u64 or 1u64.
-    #[inline(always)]
-    pub fn push_native_bool(&mut self, value: bool) -> Result<(), VMError> {
-        self.push_raw_u64(value as u64)
-    }
-
-    /// Pop a raw bool from the stack — no NaN-decoding.
-    ///
-    /// Treats 0u64 as `false`, anything else as `true`.
-    #[inline(always)]
-    pub fn pop_native_bool(&mut self) -> Result<bool, VMError> {
-        self.pop_raw_u64().map(|bits| bits != 0)
-    }
-
-    // ===== Hash and frame helpers =====
+    // ── Hash and frame helpers ─────────────────────────────────────────────
 
     pub(crate) fn blob_hash_for_function(&self, func_id: u16) -> Option<FunctionHash> {
         self.function_hashes
@@ -613,22 +449,78 @@ impl VirtualMachine {
             .unwrap_or(0)
     }
 
-    /// Wave C Phase C1: Look up the FrameDescriptor for the currently executing
-    /// function. Returns None if no call frame is active or the active function
-    /// has no FrameDescriptor (legacy bytecode).
-    ///
-    /// Used by typed handlers (`op_load_local_trusted`, etc.) to skip ValueWord
-    /// wrapping when the slot kind is a known scalar.
+    /// Look up the FrameDescriptor for the currently executing function.
+    /// Returns None if no call frame is active or the active function has
+    /// no FrameDescriptor (legacy bytecode).
     #[inline]
-    pub(crate) fn current_frame_descriptor(&self) -> Option<&crate::type_tracking::FrameDescriptor> {
+    pub(crate) fn current_frame_descriptor(
+        &self,
+    ) -> Option<&crate::type_tracking::FrameDescriptor> {
         let func_id = self.call_stack.last()?.function_id?;
         let func = self.program.functions.get(func_id as usize)?;
         func.frame_descriptor.as_ref()
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // ADR-006 §2.7.7 transitional shims — legacy-name forwarders to the
+    // kinded API. Pre-Wave-6 callers in non-territory files (exceptions,
+    // foreign_marshal, state_builtins, etc. — Waves 7-9) still call these
+    // names. Each forwarder records `NativeKind::Bool` as the per-slot
+    // kind, which is leak-free (Drop / Clone are no-ops for the Bool arm
+    // regardless of the underlying bits). Migration of those call sites
+    // to `push_kinded(bits, real_kind)` is owned by their respective
+    // waves; until then the forwarders preserve the index invariant.
+    //
+    // Forbidden patterns this preserves: none. The shims do not decode
+    // bits, do not probe tags, and do not reintroduce `vw_clone` /
+    // `vw_drop`. The Bool default is the §2.7 sentinel — explicitly
+    // Drop-safe per `KindedSlot::Drop` and `clone_with_kind`/`drop_with_kind`
+    // in this module.
+    // ────────────────────────────────────────────────────────────────────
+
+    // ────────────────────────────────────────────────────────────────────
+    // ADR-006 §2.7.7 Wave 6.5 (commit `a3fbe7f`+1): the Wave 6.0
+    // transitional shim layer has been DELETED. The shims dressed up
+    // Bool-default kinded primitives as legacy ValueWord-shape names;
+    // per ADR-006 §2.7.7 "Forbidden shapes" the pattern is the W-series
+    // "borrowed slot with call-pattern invariants" defection-attractor.
+    // Every caller must source kind locally and call
+    // `push_kinded(bits, kind)` / `pop_kinded() -> (bits, kind)`
+    // directly.
+    //
+    // The sentinel constant for the zero/Bool slot is kept as a public
+    // re-export so callers that need a "dead slot" placeholder can name
+    // it without re-encoding the convention.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Sentinel "dead slot" payload: zero bits paired with `NativeKind::Bool`
+    /// is Drop-safe (no refcount dispatch). Wave 6.5 retains the constant
+    /// so callers (snapshot.rs, OSR re-materialization, etc.) can name the
+    /// convention without re-encoding it.
+    pub(crate) const NONE_BITS: u64 = 0u64;
+
+    // ── Read-only peek-by-closure helper ──────────────────────────────────
+
+    /// Read-only inspection of `stack[idx]` via a closure receiving raw
+    /// bits + kind. The closure must NOT retain the bits past its
+    /// return — the slot still owns the underlying share.
+    ///
+    /// Replaces the deleted Wave-6.0 borrow-only peek shim (which handed
+    /// out raw bits without the kind, fitting the W-series "borrowed
+    /// slot with call-pattern invariants" defection-attractor).
+    /// Post-Wave-6.5, every peek site receives kind alongside bits so
+    /// downstream dispatch can match on kind without re-probing.
+    #[inline(always)]
+    pub(crate) fn stack_peek_kinded<F, R>(&self, idx: usize, f: F) -> R
+    where
+        F: FnOnce(u64, NativeKind) -> R,
+    {
+        f(self.stack[idx], self.kinds[idx])
+    }
 }
 
 #[cfg(test)]
-mod raw_stack_tests {
+mod kinded_stack_tests {
     use super::*;
     use crate::executor::VMConfig;
 
@@ -636,184 +528,95 @@ mod raw_stack_tests {
         VirtualMachine::new(VMConfig::default())
     }
 
-    // ----- Bool round-trip -----
-
     #[test]
-    fn raw_bool_round_trip_true() {
+    fn push_pop_int_round_trip() {
         let mut vm = make_vm();
-        vm.push_tagged_bool(true).unwrap();
-        assert!(vm.stack_top_is_bool());
-        let v = vm.pop_tagged_bool().unwrap();
-        assert_eq!(v, true);
+        vm.push_kinded(42u64, NativeKind::Int64).unwrap();
+        let (bits, kind) = vm.pop_kinded().unwrap();
+        assert_eq!(bits, 42u64);
+        assert_eq!(kind, NativeKind::Int64);
     }
 
     #[test]
-    fn raw_bool_round_trip_false() {
+    fn push_pop_bool_round_trip() {
         let mut vm = make_vm();
-        vm.push_tagged_bool(false).unwrap();
-        assert!(vm.stack_top_is_bool());
-        let v = vm.pop_tagged_bool().unwrap();
-        assert_eq!(v, false);
+        vm.push_kinded(1u64, NativeKind::Bool).unwrap();
+        let (bits, kind) = vm.pop_kinded().unwrap();
+        assert_eq!(bits, 1u64);
+        assert_eq!(kind, NativeKind::Bool);
     }
 
     #[test]
-    fn raw_bool_compatible_with_vw_pop() {
-        // pop_vw on a raw_bool slot must materialize a bool ValueWord
+    fn pop_underflow() {
         let mut vm = make_vm();
-        vm.push_tagged_bool(true).unwrap();
-        let vw = vm.pop_raw_u64().unwrap();
-        assert!(vw.is_bool());
-        assert_eq!(unsafe { vw.as_bool_unchecked() }, true);
+        assert!(vm.pop_kinded().is_err());
     }
 
     #[test]
-    fn vw_bool_compatible_with_raw_pop() {
-        // push_vw of a bool followed by pop_tagged_bool must yield same value
+    fn parallel_track_invariant_holds() {
         let mut vm = make_vm();
-        vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
-        assert!(vm.stack_top_is_bool());
-        assert_eq!(vm.pop_tagged_bool().unwrap(), true);
+        for i in 0..100i64 {
+            vm.push_kinded(i as u64, NativeKind::Int64).unwrap();
+        }
+        vm.debug_assert_kinds_in_sync();
+        for _ in 0..100 {
+            let (_b, _k) = vm.pop_kinded().unwrap();
+        }
+        vm.debug_assert_kinds_in_sync();
     }
 
-    // ----- f64 round-trip including NaN -----
-
+    /// ADR-006 §2.7.7 WB2.4: reading owned hands out an independent share.
     #[test]
-    fn raw_f64_round_trip_nan() {
+    fn read_owned_kinded_bumps_refcount() {
         let mut vm = make_vm();
-        vm.push_raw_f64(f64::NAN).unwrap();
-        // After push, the bits are CANONICAL_NAN (canonicalized to prevent
-        // collisions with the tagged range). pop_raw_f64 reinterprets as f64.
-        let v = vm.pop_raw_f64().unwrap();
-        assert!(v.is_nan(), "expected NaN, got {}", v);
+        let arc = Arc::new("hello".to_string());
+        let weak = Arc::downgrade(&arc);
+        let bits = Arc::into_raw(arc) as u64;
+        vm.push_kinded(bits, NativeKind::String).unwrap();
+        assert_eq!(weak.strong_count(), 1, "stack owns the only share");
+        let kinded = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(weak.strong_count(), 2, "read_owned bumped refcount");
+        // Drop the kinded carrier — refcount → 1 (stack still holds the share).
+        drop(kinded);
+        assert_eq!(weak.strong_count(), 1, "carrier drop retired its share");
+        // Pop the stack slot and retire its share.
+        let (b, k) = vm.pop_kinded().unwrap();
+        drop_with_kind(b, k);
+        assert_eq!(weak.strong_count(), 0, "stack pop + drop retired the last");
     }
 
+    /// ADR-006 §2.7.7 WB2.4: truncate releases every dropped share.
     #[test]
-    fn raw_f64_round_trip_neg_zero() {
+    fn truncate_stack_releases_shares() {
         let mut vm = make_vm();
-        vm.push_raw_f64(-0.0).unwrap();
-        let v = vm.pop_raw_f64().unwrap();
-        // -0.0.to_bits() != 0.0.to_bits() but -0.0 == 0.0 numerically
-        assert_eq!(v, -0.0);
-        assert_eq!(v.to_bits(), (-0.0_f64).to_bits());
+        let arc = Arc::new("truncate test".to_string());
+        let weak = Arc::downgrade(&arc);
+        let bits = Arc::into_raw(arc) as u64;
+        vm.push_kinded(bits, NativeKind::String).unwrap();
+        assert_eq!(weak.strong_count(), 1);
+        vm.truncate_stack(0);
+        assert_eq!(weak.strong_count(), 0, "truncate dropped the share");
     }
 
+    /// Inline scalars: clone/drop are no-ops on the bits.
     #[test]
-    fn raw_f64_round_trip_infinity() {
-        let mut vm = make_vm();
-        vm.push_raw_f64(f64::INFINITY).unwrap();
-        let v = vm.pop_raw_f64().unwrap();
-        assert_eq!(v, f64::INFINITY);
+    fn inline_scalars_no_refcount_dispatch() {
+        // Just confirms that clone/drop on Int64/Bool/Float64 don't crash
+        // with arbitrary "pointer-shaped" bits.
+        clone_with_kind(0xDEAD_BEEFu64, NativeKind::Int64);
+        drop_with_kind(0xDEAD_BEEFu64, NativeKind::Int64);
+        clone_with_kind(0u64, NativeKind::Float64);
+        drop_with_kind(0u64, NativeKind::Float64);
+        clone_with_kind(1u64, NativeKind::Bool);
+        drop_with_kind(1u64, NativeKind::Bool);
     }
 
-    // ----- i64 round-trip including i48 boundary -----
-
+    /// Zero bits short-circuit refcount dispatch even on heap kinds.
     #[test]
-    fn raw_i64_round_trip_max_i48() {
-        const I48_MAX: i64 = (1i64 << 47) - 1;
-        let mut vm = make_vm();
-        vm.push_tagged_i64(I48_MAX).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), I48_MAX);
-    }
-
-    #[test]
-    fn raw_i64_round_trip_min_i48() {
-        const I48_MIN: i64 = -(1i64 << 47);
-        let mut vm = make_vm();
-        vm.push_tagged_i64(I48_MIN).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), I48_MIN);
-    }
-
-    #[test]
-    fn raw_i64_round_trip_negative() {
-        let mut vm = make_vm();
-        vm.push_tagged_i64(-12345).unwrap();
-        assert_eq!(vm.pop_tagged_i64().unwrap(), -12345);
-    }
-
-    // ----- Underflow -----
-
-    #[test]
-    fn raw_pop_underflows() {
-        let mut vm = make_vm();
-        assert!(vm.pop_tagged_bool().is_err());
-        assert!(vm.pop_tagged_i64().is_err());
-        assert!(vm.pop_raw_f64().is_err());
-        assert!(vm.pop_raw_u64().is_err());
-    }
-
-    // ----- u64 round-trip (raw, no NaN-box semantics) -----
-
-    #[test]
-    fn raw_u64_round_trip_arbitrary_bits() {
-        let mut vm = make_vm();
-        let bits: u64 = 0x12345678_9abcdef0;
-        vm.push_raw_u64(bits).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), bits);
-    }
-
-    // ----- Native helpers (E+5.3+ — truly raw, no NaN-boxing) -----
-
-    #[test]
-    fn native_i64_round_trip_positive() {
-        let mut vm = make_vm();
-        vm.push_native_i64(123_456_789).unwrap();
-        assert_eq!(vm.pop_native_i64().unwrap(), 123_456_789);
-    }
-
-    #[test]
-    fn native_i64_round_trip_negative() {
-        let mut vm = make_vm();
-        vm.push_native_i64(-987_654_321).unwrap();
-        assert_eq!(vm.pop_native_i64().unwrap(), -987_654_321);
-    }
-
-    #[test]
-    fn native_i64_round_trip_full_range_no_tag() {
-        // Full i64 range — bits that would never fit in an i48-tagged slot.
-        let mut vm = make_vm();
-        let value: i64 = i64::MIN + 1; // most-negative-plus-one to avoid abs() trap
-        vm.push_native_i64(value).unwrap();
-        assert_eq!(vm.pop_native_i64().unwrap(), value);
-    }
-
-    #[test]
-    fn native_i64_writes_no_tag_bits() {
-        // Confirm the slot contains raw native bits (not NaN-tagged) immediately
-        // after push_native_i64 by reading back via pop_raw_u64.
-        let mut vm = make_vm();
-        let value: i64 = 0x0123_4567_89AB_CDEF;
-        vm.push_native_i64(value).unwrap();
-        let bits = vm.pop_raw_u64().unwrap();
-        assert_eq!(bits, value as u64, "expected raw bits, got tagged encoding");
-    }
-
-    #[test]
-    fn native_bool_round_trip_true() {
-        let mut vm = make_vm();
-        vm.push_native_bool(true).unwrap();
-        assert_eq!(vm.pop_native_bool().unwrap(), true);
-    }
-
-    #[test]
-    fn native_bool_round_trip_false() {
-        let mut vm = make_vm();
-        vm.push_native_bool(false).unwrap();
-        assert_eq!(vm.pop_native_bool().unwrap(), false);
-    }
-
-    #[test]
-    fn native_bool_writes_no_tag_bits() {
-        // push_native_bool(true) must write 1u64, not the NaN-tagged bool encoding.
-        let mut vm = make_vm();
-        vm.push_native_bool(true).unwrap();
-        let bits = vm.pop_raw_u64().unwrap();
-        assert_eq!(bits, 1u64, "expected raw 1, got tagged encoding");
-    }
-
-    #[test]
-    fn native_pop_underflows() {
-        let mut vm = make_vm();
-        assert!(vm.pop_native_i64().is_err());
-        assert!(vm.pop_native_bool().is_err());
+    fn zero_bits_safe_on_heap_kinds() {
+        clone_with_kind(0u64, NativeKind::String);
+        drop_with_kind(0u64, NativeKind::String);
+        clone_with_kind(0u64, NativeKind::Ptr(HeapKind::TypedObject));
+        drop_with_kind(0u64, NativeKind::Ptr(HeapKind::TypedObject));
     }
 }

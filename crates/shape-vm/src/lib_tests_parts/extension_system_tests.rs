@@ -1,9 +1,6 @@
 use crate::BytecodeExecutor;
 use crate::compiler::BytecodeCompiler;
 use shape_runtime::module_loader::ModuleLoader;
-use shape_runtime::typed_module_exports::register_test_function;
-use shape_value::ValueWordExt;
-
 /// `use example` should parse and compile without error.
 #[test]
 fn test_use_namespace_compiles() {
@@ -52,34 +49,7 @@ fn test_from_import_compiles() {
 /// and the extension should be stored for later use.
 #[test]
 fn test_extension_registration() {
-    use shape_runtime::module_exports::ModuleExports;
-
-    let mut ext = ModuleExports::new("test_ext");
-    register_test_function(&mut ext, 
-        "hello",
-        |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
-            Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
-                "hi".to_string(),
-            )))
-        },
-    );
-
-    let mut executor = BytecodeExecutor::new();
-    executor.register_extension(ext);
-
-    // Verify the extension was stored (extensions vec is not empty)
-    // We cannot directly inspect the private field, but we can verify
-    // that a second registration also works without panic.
-    let mut ext2 = ModuleExports::new("test_ext_2");
-    register_test_function(&mut ext2, 
-        "world",
-        |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
-            Ok(shape_value::ValueWord::from_string(std::sync::Arc::new(
-                "hello".to_string(),
-            )))
-        },
-    );
-    executor.register_extension(ext2);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]

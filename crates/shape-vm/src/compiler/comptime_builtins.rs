@@ -12,8 +12,11 @@
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_from_pairs;
 use shape_runtime::type_system::BuiltinTypes;
-use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_runtime::typed_module_exports::{
+    ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
+};
+use shape_value::heap_value::HeapValue;
+use shape_value::KindedSlot;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,7 +32,7 @@ pub(crate) enum ComptimeDirective {
     },
     SetParamValue {
         param_name: String,
-        value: ValueWord,
+        value: KindedSlot,
     },
     SetReturnType {
         type_annotation: shape_ast::ast::TypeAnnotation,
@@ -125,9 +128,15 @@ fn parse_module_items_payload(payload: &str) -> Result<Vec<shape_ast::ast::Item>
     maybe_items.ok_or_else(|| "could not parse replacement module payload".to_string())
 }
 
-/// Helper: create a ValueWord string from a &str.
-fn nb_str(s: &str) -> ValueWord {
-    ValueWord::from_string(Arc::new(s.to_string()))
+/// Helper: create a string-kinded `KindedSlot` from a `&str`.
+///
+/// Phase 1.B-vm Wave 5a (ADR-006 §2.7.6 / Q8): the helper signature
+/// changed from `ValueWord` to `KindedSlot` alongside the
+/// `register_typed_function` body contract (`&[KindedSlot]`). The name
+/// is kept as `nb_str` so existing callers in this module / its tests
+/// don't need to be re-touched in 5a.
+fn nb_str(s: &str) -> KindedSlot {
+    KindedSlot::from_string_arc(Arc::new(s.to_string()))
 }
 
 /// Create a ModuleExports containing all comptime builtin functions.
@@ -153,11 +162,11 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
         move |nb_args, _ctx| {
             let type_name = match nb_args.first().and_then(|nb| nb.as_str()) {
                 Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Bool(false)),
+                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
             };
             let trait_name = match nb_args.get(1).and_then(|nb| nb.as_str()) {
                 Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Bool(false)),
+                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
             };
 
             let has_impl = |ty: &str| {
@@ -170,19 +179,19 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             };
 
             if has_impl(&type_name) {
-                return Ok(TypedReturn::Bool(true));
+                return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
             }
 
             // Numeric widening: integer-family aliases can satisfy number-family impls.
             if BuiltinTypes::is_integer_type_name(&type_name) {
                 for widen_to in &["number", "float", "f64"] {
                     if has_impl(widen_to) {
-                        return Ok(TypedReturn::Bool(true));
+                        return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
                     }
                 }
             }
 
-            Ok(TypedReturn::Bool(false))
+            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false)))
         },
     );
 
@@ -198,7 +207,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             if let Some(msg) = nb_args.first().and_then(|nb| nb.as_str()) {
                 eprintln!("[comptime warning] {}", msg);
             }
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -211,10 +220,16 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
         vec![],
         ConcreteType::Unit,
         |nb_args, _ctx| {
+            // ADR-006 §2.7.6: KindedSlot string accessor first; non-string
+            // kinds fall through to a kind-aware diagnostic stub. The
+            // pre-bulldozer `ValueWordDisplay` helper is deleted; the
+            // body-side formatter for arbitrary `KindedSlot` lives in
+            // Wave 5e (`executor/printing.rs`). Until then non-string
+            // arguments to `error()` surface their kind name.
             let msg = match nb_args.first() {
                 Some(nb) => match nb.as_str() {
                     Some(s) => s.to_string(),
-                    None => format!("{}", shape_value::ValueWordDisplay(*nb)),
+                    None => format!("<{:?}>", nb.kind()),
                 },
                 None => "comptime error".to_string(),
             };
@@ -238,16 +253,47 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
         vec![],
         ConcreteType::Object,
         |_args, _ctx| {
-            // The comptime compiler resolves field access via a predeclared schema
-            // (registered above), so we need to materialize an Object-shaped
-            // ValueWord with the matching schema. Using TypedReturn::ValueWord
-            // pass-through preserves the existing typed_object_from_pairs path.
-            Ok(TypedReturn::ValueWord(typed_object_from_pairs(&[
-                ("debug", ValueWord::from_bool(cfg!(debug_assertions))),
+            // ADR-006 §2.7.6 / Q8 (Wave 5a Substep 3): build the typed
+            // object via `typed_object_from_pairs` (which already takes
+            // `KindedSlot`), then project the resulting carrier through
+            // its underlying `ValueSlot::as_heap_value()` to recover the
+            // `Arc<TypedObjectStorage>` and rewrap it for
+            // `ConcreteReturn::OpaqueTypedObject` — preserving ADR-005
+            // §1's single-discriminator (HeapValue stays canonical) and
+            // ADR-006 §2.7.6's no-per-heap-variant-accessor bound.
+            //
+            // The pre-bulldozer `TypedReturn::ValueWord` pass-through is
+            // deleted; the strict-typed marshal boundary projects each
+            // `TypedReturn` variant directly into a typed slot via the
+            // function's registered `NativeKind`.
+            let kinded = typed_object_from_pairs(&[
+                ("debug", KindedSlot::from_bool(cfg!(debug_assertions))),
                 ("version", nb_str(env!("CARGO_PKG_VERSION"))),
                 ("target_os", nb_str(std::env::consts::OS)),
                 ("target_arch", nb_str(std::env::consts::ARCH)),
-            ])))
+            ]);
+            // SAFETY (ADR-006 §2.7.6 heap-dispatch pattern): the kinded
+            // slot is a fresh TypedObject pointer constructed above; its
+            // bits are a valid `Arc::into_raw::<TypedObjectStorage>` and
+            // the carrier owns one strong-count share for the duration
+            // of this scope. `as_heap_value()` borrows; we clone the
+            // inner `Arc<TypedObjectStorage>` into a fresh
+            // `Arc<HeapValue>` for the marshal layer to project.
+            let storage = match kinded.slot().as_heap_value() {
+                HeapValue::TypedObject(s) => s.clone(),
+                other => panic!(
+                    "build_config: typed_object_from_pairs produced \
+                     non-TypedObject HeapValue: {:?}",
+                    other.kind()
+                ),
+            };
+            // Drop the carrier explicitly — `Arc::clone(&storage)` above
+            // bumped the strong-count share for the new `HeapValue`
+            // wrapper, so the carrier's share retires cleanly.
+            drop(kinded);
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(HeapValue::TypedObject(storage)),
+            )))
         },
     );
 
@@ -266,7 +312,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             let extend: shape_ast::ast::ExtendStatement =
                 serde_json::from_str(json).map_err(|e| format!("invalid extend payload: {}", e))?;
             push_comptime_directive(ComptimeDirective::Extend(extend))?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -279,7 +325,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
         ConcreteType::Unit,
         |_nb_args, _ctx| {
             push_comptime_directive(ComptimeDirective::RemoveTarget)?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -307,7 +353,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 param_name,
                 type_annotation,
             })?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -331,7 +377,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 "__emit_set_param_value expects a value as second arg".to_string()
             })?;
             push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -349,7 +395,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             })?;
             let type_annotation = parse_type_annotation_payload(payload)?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -367,7 +413,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             })?;
             let body = parse_function_body_payload(payload)?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -385,7 +431,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             })?;
             let items = parse_module_items_payload(payload)?;
             push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
-            Ok(TypedReturn::Unit)
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 

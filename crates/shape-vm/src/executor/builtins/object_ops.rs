@@ -1,92 +1,172 @@
-//! Object operation builtin implementations
+//! Object operation builtin implementations (ADR-006 §2.7.6 / Q8).
 //!
-//! Handles: objectRest
+//! Wave 5b body migration: `builtin_object_rest` takes `&mut VirtualMachine`
+//! (it consults the schema registry to derive a subset schema) plus a
+//! `&[KindedSlot]` arg slice and returns `Result<KindedSlot, VMError>`.
+//! Heap dispatch goes through `slot.as_heap_value()` + `HeapValue` match,
+//! preserving ADR-005 §1's single-discriminator discipline.
 
 use crate::executor::VirtualMachine;
-use shape_value::{ArgVec, HeapValue, VMError, ValueWord, ValueWordExt};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, TypedObjectStorage, VMError};
+use std::sync::Arc;
+
+#[inline]
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
+}
 
 impl VirtualMachine {
-    /// ObjectRest: Create new object excluding specified keys
+    /// `object_rest(obj, [excluded_keys])` — produce a new object excluding the
+    /// listed keys. Schema-driven on a `TypedObject` receiver; the subset
+    /// schema is derived from the schema registry (must be predeclared by
+    /// the compiler).
     pub(in crate::executor) fn builtin_object_rest(
         &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
         if args.len() != 2 {
-            return Err(VMError::RuntimeError(
-                "object_rest() requires exactly 2 arguments".to_string(),
-            ));
+            return Err(type_error("object_rest() requires exactly 2 arguments"));
         }
 
-        // Extract exclude keys from the second arg (array of strings)
-        let keys_arr = args[1]
-            .as_any_array()
-            .ok_or_else(|| {
-                VMError::RuntimeError("object_rest() second argument must be an array".to_string())
-            })?
-            .to_generic();
-
+        // Extract exclude keys: arg 1 is an Array<string>.
         let mut exclude = std::collections::HashSet::new();
-        for key in keys_arr.iter() {
-            if let Some(s) = key.as_str() {
-                exclude.insert(s.to_string());
-            } else {
-                return Err(VMError::RuntimeError(
-                    "object_rest() keys must be strings".to_string(),
+        match args[1].kind {
+            NativeKind::Ptr(HeapKind::TypedArray) => match args[1].slot.as_heap_value() {
+                HeapValue::TypedArray(arr) => match arr.as_ref() {
+                    TypedArrayData::String(buf) => {
+                        for s in buf.data.iter() {
+                            exclude.insert(s.as_str().to_string());
+                        }
+                    }
+                    _ => {
+                        return Err(type_error(
+                            "object_rest() second argument must be Array<string>",
+                        ));
+                    }
+                },
+                _ => unreachable!("kind says TypedArray"),
+            },
+            _ => {
+                return Err(type_error(
+                    "object_rest() second argument must be an array",
                 ));
             }
         }
 
-        // TypedObject: schema-driven subset (HeapValue fast path)
-        if let Some(HeapValue::TypedObject {
-            schema_id,
-            slots,
-            heap_mask,
-        // cold-path: as_heap_ref retained — TypedObject schema-driven subset
-        }) = args[0].as_heap_ref() // cold-path
-        {
-            let sid = *schema_id as u32;
-            let orig_slots = slots.clone();
-            let orig_mask = *heap_mask;
+        // Project the receiver as a TypedObject. ADR-005 §1: heap dispatch
+        // goes through HeapValue match; no per-heap-variant accessor.
+        let receiver_storage: Arc<TypedObjectStorage> = match args[0].kind {
+            NativeKind::Ptr(HeapKind::TypedObject) => match args[0].slot.as_heap_value() {
+                HeapValue::TypedObject(s) => Arc::clone(s),
+                _ => unreachable!("kind says TypedObject"),
+            },
+            _ => {
+                return Err(type_error(
+                    "object_rest() first argument must be an object",
+                ));
+            }
+        };
 
-            // Collect kept field indices before mutable borrow
-            let kept_indices: Vec<usize> = {
-                let schema = self
-                    .lookup_schema(sid)
-                    .ok_or_else(|| VMError::RuntimeError(format!("Schema {} not found", sid)))?;
-                schema
-                    .fields
-                    .iter()
-                    .filter(|f| !exclude.contains(&f.name))
-                    .map(|f| f.index as usize)
-                    .collect()
-            };
+        let sid = receiver_storage.schema_id as u32;
 
-            let subset_id = self.derive_subset_schema(sid, &exclude)?;
+        // Collect kept field indices before mutable borrow of self.
+        let kept_indices: Vec<usize> = {
+            let schema = self.lookup_schema(sid).ok_or_else(|| {
+                type_error(format!("Schema {} not found", sid))
+            })?;
+            schema
+                .fields
+                .iter()
+                .filter(|f| !exclude.contains(&f.name))
+                .map(|f| f.index as usize)
+                .collect()
+        };
 
-            // Build subset slots
-            let mut new_slots = Vec::with_capacity(kept_indices.len());
-            let mut new_mask: u64 = 0;
-            for &orig_idx in &kept_indices {
-                let new_idx = new_slots.len();
-                if orig_mask & (1u64 << orig_idx) != 0 {
-                    new_slots.push(unsafe { orig_slots[orig_idx].clone_heap() });
-                    new_mask |= 1u64 << new_idx;
-                } else {
-                    new_slots.push(orig_slots[orig_idx]);
+        let subset_id = self.derive_subset_schema(sid, &exclude)?;
+
+        // Build subset slots + heap_mask + field_kinds. Each retained slot
+        // copies the source bits; for heap slots we bump the matching Arc
+        // strong-count via per-FieldType clone (the new TypedObjectStorage
+        // owns its own share).
+        let orig_slots = &receiver_storage.slots;
+        let orig_mask = receiver_storage.heap_mask;
+        let orig_kinds = &receiver_storage.field_kinds;
+
+        let mut new_slots: Vec<shape_value::ValueSlot> =
+            Vec::with_capacity(kept_indices.len());
+        let mut new_kinds: Vec<NativeKind> = Vec::with_capacity(kept_indices.len());
+        let mut new_mask: u64 = 0;
+
+        for (new_idx, &orig_idx) in kept_indices.iter().enumerate() {
+            new_slots.push(orig_slots[orig_idx]);
+            new_kinds.push(orig_kinds[orig_idx]);
+            if orig_mask & (1u64 << orig_idx) != 0 {
+                new_mask |= 1u64 << new_idx;
+                // Bump the source Arc's refcount. Per the per-FieldType
+                // discipline (ADR-006 §2.4 / §2.5), each kind dictates the
+                // matching `Arc::increment_strong_count::<T>`. We replicate
+                // the same pointer in `new_slots`; refcount discipline gets
+                // enforced when the new TypedObjectStorage drops.
+                let bits = orig_slots[orig_idx].raw();
+                if bits != 0 {
+                    unsafe {
+                        match orig_kinds[orig_idx] {
+                            NativeKind::String => {
+                                Arc::increment_strong_count(bits as *const String);
+                            }
+                            NativeKind::Ptr(HeapKind::String) => {
+                                Arc::increment_strong_count(bits as *const String);
+                            }
+                            NativeKind::Ptr(HeapKind::TypedArray) => {
+                                Arc::increment_strong_count(
+                                    bits as *const TypedArrayData,
+                                );
+                            }
+                            NativeKind::Ptr(HeapKind::TypedObject) => {
+                                Arc::increment_strong_count(
+                                    bits as *const TypedObjectStorage,
+                                );
+                            }
+                            NativeKind::Ptr(HeapKind::HashMap) => {
+                                Arc::increment_strong_count(
+                                    bits as *const shape_value::heap_value::HashMapData,
+                                );
+                            }
+                            NativeKind::Ptr(HeapKind::Decimal) => {
+                                Arc::increment_strong_count(
+                                    bits as *const rust_decimal::Decimal,
+                                );
+                            }
+                            NativeKind::Ptr(HeapKind::BigInt) => {
+                                Arc::increment_strong_count(bits as *const i64);
+                            }
+                            // Other kinds: no Arc payload (Char, Future,
+                            // NativeScalar are inline; Closure has its own
+                            // refcount in OwnedClosureBlock and isn't
+                            // schema-routed today).
+                            _ => {
+                                // No-op for inline / non-Arc kinds. If
+                                // heap_mask was set for one of these, that's
+                                // a construction-side bug; debug_assert in
+                                // tests, silently skip in release.
+                                debug_assert!(
+                                    false,
+                                    "object_rest: heap_mask set for non-Arc kind {:?}",
+                                    orig_kinds[orig_idx]
+                                );
+                            }
+                        }
+                    }
                 }
             }
-
-            return Ok(ValueWord::from_heap_value(
-                shape_value::heap_value::HeapValue::TypedObject {
-                    schema_id: subset_id as u64,
-                    slots: new_slots.into_boxed_slice(),
-                    heap_mask: new_mask,
-                },
-            ));
         }
 
-        Err(VMError::RuntimeError(
-            "object_rest() first argument must be an object".to_string(),
-        ))
+        let new_storage = TypedObjectStorage::new(
+            subset_id as u64,
+            new_slots.into_boxed_slice(),
+            new_mask,
+            Arc::from(new_kinds.into_boxed_slice()),
+        );
+        Ok(KindedSlot::from_typed_object(Arc::new(new_storage)))
     }
 }

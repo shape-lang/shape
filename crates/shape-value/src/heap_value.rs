@@ -851,6 +851,17 @@ impl Drop for TypedObjectStorage {
                         HeapKind::TaskGroup => {
                             std::sync::Arc::decrement_strong_count(bits as *const TaskGroupData);
                         }
+                        // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6
+                        // / Q8 amendment): FilterExpr fields hold one
+                        // `Arc::into_raw(Arc<FilterNode>)` strong-count
+                        // share. Pre-amendment, FilterExpr-typed slot bits
+                        // were mislabeled as `HeapKind::NativeView`; this
+                        // arm dispatches them as the correct payload type.
+                        HeapKind::FilterExpr => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::value::FilterNode,
+                            );
+                        }
                         // Closure / Future / Char / NativeScalar: these
                         // HeapKind discriminators do not have an Arc<T>
                         // slot payload (closure uses OwnedClosureBlock with
@@ -1292,6 +1303,10 @@ impl Clone for HeapValue {
             HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
             HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
             HeapValue::HashMap(v) => HeapValue::HashMap(Arc::clone(v)),
+            // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment):
+            // FilterExpr Arcs share the typed-Arc clone shape — single
+            // strong-count bump, no payload copy.
+            HeapValue::FilterExpr(v) => HeapValue::FilterExpr(Arc::clone(v)),
         }
     }
 }
@@ -1440,6 +1455,11 @@ impl fmt::Display for HeapValue {
                 }
                 write!(f, "}}")
             }
+            // Wave-γ G-heap-filter-expr (ADR-006 §2.3 amendment): no
+            // user-facing FilterExpr literal exists; render as an opaque
+            // tag for diagnostics. Construction-side bug if a FilterExpr
+            // ever escapes into a user-visible Display path.
+            HeapValue::FilterExpr(_) => write!(f, "<filter_expr>"),
         }
     }
 }

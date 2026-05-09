@@ -2,7 +2,7 @@
 //!
 //! Phase 2b minimization: the broad ValueWord-typed `render_as_content` /
 //! `render_as_content_for` dispatch chain (~600 LoC) was deleted along
-//! with the polymorphic-tag-decode helpers it depended on (tag_bits,
+//! with the polymorphic-the deleted tag_bits module it depended on (tag_bits,
 //! ValueBits, ValueWordDisplay). The kind-threaded replacement lands
 //! when shape-vm's content rendering is rebuilt on top of `slot_to_wire`
 //! / `slot_extract_content` (the wire_conversion entry points).

@@ -1,124 +1,91 @@
-//! Method handlers for the PriorityQueue (min-heap) collection type.
+//! Method handlers for the PriorityQueue collection type.
 //!
-//! Methods: push, pop, peek, size, len, length, isEmpty, toArray
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//!
+//! `PriorityQueue` is **not** a surviving `HeapKind` variant per ADR-006
+//! §2.3 trim (`crates/shape-value/src/heap_variants.rs`); the
+//! heterogeneous-element `PriorityQueueData` payload depended on the
+//! deleted `ValueWord` per-element representation. Re-introducing
+//! PriorityQueue requires a typed-Arc replacement — a monomorphized
+//! `TypedPriorityQueue<T>` per element kind (mirroring `TypedArrayData`).
+//! That is a Phase 2c Stage C item, not a Wave-β migration.
+//!
+//! The pre-Wave-6 implementation used the deleted
+//! `ValueWord::from_priority_queue`, `as_priority_queue_mut`,
+//! `raw_helpers::extract_priority_queue` (deleted in cluster
+//! D-raw-helpers), `vmarray_from_vec`, plus the kindless MethodHandler
+//! ABI. Per playbook §4 #1 / #9 a Bool-default kinded shim is forbidden;
+//! per §7.4 the correct response is `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::{KindedSlot, VMError};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
-// ═══════════════════════════════════════════════════════════════════════════
+#[inline]
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — PriorityQueue.{}(): PriorityQueue is not a surviving \
+         HeapKind variant per ADR-006 §2.3 trim; needs typed-Arc replacement \
+         (TypedPriorityQueue<T>). MethodHandler ABI also needs kinded \
+         migration (cluster E-builtins-backlog, Wave 5b template).",
+        method
+    ))
+}
 
-use super::raw_helpers::extract_priority_queue;
-
-/// PriorityQueue.push(item) -> PriorityQueue [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
-    if let Some(pq_data) = extract_priority_queue(args[0]) {
-        let mut new_data = pq_data.clone();
-        new_data.push(item);
-        // `PriorityQueueData` has a custom Drop (Wave 4 WC.1), so
-        // move `items` out via `take_items()` before dropping.
-        Ok(ValueWord::from_priority_queue(new_data.take_items()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("push", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("push"))
 }
 
-/// PriorityQueue.pop() -> value [v2] — always clones
 pub fn v2_pop(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(pq_data) = extract_priority_queue(args[0]) {
-        let mut new_data = pq_data.clone();
-        Ok(match new_data.pop() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("pop", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("pop"))
 }
 
-/// PriorityQueue.peek() -> value [v2]
 pub fn v2_peek(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_priority_queue(args[0]) {
-        Ok(match data.peek() {
-            Some(item) => item.clone().into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        })
-    } else {
-        Err(type_mismatch_error("peek", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("peek"))
 }
 
-/// PriorityQueue.size() / .len() / .length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_priority_queue(args[0]) {
-        Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("size", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("size"))
 }
 
-/// PriorityQueue.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_priority_queue(args[0]) {
-        Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("isEmpty", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isEmpty"))
 }
 
-/// PriorityQueue.toArray() -> array (heap order, NOT sorted) [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_priority_queue(args[0]) {
-        let arr: Vec<ValueWord> = data.items.clone();
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("toArray", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toArray"))
 }
 
-/// PriorityQueue.toSortedArray() -> array (sorted order) [v2]
 pub fn v2_to_sorted_array(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    if let Some(data) = extract_priority_queue(args[0]) {
-        let mut pq = data.clone();
-        let mut sorted = Vec::with_capacity(pq.items.len());
-        while let Some(item) = pq.pop() {
-            sorted.push(item);
-        }
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("toSortedArray", "PriorityQueue"))
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toSortedArray"))
 }

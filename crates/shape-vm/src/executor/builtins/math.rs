@@ -1,491 +1,473 @@
-//! Native math and stats builtin implementations
+//! Native math builtin implementations (ADR-006 §2.7.6 / Q8).
 //!
-//! Direct builtin methods — no string-based dispatch.
+//! Wave 5b body migration: every fn here takes `&[KindedSlot]` and returns
+//! `Result<KindedSlot, VMError>`. Heterogeneous-numeric inputs (Int|Float)
+//! coerce via the body-side helper `kind_coerce::coerce_to_f64`; per
+//! §2.7.6 the carrier `KindedSlot` does NOT expose a cross-kind
+//! `as_number_coerce` accessor.
+//!
+//! Method-form broadcasts (`arr.sqrt()`, `arr.abs()`, etc.) dispatch
+//! through the per-type PHF method registries (`ARRAY_METHODS`,
+//! etc.) and never reach this file. This file handles only the scalar
+//! builtin call form (`abs(x)`, `sqrt(x)`, ...).
 
-use crate::executor::VirtualMachine;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
+use super::kind_coerce::coerce_to_f64;
+use shape_value::{KindedSlot, NativeKind, VMError};
 
-/// Extract a number (f64) from a ValueWord
-fn nb_to_f64(nb: &ValueWord) -> Result<f64, VMError> {
-    if let Some(f) = nb.as_number_coerce() {
-        Ok(f)
-    } else {
-        Err(VMError::RuntimeError(format!(
-            "expected a number, got {}",
-            nb.type_name()
-        )))
-    }
-}
-
-// ── PC.3: broadcasted-math helpers for `arr.sqrt()` / `.ln()` / `.exp()` ────
-//
-// Because `sqrt`/`ln`/`exp` are NOT listed in `is_known_builtin_method`, the
-// compiler lowers `arr.sqrt()` to a `BuiltinCall(Sqrt)` instead of a typed
-// `CallMethod`. Without the broadcasting path below that would turn the
-// array into `nb_to_f64` → "expected a number, got ptr". To keep the
-// single-element `(2.5).sqrt()` path bit-exact while enabling SIMD when
-// the receiver is an array, each builtin first checks for a v2 F64 typed
-// array (fast path) or a legacy FloatArray (fallback), and only then
-// coerces to `f64` for the scalar case.
-
-/// Try to apply a SIMD element-wise `f64` transform if `arg` is either a v2
-/// typed F64 array or a legacy FloatArray. Returns `Some(result)` on a hit,
-/// `None` when the argument isn't an F64 array — the caller then takes the
-/// scalar f64 path.
+/// Construct a runtime type-error `VMError` with a builtin-specific message.
 #[inline]
-fn try_broadcast_f64_unary(
-    arg: &ValueWord,
-    simd_op: fn(wide::f64x4) -> wide::f64x4,
-    scalar_op: fn(f64) -> f64,
-) -> Option<ValueWord> {
-    use crate::executor::v2_handlers::v2_array_detect as v2;
-
-    // Fast path: v2 typed array pointer.
-    if let Some(view) = v2::as_v2_typed_array(arg) {
-        if let Some(ptr) = v2::unary_f64_transform(&view, simd_op, scalar_op) {
-            return Some(ValueWord::from_native_ptr(ptr as usize));
-        }
-    }
-    // Legacy Arc-backed FloatArray — preserves pre-v2 behaviour when a
-    // higher-level op produced a FloatArray rather than a v2 typed array.
-    if let Some(arr) = arg.as_float_array() {
-        use shape_value::aligned_vec::AlignedVec;
-        use std::sync::Arc;
-        use wide::f64x4;
-        const SIMD_THRESHOLD: usize = 16;
-        let len = arr.len();
-        let mut result = AlignedVec::with_capacity(len);
-        if len >= SIMD_THRESHOLD {
-            let chunks = len / 4;
-            for i in 0..chunks {
-                let idx = i * 4;
-                let v = f64x4::from(&arr[idx..idx + 4]);
-                let r = simd_op(v);
-                for &x in r.to_array().iter() {
-                    result.push(x);
-                }
-            }
-            for i in (chunks * 4)..len {
-                result.push(scalar_op(arr[i]));
-            }
-        } else {
-            for &v in arr.iter() {
-                result.push(scalar_op(v));
-            }
-        }
-        return Some(ValueWord::from_float_array(Arc::new(result.into())));
-    }
-    None
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
 }
 
-impl VirtualMachine {
-    pub(in crate::executor) fn builtin_abs(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("abs() requires 1 argument".into()));
-        }
-        // PC.3: `arr.abs()` lands here when UFCS rewrites the method call
-        // to a builtin. Broadcast via SIMD before falling back to scalar.
-        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.abs(), f64::abs) {
-            return Ok(result);
-        }
-        if let Some(i) = args[0].as_i64() {
-            Ok(ValueWord::from_i64(i.abs()))
-        } else if let Some(n) = args[0].as_number_coerce() {
-            Ok(ValueWord::from_f64(n.abs()))
-        } else {
-            Err(VMError::RuntimeError(
-                "abs() argument must be a number".into(),
-            ))
-        }
+/// Common arity check helper — returns a runtime error if `args.len() != n`.
+#[inline]
+fn check_arity(args: &[KindedSlot], n: usize, name: &str) -> Result<(), VMError> {
+    if args.len() != n {
+        return Err(type_error(format!(
+            "{}() requires {} argument{}",
+            name,
+            n,
+            if n == 1 { "" } else { "s" }
+        )));
     }
+    Ok(())
+}
 
-    pub(in crate::executor) fn builtin_sqrt(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("sqrt() requires 1 argument".into()));
-        }
-        // PC.3: broadcast over F64 arrays via SIMD; scalar path is preserved.
-        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.sqrt(), f64::sqrt) {
-            return Ok(result);
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.sqrt()))
+// ── Heterogeneous-numeric monadic helpers ──────────────────────────────────
+//
+// These accept either Int or Float and dispatch on input kind to preserve
+// kind on output where it makes sense. Per §2.7.6's heterogeneous-kind body
+// pattern, we coerce to f64 at the body site, then re-narrow on return.
+
+pub(in crate::executor) fn builtin_abs(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "abs")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("abs() argument must be a number"))?;
+    match args[0].kind {
+        NativeKind::Int64 => Ok(KindedSlot::from_int(x.abs() as i64)),
+        NativeKind::Float64 => Ok(KindedSlot::from_number(x.abs())),
+        _ => unreachable!("coerce_to_f64 only succeeds on Int64|Float64"),
     }
+}
 
-    pub(in crate::executor) fn builtin_floor(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("floor() requires 1 argument".into()));
+pub(in crate::executor) fn builtin_sqrt(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "sqrt")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("sqrt() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.sqrt()))
+}
+
+pub(in crate::executor) fn builtin_floor(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "floor")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("floor() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.floor()))
+}
+
+pub(in crate::executor) fn builtin_ceil(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "ceil")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("ceil() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.ceil()))
+}
+
+pub(in crate::executor) fn builtin_round(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "round")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("round() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.round()))
+}
+
+pub(in crate::executor) fn builtin_ln(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "ln")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("ln() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.ln()))
+}
+
+pub(in crate::executor) fn builtin_exp(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "exp")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("exp() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.exp()))
+}
+
+pub(in crate::executor) fn builtin_log(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    match args.len() {
+        1 => {
+            let x = coerce_to_f64(&args[0])
+                .ok_or_else(|| type_error("log() argument must be a number"))?;
+            Ok(KindedSlot::from_number(x.log10()))
         }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.floor()))
+        2 => {
+            let val = coerce_to_f64(&args[0])
+                .ok_or_else(|| type_error("log() argument must be a number"))?;
+            let base = coerce_to_f64(&args[1])
+                .ok_or_else(|| type_error("log() base must be a number"))?;
+            Ok(KindedSlot::from_number(val.log(base)))
+        }
+        _ => Err(type_error("log() requires 1 or 2 arguments")),
     }
+}
 
-    pub(in crate::executor) fn builtin_ceil(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("ceil() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.ceil()))
+pub(in crate::executor) fn builtin_pow(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 2, "pow")?;
+    let base = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("pow() base must be a number"))?;
+    let exp = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("pow() exponent must be a number"))?;
+    Ok(KindedSlot::from_number(base.powf(exp)))
+}
+
+pub(in crate::executor) fn builtin_sin(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "sin")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("sin() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.sin()))
+}
+
+pub(in crate::executor) fn builtin_cos(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "cos")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("cos() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.cos()))
+}
+
+pub(in crate::executor) fn builtin_tan(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "tan")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("tan() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.tan()))
+}
+
+pub(in crate::executor) fn builtin_asin(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "asin")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("asin() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.asin()))
+}
+
+pub(in crate::executor) fn builtin_acos(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "acos")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("acos() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.acos()))
+}
+
+pub(in crate::executor) fn builtin_atan(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "atan")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("atan() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.atan()))
+}
+
+pub(in crate::executor) fn builtin_min(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    // Two-argument scalar form. Single-argument array form drops here in
+    // Wave 5b; array reduction path lives in `Array::min()` PHF method
+    // dispatch, not the bare-name builtin. (CLAUDE.md: array methods are
+    // dispatch-only; bare-name aliases removed.)
+    if args.len() != 2 {
+        return Err(type_error("min() requires 2 arguments"));
     }
-
-    pub(in crate::executor) fn builtin_round(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("round() requires 1 argument".into()));
+    let a = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("min() argument must be a number"))?;
+    let b = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("min() argument must be a number"))?;
+    // Preserve Int kind when both inputs are Int.
+    match (args[0].kind, args[1].kind) {
+        (NativeKind::Int64, NativeKind::Int64) => {
+            let ai = args[0].as_i64().expect("kind=Int64");
+            let bi = args[1].as_i64().expect("kind=Int64");
+            Ok(KindedSlot::from_int(ai.min(bi)))
         }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.round()))
+        _ => Ok(KindedSlot::from_number(a.min(b))),
     }
+}
 
-    pub(in crate::executor) fn builtin_ln(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("ln() requires 1 argument".into()));
-        }
-        // PC.3: broadcast over F64 arrays via SIMD.
-        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.ln(), f64::ln) {
-            return Ok(result);
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.ln()))
+pub(in crate::executor) fn builtin_max(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error("max() requires 2 arguments"));
     }
-
-    pub(in crate::executor) fn builtin_exp(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("exp() requires 1 argument".into()));
+    let a = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("max() argument must be a number"))?;
+    let b = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("max() argument must be a number"))?;
+    match (args[0].kind, args[1].kind) {
+        (NativeKind::Int64, NativeKind::Int64) => {
+            let ai = args[0].as_i64().expect("kind=Int64");
+            let bi = args[1].as_i64().expect("kind=Int64");
+            Ok(KindedSlot::from_int(ai.max(bi)))
         }
-        // PC.3: broadcast over F64 arrays via SIMD.
-        if let Some(result) = try_broadcast_f64_unary(&args[0], |v| v.exp(), f64::exp) {
-            return Ok(result);
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.exp()))
+        _ => Ok(KindedSlot::from_number(a.max(b))),
     }
+}
 
-    pub(in crate::executor) fn builtin_log(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        match args.len() {
-            1 => Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.log10())),
-            2 => {
-                let val = nb_to_f64(&args[0])?;
-                let base = nb_to_f64(&args[1])?;
-                Ok(ValueWord::from_f64(val.log(base)))
-            }
-            _ => Err(VMError::RuntimeError(
-                "log() requires 1 or 2 arguments".into(),
-            )),
+pub(in crate::executor) fn builtin_sign(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "sign")?;
+    match args[0].kind {
+        NativeKind::Int64 => {
+            let i = args[0].as_i64().expect("kind=Int64");
+            Ok(KindedSlot::from_int(i.signum()))
         }
-    }
-
-    pub(in crate::executor) fn builtin_pow(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 2 {
-            return Err(VMError::RuntimeError("pow() requires 2 arguments".into()));
-        }
-        Ok(ValueWord::from_f64(
-            nb_to_f64(&args[0])?.powf(nb_to_f64(&args[1])?),
-        ))
-    }
-
-    pub(in crate::executor) fn builtin_sin(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("sin() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.sin()))
-    }
-
-    pub(in crate::executor) fn builtin_cos(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("cos() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.cos()))
-    }
-
-    pub(in crate::executor) fn builtin_tan(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("tan() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.tan()))
-    }
-
-    pub(in crate::executor) fn builtin_asin(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("asin() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.asin()))
-    }
-
-    pub(in crate::executor) fn builtin_acos(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("acos() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.acos()))
-    }
-
-    pub(in crate::executor) fn builtin_atan(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("atan() requires 1 argument".into()));
-        }
-        Ok(ValueWord::from_f64(nb_to_f64(&args[0])?.atan()))
-    }
-
-    pub(in crate::executor) fn builtin_min(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() == 2 {
-            let a = nb_to_f64(&args[0])?;
-            let b = nb_to_f64(&args[1])?;
-            Ok(ValueWord::from_f64(a.min(b)))
-        } else if args.len() == 1 {
-            if let Some(view) = args[0].as_any_array() {
-                if view.is_empty() {
-                    return Ok(ValueWord::none());
-                }
-                let arr = view.to_generic();
-                let mut result = nb_to_f64(&arr[0])?;
-                for v in arr.iter().skip(1) {
-                    result = result.min(nb_to_f64(v)?);
-                }
-                Ok(ValueWord::from_f64(result))
-            } else {
-                Err(VMError::RuntimeError(
-                    "min() with 1 argument requires an array".into(),
-                ))
-            }
-        } else {
-            Err(VMError::RuntimeError(
-                "min() requires 1 or 2 arguments".into(),
-            ))
-        }
-    }
-
-    pub(in crate::executor) fn builtin_max(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() == 2 {
-            let a = nb_to_f64(&args[0])?;
-            let b = nb_to_f64(&args[1])?;
-            Ok(ValueWord::from_f64(a.max(b)))
-        } else if args.len() == 1 {
-            if let Some(view) = args[0].as_any_array() {
-                if view.is_empty() {
-                    return Ok(ValueWord::none());
-                }
-                let arr = view.to_generic();
-                let mut result = nb_to_f64(&arr[0])?;
-                for v in arr.iter().skip(1) {
-                    result = result.max(nb_to_f64(v)?);
-                }
-                Ok(ValueWord::from_f64(result))
-            } else {
-                Err(VMError::RuntimeError(
-                    "max() with 1 argument requires an array".into(),
-                ))
-            }
-        } else {
-            Err(VMError::RuntimeError(
-                "max() requires 1 or 2 arguments".into(),
-            ))
-        }
-    }
-
-    pub(in crate::executor) fn builtin_sign(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("sign() requires 1 argument".into()));
-        }
-        if let Some(i) = args[0].as_i64() {
-            Ok(ValueWord::from_i64(if i > 0 {
-                1
-            } else if i < 0 {
-                -1
-            } else {
-                0
-            }))
-        } else if let Some(n) = args[0].as_number_coerce() {
-            Ok(ValueWord::from_f64(if n > 0.0 {
+        NativeKind::Float64 => {
+            let n = args[0].as_f64().expect("kind=Float64");
+            let s = if n > 0.0 {
                 1.0
             } else if n < 0.0 {
                 -1.0
             } else {
                 0.0
-            }))
-        } else {
-            Err(VMError::RuntimeError(
-                "sign() argument must be a number".into(),
-            ))
+            };
+            Ok(KindedSlot::from_number(s))
         }
+        _ => Err(type_error("sign() argument must be a number")),
     }
+}
 
-    pub(in crate::executor) fn builtin_gcd(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 2 {
-            return Err(VMError::RuntimeError("gcd() requires 2 arguments".into()));
-        }
-        let mut a = nb_to_f64(&args[0])? as i64;
-        let mut b = nb_to_f64(&args[1])? as i64;
-        a = a.abs();
-        b = b.abs();
-        while b != 0 {
-            let t = b;
-            b = a % b;
-            a = t;
-        }
-        Ok(ValueWord::from_i64(a))
+pub(in crate::executor) fn builtin_gcd(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 2, "gcd")?;
+    let mut a = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("gcd() argument must be a number"))? as i64;
+    let mut b = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("gcd() argument must be a number"))? as i64;
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
     }
+    Ok(KindedSlot::from_int(a))
+}
 
-    pub(in crate::executor) fn builtin_lcm(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 2 {
-            return Err(VMError::RuntimeError("lcm() requires 2 arguments".into()));
-        }
-        let mut a = nb_to_f64(&args[0])? as i64;
-        let mut b = nb_to_f64(&args[1])? as i64;
-        if a == 0 && b == 0 {
-            return Ok(ValueWord::from_i64(0));
-        }
-        let a_abs = a.abs();
-        let b_abs = b.abs();
-        // gcd
-        a = a_abs;
-        b = b_abs;
-        while b != 0 {
-            let t = b;
-            b = a % b;
-            a = t;
-        }
-        let gcd = a;
-        Ok(ValueWord::from_i64(a_abs / gcd * b_abs))
+pub(in crate::executor) fn builtin_lcm(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 2, "lcm")?;
+    let a = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("lcm() argument must be a number"))? as i64;
+    let b = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("lcm() argument must be a number"))? as i64;
+    if a == 0 && b == 0 {
+        return Ok(KindedSlot::from_int(0));
     }
-
-    pub(in crate::executor) fn builtin_hypot(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 2 {
-            return Err(VMError::RuntimeError("hypot() requires 2 arguments".into()));
-        }
-        let a = nb_to_f64(&args[0])?;
-        let b = nb_to_f64(&args[1])?;
-        Ok(ValueWord::from_f64(a.hypot(b)))
+    let a_abs = a.abs();
+    let b_abs = b.abs();
+    let mut x = a_abs;
+    let mut y = b_abs;
+    while y != 0 {
+        let t = y;
+        y = x % y;
+        x = t;
     }
+    let gcd = x;
+    Ok(KindedSlot::from_int(a_abs / gcd * b_abs))
+}
 
-    pub(in crate::executor) fn builtin_clamp(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 3 {
-            return Err(VMError::RuntimeError(
-                "clamp() requires 3 arguments (x, min, max)".into(),
-            ));
-        }
-        let x = nb_to_f64(&args[0])?;
-        let min_val = nb_to_f64(&args[1])?;
-        let max_val = nb_to_f64(&args[2])?;
-        Ok(ValueWord::from_f64(x.max(min_val).min(max_val)))
-    }
+pub(in crate::executor) fn builtin_hypot(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 2, "hypot")?;
+    let a = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("hypot() argument must be a number"))?;
+    let b = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("hypot() argument must be a number"))?;
+    Ok(KindedSlot::from_number(a.hypot(b)))
+}
 
-    pub(in crate::executor) fn builtin_is_nan(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError("isNaN() requires 1 argument".into()));
-        }
-        if let Some(n) = args[0].as_number_coerce() {
-            Ok(ValueWord::from_bool(n.is_nan()))
-        } else {
-            // Non-numeric values are not NaN
-            Ok(ValueWord::from_bool(false))
-        }
-    }
+pub(in crate::executor) fn builtin_clamp(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 3, "clamp")?;
+    let x = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error("clamp() argument must be a number"))?;
+    let min_val = coerce_to_f64(&args[1])
+        .ok_or_else(|| type_error("clamp() min must be a number"))?;
+    let max_val = coerce_to_f64(&args[2])
+        .ok_or_else(|| type_error("clamp() max must be a number"))?;
+    Ok(KindedSlot::from_number(x.max(min_val).min(max_val)))
+}
 
-    pub(in crate::executor) fn builtin_is_finite(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError(
-                "isFinite() requires 1 argument".into(),
-            ));
-        }
-        if let Some(i) = args[0].as_i64() {
-            // Integers are always finite
-            let _ = i;
-            Ok(ValueWord::from_bool(true))
-        } else if let Some(n) = args[0].as_number_coerce() {
-            Ok(ValueWord::from_bool(n.is_finite()))
-        } else {
-            Ok(ValueWord::from_bool(false))
-        }
-    }
+pub(in crate::executor) fn builtin_is_nan(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "isNaN")?;
+    let result = match args[0].kind {
+        NativeKind::Float64 => args[0].as_f64().expect("kind=Float64").is_nan(),
+        // Integers are never NaN; non-numeric values are not NaN.
+        _ => false,
+    };
+    Ok(KindedSlot::from_bool(result))
+}
 
-    pub(in crate::executor) fn builtin_stddev(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        if args.len() != 1 {
-            return Err(VMError::RuntimeError(
-                "stddev() requires 1 argument (array)".into(),
-            ));
-        }
-        if let Some(view) = args[0].as_any_array() {
-            if view.is_empty() {
-                return Ok(ValueWord::from_f64(0.0));
+pub(in crate::executor) fn builtin_is_finite(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "isFinite")?;
+    let result = match args[0].kind {
+        NativeKind::Int64 => true,
+        NativeKind::Float64 => args[0].as_f64().expect("kind=Float64").is_finite(),
+        _ => false,
+    };
+    Ok(KindedSlot::from_bool(result))
+}
+
+/// `stddev(arr)` — population standard deviation over a `Vec<number>` /
+/// `Vec<int>` typed array. Single-array form. Per ADR-005 §1, heap dispatch
+/// routes through `slot.as_heap_value()` + `HeapValue` match.
+pub(in crate::executor) fn builtin_stddev(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "stddev")?;
+    use shape_value::heap_value::{HeapValue, TypedArrayData};
+
+    match args[0].kind {
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray) => {
+            let hv: &HeapValue = args[0].slot.as_heap_value();
+            let arr = match hv {
+                HeapValue::TypedArray(a) => a,
+                _ => unreachable!("kind says TypedArray"),
+            };
+            let values: Vec<f64> = match arr.as_ref() {
+                TypedArrayData::F64(buf) => buf.iter().copied().collect(),
+                TypedArrayData::I64(buf) => buf.iter().map(|&v| v as f64).collect(),
+                TypedArrayData::I32(buf) => buf.iter().map(|&v| v as f64).collect(),
+                TypedArrayData::F32(buf) => buf.iter().map(|&v| v as f64).collect(),
+                _ => {
+                    return Err(type_error(
+                        "stddev() requires a numeric array (Vec<number>/Vec<int>)",
+                    ));
+                }
+            };
+            if values.is_empty() {
+                return Ok(KindedSlot::from_number(0.0));
             }
-            let arr = view.to_generic();
-            let values: Result<Vec<f64>, _> = arr.iter().map(|v| nb_to_f64(v)).collect();
-            let values = values?;
             let n = values.len() as f64;
             let mean = values.iter().sum::<f64>() / n;
             let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
-            Ok(ValueWord::from_f64(variance.sqrt()))
-        } else {
-            Err(VMError::RuntimeError(
-                "stddev() argument must be an array".into(),
-            ))
+            Ok(KindedSlot::from_number(variance.sqrt()))
+        }
+        _ => Err(type_error("stddev() argument must be an array")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abs_int_preserves_int_kind() {
+        let s = KindedSlot::from_int(-7);
+        let r = builtin_abs(&[s]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn abs_float_preserves_float_kind() {
+        let s = KindedSlot::from_number(-2.5);
+        let r = builtin_abs(&[s]).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(2.5));
+    }
+
+    #[test]
+    fn sqrt_int_widens_to_float() {
+        let s = KindedSlot::from_int(9);
+        let r = builtin_sqrt(&[s]).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(3.0));
+    }
+
+    #[test]
+    fn pow_basic() {
+        let r = builtin_pow(&[KindedSlot::from_int(2), KindedSlot::from_int(8)]).unwrap();
+        assert_eq!(r.as_f64(), Some(256.0));
+    }
+
+    #[test]
+    fn min_two_ints_stays_int() {
+        let r =
+            builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_int(7)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(3));
+    }
+
+    #[test]
+    fn min_int_float_widens() {
+        let r =
+            builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_number(1.5)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn sign_int_preserves_int() {
+        let r = builtin_sign(&[KindedSlot::from_int(-42)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(-1));
+    }
+
+    #[test]
+    fn gcd_basic() {
+        let r =
+            builtin_gcd(&[KindedSlot::from_int(12), KindedSlot::from_int(18)]).unwrap();
+        assert_eq!(r.as_i64(), Some(6));
+    }
+
+    #[test]
+    fn lcm_basic() {
+        let r =
+            builtin_lcm(&[KindedSlot::from_int(4), KindedSlot::from_int(6)]).unwrap();
+        assert_eq!(r.as_i64(), Some(12));
+    }
+
+    #[test]
+    fn hypot_basic() {
+        let r = builtin_hypot(&[KindedSlot::from_number(3.0), KindedSlot::from_number(4.0)])
+            .unwrap();
+        assert_eq!(r.as_f64(), Some(5.0));
+    }
+
+    #[test]
+    fn clamp_basic() {
+        let r = builtin_clamp(&[
+            KindedSlot::from_number(15.0),
+            KindedSlot::from_number(0.0),
+            KindedSlot::from_number(10.0),
+        ])
+        .unwrap();
+        assert_eq!(r.as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn is_nan_int_false() {
+        let r = builtin_is_nan(&[KindedSlot::from_int(0)]).unwrap();
+        assert_eq!(r.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn is_nan_float_nan_true() {
+        let r = builtin_is_nan(&[KindedSlot::from_number(f64::NAN)]).unwrap();
+        assert_eq!(r.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn is_finite_int_true() {
+        let r = builtin_is_finite(&[KindedSlot::from_int(42)]).unwrap();
+        assert_eq!(r.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn is_finite_inf_false() {
+        let r = builtin_is_finite(&[KindedSlot::from_number(f64::INFINITY)]).unwrap();
+        assert_eq!(r.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn arity_check_fires() {
+        let err = builtin_sqrt(&[]).unwrap_err();
+        match err {
+            VMError::RuntimeError(msg) => assert!(msg.contains("sqrt")),
+            other => panic!("expected RuntimeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_check_fires() {
+        let err = builtin_sqrt(&[KindedSlot::from_bool(true)]).unwrap_err();
+        match err {
+            VMError::RuntimeError(msg) => assert!(msg.contains("number")),
+            other => panic!("expected RuntimeError, got {:?}", other),
         }
     }
 }

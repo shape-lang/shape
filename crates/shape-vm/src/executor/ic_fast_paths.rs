@@ -10,8 +10,6 @@
 use crate::executor::VirtualMachine;
 use crate::executor::objects::method_registry::{MethodFnV2, MethodHandler};
 use crate::feedback::{FeedbackSlot, ICState};
-#[cfg(test)]
-use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::HeapKind;
 
 // ---------------------------------------------------------------------------
@@ -152,10 +150,23 @@ pub(crate) fn megamorphic_property_insert(
 // Arithmetic IC fast path
 // ---------------------------------------------------------------------------
 
-/// Tag constants for IC comparison.
-/// F64 is untagged (0xFF sentinel), I48 matches TAG_INT.
-const NANTAG_I48: u8 = shape_value::tag_bits::TAG_INT as u8;
-const NANTAG_F64: u8 = 0xFF; // F64 is untagged — sentinel value
+/// IC observation discriminants for arithmetic operands.
+///
+/// Pre-bulldozer these were derived from the deleted `shape_value::tag_bits`
+/// (the W-series ValueWord NaN-tag layout). Post-§2.7.7 the VM stack carries
+/// data + parallel `NativeKind` per slot — no tag bits exist to read. Per
+/// CLAUDE.md "Forbidden Patterns", `tag_bits::*` is deleted on sight.
+///
+/// `record_arithmetic` callsites in `arithmetic/mod.rs` are themselves
+/// part of the IC hot-path rebuild (the live VM no longer records here —
+/// see playbook §10 row `R-async-time` for the IC reentry surface). Until
+/// that rebuild lands the sentinels live here as IC-private u8 values
+/// (not a re-skinning of the deleted tag layout). The matching record-side
+/// path will pass these constants explicitly when the IC fast-path is
+/// re-lit; until then `arithmetic_ic_check` always returns `None` /
+/// `ArithmeticIcHint::None` because no live recordings exist.
+const IC_OPERAND_I48: u8 = 1; // signed integer family observation
+const IC_OPERAND_F64: u8 = 2; // float64 observation
 
 /// Arithmetic IC specialization hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,9 +192,9 @@ pub(crate) fn arithmetic_ic_check(vm: &VirtualMachine, ip: usize) -> ArithmeticI
         match slot {
             FeedbackSlot::Arithmetic(fb) if fb.state == ICState::Monomorphic => {
                 let pair = fb.type_pairs.first()?;
-                if pair.left_tag == NANTAG_I48 && pair.right_tag == NANTAG_I48 {
+                if pair.left_tag == IC_OPERAND_I48 && pair.right_tag == IC_OPERAND_I48 {
                     Some(ArithmeticIcHint::BothI48)
-                } else if pair.left_tag == NANTAG_F64 && pair.right_tag == NANTAG_F64 {
+                } else if pair.left_tag == IC_OPERAND_F64 && pair.right_tag == IC_OPERAND_F64 {
                     Some(ArithmeticIcHint::BothF64)
                 } else {
                     Some(ArithmeticIcHint::None)
@@ -322,13 +333,13 @@ mod tests {
     #[test]
     fn test_arithmetic_ic_hint_i48() {
         let mut fv = FeedbackVector::new(0);
-        fv.record_arithmetic(10, NANTAG_I48, NANTAG_I48);
+        fv.record_arithmetic(10, IC_OPERAND_I48, IC_OPERAND_I48);
         assert_eq!(fv.slots.len(), 1);
         match fv.get_slot(10).unwrap() {
             FeedbackSlot::Arithmetic(fb) => {
                 assert_eq!(fb.state, ICState::Monomorphic);
-                assert_eq!(fb.type_pairs[0].left_tag, NANTAG_I48);
-                assert_eq!(fb.type_pairs[0].right_tag, NANTAG_I48);
+                assert_eq!(fb.type_pairs[0].left_tag, IC_OPERAND_I48);
+                assert_eq!(fb.type_pairs[0].right_tag, IC_OPERAND_I48);
             }
             _ => panic!("expected Arithmetic slot"),
         }
@@ -337,12 +348,12 @@ mod tests {
     #[test]
     fn test_arithmetic_ic_hint_f64() {
         let mut fv = FeedbackVector::new(0);
-        fv.record_arithmetic(10, NANTAG_F64, NANTAG_F64);
+        fv.record_arithmetic(10, IC_OPERAND_F64, IC_OPERAND_F64);
         match fv.get_slot(10).unwrap() {
             FeedbackSlot::Arithmetic(fb) => {
                 assert_eq!(fb.state, ICState::Monomorphic);
-                assert_eq!(fb.type_pairs[0].left_tag, NANTAG_F64);
-                assert_eq!(fb.type_pairs[0].right_tag, NANTAG_F64);
+                assert_eq!(fb.type_pairs[0].left_tag, IC_OPERAND_F64);
+                assert_eq!(fb.type_pairs[0].right_tag, IC_OPERAND_F64);
             }
             _ => panic!("expected Arithmetic slot"),
         }
@@ -350,13 +361,15 @@ mod tests {
 
     #[test]
     fn test_method_ic_handler_roundtrip() {
-        // Verify function pointer can be stored and recovered via transmute
+        // Verify function pointer can be stored and recovered via transmute.
+        // The dummy returns 0u64 — the §2.7 null sentinel under the
+        // post-§2.7.7 stack ABI (zero bits + Bool kind = no-op drop).
         fn dummy_handler(
             _vm: &mut VirtualMachine,
             _args: &mut [u64],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
         ) -> Result<u64, shape_value::VMError> {
-            Ok(ValueWord::none().raw_bits())
+            Ok(0u64)
         }
         let ptr = dummy_handler as MethodFnV2 as usize;
         assert_ne!(ptr, 0);

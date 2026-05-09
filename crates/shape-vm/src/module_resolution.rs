@@ -241,7 +241,20 @@ mod tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::VirtualMachine;
     use crate::module_graph;
-    use shape_value::ValueWordExt;
+    use shape_value::{KindedSlot, NativeKind};
+
+    /// Test helper: coerce a [`KindedSlot`] result to `f64` for
+    /// numeric assertions. Replaces the deleted
+    /// `ValueWordExt::as_number_coerce` accessor (post-`ValueWord`
+    /// removal). Honors `NativeKind::Int64` / `NativeKind::Float64`
+    /// per ADR-006 §2.7.6 carrier API bound.
+    fn slot_as_number(slot: &KindedSlot) -> Option<f64> {
+        match slot.kind() {
+            NativeKind::Int64 => slot.as_i64().map(|n| n as f64),
+            NativeKind::Float64 => slot.as_f64(),
+            _ => None,
+        }
+    }
 
     /// Helper: build a graph and compile a program with prelude + imports.
     fn compile_program_with_graph(
@@ -354,7 +367,7 @@ alpha() + beta() + gamma()
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         let result = vm.execute(None).expect("execute");
-        assert_eq!(result.as_number_coerce().unwrap(), 6.0);
+        assert_eq!(slot_as_number(&result).unwrap(), 6.0);
     }
 
     #[test]
@@ -383,7 +396,7 @@ mymod::beta()
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         let result = vm.execute(None).expect("execute");
-        assert_eq!(result.as_number_coerce().unwrap(), 2.0);
+        assert_eq!(slot_as_number(&result).unwrap(), 2.0);
     }
 
     #[test]

@@ -253,17 +253,20 @@ pub type ModuleFn = Arc<
 >;
 
 /// One entry in the VM's per-process module-function table
-/// (`module_fn_table`), indexed by `ValueWord::ModuleFunction(u32)`.
+/// (`module_fn_table`), indexed by positional `u32` id.
 ///
 /// Phase 4c.4: the legacy `ModuleFn` ABI escape hatch was deleted. All
 /// stdlib and test fixtures route through the typed registry.
 ///
 /// - [`Self::Typed`]: synchronous typed-return native function. The
 ///   body returns [`crate::typed_module_exports::TypedReturn`] directly;
-///   marshalling to `ValueWord` happens at the dispatch boundary.
+///   the dispatch boundary projects the typed return into a kinded slot
+///   per ADR-006 §2.7 — no round-trip through a synthesized runtime
+///   value.
 /// - [`Self::TypedAsync`]: async typed-return native function. The body
 ///   returns a future of `TypedReturn`; the synchronous dispatch path
-///   blocks on the future and marshals at the boundary.
+///   blocks on the future and applies the same kind-threaded projection
+///   at the boundary.
 #[derive(Clone)]
 pub enum ModuleFnEntry {
     Typed(crate::typed_module_exports::TypedModuleFunction),
@@ -367,8 +370,9 @@ pub struct ModuleExports {
     /// Authoritative registry for native-module function bodies. Every
     /// export here declares its return type via
     /// [`crate::typed_module_exports::TypedReturn`] / [`crate::typed_module_exports::ConcreteType`];
-    /// marshalling to `ValueWord` happens at the dispatch boundary
-    /// inside the VM, not in the body. Phase 4c.4 deleted the legacy
+    /// the kind-threaded marshal layer projects the typed return into
+    /// a kinded slot at the dispatch boundary inside the VM, not in
+    /// the body (ADR-006 §2.7). Phase 4c.4 deleted the legacy
     /// `exports`/`async_exports` `ModuleFn` parallel registry — every
     /// callable function body lives here.
     pub typed_exports: crate::typed_module_exports::TypedModuleExports,
@@ -531,7 +535,7 @@ impl ModuleExports {
             || self.typed_exports.async_functions.contains_key(name)
     }
 
-    // `invoke_export` removed alongside `TypedReturn::into_value_word()`.
+    // `invoke_export` and `TypedReturn::into_value_word()` are deleted.
     // The replacement is the Phase 2b kind-threaded marshal layer that
     // projects `TypedReturn` directly into a typed slot without round-
     // tripping through a synthesized runtime value.

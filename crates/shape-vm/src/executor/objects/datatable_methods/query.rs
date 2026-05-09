@@ -1,427 +1,305 @@
 //! DataTable query methods: filter, orderBy, group_by, forEach, map.
+//!
+//! ADR-006 §2.7.10 / Q11 — Wave-δ MR-datatable body migration.
+//!
+//! Closure-driven forms surface (`op_call_value` is itself at SURFACE per
+//! `executor/control_flow/mod.rs::op_call_value` —
+//! PHASE_2C_CALL_REBUILD_SURFACE; per playbook §8 the correct shape is
+//! surface-and-stop until the closure-call rebuild lands).
+//!
+//! `filter` has a 3-arg non-closure form `filter(col, op, value)` that
+//! does not depend on closures and is implemented here. The expected
+//! ops are `=`, `!=`, `<`, `<=`, `>`, `>=`. Result is a fresh DataTable
+//! containing the filtered rows (zero-copy via `arrow_select::filter`).
 
-use crate::executor::VirtualMachine;
-use crate::executor::objects::object_creation::nb_to_slot_with_field_type;
-use crate::executor::objects::raw_helpers;
-use arrow_array::BooleanArray;
-use arrow_ord::sort::sort_to_indices;
-use arrow_select::filter::filter_record_batch;
-use arrow_select::take::take;
-use shape_runtime::type_schema::FieldType;
-use shape_value::datatable::DataTable;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
+use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
+use shape_runtime::context::ExecutionContext;
+use shape_value::{DataTable, KindedSlot, NativeKind, ValueSlot, VMError, heap_value::HeapKind};
 use std::sync::Arc;
 
-use super::common::{
-    apply_comparison_nb, array_values_equal, build_datatable_from_objects_nb, cmp_nb_values,
-    extract_array_value_nb, extract_dt_nb, wrap_result_table_nb,
-};
-use std::mem::ManuallyDrop;
+use crate::executor::VirtualMachine;
 
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
+use super::common::borrow_data_table;
 
-/// `dt.filter("col", "op", value)` — filter rows using Arrow compute kernels (string path).
-/// `dt.filter(row => bool)` — filter rows using closure (closure path).
+/// `dt.filter(closure)` / `dt.filter(col, op, value)`.
+///
+/// The 3-arg form is implemented here; the closure form surfaces.
 pub(crate) fn handle_filter(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "filter")?;
 
-    // Closure path: dt.filter(row => row.price > 100)
-    if let Some(&raw1) = args.get(1) {
-        if raw_helpers::is_callable_raw(raw1) {
-            let dt = dt.clone();
-            let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let row_count = dt_arc.row_count();
-
-            let mut keep = Vec::with_capacity(row_count);
-            for row_idx in 0..row_count {
-                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-                keep.push(raw_helpers::is_truthy_raw(result_bits));
-            }
-
-            let mask = BooleanArray::from(keep);
-            let filtered = filter_record_batch(dt_arc.inner(), &mask)
-                .map_err(|e| VMError::RuntimeError(format!("filter() failed: {}", e)))?;
-            let mut new_dt = DataTable::new(filtered);
-            if let Some(idx_name) = dt_arc.index_col() {
-                new_dt = new_dt.with_index_col(idx_name.to_string());
-            }
-            return Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits());
-        }
+    // Closure form: 1 arg of kind Closure-family.
+    if args.len() == 2
+        && matches!(
+            args[1].kind,
+            NativeKind::Ptr(HeapKind::Closure) | NativeKind::Ptr(HeapKind::Future)
+        )
+    {
+        return Err(VMError::NotImplemented(
+            "datatable.filter (closure form) — SURFACE: depends on \
+             op_call_value rebuild (executor/control_flow/mod.rs \
+             PHASE_2C_CALL_REBUILD_SURFACE)."
+                .to_string(),
+        ));
     }
 
-    // String path: dt.filter("col", "op", value)
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let col_name = arg1
-        .as_ref()
-        .and_then(|nb| nb.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| {
-            VMError::RuntimeError("filter() requires a string column name argument".to_string())
-        })?;
-    let arg2 = args.get(2).map(|&r| borrow_vw(r));
-    let op = arg2
-        .as_ref()
-        .and_then(|nb| nb.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| {
-            VMError::RuntimeError("filter() requires an operator string argument".to_string())
-        })?;
-    let arg3 = args.get(3).map(|&r| borrow_vw(r));
-    let value = arg3.as_ref().ok_or_else(|| {
-        VMError::RuntimeError("filter() requires a comparison value as third argument".to_string())
+    // 3-arg form: `filter(col, op, value)`.
+    if args.len() != 4 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.filter: expected (col, op, value) or (closure), got {} args",
+            args.len() - 1
+        )));
+    }
+    let col_name = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.filter: arg 1 (col) must be string, got {:?}",
+            args[1].kind
+        ))
     })?;
+    let op = args[2].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.filter: arg 2 (op) must be string, got {:?}",
+            args[2].kind
+        ))
+    })?;
+    let value = &args[3];
 
-    let batch = dt.inner();
-    let col = dt
-        .column_by_name(&col_name)
-        .ok_or_else(|| VMError::RuntimeError(format!("Column '{}' not found", col_name)))?;
+    let col = dt.column_by_name(col_name).ok_or_else(|| {
+        VMError::RuntimeError(format!("datatable.filter: unknown column: {}", col_name))
+    })?;
+    let n = col.len();
+    let mut mask: Vec<bool> = Vec::with_capacity(n);
 
-    let mask = apply_comparison_nb(col.as_ref(), &op, value)?;
-
-    let filtered = filter_record_batch(batch, &mask)
-        .map_err(|e| VMError::RuntimeError(format!("filter() failed: {}", e)))?;
-
-    let mut new_dt = DataTable::new(filtered);
-    if let Some(idx_name) = dt.index_col() {
-        new_dt = new_dt.with_index_col(idx_name.to_string());
+    if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+        let target = match value.kind {
+            NativeKind::Float64 => value.as_f64().unwrap(),
+            NativeKind::Int64 => value.as_i64().unwrap() as f64,
+            _ => {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.filter: value kind {:?} incompatible with Float64 column",
+                    value.kind
+                )));
+            }
+        };
+        for i in 0..n {
+            if f64a.is_null(i) {
+                mask.push(false);
+                continue;
+            }
+            mask.push(cmp_f64(f64a.value(i), op, target)?);
+        }
+    } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+        let target = match value.kind {
+            NativeKind::Int64 => value.as_i64().unwrap(),
+            NativeKind::Float64 => value.as_f64().unwrap() as i64,
+            _ => {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.filter: value kind {:?} incompatible with Int64 column",
+                    value.kind
+                )));
+            }
+        };
+        for i in 0..n {
+            if i64a.is_null(i) {
+                mask.push(false);
+                continue;
+            }
+            mask.push(cmp_i64(i64a.value(i), op, target)?);
+        }
+    } else if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        let target = value.as_str().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "datatable.filter: value kind {:?} incompatible with String column",
+                value.kind
+            ))
+        })?;
+        for i in 0..n {
+            if s.is_null(i) {
+                mask.push(false);
+                continue;
+            }
+            mask.push(cmp_str(s.value(i), op, target)?);
+        }
+    } else if let Some(b) = col.as_any().downcast_ref::<BooleanArray>() {
+        let target = value.as_bool().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "datatable.filter: value kind {:?} incompatible with Bool column",
+                value.kind
+            ))
+        })?;
+        for i in 0..n {
+            if b.is_null(i) {
+                mask.push(false);
+                continue;
+            }
+            mask.push(cmp_bool(b.value(i), op, target)?);
+        }
+    } else {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.filter: column {} has unsupported type {:?}",
+            col_name,
+            col.data_type()
+        )));
     }
-    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
+
+    let mask_array = BooleanArray::from(mask);
+    let inner = dt.inner();
+    let n_cols = inner.num_columns();
+    let mut new_cols = Vec::with_capacity(n_cols);
+    for c in 0..n_cols {
+        let filtered = arrow_select::filter::filter(inner.column(c), &mask_array)
+            .map_err(|e| VMError::RuntimeError(format!("datatable.filter: {}", e)))?;
+        new_cols.push(filtered);
+    }
+    let new_batch = arrow_array::RecordBatch::try_new(inner.schema(), new_cols)
+        .map_err(|e| VMError::RuntimeError(format!("datatable.filter: {}", e)))?;
+    let new_dt = DataTable::new(new_batch);
+    let bits = Arc::into_raw(Arc::new(new_dt)) as u64;
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
+    ))
 }
 
-/// `dt.orderBy("col", "asc"|"desc")` — sort by column with direction (string path).
-/// `dt.orderBy(row => row.field, "asc"|"desc")` — sort by closure key (closure path).
+/// `dt.orderBy(closure)` / `dt.orderBy(col, asc?)`. The column-name form
+/// is identical to `aggregation::handle_sort`; the closure form
+/// surfaces.
 pub(crate) fn handle_order_by(
     vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-
-    // Closure path: dt.orderBy(row => row.price, "desc")
-    if let Some(&raw1) = args.get(1) {
-        if raw_helpers::is_callable_raw(raw1) {
-            let dt = dt.clone();
-            let descending = args
-                .get(2)
-                .and_then(|&r| raw_helpers::extract_str(r))
-                .map(|s| s == "desc")
-                .unwrap_or(false);
-            let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let row_count = dt_arc.row_count();
-
-            let mut keys: Vec<(usize, ValueWord)> = Vec::with_capacity(row_count);
-            for row_idx in 0..row_count {
-                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-                keys.push((row_idx, ValueWord::from_raw_bits(result_bits)));
-            }
-
-            keys.sort_by(|a, b| {
-                let ord = cmp_nb_values(&a.1, &b.1);
-                if descending { ord.reverse() } else { ord }
-            });
-
-            let indices_vec: Vec<u32> = keys.iter().map(|(idx, _)| *idx as u32).collect();
-            let indices = arrow_array::UInt32Array::from(indices_vec);
-            let batch = dt_arc.inner();
-            let sorted_columns: Vec<_> = batch
-                .columns()
-                .iter()
-                .map(|c| take(c.as_ref(), &indices, None))
-                .collect::<Result<_, _>>()
-                .map_err(|e| VMError::RuntimeError(format!("orderBy() take failed: {}", e)))?;
-
-            let sorted_batch = arrow_array::RecordBatch::try_new(batch.schema(), sorted_columns)
-                .map_err(|e| VMError::RuntimeError(format!("orderBy() rebuild failed: {}", e)))?;
-
-            let mut new_dt = DataTable::new(sorted_batch);
-            if let Some(idx_name) = dt_arc.index_col() {
-                new_dt = new_dt.with_index_col(idx_name.to_string());
-            }
-            return Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits());
-        }
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() >= 2
+        && matches!(
+            args[1].kind,
+            NativeKind::Ptr(HeapKind::Closure) | NativeKind::Ptr(HeapKind::Future)
+        )
+    {
+        return Err(VMError::NotImplemented(
+            "datatable.orderBy (closure form) — SURFACE: depends on \
+             op_call_value rebuild (executor/control_flow/mod.rs \
+             PHASE_2C_CALL_REBUILD_SURFACE)."
+                .to_string(),
+        ));
     }
-
-    // String path: dt.orderBy("col", "asc"|"desc")
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let col_name = arg1
-        .as_ref()
-        .and_then(|nb| nb.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| {
-            VMError::RuntimeError("orderBy() requires a string column name argument".to_string())
-        })?;
-    let descending = args
-        .get(2)
-        .and_then(|&r| raw_helpers::extract_str(r))
-        .map(|s| s == "desc")
-        .unwrap_or(false);
-    let batch = dt.inner();
-
-    let col = dt
-        .column_by_name(&col_name)
-        .ok_or_else(|| VMError::RuntimeError(format!("Column '{}' not found", col_name)))?;
-
-    let sort_opts = arrow_schema::SortOptions {
-        descending,
-        nulls_first: false,
-    };
-
-    let indices = sort_to_indices(col.as_ref(), Some(sort_opts), None)
-        .map_err(|e| VMError::RuntimeError(format!("orderBy() failed: {}", e)))?;
-
-    let sorted_columns: Vec<_> = batch
-        .columns()
-        .iter()
-        .map(|c| take(c.as_ref(), &indices, None))
-        .collect::<Result<_, _>>()
-        .map_err(|e| VMError::RuntimeError(format!("orderBy() take failed: {}", e)))?;
-
-    let sorted_batch = arrow_array::RecordBatch::try_new(batch.schema(), sorted_columns)
-        .map_err(|e| VMError::RuntimeError(format!("orderBy() rebuild failed: {}", e)))?;
-
-    let mut new_dt = DataTable::new(sorted_batch);
-    if let Some(idx_name) = dt.index_col() {
-        new_dt = new_dt.with_index_col(idx_name.to_string());
-    }
-    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
+    super::aggregation::handle_sort(vm, args, ctx)
 }
 
-/// `dt.group_by("col")` — group rows by column value (string path).
-/// `dt.group_by(row => row.field)` — group rows by closure key (closure path).
-///
-/// Returns Array of {key: value, group: DataTable} objects.
+/// `dt.group_by(col)` / `dt.group_by(col, agg_spec)` — closure-/spec-driven
+/// dispatch surfaces; the spec-driven form crosses into
+/// `D-prop-access` / `D-typed-access` cluster territory.
 pub(crate) fn handle_group_by(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-
-    // Closure path: dt.group_by(row => row.symbol)
-    if let Some(&raw1) = args.get(1) {
-        if raw_helpers::is_callable_raw(raw1) {
-            let dt = dt.clone();
-            let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let row_count = dt_arc.row_count();
-
-            if row_count == 0 {
-                return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::<ValueWord>::new())).into_raw_bits());
-            }
-
-            let mut key_row_pairs: Vec<(ValueWord, usize)> = Vec::with_capacity(row_count);
-            for row_idx in 0..row_count {
-                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-                key_row_pairs.push((ValueWord::from_raw_bits(result_bits), row_idx));
-            }
-
-            key_row_pairs.sort_by(|a, b| cmp_nb_values(&a.0, &b.0));
-
-            let mut groups: ArgVec = ArgVec::new();
-            let mut group_start = 0;
-            for i in 1..=key_row_pairs.len() {
-                let boundary = i == key_row_pairs.len()
-                    || cmp_nb_values(&key_row_pairs[i - 1].0, &key_row_pairs[i].0)
-                        != std::cmp::Ordering::Equal;
-                if boundary {
-                    let key = key_row_pairs[group_start].0.clone();
-                    let indices_vec: Vec<u32> = key_row_pairs[group_start..i]
-                        .iter()
-                        .map(|(_, idx)| *idx as u32)
-                        .collect();
-                    let indices_arr = arrow_array::UInt32Array::from(indices_vec);
-                    let batch = dt_arc.inner();
-                    let group_columns: Vec<_> = batch
-                        .columns()
-                        .iter()
-                        .map(|c| take(c.as_ref(), &indices_arr, None))
-                        .collect::<Result<_, _>>()
-                        .map_err(|e| {
-                            VMError::RuntimeError(format!("group_by() take failed: {}", e))
-                        })?;
-                    let group_batch =
-                        arrow_array::RecordBatch::try_new(batch.schema(), group_columns).map_err(
-                            |e| VMError::RuntimeError(format!("group_by() rebuild failed: {}", e)),
-                        )?;
-
-                    let group_schema = vm.builtin_schemas.group_result;
-                    let group_table =
-                        ValueWord::from_datatable(Arc::new(DataTable::new(group_batch)));
-                    let (key_slot, key_heap) =
-                        nb_to_slot_with_field_type(&key, Some(&FieldType::Any));
-                    let (table_slot, table_heap) =
-                        nb_to_slot_with_field_type(&group_table, Some(&FieldType::Any));
-                    let mut heap_mask = 0u64;
-                    if key_heap {
-                        heap_mask |= 1 << 0;
-                    }
-                    if table_heap {
-                        heap_mask |= 1 << 1;
-                    }
-
-                    groups.push(ValueWord::from_heap_value(
-                        shape_value::heap_value::HeapValue::TypedObject {
-                            schema_id: group_schema as u64,
-                            slots: vec![key_slot, table_slot].into_boxed_slice(),
-                            heap_mask,
-                        },
-                    ).into_raw_bits());
-
-                    group_start = i;
-                }
-            }
-
-            return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups.into_inner())).into_raw_bits());
-        }
-    }
-
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let col_name = arg1
-        .as_ref()
-        .and_then(|nb| nb.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| {
-            VMError::RuntimeError("group_by() requires a string column name argument".to_string())
-        })?;
-    let batch = dt.inner();
-
-    let col = dt
-        .column_by_name(&col_name)
-        .ok_or_else(|| VMError::RuntimeError(format!("Column '{}' not found", col_name)))?;
-
-    let indices = sort_to_indices(col.as_ref(), None, None)
-        .map_err(|e| VMError::RuntimeError(format!("group_by() sort failed: {}", e)))?;
-
-    let sorted_columns: Vec<_> = batch
-        .columns()
-        .iter()
-        .map(|c| take(c.as_ref(), &indices, None))
-        .collect::<Result<_, _>>()
-        .map_err(|e| VMError::RuntimeError(format!("group_by() take failed: {}", e)))?;
-
-    let sorted_batch = arrow_array::RecordBatch::try_new(batch.schema(), sorted_columns)
-        .map_err(|e| VMError::RuntimeError(format!("group_by() rebuild failed: {}", e)))?;
-
-    let sorted_dt = DataTable::new(sorted_batch.clone());
-    let sorted_col = sorted_dt.column_by_name(&col_name).unwrap();
-
-    let row_count = sorted_dt.row_count();
-    if row_count == 0 {
-        return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())).into_raw_bits());
-    }
-
-    let mut groups: ArgVec = ArgVec::new();
-    let mut group_start = 0;
-    let group_schema = vm.builtin_schemas.group_result;
-
-    for i in 1..=row_count {
-        let boundary = i == row_count || !array_values_equal(sorted_col.as_ref(), i - 1, i);
-        if boundary {
-            let key = extract_array_value_nb(sorted_col.as_ref(), group_start)?;
-            let group_len = i - group_start;
-            let group_dt = sorted_dt.slice(group_start, group_len);
-
-            let group_table = ValueWord::from_datatable(Arc::new(group_dt));
-            let (key_slot, key_heap) = nb_to_slot_with_field_type(&key, Some(&FieldType::Any));
-            let (table_slot, table_heap) =
-                nb_to_slot_with_field_type(&group_table, Some(&FieldType::Any));
-            let mut heap_mask = 0u64;
-            if key_heap {
-                heap_mask |= 1 << 0;
-            }
-            if table_heap {
-                heap_mask |= 1 << 1;
-            }
-
-            groups.push(ValueWord::from_heap_value(
-                shape_value::heap_value::HeapValue::TypedObject {
-                    schema_id: group_schema as u64,
-                    slots: vec![key_slot, table_slot].into_boxed_slice(),
-                    heap_mask,
-                },
-            ).into_raw_bits());
-
-            group_start = i;
-        }
-    }
-
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups.into_inner())).into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "datatable.group_by — SURFACE: spec-driven dispatch crosses into \
+         D-prop-access / D-typed-access cluster territory; the kinded \
+         property-access surface is itself at SURFACE \
+         (executor/objects/property_access.rs). Closure form additionally \
+         depends on op_call_value rebuild."
+            .to_string(),
+    ))
 }
 
-/// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.
+/// `dt.forEach(closure)` — per-row callback. SURFACE: requires
+/// `op_call_value`.
 pub(crate) fn handle_for_each(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?.clone();
-    let raw1 = *args.get(1).ok_or_else(|| {
-        VMError::RuntimeError("forEach() requires a function argument".to_string())
-    })?;
-
-    if !raw_helpers::is_callable_raw(raw1) {
-        return Err(VMError::RuntimeError(
-            "forEach() second argument must be a function".to_string(),
-        ));
-    }
-
-    let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let dt_arc = Arc::new(dt.as_ref().clone());
-
-    for row_idx in 0..dt_arc.row_count() {
-        let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-        vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-    }
-
-    Ok(ValueWord::none().into_raw_bits())
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "datatable.forEach — SURFACE: per-row closure dispatch depends on \
+         op_call_value rebuild (executor/control_flow/mod.rs \
+         PHASE_2C_CALL_REBUILD_SURFACE)."
+            .to_string(),
+    ))
 }
 
-/// `dt.map(fn)` — transform each row via closure, producing a new DataTable.
+/// `dt.map(closure)` — per-row transformation. SURFACE: requires
+/// `op_call_value`.
 pub(crate) fn handle_map(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?.clone();
-    let raw1 = *args.get(1).ok_or_else(|| {
-        VMError::RuntimeError("map() requires a function argument".to_string())
-    })?;
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "datatable.map — SURFACE: per-row closure dispatch depends on \
+         op_call_value rebuild (executor/control_flow/mod.rs \
+         PHASE_2C_CALL_REBUILD_SURFACE). The result-type-classification \
+         step that drove the pre-Wave-6.5 body (Float / Int / TypedObject \
+         per closure return) also depends on the closure dispatch path."
+            .to_string(),
+    ))
+}
 
-    if !raw_helpers::is_callable_raw(raw1) {
-        return Err(VMError::RuntimeError(
-            "map() second argument must be a function".to_string(),
-        ));
-    }
+// ── comparison helpers ──────────────────────────────────────────────────────
 
-    let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-    let dt_arc = Arc::new(dt.as_ref().clone());
-    let row_count = dt_arc.row_count();
+fn cmp_f64(a: f64, op: &str, b: f64) -> Result<bool, VMError> {
+    Ok(match op {
+        "=" | "==" => a == b,
+        "!=" => a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.filter: unknown op: {}",
+                other
+            )));
+        }
+    })
+}
 
-    if row_count == 0 {
-        return Ok(ValueWord::from_datatable(Arc::new(DataTable::new(
-            arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()),
-        ))).into_raw_bits());
-    }
+fn cmp_i64(a: i64, op: &str, b: i64) -> Result<bool, VMError> {
+    Ok(match op {
+        "=" | "==" => a == b,
+        "!=" => a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.filter: unknown op: {}",
+                other
+            )));
+        }
+    })
+}
 
-    let mut rows: ArgVec = ArgVec::with_capacity(row_count);
-    for row_idx in 0..row_count {
-        let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-        let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-        rows.push(result_bits);
-    }
+fn cmp_str(a: &str, op: &str, b: &str) -> Result<bool, VMError> {
+    Ok(match op {
+        "=" | "==" => a == b,
+        "!=" => a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.filter: unknown op: {}",
+                other
+            )));
+        }
+    })
+}
 
-    Ok(build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits())
+fn cmp_bool(a: bool, op: &str, b: bool) -> Result<bool, VMError> {
+    Ok(match op {
+        "=" | "==" => a == b,
+        "!=" => a != b,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.filter: op {} not supported on Bool column",
+                other
+            )));
+        }
+    })
 }

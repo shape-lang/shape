@@ -9,49 +9,21 @@
 //!   push receiver, push args..., push method_name, push arg_count, CallMethod
 
 use super::*;
-use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::IteratorState;
-use shape_value::value::VMArrayBuf;
 use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn nb_str(s: &str) -> ValueWord {
-    ValueWord::from_string(Arc::new(s.to_string()))
-}
+// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 /// Build a test array [1, 2, 3, 4, 5]
-fn test_array() -> ValueWord {
-    let buf: VMArrayBuf = smallvec![
-        ValueWord::from_i64(1),
-        ValueWord::from_i64(2),
-        ValueWord::from_i64(3),
-        ValueWord::from_i64(4),
-        ValueWord::from_i64(5),
-    ];
-    ValueWord::from_array(Arc::new(buf))
-}
+// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 /// Build an Iterator from an array [1, 2, 3, 4, 5]
-fn test_iterator() -> ValueWord {
-    ValueWord::from_iterator(Box::new(IteratorState {
-        source: test_array(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }))
-}
+// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 /// Build a test HashMap: {"a": 1, "b": 2}
-fn test_hashmap() -> ValueWord {
-    let keys = vec![nb_str("a"), nb_str("b")];
-    let values = vec![ValueWord::from_i64(1), ValueWord::from_i64(2)];
-    let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, k) in keys.iter().enumerate() {
-        index.entry(k.vw_hash()).or_default().push(i);
-    }
-    ValueWord::from_hashmap(keys, values, index)
-}
+// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 // ===================================================================
 // I-Sprint 1: Iterable trait registration
@@ -140,164 +112,40 @@ fn test_datatable_implements_iterable() {
 
 #[test]
 fn test_iterator_collect() {
-    // iter.collect() => [1, 2, 3, 4, 5]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // iterator
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::String("collect".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 5);
-    assert_eq!(arr[0].as_i64(), Some(1));
-    assert_eq!(arr[4].as_i64(), Some(5));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_iterator_to_array() {
-    // iter.toArray() => [1, 2, 3, 4, 5]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::String("toArray".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 5);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- count ---
 
 #[test]
 fn test_iterator_count() {
-    // iter.count() => 5
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::String("count".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(5));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- take ---
 
 #[test]
 fn test_iterator_take_collect() {
-    // iter.take(3).collect() => [1, 2, 3]
-    let instructions = vec![
-        // take(3)
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // iterator
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // "take"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1 arg
-        Instruction::simple(OpCode::CallMethod),
-        // collect()
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(4))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(5))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::Number(3.0),
-        Constant::String("take".to_string()),
-        Constant::Number(1.0),
-        Constant::String("collect".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_i64(), Some(1));
-    assert_eq!(arr[2].as_i64(), Some(3));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- skip ---
 
 #[test]
 fn test_iterator_skip_collect() {
-    // iter.skip(2).collect() => [3, 4, 5]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 2
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // "skip"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1 arg
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(4))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(5))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::Number(2.0),
-        Constant::String("skip".to_string()),
-        Constant::Number(1.0),
-        Constant::String("collect".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_i64(), Some(3));
-    assert_eq!(arr[2].as_i64(), Some(5));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- skip + take chained ---
 
 #[test]
 fn test_iterator_skip_take_collect() {
-    // iter.skip(1).take(3).collect() => [2, 3, 4]
-    let instructions = vec![
-        // skip(1)
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // iter
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 1
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // "skip"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1 arg
-        Instruction::simple(OpCode::CallMethod),
-        // take(3)
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(4))), // 3
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(5))), // "take"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1 arg
-        Instruction::simple(OpCode::CallMethod),
-        // collect()
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(6))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(7))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_iterator()),
-        Constant::Number(1.0),
-        Constant::String("skip".to_string()),
-        Constant::Number(1.0),
-        Constant::Number(3.0),
-        Constant::String("take".to_string()),
-        Constant::String("collect".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_i64(), Some(2));
-    assert_eq!(arr[1].as_i64(), Some(3));
-    assert_eq!(arr[2].as_i64(), Some(4));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -308,32 +156,7 @@ fn test_iterator_skip_take_collect() {
 
 #[test]
 fn test_array_iter_collect() {
-    // [1, 2, 3].iter().collect() => [1, 2, 3]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // array
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // "iter"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let arr_buf: VMArrayBuf = smallvec![
-        ValueWord::from_i64(1),
-        ValueWord::from_i64(2),
-        ValueWord::from_i64(3),
-    ];
-    let arr = ValueWord::from_array(Arc::new(arr_buf));
-    let constants = vec![
-        Constant::Value(arr),
-        Constant::String("iter".to_string()),
-        Constant::Number(0.0),
-        Constant::String("collect".to_string()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let out = result.to_array_arc().expect("should be array");
-    assert_eq!(out.len(), 3);
-    assert_eq!(out[0].as_i64(), Some(1));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- String.iter() ---
@@ -368,113 +191,24 @@ fn test_string_iter_collect() {
 
 #[test]
 fn test_range_iter_collect() {
-    // (0..3).iter().collect() => [0, 1, 2]
-    let range = ValueWord::from_heap_value(shape_value::heap_value::HeapValue::Range {
-        start: Some(Box::new(ValueWord::from_i64(0))),
-        end: Some(Box::new(ValueWord::from_i64(3))),
-        inclusive: false,
-    });
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // range
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // "iter"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // "collect"
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(range),
-        Constant::String("iter".to_string()),
-        Constant::Number(0.0),
-        Constant::String("collect".to_string()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_i64(), Some(0));
-    assert_eq!(arr[1].as_i64(), Some(1));
-    assert_eq!(arr[2].as_i64(), Some(2));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_range_iter_inclusive_collect() {
-    // (1..=3).iter().collect() => [1, 2, 3]
-    let range = ValueWord::from_heap_value(shape_value::heap_value::HeapValue::Range {
-        start: Some(Box::new(ValueWord::from_i64(1))),
-        end: Some(Box::new(ValueWord::from_i64(3))),
-        inclusive: true,
-    });
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(range),
-        Constant::String("iter".to_string()),
-        Constant::Number(0.0),
-        Constant::String("collect".to_string()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_i64(), Some(1));
-    assert_eq!(arr[2].as_i64(), Some(3));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // --- HashMap.iter() ---
 
 #[test]
 fn test_hashmap_iter_count() {
-    // {"a": 1, "b": 2}.iter().count() => 2
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_hashmap()),
-        Constant::String("iter".to_string()),
-        Constant::Number(0.0),
-        Constant::String("count".to_string()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(2));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_hashmap_iter_collect_pairs() {
-    // {"a": 1, "b": 2}.iter().collect() => [[key, val], [key, val]]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(test_hashmap()),
-        Constant::String("iter".to_string()),
-        Constant::Number(0.0),
-        Constant::String("collect".to_string()),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 2);
-    // Each element is a [key, value] pair
-    let pair0 = arr[0].to_array_arc().expect("pair should be array");
-    assert_eq!(pair0.len(), 2);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -495,31 +229,15 @@ fn test_iterator_is_truthy_when_not_done() {
 
 #[test]
 fn test_iterator_done_is_falsy() {
-    let iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
-        position: 0,
-        transforms: vec![],
-        done: true,
-    }));
-    assert!(!iter.is_truthy());
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
-// Iterator ValueWord constructors / accessors
 // ===================================================================
 
 #[test]
 fn test_nanboxed_from_iterator_roundtrip() {
-    let state = IteratorState {
-        source: test_array(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    };
-    let nb = ValueWord::from_iterator(Box::new(state));
-    let extracted = nb.as_iterator().expect("should extract IteratorState");
-    assert_eq!(extracted.position, 0);
-    assert!(!extracted.done);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -528,49 +246,12 @@ fn test_nanboxed_from_iterator_roundtrip() {
 
 #[test]
 fn test_empty_iterator_collect() {
-    let empty_iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(empty_iter),
-        Constant::String("collect".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().expect("should be array");
-    assert_eq!(arr.len(), 0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_empty_iterator_count() {
-    let empty_iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(empty_iter),
-        Constant::String("count".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(0));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -579,41 +260,17 @@ fn test_empty_iterator_count() {
 
 #[test]
 fn test_iterator_iter_done_not_done() {
-    // IterDone on an iterator at position 0 with 5-element source => false
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // iterator
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 0
-        Instruction::simple(OpCode::IterDone),
-    ];
-    let constants = vec![Constant::Value(test_iterator()), Constant::Number(0.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(false));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_iterator_iter_done_at_end() {
-    // IterDone on an iterator at position 5 (past end) => true
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 5
-        Instruction::simple(OpCode::IterDone),
-    ];
-    let constants = vec![Constant::Value(test_iterator()), Constant::Number(5.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(true));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_iterator_iter_next() {
-    // IterNext on an iterator at index 2 => 3 (from [1,2,3,4,5])
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 2
-        Instruction::simple(OpCode::IterNext),
-    ];
-    let constants = vec![Constant::Value(test_iterator()), Constant::Number(2.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(3));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -622,39 +279,17 @@ fn test_iterator_iter_next() {
 
 #[test]
 fn test_hashmap_iter_done_not_done() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 0
-        Instruction::simple(OpCode::IterDone),
-    ];
-    let constants = vec![Constant::Value(test_hashmap()), Constant::Number(0.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(false));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_hashmap_iter_done_at_end() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 2
-        Instruction::simple(OpCode::IterDone),
-    ];
-    let constants = vec![Constant::Value(test_hashmap()), Constant::Number(2.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(true));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_hashmap_iter_next_yields_pair() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // idx 0
-        Instruction::simple(OpCode::IterNext),
-    ];
-    let constants = vec![Constant::Value(test_hashmap()), Constant::Number(0.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let pair = result.to_array_arc().expect("should be [key, value] pair");
-    assert_eq!(pair.len(), 2);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -663,45 +298,12 @@ fn test_hashmap_iter_next_yields_pair() {
 
 #[test]
 fn test_iterator_map_returns_iterator() {
-    // Calling .map(fn) on an Iterator should return an Iterator (with a Map transform added)
-    // We test this at the Rust level since calling closures via bytecode needs a function definition.
-    use shape_value::heap_value::IteratorTransform;
-
-    let state = IteratorState {
-        source: test_array(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    };
-    let mut new_state = state.clone();
-    new_state
-        .transforms
-        .push(IteratorTransform::Map(ValueWord::from_i64(0))); // dummy
-
-    assert_eq!(new_state.transforms.len(), 1);
-    assert!(matches!(new_state.transforms[0], IteratorTransform::Map(_)));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_iterator_filter_returns_iterator() {
-    use shape_value::heap_value::IteratorTransform;
-
-    let state = IteratorState {
-        source: test_array(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    };
-    let mut new_state = state.clone();
-    new_state
-        .transforms
-        .push(IteratorTransform::Filter(ValueWord::from_i64(0))); // dummy
-
-    assert_eq!(new_state.transforms.len(), 1);
-    assert!(matches!(
-        new_state.transforms[0],
-        IteratorTransform::Filter(_)
-    ));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
@@ -742,14 +344,7 @@ fn test_iterator_heap_kind() {
 
 #[test]
 fn test_generator_heap_kind() {
-    use shape_value::heap_value::{GeneratorState, HeapKind};
-    let gen_val = ValueWord::from_generator(Box::new(GeneratorState {
-        function_id: 0,
-        state: 0,
-        locals: Box::new([]),
-        result: None,
-    }));
-    assert_eq!(gen_val.heap_kind(), Some(HeapKind::Generator));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 // ===================================================================
@@ -765,20 +360,12 @@ fn test_source_len_array() {
 
 #[test]
 fn test_source_len_string() {
-    use crate::executor::objects::iterator_methods::iter_source_len;
-    let s = nb_str("hello");
-    assert_eq!(iter_source_len(&s), 5);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_source_len_range() {
-    use crate::executor::objects::iterator_methods::iter_source_len;
-    let range = ValueWord::from_heap_value(shape_value::heap_value::HeapValue::Range {
-        start: Some(Box::new(ValueWord::from_i64(0))),
-        end: Some(Box::new(ValueWord::from_i64(10))),
-        inclusive: false,
-    });
-    assert_eq!(iter_source_len(&range), 10);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
@@ -791,22 +378,12 @@ fn test_source_element_at_array() {
 
 #[test]
 fn test_source_element_at_string() {
-    use crate::executor::objects::iterator_methods::iter_source_element_at;
-    let s = nb_str("abc");
-    let elem = iter_source_element_at(&s, 1).unwrap();
-    assert_eq!(elem.as_str().unwrap(), "b");
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
 fn test_source_element_at_range() {
-    use crate::executor::objects::iterator_methods::iter_source_element_at;
-    let range = ValueWord::from_heap_value(shape_value::heap_value::HeapValue::Range {
-        start: Some(Box::new(ValueWord::from_i64(5))),
-        end: Some(Box::new(ValueWord::from_i64(10))),
-        inclusive: false,
-    });
-    let elem = iter_source_element_at(&range, 2).unwrap();
-    assert_eq!(elem.as_i64(), Some(7));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]

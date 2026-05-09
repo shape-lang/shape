@@ -1,309 +1,461 @@
-//! Core DataTable methods: origin, len, columns, column, slice, head, tail, first, last, select, toMat, limit, execute.
+//! Core DataTable methods: origin, len, columns, column, slice, head, tail,
+//! first, last, select, toMat, limit, execute, rows, columnsRef.
+//!
+//! ADR-006 §2.7.10 / Q11 — Wave-δ MR-datatable body migration.
+//!
+//! ABI: `args[0]` is the receiver — `NativeKind::Ptr(HeapKind::DataTable)`
+//! (or `Ptr(HeapKind::TableView)` for the typed/indexed/row-view/column-ref
+//! variants). Per-arg kinds come from the §2.7.7 stack parallel-`Vec<NativeKind>`
+//! track at the dispatch boundary; `args` is borrow-only — handlers do not
+//! consume any share.
+//!
+//! Body pattern: borrow the receiver Arc payload via
+//! `unsafe { &*(args[0].slot.raw() as *const DataTable) }` (and
+//! `*const TableViewData` for `TableView` receivers) — soundness rests on
+//! the §2.7.6 / Q8 construction-side contract that each `Ptr(HeapKind::*)`
+//! kind carries the result of `Arc::into_raw::<T>` for the matching `T`.
+//! `args[0].slot.as_heap_value()` is unsound on typed-Arc slots (it
+//! reinterprets the bits as `*const HeapValue`, the deleted Box-wrap
+//! shape — see Wave-γ G-heap-filter-expr soundness fix at
+//! `Arc::increment_strong_count::<FilterNode>`); the typed-Arc dispatch
+//! pattern lives in `executor/window_join.rs::exec_bind_schema` (Wave-α
+//! D-window-join precedent).
+//!
+//! Result construction:
+//!   - DataTable result: wrap in `Arc::new`, `Arc::into_raw` to the slot,
+//!     push as `NativeKind::Ptr(HeapKind::DataTable)` per playbook §3.
+//!   - TableView result: same pattern with `Arc<TableViewData>` and
+//!     `NativeKind::Ptr(HeapKind::TableView)`.
+//!   - Scalar result: `KindedSlot::from_int` / `from_number` / `from_bool`.
+//!   - String result: `KindedSlot::from_string_arc(Arc<String>)`.
+//!   - Array result: `KindedSlot::from_typed_array(Arc<TypedArrayData>)`.
+//!
+//! Closure-callback handlers (filter / orderBy / group_by / map / forEach /
+//! aggregate-with-spec) live in `query.rs` / `aggregation.rs` — they
+//! surface because `op_call_value` itself is at SURFACE per
+//! `executor/control_flow/mod.rs:372` (PHASE_2C_CALL_REBUILD_SURFACE).
 
-use crate::executor::VirtualMachine;
-use arrow_array::{
-    Array, ArrayRef, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+use shape_runtime::context::ExecutionContext;
+use shape_value::{
+    AlignedTypedBuffer, AlignedVec, DataTable, HeapValue, KindedSlot, NativeKind, TableViewData,
+    TypedArrayData, TypedBuffer, ValueSlot, VMError, heap_value::HeapKind,
 };
-use arrow_schema::DataType;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use super::common::{extract_dt_nb, extract_schema_id_nb, wrap_result_table_nb};
+use crate::executor::VirtualMachine;
 
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
+use super::common::{borrow_data_table, push_data_table_result};
 
-/// `dt.origin()`
+/// `dt.origin()` — returns the table origin string (`type_name`, falling
+/// back to "DataTable").
 pub(crate) fn handle_origin(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    Ok(dt.origin().into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "origin")?;
+    let name = dt.type_name().unwrap_or("DataTable").to_string();
+    Ok(KindedSlot::from_string_arc(Arc::new(name)))
 }
 
-/// `dt.len()`
+/// `dt.len()` — returns the row count as `Int64`.
 pub(crate) fn handle_len(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    Ok(ValueWord::from_i64(dt.row_count() as i64).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "len")?;
+    Ok(KindedSlot::from_int(dt.row_count() as i64))
 }
 
-/// `dt.columns()`
+/// `dt.columns()` — returns an `Array<String>` of column names.
 pub(crate) fn handle_columns(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let names: ArgVec = ArgVec::from_vec(dt
-        .column_names()
-        .into_iter()
-        .map(|n| ValueWord::from_string(Arc::new(n)))
-        .collect());
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(names.into_inner())).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "columns")?;
+    let names: Vec<Arc<String>> = dt.column_names().into_iter().map(Arc::new).collect();
+    let buf = TypedBuffer::from_vec(names);
+    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::String(
+        Arc::new(buf),
+    ))))
 }
 
-/// `dt.column(name)`
+/// `dt.column(name)` — returns a `ColumnRef` (`TableView` variant).
 pub(crate) fn handle_column(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let schema_id = extract_schema_id_nb(&receiver);
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let col_name = arg1
-        .as_ref()
-        .and_then(|nb| nb.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| VMError::RuntimeError("column() requires a string argument".to_string()))?;
-    let col_id = dt.inner().schema().index_of(&col_name).map_err(|_| {
-        VMError::RuntimeError(format!("Column '{}' not found in DataTable", col_name))
-    })? as u32;
-    Ok(ValueWord::from_column_ref(schema_id, dt.clone(), col_id).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "column")?;
+    let name = arg_str(args, 1, "column", "column name")?;
+    let col_id = dt_arc
+        .column_names()
+        .iter()
+        .position(|n| n == name)
+        .ok_or_else(|| VMError::RuntimeError(format!("column not found: {}", name)))?;
+    let tv = TableViewData::ColumnRef {
+        schema_id: dt_arc.schema_id().unwrap_or(0) as u64,
+        table: dt_arc,
+        col_id: col_id as u32,
+    };
+    let bits = Arc::into_raw(Arc::new(tv)) as u64;
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::TableView),
+    ))
 }
 
-/// `dt.slice(offset, length)`
+/// `dt.slice(offset, length)` — zero-copy sliced DataTable.
 pub(crate) fn handle_slice(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let offset = arg1.as_ref().and_then(|nb| nb.as_number_coerce()).map(|n| n as usize)
-        .ok_or_else(|| VMError::RuntimeError("slice() requires offset as first arg".to_string()))?;
-    let arg2 = args.get(2).map(|&r| borrow_vw(r));
-    let length = arg2.as_ref().and_then(|nb| nb.as_number_coerce()).map(|n| n as usize)
-        .ok_or_else(|| VMError::RuntimeError("slice() requires length as second arg".to_string()))?;
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "slice")?;
+    let offset = arg_usize(args, 1, "slice", "offset")?;
+    let length = arg_usize(args, 2, "slice", "length")?;
+    let row_count = dt.row_count();
+    if offset > row_count {
+        return Err(VMError::RuntimeError(format!(
+            "slice: offset {} out of range (row_count={})",
+            offset, row_count
+        )));
+    }
+    let length = length.min(row_count - offset);
     let sliced = dt.slice(offset, length);
-    Ok(wrap_result_table_nb(&receiver, sliced).into_raw_bits())
+    push_data_table_result(sliced)
 }
 
-/// `dt.head(n)`
+/// `dt.head(n)` — first `n` rows.
 pub(crate) fn handle_head(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let n = arg1.as_ref().and_then(|nb| nb.as_number_coerce()).map(|n| n as usize).unwrap_or(5);
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "head")?;
+    let n = arg_usize(args, 1, "head", "n")?;
     let n = n.min(dt.row_count());
-    let sliced = dt.slice(0, n);
-    Ok(wrap_result_table_nb(&receiver, sliced).into_raw_bits())
+    push_data_table_result(dt.slice(0, n))
 }
 
-/// `dt.limit(n)`
-pub(crate) fn handle_limit(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let n = arg1.as_ref().and_then(|nb| nb.as_number_coerce()).map(|n| n as usize)
-        .ok_or_else(|| VMError::RuntimeError("limit() requires a number argument".to_string()))?;
-    let n = n.min(dt.row_count());
-    let sliced = dt.slice(0, n);
-    Ok(wrap_result_table_nb(&receiver, sliced).into_raw_bits())
-}
-
-/// `dt.execute()`
-pub(crate) fn handle_execute(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Ok(args[0])
-}
-
-fn is_numeric_dtype(dtype: &DataType) -> bool {
-    matches!(dtype,
-        DataType::Float64 | DataType::Float32 | DataType::Int64 | DataType::Int32
-        | DataType::Int16 | DataType::Int8 | DataType::UInt64 | DataType::UInt32
-        | DataType::UInt16 | DataType::UInt8)
-}
-
-fn numeric_column_to_f64(col: &ArrayRef, col_name: &str, row_count: usize) -> Result<Vec<f64>, VMError> {
-    macro_rules! cast_numeric {
-        ($ty:ty, $convert:expr) => {
-            if let Some(arr) = col.as_any().downcast_ref::<$ty>() {
-                return Ok((0..row_count).map(|i| if arr.is_null(i) { f64::NAN } else { $convert(arr, i) }).collect());
-            }
-        };
-    }
-    cast_numeric!(Float64Array, |arr: &Float64Array, i| arr.value(i));
-    cast_numeric!(Float32Array, |arr: &Float32Array, i| arr.value(i) as f64);
-    cast_numeric!(Int64Array, |arr: &Int64Array, i| arr.value(i) as f64);
-    cast_numeric!(Int32Array, |arr: &Int32Array, i| arr.value(i) as f64);
-    cast_numeric!(Int16Array, |arr: &Int16Array, i| arr.value(i) as f64);
-    cast_numeric!(Int8Array, |arr: &Int8Array, i| arr.value(i) as f64);
-    cast_numeric!(UInt64Array, |arr: &UInt64Array, i| arr.value(i) as f64);
-    cast_numeric!(UInt32Array, |arr: &UInt32Array, i| arr.value(i) as f64);
-    cast_numeric!(UInt16Array, |arr: &UInt16Array, i| arr.value(i) as f64);
-    cast_numeric!(UInt8Array, |arr: &UInt8Array, i| arr.value(i) as f64);
-    Err(VMError::RuntimeError(format!("Column '{}' is not a numeric column", col_name)))
-}
-
-/// `dt.toMat([cols...])`
-pub(crate) fn handle_to_mat(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let batch = dt.inner();
-    let schema = batch.schema();
-    let row_count = batch.num_rows();
-    let selected_indices = if args.len() > 1 {
-        let mut indices = Vec::with_capacity(args.len() - 1);
-        for &raw in args.iter().skip(1) {
-            let arg = borrow_vw(raw);
-            let name = arg.as_str().ok_or_else(|| VMError::RuntimeError("toMat() expects string column names".to_string()))?;
-            let idx = schema.index_of(name).map_err(|_| VMError::RuntimeError(format!("Column '{}' not found", name)))?;
-            let dtype = schema.field(idx).data_type();
-            if !is_numeric_dtype(dtype) { return Err(VMError::RuntimeError(format!("Column '{}' has non-numeric type {:?}", name, dtype))); }
-            indices.push(idx);
-        }
-        indices
-    } else {
-        schema.fields().iter().enumerate().filter_map(|(idx, field)| is_numeric_dtype(field.data_type()).then_some(idx)).collect::<Vec<_>>()
-    };
-    if selected_indices.is_empty() { return Err(VMError::RuntimeError("toMat() requires at least one numeric column".to_string())); }
-    let selected_names = selected_indices.iter().map(|idx| schema.field(*idx).name().clone()).collect::<Vec<_>>();
-    let columns = selected_indices.iter().zip(selected_names.iter()).map(|(idx, name)| numeric_column_to_f64(batch.column(*idx), name, row_count)).collect::<Result<Vec<_>, _>>()?;
-    let n_cols = columns.len();
-    let total = row_count * n_cols;
-    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(total);
-    for row_idx in 0..row_count { for col in &columns { data.push(col[row_idx]); } }
-    let mat = shape_value::heap_value::MatrixData::from_flat(data, row_count as u32, n_cols as u32);
-    Ok(ValueWord::from_matrix(std::sync::Arc::new(mat)).into_raw_bits())
-}
-
-/// `dt.tail(n)`
+/// `dt.tail(n)` — last `n` rows.
 pub(crate) fn handle_tail(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let arg1 = args.get(1).map(|&r| borrow_vw(r));
-    let n = arg1.as_ref().and_then(|nb| nb.as_number_coerce()).map(|n| n as usize).unwrap_or(5);
-    let n = n.min(dt.row_count());
-    let offset = dt.row_count() - n;
-    let sliced = dt.slice(offset, n);
-    Ok(wrap_result_table_nb(&receiver, sliced).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "tail")?;
+    let n = arg_usize(args, 1, "tail", "n")?;
+    let row_count = dt.row_count();
+    let n = n.min(row_count);
+    let offset = row_count - n;
+    push_data_table_result(dt.slice(offset, n))
 }
 
-/// `dt.first()`
+/// `dt.first()` — first row as `RowView`.
 pub(crate) fn handle_first(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if dt.is_empty() { Ok(ValueWord::none().into_raw_bits()) }
-    else { Ok(wrap_result_table_nb(&receiver, dt.slice(0, 1)).into_raw_bits()) }
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "first")?;
+    if dt_arc.row_count() == 0 {
+        return Err(VMError::RuntimeError("first: empty table".to_string()));
+    }
+    let tv = TableViewData::RowView {
+        schema_id: dt_arc.schema_id().unwrap_or(0) as u64,
+        table: dt_arc,
+        row_idx: 0,
+    };
+    let bits = Arc::into_raw(Arc::new(tv)) as u64;
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::TableView),
+    ))
 }
 
-/// `dt.last()`
+/// `dt.last()` — last row as `RowView`.
 pub(crate) fn handle_last(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if dt.is_empty() { Ok(ValueWord::none().into_raw_bits()) }
-    else { let n = dt.row_count(); Ok(wrap_result_table_nb(&receiver, dt.slice(n - 1, 1)).into_raw_bits()) }
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "last")?;
+    let row_count = dt_arc.row_count();
+    if row_count == 0 {
+        return Err(VMError::RuntimeError("last: empty table".to_string()));
+    }
+    let tv = TableViewData::RowView {
+        schema_id: dt_arc.schema_id().unwrap_or(0) as u64,
+        table: dt_arc,
+        row_idx: row_count - 1,
+    };
+    let bits = Arc::into_raw(Arc::new(tv)) as u64;
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::TableView),
+    ))
 }
 
-/// `dt.select(...)`
+/// `dt.select(col_names...)` — projection. Variadic column-name args.
 pub(crate) fn handle_select(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if let Some(&raw1) = args.get(1) {
-        if super::super::raw_helpers::is_callable_raw(raw1) {
-            let dt = dt.clone();
-            let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let row_count = dt_arc.row_count();
-            if row_count == 0 {
-                return Ok(super::common::wrap_result_table_nb(&receiver,
-                    shape_value::datatable::DataTable::new(arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()))).into_raw_bits());
-            }
-            let mut rows: ArgVec = ArgVec::with_capacity(row_count);
-            for row_idx in 0..row_count {
-                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
-                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
-                rows.push(result_bits);
-            }
-            return Ok(super::common::build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits());
-        }
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "select")?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "select: at least one column name required".to_string(),
+        ));
     }
-    let batch = dt.inner();
-    let mut indices = Vec::new();
-    for &raw in &args[1..] {
-        let nb = borrow_vw(raw);
-        let name = nb.as_str().ok_or_else(|| VMError::RuntimeError("select() requires string column names or a function".to_string()))?;
-        let idx = batch.schema().index_of(name).map_err(|_| VMError::RuntimeError(format!("Column '{}' not found", name)))?;
+    let mut indices: Vec<usize> = Vec::with_capacity(args.len() - 1);
+    let names = dt.column_names();
+    for (i, slot) in args[1..].iter().enumerate() {
+        let name = slot.as_str().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "select: arg {} must be a column-name string, got {:?}",
+                i + 1,
+                slot.kind
+            ))
+        })?;
+        let idx = names
+            .iter()
+            .position(|n| n == name)
+            .ok_or_else(|| VMError::RuntimeError(format!("select: unknown column: {}", name)))?;
         indices.push(idx);
     }
-    let projected = batch.project(&indices).map_err(|e| VMError::RuntimeError(format!("select() failed: {}", e)))?;
-    let mut new_dt = shape_value::datatable::DataTable::new(projected);
-    if let Some(idx_name) = dt.index_col() { new_dt = new_dt.with_index_col(idx_name.to_string()); }
-    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
+    use arrow_schema::{Field, Schema};
+    let inner = dt.inner();
+    let projected_fields: Vec<Field> = indices
+        .iter()
+        .map(|&i| inner.schema().field(i).clone())
+        .collect();
+    let projected_cols = indices
+        .iter()
+        .map(|&i| inner.column(i).clone())
+        .collect::<Vec<_>>();
+    let new_schema = Arc::new(Schema::new(projected_fields));
+    let new_batch = arrow_array::RecordBatch::try_new(new_schema, projected_cols)
+        .map_err(|e| VMError::RuntimeError(format!("select: {}", e)))?;
+    push_data_table_result(DataTable::new(new_batch))
 }
 
-/// `dt.rows()`
+/// `dt.toMat()` — convert to `Array<Array<f64>>`. Each row becomes a
+/// row-vector; per-column kinds widen to `f64` (Float64 / Int64 supported).
+pub(crate) fn handle_to_mat(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    use arrow_array::{Float64Array, Int64Array};
+    let dt = borrow_data_table(args, "toMat")?;
+    let row_count = dt.row_count();
+    let col_count = dt.column_count();
+
+    // Pre-collect each column as Vec<f64> for row-major reconstruction.
+    let mut cols: Vec<Vec<f64>> = Vec::with_capacity(col_count);
+    for col_idx in 0..col_count {
+        let col = dt.inner().column(col_idx);
+        if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+            cols.push((0..row_count).map(|i| f64a.value(i)).collect());
+        } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+            cols.push((0..row_count).map(|i| i64a.value(i) as f64).collect());
+        } else {
+            return Err(VMError::RuntimeError(format!(
+                "toMat: column {} is non-numeric ({:?})",
+                col_idx,
+                col.data_type()
+            )));
+        }
+    }
+
+    let mut row_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(row_count);
+    for r in 0..row_count {
+        let row: Vec<f64> = (0..col_count).map(|c| cols[c][r]).collect();
+        let aligned = AlignedVec::from_vec(row);
+        let buf = AlignedTypedBuffer::from_aligned(aligned);
+        let inner = TypedArrayData::F64(Arc::new(buf));
+        let hv = HeapValue::TypedArray(Arc::new(inner));
+        row_arcs.push(Arc::new(hv));
+    }
+    let outer_buf = TypedBuffer::from_vec(row_arcs);
+    let outer = TypedArrayData::HeapValue(Arc::new(outer_buf));
+    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+}
+
+/// `dt.limit(n)` — alias for take-first-n.
+pub(crate) fn handle_limit(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    handle_head(vm, args, ctx)
+}
+
+/// `dt.execute()` — terminal Queryable adapter. The DataTable is already
+/// materialized; `execute` returns it as-is (Queryable trait contract).
+pub(crate) fn handle_execute(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "execute")?;
+    let bits = Arc::into_raw(dt_arc) as u64;
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
+    ))
+}
+
+/// `dt.rows()` — `Array<RowView>` (each RowView is a TableView Arc).
 pub(crate) fn handle_rows(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let schema_id = extract_schema_id_nb(&receiver);
-    let row_count = dt.row_count();
-    let mut rows = Vec::with_capacity(row_count);
-    for i in 0..row_count { rows.push(ValueWord::from_row_view(schema_id, dt.clone(), i)); }
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows)).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "rows")?;
+    let row_count = dt_arc.row_count();
+    let schema_id = dt_arc.schema_id().unwrap_or(0) as u64;
+    let mut row_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(row_count);
+    for r in 0..row_count {
+        let tv = TableViewData::RowView {
+            schema_id,
+            table: Arc::clone(&dt_arc),
+            row_idx: r,
+        };
+        let hv = HeapValue::TableView(Arc::new(tv));
+        row_arcs.push(Arc::new(hv));
+    }
+    let buf = TypedBuffer::from_vec(row_arcs);
+    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(
+        Arc::new(buf),
+    ))))
 }
 
-/// `dt.columnsRef()`
+/// `dt.columnsRef()` — `Array<ColumnRef>`.
 pub(crate) fn handle_columns_ref(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let schema_id = extract_schema_id_nb(&receiver);
-    let col_count = dt.column_count();
-    let mut cols = Vec::with_capacity(col_count);
-    for i in 0..col_count { cols.push(ValueWord::from_column_ref(schema_id, dt.clone(), i as u32)); }
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(cols)).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_data_table_arc(args, "columnsRef")?;
+    let schema_id = dt_arc.schema_id().unwrap_or(0) as u64;
+    let col_count = dt_arc.column_count();
+    let mut col_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(col_count);
+    for c in 0..col_count {
+        let tv = TableViewData::ColumnRef {
+            schema_id,
+            table: Arc::clone(&dt_arc),
+            col_id: c as u32,
+        };
+        let hv = HeapValue::TableView(Arc::new(tv));
+        col_arcs.push(Arc::new(hv));
+    }
+    let buf = TypedBuffer::from_vec(col_arcs);
+    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(
+        Arc::new(buf),
+    ))))
+}
+
+// ── argument coercion helpers ───────────────────────────────────────────────
+
+fn borrow_data_table_arc(args: &[KindedSlot], method: &str) -> Result<Arc<DataTable>, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: missing receiver",
+            method
+        )));
+    }
+    let recv = &args[0];
+    match recv.kind {
+        NativeKind::Ptr(HeapKind::DataTable) => {
+            // Borrow without consuming; bump the strong count so the
+            // returned Arc has its own share.
+            let bits = recv.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.{}: null receiver",
+                    method
+                )));
+            }
+            // SAFETY: §2.7.6 / Q8 construction-side contract guarantees
+            // `Ptr(HeapKind::DataTable)` slot bits = `Arc::into_raw::<DataTable>`.
+            unsafe {
+                Arc::increment_strong_count(bits as *const DataTable);
+                Ok(Arc::from_raw(bits as *const DataTable))
+            }
+        }
+        NativeKind::Ptr(HeapKind::TableView) => {
+            let bits = recv.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.{}: null receiver",
+                    method
+                )));
+            }
+            // SAFETY: same construction-side contract for TableView.
+            let tv: &TableViewData = unsafe { &*(bits as *const TableViewData) };
+            let inner = match tv {
+                TableViewData::TypedTable { table, .. }
+                | TableViewData::IndexedTable { table, .. }
+                | TableViewData::RowView { table, .. }
+                | TableViewData::ColumnRef { table, .. } => Arc::clone(table),
+            };
+            Ok(inner)
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "datatable.{}: expected DataTable/TableView receiver, got {:?}",
+            method, other
+        ))),
+    }
+}
+
+fn arg_str<'a>(
+    args: &'a [KindedSlot],
+    idx: usize,
+    method: &str,
+    name: &str,
+) -> Result<&'a str, VMError> {
+    let slot = args.get(idx).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.{}: missing arg {} ({})",
+            method, idx, name
+        ))
+    })?;
+    slot.as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.{}: arg {} ({}) must be string, got {:?}",
+            method, idx, name, slot.kind
+        ))
+    })
+}
+
+fn arg_usize(
+    args: &[KindedSlot],
+    idx: usize,
+    method: &str,
+    name: &str,
+) -> Result<usize, VMError> {
+    let slot = args.get(idx).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.{}: missing arg {} ({})",
+            method, idx, name
+        ))
+    })?;
+    let n = slot.as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.{}: arg {} ({}) must be integer, got {:?}",
+            method, idx, name, slot.kind
+        ))
+    })?;
+    if n < 0 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: arg {} ({}) must be non-negative, got {}",
+            method, idx, name, n
+        )));
+    }
+    Ok(n as usize)
 }

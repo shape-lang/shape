@@ -36,6 +36,9 @@
 use super::closure_layout::{ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
+use crate::kinded_slot::KindedSlot;
+use crate::native_kind::NativeKind;
+use crate::slot::ValueSlot;
 use std::sync::Arc;
 
 /// Owning handle for a raw `TypedClosureHeader` block paired with its layout.
@@ -114,6 +117,61 @@ impl OwnedClosureBlock {
     #[inline]
     pub fn layout(&self) -> &Arc<ClosureLayout> {
         &self.layout
+    }
+
+    /// Read capture `idx`'s raw 8-byte payload paired with its
+    /// `NativeKind` from the layout's per-capture kind track (ADR-006
+    /// §2.7.8 / Q10).
+    ///
+    /// This is the cell-bound mirror of the §2.7.7 stack-side
+    /// `read_owned_kinded` accessor: returns `(bits, kind)` lockstep so
+    /// the caller can route through `clone_with_kind` /
+    /// `drop_with_kind` (the canonical `KindedSlot` dispatch) without
+    /// reconstructing the kind from the slot bits or probing a tag.
+    ///
+    /// For `Immutable` captures the returned `bits` are the raw payload
+    /// bit pattern (e.g. `f64::to_bits(v)`, `Arc::into_raw::<T>` raw
+    /// pointer) and `kind` classifies it directly.
+    ///
+    /// For `OwnedMutable` and `Shared` captures the returned `bits` are
+    /// the raw cell pointer (`*mut T` from `Box::into_raw` or `*const
+    /// SharedCell` from `Arc::into_raw`); `kind` classifies the cell's
+    /// **interior** payload — the same shape `capture_inner_kind`
+    /// resolves to at the `FieldKind` level, but lifted to `NativeKind`
+    /// so heap-bearing interior payloads dispatch through the same
+    /// table the stack-tier uses. Wave-β `B6-variables-loadptr` consumes
+    /// this accessor to migrate the `Load*Ptr` / `Store*Ptr` handlers off
+    /// `NotImplemented(SURFACE)`.
+    ///
+    /// # Safety
+    ///
+    /// The block's captures area for `idx` must have been initialised
+    /// (zero-initialised by `alloc_typed_closure` and then written by
+    /// the make-closure init stage). The 8-byte read is always
+    /// in-bounds because the layout rounds total size up to 8-byte
+    /// alignment and `idx < layout.capture_count()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.layout.capture_count()`.
+    #[inline]
+    pub unsafe fn read_capture_kinded(&self, idx: usize) -> (u64, crate::native_kind::NativeKind) {
+        assert!(
+            idx < self.layout.capture_count(),
+            "OwnedClosureBlock::read_capture_kinded: idx {} out of range (capture_count = {})",
+            idx,
+            self.layout.capture_count()
+        );
+        let off = self.layout.heap_capture_offset(idx);
+        // SAFETY: caller upholds the construction-side init contract; the
+        // 8-byte read at `heap_capture_offset(idx)` is in-bounds per the
+        // layout's geometry (every capture slot is at least 8 bytes wide
+        // — narrower kinds zero-extend in the `read_capture_as_value_bits`
+        // path; this raw read sees the same on-block bytes the JIT and
+        // VM consumers see).
+        let bits = unsafe { std::ptr::read(self.ptr.add(off) as *const u64) };
+        let kind = self.layout.capture_native_kind(idx);
+        (bits, kind)
     }
 }
 
@@ -273,17 +331,23 @@ pub unsafe fn retain_typed_closure(ptr: *const u8) {
 /// block itself. The three masks are:
 ///
 /// - `heap_capture_mask` — bit `i` set means capture `i` is an immutable
-///   Ptr holding a `ValueWord` share. Released via
-///   `release_raw_value_bits` (mirrors `raw_helpers::drop_raw_bits`).
+///   Ptr holding one `Arc<T>` strong-count share for the `T` matching the
+///   layout's `capture_native_kinds[i]` (per ADR-006 §2.7.8 / Q10).
+///   Released via `drop_with_kind(bits, kind)` — the canonical
+///   `KindedSlot::Drop` table — replacing the deleted `Arc<HeapValue>`
+///   blanket decrement.
 /// - `owned_mutable_capture_mask` — bit `i` set means capture `i` is
-///   `CaptureKind::OwnedMutable`; the slot holds `*mut ValueWord` from
-///   `Box::into_raw`. Released via `Box::from_raw` (which runs the inner
-///   `ValueWord`'s Drop — see `ValueWord`'s Drop glue — and frees the box).
+///   `CaptureKind::OwnedMutable`; the slot holds a typed `*mut T` from
+///   `Box::into_raw`. Released via `drop_owned_mutable_capture`, which
+///   reconstructs the matching `Box<T>` per `capture_inner_kind(i)` and
+///   reclaims it; for `Ptr` interior kind the heap-refcount share encoded
+///   in the cell's payload is released first via `drop_with_kind`.
 /// - `shared_capture_mask` — bit `i` set means capture `i` is
 ///   `CaptureKind::Shared`; the slot holds `*const SharedCell` from
-///   `Arc::into_raw`. Released via `Arc::from_raw`, which decrements the
-///   strong count by one and (if this was the last share) runs the inner
-///   `Mutex<ValueWord>`'s Drop.
+///   `Arc::into_raw`. Released via `drop_shared_capture`, which retires
+///   any heap-refcount share carried by the cell's payload (via
+///   `drop_with_kind`) and then `Arc::from_raw`s the cell to release
+///   the strong-count share.
 ///
 /// The three masks are mutually exclusive per index — `ClosureLayout`'s
 /// constructor enforces this — so no slot is released twice.
@@ -335,10 +399,23 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
                     // SAFETY: heap_capture_mask bits are only set for
                     // Ptr-shaped 8-byte slots; the read is in-bounds.
                     let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
+                    // ADR-006 §2.7.8 / Q10: per-capture kind-aware drop.
+                    // The slot's `NativeKind` lives in the layout's
+                    // `capture_native_kinds[i]` companion track (set at
+                    // construction per §2.7.8); routing through
+                    // `drop_with_kind(bits, kind)` retires the matching
+                    // `Arc<T>` strong-count share via the canonical
+                    // `KindedSlot::Drop` table. This replaces the
+                    // forbidden `Arc<HeapValue>` blanket decrement
+                    // (the deleted `release_raw_heap_share` shape) and
+                    // the forbidden `vw_drop(bits)` (§2.7.7 #8).
+                    let kind = layout.capture_native_kind(i);
                     // SAFETY: `is_heap_capture(i)` confirms FieldKind::Ptr;
-                    // the slot bits are an Arc<HeapValue> share owned by
-                    // this capture.
-                    unsafe { release_raw_heap_share(bits) };
+                    // the slot bits are one `Arc<T>` strong-count share
+                    // for the `T` corresponding to `kind` (per the
+                    // construction-side contract on `write_capture_typed`
+                    // / `make_closure` initialisers).
+                    unsafe { drop_with_kind(bits, kind) };
                 }
             }
             CaptureKind::OwnedMutable => {
@@ -792,13 +869,22 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
             // SAFETY: payload offset is 8, payload is 8 bytes wide.
             unsafe { std::ptr::read(shared_cell_payload_ptr(cell_ptr) as *const u64) }
         };
-        // The stored Ptr payload owns one heap refcount share (mirroring
-        // how `release_typed_closure`'s heap_capture_mask path treats
-        // immutable Ptr captures). Releasing it here keeps the bookkeeping
-        // balanced.
+        // ADR-006 §2.7.8 / Q10: route the Ptr-payload share retire through
+        // the per-capture `NativeKind` carried by the layout's
+        // `capture_native_kinds[i]` track. Same canonical
+        // `KindedSlot::Drop` dispatch as the Immutable-Ptr branch in
+        // `release_typed_closure`. The `SharedCell` itself also carries a
+        // single-slot `kind` companion (set at construction per §2.7.8 /
+        // Q10 — see `closure_layout::SharedCell::new`); the layout's
+        // per-capture kind and the cell's per-slot kind are required to
+        // agree by the §2.7.8 lockstep invariant. Reading from the layout
+        // keeps this single-sourced — the layout is the storage-tier
+        // descriptor for the closure block.
+        let kind = layout.capture_native_kind(i);
         // SAFETY: `inner_kind == FieldKind::Ptr` confirms the cell payload
-        // is an Arc<HeapValue> share owned by this slot.
-        unsafe { release_raw_heap_share(bits) };
+        // is an `Arc<T>` share owned by this slot for the `T` matching
+        // `kind` (per the construction-side contract).
+        unsafe { drop_with_kind(bits, kind) };
     }
 
     // Reclaim the Arc strong-count share. If we held the last share the
@@ -810,37 +896,14 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
     unsafe { drop(Arc::from_raw(cell_ptr)) };
 }
 
-/// Release the heap-refcount share held by a strict-typed `Ptr`-kind
-/// capture slot.
-///
-/// In the strict-typed runtime, a closure-capture slot whose layout
-/// `FieldKind == Ptr` stores the raw `*const HeapValue` pointer bits of
-/// an `Arc<HeapValue>` share. Releasing it is one
-/// `Arc::decrement_strong_count` — there is no NaN-box tag to inspect,
-/// no owned/shared bit to dispatch on, no inline-scalar fast path.
-/// Callers MUST verify the slot is a `Ptr` capture before calling this
-/// (`layout.is_heap_capture(i)` for Immutable captures, or
-/// `layout.capture_inner_kind(i) == FieldKind::Ptr` for OwnedMutable /
-/// Shared cell payloads).
-///
-/// # Safety
-///
-/// `bits` must be a valid `*const HeapValue` raw pointer obtained from
-/// `Arc::into_raw` (or null), representing exactly one strong-count
-/// share that the caller is consuming with this release. Passing bits
-/// from a non-Ptr slot is undefined behaviour.
-#[inline]
-unsafe fn release_raw_heap_share(bits: u64) {
-    use crate::heap_value::HeapValue;
-    let ptr = bits as *const HeapValue;
-    if !ptr.is_null() {
-        // SAFETY: caller upheld that `bits` came from `Arc::into_raw` and
-        // represents one strong-count share; decrementing here matches.
-        unsafe {
-            std::sync::Arc::decrement_strong_count(ptr);
-        }
-    }
-}
+// `release_raw_heap_share` was deleted at the §2.7.8 / Q10
+// G-owned-closure-block close. It violated the §1 single-discriminator rule
+// by performing a blanket `Arc<HeapValue>::decrement_strong_count` on every
+// Ptr-capture slot regardless of which `T` the slot's bits actually came
+// from — incompatible with ADR-005's typed-pointer storage discipline
+// (`HeapValue::TypedArray(Arc<TypedArrayData>)` etc.). Every former call
+// site has migrated to `drop_with_kind(bits, kind)` reading the layout's
+// per-capture `NativeKind` track.
 
 /// Write a raw 8-byte capture slot at the given index.
 ///
@@ -1401,17 +1464,587 @@ pub unsafe fn drop_owned_mutable_capture(layout: &ClosureLayout, base: *mut u8, 
         FieldKind::Ptr => {
             // Interior is a heap-refcount share — release it before
             // freeing the box. Read the bits, decrement the inner
-            // share, then reclaim the box itself.
+            // share via the per-capture `NativeKind`-keyed dispatch,
+            // then reclaim the box itself.
             // SAFETY: slot was produced by `alloc_owned_mutable_ptr`,
-            // so the box holds exactly one `u64` cell with the
-            // `ValueWord` bit pattern.
+            // so the box holds exactly one `u64` cell with the raw
+            // `Arc<T>::into_raw` bits per the construction-side
+            // contract.
             let cell = raw as *mut u64;
             let bits = unsafe { *cell };
-            // SAFETY: FieldKind::Ptr confirms `bits` is an Arc<HeapValue>
-            // share; the matching alloc_owned_mutable_ptr stored it.
-            unsafe { release_raw_heap_share(bits) };
+            // ADR-006 §2.7.8 / Q10: route through `drop_with_kind` using
+            // the layout's per-capture kind track — the canonical
+            // `KindedSlot::Drop` dispatch retires exactly one
+            // `Arc<T>` strong-count share for the `T` matching the
+            // capture's `NativeKind`. Replaces the forbidden
+            // `Arc<HeapValue>` blanket decrement.
+            let kind = layout.capture_native_kind(i);
+            // SAFETY: FieldKind::Ptr confirms `bits` is an `Arc<T>`
+            // share for the `T` matching `kind`; the construction-side
+            // contract on `alloc_owned_mutable_ptr` stored it.
+            unsafe { drop_with_kind(bits, kind) };
             // SAFETY: reclaim the now-empty `Box<u64>`.
             unsafe { drop(Box::from_raw(cell)) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §2.7.8 / Q10 — Cell-storage kind-awareness (Phase 1.B-vm Wave 6.5 B7).
+//
+// The §2.7.7 stack-side parallel-`Vec<NativeKind>` invariant extends to
+// every cell-storage struct that holds raw heap-pointer bits in the
+// runtime/VM tier. Below is the closure-cell incarnation: a kind-aware
+// capture-cell store that pairs `Vec<u64>` raw payload with a parallel
+// `Vec<NativeKind>` track in lockstep, plus the matching `clone_with_kind`
+// / `drop_with_kind` dispatch (mirrored from `KindedSlot::Clone` /
+// `KindedSlot::Drop` — the canonical refcount-dispatch table in
+// `crates/shape-value/src/kinded_slot.rs`).
+//
+// This struct is the structural foundation Wave-β cluster
+// `B6-variables-loadptr` consumes when it migrates the `Load*Ptr` /
+// `Store*Ptr` handlers off `NotImplemented(SURFACE)`. The closure block's
+// raw byte buffer (allocated via `alloc_typed_closure`) and the
+// `OwnedClosureBlock` handle continue to exist as today; `ClosureCell`
+// adds the parallel-kind track that the cell-bound consumer surface
+// (variables/mod.rs Load*Ptr handlers) requires per §2.7.8.
+//
+// See `docs/adr/006-value-and-memory-model.md` §2.7.8 + §17 Q10.
+// Playbook anchor: `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md`
+// §10 row B7-closure-cells.
+// ---------------------------------------------------------------------------
+
+/// WB2.4 retain-on-read mirror of `KindedSlot::Clone`. Bumps the matching
+/// `Arc<T>` strong-count for a heap-bearing kind, no-op for inline scalars.
+///
+/// Implemented by constructing a transient `KindedSlot` and forgetting
+/// it — `KindedSlot::Clone` carries the canonical per-`NativeKind`
+/// dispatch, so this routes every retain through the single discriminator
+/// without duplicating the table.
+///
+/// # Safety
+///
+/// `bits` must be a valid representation of `kind` per the construction-side
+/// contract (for heap kinds: result of `Arc::into_raw::<T>` for the matching
+/// `T`; for inline scalars: native bit pattern of the kind).
+#[inline]
+pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: caller upholds the construction-side contract (see fn doc).
+    // `KindedSlot::clone()` bumps exactly one strong-count share for the
+    // matching `Arc<T>` per kind; we keep the cloned slot (which owns the
+    // bumped share) and leak the original via `mem::forget` so the borrowed
+    // `bits` continue to represent the original share owned by the caller's
+    // cell.
+    unsafe {
+        let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let cloned = original.clone();
+        std::mem::forget(original);
+        // `cloned` carries the +1 strong-count we added; dropping it would
+        // cancel the retain we just performed, so leak it. The caller's
+        // freshly-cloned slot owns the new share.
+        std::mem::forget(cloned);
+    }
+}
+
+/// WB2.4 release-on-overwrite mirror of `KindedSlot::Drop`. Decrements the
+/// matching `Arc<T>` strong-count for a heap-bearing kind, no-op for inline
+/// scalars.
+///
+/// Implemented by reconstructing the owning `KindedSlot` from `(bits, kind)`
+/// and letting Rust's Drop dispatch through `KindedSlot::drop` — the single
+/// per-`NativeKind` table.
+///
+/// # Safety
+///
+/// `bits` must be a valid representation of `kind` and must represent
+/// exactly one strong-count share that the caller is consuming with this
+/// release. Calling `drop_with_kind` twice on the same bits is a
+/// double-free for heap kinds.
+#[inline]
+pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: caller upholds that `bits` is one strong-count share for
+    // `kind`; reconstructing the `KindedSlot` and letting it drop retires
+    // exactly one share via the canonical dispatch table.
+    unsafe {
+        let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    }
+}
+
+/// Kind-aware closure capture cell store (§2.7.8 / Q10).
+///
+/// Carries two parallel arrays in lockstep:
+///
+/// - `bits: Vec<u64>` — 8-byte raw payload per cell (the same shape as
+///   the existing closure block's capture slots, but stored separately as
+///   a kind-tracked side-store for cells whose kind is not derivable from
+///   `ClosureLayout::capture_inner_kind` alone — i.e. heap captures whose
+///   `NativeKind::Ptr(HeapKind)` discriminator is finer than `FieldKind::Ptr`).
+/// - `kinds: Vec<NativeKind>` — 1-byte interpretation per cell.
+///
+/// **Index invariant:** `bits.len() == kinds.len()` at every observable
+/// boundary (method entry/exit). Mixed lengths are a bug.
+///
+/// **Drop discipline:** every cell is released through `drop_with_kind`
+/// — never bare `vw_drop` (forbidden #8 per §2.7.7) or "drop only if
+/// heap-shaped" probes (forbidden #7). Inline-scalar kinds are no-op
+/// drops; heap-bearing kinds retire one `Arc<T>` strong-count share per
+/// the dispatch in `KindedSlot::drop`.
+///
+/// **Construction:** every push/pop/read accepts/returns `(bits, kind)`
+/// lockstep. There is no kind-less constructor — cells are post-proof per
+/// §2.7.5.1, so each cell carries a known `NativeKind` by construction.
+///
+/// **Forbidden shapes (mirror of §2.7.7's stack-side list):**
+/// - `Vec<KindedSlot>` for the cell store (§2.7.5 — `KindedSlot` is a
+///   runtime-tier carrier, not the storage-tier shape).
+/// - 16-byte cell slots / packed tag bits in the `u64` (§2.1 — 8-byte
+///   slot invariant).
+/// - `Vec<Option<NativeKind>>` for the kind track (§2.7.5.1 — cells are
+///   post-proof; every cell has a concrete kind by construction).
+/// - `NativeKind::Unknown` / `Pending` / `Dynamic` placeholders (deleted
+///   from the enum).
+/// - Bool-default fallback for any cell write (§2.7.7 #9 — the W-series
+///   rationalization; surface to supervisor on a kind-source gap instead).
+///
+/// **Wave-β consumer migration:** the `Load*Ptr` / `Store*Ptr` handlers
+/// in `executor/variables/mod.rs` (the 130 mandatory + 33 sibling sites
+/// cluster B partial-closed leaving as `NotImplemented(SURFACE)`) will be
+/// migrated by Wave-β cluster `B6-variables-loadptr` to thread the kind
+/// through the cell-bound read paths via this struct.
+#[derive(Debug)]
+pub struct ClosureCell {
+    /// Raw payload — 8-byte per cell. Cell `i` holds `bits[i]` interpreted
+    /// per `kinds[i]` (e.g. an `Arc::into_raw::<TypedArrayData>` raw pointer
+    /// when `kinds[i] == NativeKind::Ptr(HeapKind::TypedArray)`, or a native
+    /// `f64` bit pattern when `kinds[i] == NativeKind::Float64`).
+    pub bits: Vec<u64>,
+    /// Per-cell kind track. Lockstep with `bits` per the §2.7.8 index
+    /// invariant.
+    pub kinds: Vec<NativeKind>,
+}
+
+impl ClosureCell {
+    /// Create an empty cell store.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            bits: Vec::new(),
+            kinds: Vec::new(),
+        }
+    }
+
+    /// Create an empty cell store with the given capacity reserved on
+    /// both parallel tracks.
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            bits: Vec::with_capacity(cap),
+            kinds: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Number of live cells. The §2.7.8 index invariant guarantees this
+    /// equals `self.kinds.len()`.
+    #[inline]
+    pub fn len(&self) -> usize {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell index invariant: bits.len() == kinds.len()"
+        );
+        self.bits.len()
+    }
+
+    /// Whether the cell store is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.bits.is_empty()
+    }
+
+    /// Append a cell. The caller transfers ownership of `bits`'s
+    /// strong-count share (for heap kinds) into the cell store; the
+    /// matching `drop_with_kind` discharge happens at pop / truncate /
+    /// `Drop` time.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a valid representation of `kind` per the
+    /// construction-side contract — for heap kinds, the result of
+    /// `Arc::into_raw::<T>` for the matching `T`; for inline scalars, the
+    /// native bit pattern.
+    #[inline]
+    pub unsafe fn push(&mut self, bits: u64, kind: NativeKind) {
+        self.bits.push(bits);
+        self.kinds.push(kind);
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::push violated bits.len() == kinds.len() invariant"
+        );
+    }
+
+    /// Remove and return the last `(bits, kind)`. The caller takes
+    /// ownership of the share (for heap kinds) and is responsible for
+    /// `drop_with_kind` (or transferring it elsewhere). Pop does NOT
+    /// clone — `vec.pop()` is move-out semantics.
+    #[inline]
+    pub fn pop(&mut self) -> Option<(u64, NativeKind)> {
+        match (self.bits.pop(), self.kinds.pop()) {
+            (Some(b), Some(k)) => Some((b, k)),
+            (None, None) => None,
+            _ => {
+                // The §2.7.8 index invariant rules this out at every
+                // observable boundary; reaching here is a hard bug.
+                unreachable!("ClosureCell index invariant violated: bits/kinds desync on pop")
+            }
+        }
+    }
+
+    /// Read cell `idx` as `(bits, kind)` without consuming it. The
+    /// returned `bits` is a borrowed copy — for heap kinds the caller
+    /// must `clone_with_kind(bits, kind)` to obtain an independently-
+    /// owned share before storing it elsewhere (the cell retains its
+    /// share).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub fn read(&self, idx: usize) -> (u64, NativeKind) {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::read on desynced cell store"
+        );
+        (self.bits[idx], self.kinds[idx])
+    }
+
+    /// Read cell `idx` and return a runtime-tier `KindedSlot` carrier
+    /// with a freshly-cloned share (for heap kinds; inline scalars are
+    /// `Copy`-equivalent). This is the §2.7.7 retain-on-read pattern,
+    /// extended to cells per §2.7.8.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub fn read_kinded(&self, idx: usize) -> KindedSlot {
+        let (bits, kind) = self.read(idx);
+        // SAFETY: cells are post-proof; `bits`/`kind` represent a valid
+        // strong-count share owned by this cell store. `clone_with_kind`
+        // bumps the share so the returned `KindedSlot` owns an
+        // independent share, leaving the cell's own share intact.
+        unsafe { clone_with_kind(bits, kind) };
+        KindedSlot::new(ValueSlot::from_raw(bits), kind)
+    }
+
+    /// Overwrite cell `idx` with a new `(bits, kind)` pair, returning the
+    /// old `(bits, kind)`. The caller is responsible for `drop_with_kind`
+    /// on the returned previous value (or transferring it elsewhere) and
+    /// for ensuring the new `bits` carry one fresh strong-count share for
+    /// the new `kind`.
+    ///
+    /// # Safety
+    ///
+    /// New `bits` must be a valid representation of new `kind` per the
+    /// construction-side contract (for heap kinds: one strong-count share
+    /// from `Arc::into_raw::<T>` for the matching `T`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub unsafe fn replace(
+        &mut self,
+        idx: usize,
+        bits: u64,
+        kind: NativeKind,
+    ) -> (u64, NativeKind) {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::replace on desynced cell store"
+        );
+        let prev_bits = std::mem::replace(&mut self.bits[idx], bits);
+        let prev_kind = std::mem::replace(&mut self.kinds[idx], kind);
+        (prev_bits, prev_kind)
+    }
+
+    /// Truncate the cell store to `new_len` cells, releasing every cell
+    /// at index `>= new_len` via `drop_with_kind`. No-op if
+    /// `new_len >= self.len()`.
+    #[inline]
+    pub fn truncate(&mut self, new_len: usize) {
+        let old_len = self.len();
+        if new_len >= old_len {
+            return;
+        }
+        // Release tail in reverse so refcount semantics match the
+        // last-pushed-first-dropped order.
+        for i in (new_len..old_len).rev() {
+            let bits = self.bits[i];
+            let kind = self.kinds[i];
+            // SAFETY: the §2.7.8 push-side contract guarantees every
+            // cell carries a valid `(bits, kind)` representation owning
+            // one strong-count share. Releasing here matches that share.
+            unsafe { drop_with_kind(bits, kind) };
+        }
+        // Now that every tail cell's heap share has been retired via
+        // `drop_with_kind`, shrink both parallel tracks. The element
+        // types (`u64` and `NativeKind`) are `Copy`, so `Vec::truncate`'s
+        // own element-drop is a trivial no-op — no double-release risk.
+        self.bits.truncate(new_len);
+        self.kinds.truncate(new_len);
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::truncate violated bits.len() == kinds.len() invariant"
+        );
+    }
+}
+
+impl Default for ClosureCell {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ClosureCell {
+    /// Releases every live cell via `drop_with_kind` per §2.7.8. The
+    /// drop order is tail-first to mirror the last-pushed-first-dropped
+    /// convention used by `KindedSlot`-bearing collections.
+    fn drop(&mut self) {
+        // Iterate in reverse so refcount-bearing cells release in
+        // last-pushed-first-dropped order. `truncate(0)` already does
+        // tail-first release per the impl above; calling it here yields
+        // the same dispatch as a manual loop.
+        self.truncate(0);
+    }
+}
+
+#[cfg(test)]
+mod closure_cell_tests {
+    //! §2.7.8 / Q10 structural-extension tests for `ClosureCell`.
+    //!
+    //! These tests exercise the lockstep `bits.len() == kinds.len()`
+    //! invariant, push/pop/read/replace/truncate signatures, and the
+    //! kind-aware drop discipline. Heap-kind refcount semantics are
+    //! covered by the `KindedSlot` test suite (`kinded_slot.rs`); these
+    //! tests focus on the cell-store shape itself.
+    use super::*;
+
+    #[test]
+    fn empty_cell_satisfies_invariant() {
+        let cell = ClosureCell::new();
+        assert_eq!(cell.len(), 0);
+        assert!(cell.is_empty());
+        assert_eq!(cell.bits.len(), cell.kinds.len());
+    }
+
+    #[test]
+    fn push_pop_inline_scalars_round_trip() {
+        let mut cell = ClosureCell::with_capacity(4);
+        // SAFETY: inline-scalar bits are valid representations of their
+        // kinds (no heap shares to track).
+        unsafe {
+            cell.push(42u64, NativeKind::Int64);
+            cell.push(f64::to_bits(3.14), NativeKind::Float64);
+            cell.push(1u64, NativeKind::Bool);
+        }
+        assert_eq!(cell.len(), 3);
+        assert_eq!(cell.pop(), Some((1u64, NativeKind::Bool)));
+        assert_eq!(cell.pop(), Some((f64::to_bits(3.14), NativeKind::Float64)));
+        assert_eq!(cell.pop(), Some((42u64, NativeKind::Int64)));
+        assert_eq!(cell.pop(), None);
+    }
+
+    #[test]
+    fn read_returns_lockstep_pair() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits.
+        unsafe {
+            cell.push(7u64, NativeKind::Int64);
+            cell.push(0u64, NativeKind::Bool);
+        }
+        assert_eq!(cell.read(0), (7u64, NativeKind::Int64));
+        assert_eq!(cell.read(1), (0u64, NativeKind::Bool));
+    }
+
+    #[test]
+    fn replace_returns_previous_pair() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits.
+        unsafe {
+            cell.push(1u64, NativeKind::Int64);
+            let prev = cell.replace(0, 99u64, NativeKind::UInt64);
+            assert_eq!(prev, (1u64, NativeKind::Int64));
+            assert_eq!(cell.read(0), (99u64, NativeKind::UInt64));
+        }
+    }
+
+    #[test]
+    fn truncate_drops_tail() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits — drop is a no-op for these kinds.
+        unsafe {
+            cell.push(1u64, NativeKind::Int64);
+            cell.push(2u64, NativeKind::Int64);
+            cell.push(3u64, NativeKind::Int64);
+        }
+        cell.truncate(1);
+        assert_eq!(cell.len(), 1);
+        assert_eq!(cell.read(0), (1u64, NativeKind::Int64));
+    }
+
+    #[test]
+    fn drop_releases_all_cells() {
+        // Use a heap-bearing kind to confirm the dispatch path runs
+        // through `KindedSlot::drop`. Construct via the canonical
+        // `KindedSlot::from_string` and decompose into `(bits, kind)` so
+        // the cell store owns the share.
+        let mut cell = ClosureCell::new();
+        let slot = KindedSlot::from_string("hello §2.7.8");
+        let bits = slot.slot.raw();
+        let kind = slot.kind;
+        std::mem::forget(slot); // transfer the share into the cell
+        // SAFETY: `bits`/`kind` carry one strong-count share transferred
+        // via `mem::forget` above; the cell store now owns it.
+        unsafe { cell.push(bits, kind) };
+        assert_eq!(cell.len(), 1);
+        // Dropping the cell store should retire the share via
+        // `drop_with_kind` -> `KindedSlot::drop`.
+        drop(cell);
+        // No assertion on the freed Arc — miri / valgrind catch
+        // double-free or leak. The test passing without UB is the
+        // signal.
+    }
+
+    #[test]
+    fn pop_then_explicit_drop_round_trip() {
+        let mut cell = ClosureCell::new();
+        let slot = KindedSlot::from_string("popped");
+        let bits = slot.slot.raw();
+        let kind = slot.kind;
+        std::mem::forget(slot);
+        // SAFETY: same construction-side contract as above.
+        unsafe { cell.push(bits, kind) };
+
+        let (b, k) = cell.pop().expect("non-empty");
+        // Caller takes ownership; matching drop_with_kind retires the
+        // share once.
+        // SAFETY: `b`/`k` are exactly what we just pushed and popped.
+        unsafe { drop_with_kind(b, k) };
+    }
+}
+
+#[cfg(test)]
+mod owned_closure_block_kinded_tests {
+    //! ADR-006 §2.7.8 / Q10 structural-extension tests for the
+    //! `OwnedClosureBlock` per-capture kind track.
+    //!
+    //! These exercise the new `read_capture_kinded(idx) -> (u64, NativeKind)`
+    //! accessor (the cell-bound mirror of the §2.7.7 stack-side
+    //! `read_owned_kinded`) on the existing raw-byte closure block.
+    //! Heap-kind refcount semantics are covered by the `KindedSlot` and
+    //! `closure_cell_tests` suites; these tests focus on the
+    //! layout-driven kind dispatch through the `OwnedClosureBlock` handle.
+    use super::*;
+    use crate::v2::closure_layout::{CaptureKind, ClosureLayout};
+    use crate::v2::concrete_type::ConcreteType;
+    use std::sync::Arc;
+
+    /// Build an immutable-only Arc<ClosureLayout>.
+    fn arc_immutable_layout(types: &[ConcreteType]) -> Arc<ClosureLayout> {
+        let kinds = vec![CaptureKind::Immutable; types.len()];
+        Arc::new(ClosureLayout::from_capture_types(types, &kinds))
+    }
+
+    #[test]
+    fn read_capture_kinded_inline_scalar_returns_layout_kind() {
+        // Single I64 capture initialised to a known bit pattern; the
+        // accessor returns the lockstep `(bits, kind)` pair from the
+        // layout's `capture_native_kinds[0]`.
+        let layout = arc_immutable_layout(&[ConcreteType::I64]);
+        // SAFETY: alloc + write are paired; no concurrent access.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, 0xDEAD_BEEF_CAFE_BABE);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(bits, 0xDEAD_BEEF_CAFE_BABE);
+            assert_eq!(kind, NativeKind::Int64);
+        }
+    }
+
+    #[test]
+    fn read_capture_kinded_f64_returns_float_kind() {
+        let layout = arc_immutable_layout(&[ConcreteType::F64]);
+        // SAFETY: alloc + write are paired.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(2.5));
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(bits), 2.5);
+            assert_eq!(kind, NativeKind::Float64);
+        }
+    }
+
+    #[test]
+    fn read_capture_kinded_string_returns_string_kind() {
+        // String capture maps to NativeKind::String per the §2.7.8
+        // derivation; the accessor surfaces this for B6-round-2's
+        // `Load*Ptr` consumer to route through `clone_with_kind`.
+        let layout = arc_immutable_layout(&[ConcreteType::String]);
+        // SAFETY: alloc + write are paired. A null Ptr-slot is fine —
+        // we're not exercising the share-bearing path here.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            // Slot stays zero-initialised; `read_capture_kinded` should
+            // still return the layout's kind for slot 0.
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(bits, 0);
+            assert_eq!(kind, NativeKind::String);
+        }
+    }
+
+    #[test]
+    fn read_capture_kinded_multiple_captures_lockstep() {
+        // Mixed-kind layout: per-capture kinds match per-capture types,
+        // demonstrating that `read_capture_kinded` walks the kind track
+        // in lockstep with the bit slots.
+        let layout = arc_immutable_layout(&[
+            ConcreteType::F64,
+            ConcreteType::I32,
+            ConcreteType::Bool,
+        ]);
+        // SAFETY: alloc + per-slot writes are paired.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(1.5));
+            write_capture_typed(ptr, &layout, 1, (-7i32) as u32 as u64);
+            write_capture_typed(ptr, &layout, 2, 1);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(b0), 1.5);
+            assert_eq!(k0, NativeKind::Float64);
+
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i32, -7);
+            assert_eq!(k1, NativeKind::Int32);
+
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2 & 0xFF, 1);
+            assert_eq!(k2, NativeKind::Bool);
         }
     }
 }

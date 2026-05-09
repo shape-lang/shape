@@ -276,7 +276,7 @@ impl BytecodeCompiler {
                     // A.1B StoreSharedCapture opcode, which takes the
                     // parking_lot mutex on the `Arc<SharedCell>` pointer
                     // stored in the capture slot and overwrites the inner
-                    // ValueWord bits.
+                    // raw bits.
                     if let Some(&shared_idx) = self.shared_closure_captures.get(name.as_str()) {
                         debug_assert_eq!(upvalue_idx, shared_idx);
                         // A2-refined / task #17: dispatch to Wave D.2's typed
@@ -394,12 +394,28 @@ impl BytecodeCompiler {
                                 )),
                             ));
                         } else {
+                            // Per ADR-006 §2.7.5.1, "kind not yet known"
+                            // is `Option<StorageHint>` locally — there is
+                            // no `StorageHint::Unknown` sentinel. On
+                            // `None`, fall back to the polymorphic
+                            // `StoreLocal` (mirrors helpers_binding.rs
+                            // emit_load_local_owned migration).
+                            // `info.storage_hint` is itself
+                            // `Option<StorageHint>`, so `.and_then`
+                            // collapses both Option layers into one.
                             let hint = self
                                 .type_tracker
                                 .get_local_type(local_idx)
-                                .map(|info| info.storage_hint)
-                                .unwrap_or(crate::type_tracking::StorageHint::Unknown);
-                            self.emit_store_local_for_hint(local_idx, hint);
+                                .and_then(|info| info.storage_hint);
+                            match hint {
+                                Some(h) => self.emit_store_local_for_hint(local_idx, h),
+                                None => {
+                                    self.emit(Instruction::new(
+                                        OpCode::StoreLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                }
+                            }
                         }
                     }
                     if !self.local_binding_is_reference_value(local_idx) {
@@ -425,7 +441,7 @@ impl BytecodeCompiler {
                     // promoted to `Arc<SharedCell>` by a prior closure
                     // capture, writes must go through
                     // `StoreSharedModuleBinding` (which takes the mutex
-                    // and writes the inner ValueWord). Plain
+                    // and writes the inner raw bits). Plain
                     // `StoreModuleBinding` would overwrite the raw Arc
                     // pointer bits, leaking the Arc and losing the
                     // shared state.

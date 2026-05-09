@@ -46,6 +46,7 @@ use crate::heap_value::{
 };
 use crate::native_kind::NativeKind;
 use crate::slot::ValueSlot;
+use crate::value::FilterNode;
 use std::sync::Arc;
 
 /// Caller-side runtime-value carrier: a `ValueSlot` paired with the
@@ -134,6 +135,26 @@ impl KindedSlot {
         Self::new(ValueSlot::from_bigint(b), NativeKind::Ptr(HeapKind::BigInt))
     }
 
+    /// Convenience: a `Ptr(HeapKind::Char)`-kind slot. `Char` is an inline-
+    /// scalar payload tagged through `HeapKind` for dispatch uniformity
+    /// (no `Arc<T>`); construction shares the slot bits with the `char`
+    /// codepoint directly. Drop is a no-op (matched in `Drop` impl below
+    /// via the `Closure | Future | Char | NativeScalar` debug-assert arm
+    /// — `Char` slots never carry pointer bits, so the arm fires only on
+    /// construction-side bugs).
+    #[inline]
+    pub fn from_char(c: char) -> Self {
+        Self::new(ValueSlot::from_char(c), NativeKind::Ptr(HeapKind::Char))
+    }
+
+    /// Convenience: a `String`-kind slot from a `&str`. Allocates a fresh
+    /// `Arc<String>`. Use `from_string_arc` when you already have the
+    /// `Arc<String>` in hand and want to avoid a clone.
+    #[inline]
+    pub fn from_string(s: &str) -> Self {
+        Self::from_string_arc(Arc::new(s.to_string()))
+    }
+
     /// A null/none-value `KindedSlot`. Bool-kind by convention so the slot
     /// has a stable interpretation and Drop is a no-op.
     #[inline]
@@ -158,6 +179,79 @@ impl KindedSlot {
     #[inline]
     pub fn raw(&self) -> u64 {
         self.slot.raw()
+    }
+
+    // ── Scalar accessors (ADR-006 §2.7.6 / Q8) ────────────────────────────
+    //
+    // One accessor per `NativeKind` *scalar* variant. Each kind-dispatches
+    // on `self.kind` and returns `Some(payload)` only when the kind matches
+    // exactly. Heap variants do NOT get per-variant accessors here; bodies
+    // dispatching on a heap-typed `KindedSlot` use
+    // `kinded_slot.slot.as_heap_value() -> &HeapValue` and pattern-match,
+    // preserving ADR-005 §1's single-discriminator discipline.
+
+    /// Read as `i64` if `self.kind == NativeKind::Int64`, else `None`.
+    #[inline]
+    pub fn as_i64(&self) -> Option<i64> {
+        match self.kind {
+            NativeKind::Int64 => Some(self.slot.as_i64()),
+            _ => None,
+        }
+    }
+
+    /// Read as `f64` if `self.kind == NativeKind::Float64`, else `None`.
+    #[inline]
+    pub fn as_f64(&self) -> Option<f64> {
+        match self.kind {
+            NativeKind::Float64 => Some(self.slot.as_f64()),
+            _ => None,
+        }
+    }
+
+    /// Read as `bool` if `self.kind == NativeKind::Bool`, else `None`.
+    #[inline]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.kind {
+            NativeKind::Bool => Some(self.slot.as_bool()),
+            _ => None,
+        }
+    }
+
+    /// Read as `char` if `self.kind == NativeKind::Ptr(HeapKind::Char)`,
+    /// else `None`. `Char` lives on the `HeapKind` arm of `NativeKind` (it
+    /// is an inline-bits payload tagged through `HeapKind` for dispatch
+    /// uniformity); the accessor still 1:1 maps to a single `NativeKind`
+    /// variant per the §2.7.6 bound.
+    #[inline]
+    pub fn as_char(&self) -> Option<char> {
+        match self.kind {
+            NativeKind::Ptr(HeapKind::Char) => self.slot.as_char(),
+            _ => None,
+        }
+    }
+
+    /// Read as `&str` if `self.kind == NativeKind::String`, else `None`.
+    /// The slot stores an `Arc<String>` raw pointer; this accessor borrows
+    /// the inner `&str` for the lifetime of `&self` (the `KindedSlot` owns
+    /// one strong-count share, so the `Arc` is alive while `&self` lives).
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        match self.kind {
+            NativeKind::String => {
+                let bits = self.slot.raw();
+                if bits == 0 {
+                    return None;
+                }
+                // SAFETY: per the construction-side contract, `NativeKind::String`
+                // means the slot bits are `Arc::into_raw::<String>` and this
+                // `KindedSlot` owns one strong-count share (so the inner
+                // `String` is alive). The returned `&str` borrows from
+                // `&self`; lifetime is bounded by the slot's ownership.
+                let s: &String = unsafe { &*(bits as *const String) };
+                Some(s.as_str())
+            }
+            _ => None,
+        }
     }
 }
 
@@ -240,17 +334,30 @@ impl Drop for KindedSlot {
                     HeapKind::TaskGroup => {
                         Arc::decrement_strong_count(bits as *const TaskGroupData);
                     }
-                    // Closure / Future / Char / NativeScalar: these
-                    // HeapKind discriminators do not have an `Arc<T>`
-                    // slot payload — closure uses `OwnedClosureBlock` with
-                    // its own refcount, the others are inline scalars.
-                    // A `KindedSlot` constructed with one of those kinds
-                    // and a non-zero pointer is a construction-side bug;
-                    // debug-assert and silently no-op in release rather
-                    // than guess at the bits.
+                    // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                    // amendment): FilterExpr-kinded `KindedSlot`s own one
+                    // `Arc::into_raw(Arc<FilterNode>)` strong-count share.
+                    // The pre-amendment `HeapKind::NativeView` mislabel
+                    // would have dispatched the share as
+                    // `Arc<NativeViewData>` — wrong-type retire.
+                    HeapKind::FilterExpr => {
+                        Arc::decrement_strong_count(bits as *const FilterNode);
+                    }
+                    // Char: inline-scalar payload (codepoint bits, not an
+                    // `Arc<T>`). Drop is a no-op; non-zero bits are valid
+                    // (e.g. `from_char('a')` stores 97).
+                    HeapKind::Char => {}
+                    // Closure / Future / NativeScalar: these HeapKind
+                    // discriminators do not have an `Arc<T>` slot payload
+                    // — closure uses `OwnedClosureBlock` with its own
+                    // refcount, the others are inline scalars not yet
+                    // routed through `KindedSlot`. A `KindedSlot`
+                    // constructed with one of those kinds and a non-zero
+                    // pointer is a construction-side bug; debug-assert
+                    // and silently no-op in release rather than guess at
+                    // the bits.
                     HeapKind::Closure
                     | HeapKind::Future
-                    | HeapKind::Char
                     | HeapKind::NativeScalar => {
                         debug_assert!(
                             false,
@@ -353,9 +460,18 @@ impl Clone for KindedSlot {
                     HeapKind::TaskGroup => {
                         Arc::increment_strong_count(bits as *const TaskGroupData);
                     }
+                    // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                    // amendment): FilterExpr-kinded clone bumps the
+                    // `Arc<FilterNode>` strong-count exactly once. Mirrors
+                    // the Drop arm above.
+                    HeapKind::FilterExpr => {
+                        Arc::increment_strong_count(bits as *const FilterNode);
+                    }
+                    // Char: inline-scalar payload (codepoint bits). Clone
+                    // is a no-op (Rust copies the slot bits below).
+                    HeapKind::Char => {}
                     HeapKind::Closure
                     | HeapKind::Future
-                    | HeapKind::Char
                     | HeapKind::NativeScalar => {
                         debug_assert!(
                             false,
@@ -486,5 +602,95 @@ mod tests {
         let n = KindedSlot::none();
         assert_eq!(n.slot.raw(), 0);
         drop(n);
+    }
+
+    // ── §2.7.6 / Q8 scalar accessor coverage ──────────────────────────────
+    //
+    // One test per scalar accessor: same-kind returns Some, different-kind
+    // returns None. These tests pin the `KindedSlot` carrier API bound:
+    // accessors discriminate on `self.kind` and never decode bits when the
+    // kind is wrong.
+
+    #[test]
+    fn kinded_slot_as_i64_int_returns_some_value() {
+        let s = KindedSlot::from_int(42);
+        assert_eq!(s.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn kinded_slot_as_i64_float_returns_none() {
+        let s = KindedSlot::from_number(3.14);
+        assert_eq!(s.as_i64(), None);
+    }
+
+    #[test]
+    fn kinded_slot_as_f64_float_returns_some_value() {
+        let s = KindedSlot::from_number(3.14);
+        assert_eq!(s.as_f64(), Some(3.14));
+    }
+
+    #[test]
+    fn kinded_slot_as_f64_int_returns_none() {
+        let s = KindedSlot::from_int(42);
+        assert_eq!(s.as_f64(), None);
+    }
+
+    #[test]
+    fn kinded_slot_as_bool_bool_returns_some_value() {
+        let t = KindedSlot::from_bool(true);
+        let f = KindedSlot::from_bool(false);
+        assert_eq!(t.as_bool(), Some(true));
+        assert_eq!(f.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn kinded_slot_as_bool_int_returns_none() {
+        let s = KindedSlot::from_int(1);
+        assert_eq!(s.as_bool(), None);
+    }
+
+    #[test]
+    fn kinded_slot_as_char_char_returns_some_value() {
+        let s = KindedSlot::from_char('A');
+        assert_eq!(s.as_char(), Some('A'));
+        // Unicode round-trip.
+        let s2 = KindedSlot::from_char('λ');
+        assert_eq!(s2.as_char(), Some('λ'));
+    }
+
+    #[test]
+    fn kinded_slot_as_char_int_returns_none() {
+        let s = KindedSlot::from_int(65);
+        assert_eq!(s.as_char(), None);
+    }
+
+    #[test]
+    fn kinded_slot_as_char_drop_safe() {
+        // `from_char` stores codepoint bits inline; Drop must NOT try to
+        // free them as if they were an `Arc<T>` pointer. Failure mode is
+        // a debug-assert under the previous Char arm, or a free of an
+        // invalid pointer in release.
+        let s = KindedSlot::from_char('Z');
+        drop(s);
+    }
+
+    #[test]
+    fn kinded_slot_as_str_string_returns_some_value() {
+        let s = KindedSlot::from_string_arc(Arc::new("hello".to_string()));
+        assert_eq!(s.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn kinded_slot_as_str_int_returns_none() {
+        let s = KindedSlot::from_int(42);
+        assert_eq!(s.as_str(), None);
+    }
+
+    #[test]
+    fn kinded_slot_from_string_borrows_back() {
+        // `from_string(&str)` allocates an Arc<String> and stores its
+        // pointer; `as_str()` should round-trip the contents.
+        let s = KindedSlot::from_string("round trip");
+        assert_eq!(s.as_str(), Some("round trip"));
     }
 }

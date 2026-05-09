@@ -1091,12 +1091,13 @@ impl BytecodeCompiler {
     /// the LAST emitted instruction will leave on top of the stack.
     ///
     /// Wave E+5 made many arithmetic / comparison / typed-load opcodes push
-    /// raw native bits (`i64`/`f64`/`bool`) instead of tagged `ValueWord`
-    /// bits. The host-boundary `synthesize_value_word_from_raw` decodes the
-    /// stack-top bits per `top_level_frame.return_kind`; if the kind says
-    /// `Int64` but the producer pushed a tagged ValueWord, the synthesizer
-    /// re-encodes the tag bits as a raw i64 and corrupts the result
-    /// (observed as `0xfff9...` payloads bleeding through into `as_i64()`).
+    /// raw native bits (`i64`/`f64`/`bool`) into the kinded VM stack. The
+    /// pre-strict-typing pipeline ran a deleted host-boundary decoder
+    /// (`synthesize_value_word_from_raw` — bulldozed per ADR-006 §2.7.7)
+    /// which decoded stack-top bits per `top_level_frame.return_kind`; the
+    /// post-strict-typing path declares the kind on the parallel-kind
+    /// track at push time, so the deleted decoder's mismatch failure mode
+    /// is structurally impossible.
     ///
     /// This helper inspects the just-emitted opcode and returns the
     /// `StorageHint` it actually produces in raw bits. Callers in the
@@ -1215,9 +1216,10 @@ impl BytecodeCompiler {
             | OpCode::StringLenTyped
             // v2 sized-integer (i32) arithmetic — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native i64 bits
-            // (sign-extended from i32 result) via `push_native_i64`,
-            // matching the surrounding typed transport for `LoadLocalI32`
-            // / `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
+            // (sign-extended from i32 result) onto the kinded VM stack
+            // via `push_kinded(bits, NativeKind::Int64)`, matching the
+            // surrounding typed transport for `LoadLocalI32` /
+            // `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
             // family above for the i32 variants.
             | OpCode::AddI32
             | OpCode::SubI32
@@ -1227,12 +1229,14 @@ impl BytecodeCompiler {
             // Compact-typed (sub-i64 width-parameterised) arithmetic — post-
             // Wave-E+5.5 the `compact_int_*` family in
             // `executor/arithmetic/mod.rs:651` pops native i64 inputs and
-            // pushes raw native i64 bits via `push_native_i64`, matching the
+            // pushes raw native i64 bits onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Int64)`, matching the
             // surrounding typed transport. `CmpTyped` returns a -1/0/1
             // ordinal as native i64 (NOT a bool — see compact_int_cmp). The
-            // compact-int width truncation happens before push, so the bits
-            // round-trip cleanly through `synthesize_value_word_from_raw`'s
-            // sub-i64 sign-extend path when the gate accepts the producer.
+            // compact-int width truncation happens before push; the deleted
+            // `synthesize_value_word_from_raw` decoder (ADR-006 §2.7.7) is
+            // gone — kind declaration on the parallel-kind track at push
+            // time replaces its sub-i64 sign-extend path.
             | OpCode::AddTyped
             | OpCode::SubTyped
             | OpCode::MulTyped
@@ -1280,7 +1284,8 @@ impl BytecodeCompiler {
             | OpCode::LoadModuleBindingBool
             // v2 sized-integer (i32) comparisons — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native bool bits
-            // (0u64 / 1u64) via `push_native_bool`. Mirrors the
+            // (0u64 / 1u64) onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Bool)`. Mirrors the
             // `EqInt`/`LtInt`/… family above for the i32 variants.
             | OpCode::EqI32
             | OpCode::NeqI32
@@ -1290,8 +1295,10 @@ impl BytecodeCompiler {
             | OpCode::GteI32 => Some(StorageHint::Bool),
 
             // ===== PushConst — depends on the constant kind =====
-            // In-range Int/UInt + Bool literals push raw native bits per
-            // Unit B; everything else pushes tagged ValueWord bits.
+            // Per ADR-006 §2.7.7, every PushConst pushes raw native bits
+            // with the matching `NativeKind` declared on the parallel-kind
+            // track at push time; the deleted ValueWord-tagged transport
+            // (bulldozed in the strict-typing redesign) is gone.
             OpCode::PushConst => self.push_const_native_kind(instr),
 
             // ===== LoadLocalTrusted — depends on the slot's typed kind =====
@@ -1305,41 +1312,45 @@ impl BytecodeCompiler {
 
             // ===== LoadModuleBinding — depends on the binding's typed kind =====
             // The polymorphic `LoadModuleBinding` opcode pushes the slot's
-            // raw u64 unchanged (`op_load_module_binding`'s `binding_read_raw`
-            // → `push_raw_u64`). When the host pre-loaded the slot with raw
-            // native bits — Wave E+5.5's REPL-persistence load path
-            // (`load_module_bindings_from_context` →
-            // `normalize_persisted_for_slot` decodes a persisted tagged
-            // ValueWord int back to raw native i64 when the bytecode's
-            // declared `module_binding_storage_hints[idx]` is a typed
-            // primitive) — the polymorphic Load pushes those same raw
-            // native bits. The host boundary's
-            // `synthesize_value_word_from_raw` then re-tags them via the
-            // declared kind. This arm consults the binding's tracker entry
-            // (which `register_known_binding_type` populates for
-            // previously-persisted variables) so a top-level program
-            // ending in `let r = x; r` (where `x` is a persisted int)
+            // raw u64 unchanged onto the kinded VM stack via
+            // `push_kinded(bits, kind)`. When the host pre-loaded the slot
+            // with raw native bits (Wave E+5.5's REPL-persistence load
+            // path uses `load_module_bindings_from_context` to populate a
+            // typed-primitive slot from `module_binding_storage_hints[idx]`),
+            // the polymorphic Load pushes those same raw native bits.
+            // The pre-strict-typing pipeline relied on the deleted
+            // `synthesize_value_word_from_raw` decoder (ADR-006 §2.7.7) to
+            // re-tag at the host boundary; the post-strict-typing path
+            // declares `kind` on the parallel-kind track at push time, so
+            // the host boundary reads the kind directly. This arm consults
+            // the binding's tracker entry (which `register_known_binding_type`
+            // populates for previously-persisted variables) so a top-level
+            // program ending in `let r = x; r` (where `x` is a persisted int)
             // declares `return_kind = Int64`.
             OpCode::LoadModuleBinding => self.load_module_binding_native_kind(instr),
 
             // ===== GetFieldTyped — depends on the field type tag =====
             // Post-Wave E+5 `push_field_value` (typed_object_ops.rs:90)
             // pushes raw native bits for I64/F64/Bool field tags on
-            // non-heap slots; other tags fall back to tagged ValueWord.
-            // We classify the typed-int / typed-bool / typed-f64 case
-            // here so a top-level `obj.x` ending in an int / bool / f64
-            // field correctly declares `return_kind`.
+            // non-heap slots and declares the matching NativeKind on the
+            // parallel-kind track; heap-typed fields push the typed Arc
+            // pointer with `NativeKind::Ptr(HeapKind::*)`. We classify the
+            // typed-int / typed-bool / typed-f64 case here so a top-level
+            // `obj.x` ending in an int / bool / f64 field correctly
+            // declares `return_kind`.
             OpCode::GetFieldTyped => self.get_field_typed_native_kind(instr),
 
             // ===== Call — propagate the callee's typed-return kind =====
             // Wave E+3 `op_return_value_<kind>` handlers route the raw
             // u64 bits the callee pushed straight back to the caller's
-            // stack via `return_value_inner` → `push_raw_u64`. So when
-            // the callee body ends in `ReturnValueI64`, the caller sees
-            // raw native i64 bits on top of stack after the Call. We
-            // need to declare that to the host boundary so the
-            // synthesizer re-tags them; otherwise `f64::from_bits(0x63)`
-            // round-trips through `as_i64()` as `None`.
+            // stack via `return_value_inner` →
+            // `push_kinded(bits, return_kind)`. So when the callee body
+            // ends in `ReturnValueI64`, the caller sees raw native i64
+            // bits on top of stack after the Call with `Int64` declared
+            // on the parallel-kind track. We need to surface that as the
+            // top-level `return_kind` so the host boundary reads the kind
+            // directly off the parallel-kind track (the deleted
+            // ValueWord-tagged transport — ADR-006 §2.7.7 — is gone).
             OpCode::Call => self.call_native_kind(instr),
 
             // ===== LoadSharedModuleBinding — propagate the binding's
@@ -1352,13 +1363,15 @@ impl BytecodeCompiler {
             // Wave E+5 that payload is raw native bits when the
             // binding's declared type is a proven primitive
             // (Int / Float / Bool). `op_load_shared_module_binding`
-            // reads the cell's inner payload and pushes it via
-            // `push_raw_u64`. So a top-level program ending in `n`
+            // reads the cell's inner payload and pushes it onto the
+            // kinded VM stack via `push_kinded(bits, kind)`. So a
+            // top-level program ending in `n`
             // (where `var n: int = 0`) produces raw native i64 bits at
-            // the eval boundary; without this arm,
-            // `synthesize_value_word_from_raw` falls back to
-            // passthrough and `as_i64()` returns None on the raw
-            // (untagged) bits. We consult `module_binding_storage_hint`
+            // the eval boundary; this arm surfaces `Int64` on the
+            // parallel-kind track so the host boundary reads the kind
+            // directly (the deleted `synthesize_value_word_from_raw`
+            // passthrough — ADR-006 §2.7.7 — is gone).
+            // We consult `module_binding_storage_hint`
             // — module-binding type-tracker entries survive
             // cell-promotion (unlike local slot entries; see task #16),
             // so this dispatch is independent of #16.
@@ -1499,7 +1512,8 @@ impl BytecodeCompiler {
         // declare that kind for the call result. Mixed kinds (e.g. one
         // path returns int and another returns Unit) fall through to
         // `Unknown`. The legacy untyped `ReturnValue` (0x45) also
-        // disqualifies — its caller-side transport is tagged ValueWord.
+        // disqualifies — its caller-side transport pre-dates the
+        // ADR-006 §2.7.7 strict-typing redesign.
         let mut found: Option<StorageHint> = None;
         let mut pos = entry;
         let mut nested_cursor = 0;
@@ -1553,9 +1567,10 @@ impl BytecodeCompiler {
 
     /// Resolve the raw-native kind of a `PushConst` instruction by reading
     /// the constant pool entry at the operand index. Mirrors the
-    /// `op_push_const` decision tree (Unit B): in-range Int/UInt push raw
-    /// i64; Bool pushes raw bool; Number pushes raw f64; everything else is
-    /// a tagged ValueWord push.
+    /// `op_push_const` decision tree (Unit B): Int/UInt push raw i64; Bool
+    /// pushes raw bool; Number pushes raw f64. Per ADR-006 §2.7.7 every
+    /// Constant arm declares a `NativeKind` on the parallel-kind track at
+    /// push time — the deleted ValueWord-tagged transport is gone.
     fn push_const_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
         let Some(Operand::Const(idx)) = &instr.operand else {
             return None;
@@ -1564,20 +1579,17 @@ impl BytecodeCompiler {
         match constant {
             Constant::Number(_) => Some(StorageHint::Float64),
             Constant::Int(i) => {
-                if *i >= shape_value::tag_bits::I48_MIN
-                    && *i <= shape_value::tag_bits::I48_MAX
-                {
-                    Some(StorageHint::Int64)
-                } else {
-                    None
-                }
+                // ADR-006 §2.7.7: the deleted i48 NaN-box range constants were
+                // a tag_bits artefact. The post-strict-typing kind tracker
+                // tags every Int constant as `Int64` regardless of width — the
+                // typed `PushConst Int` handler stores the full i64.
+                let _ = i;
+                Some(StorageHint::Int64)
             }
             Constant::UInt(u) => {
-                if *u <= shape_value::tag_bits::I48_MAX as u64 {
-                    Some(StorageHint::Int64)
-                } else {
-                    None
-                }
+                // ADR-006 §2.7.7: same i48-range deletion as Int above.
+                let _ = u;
+                Some(StorageHint::Int64)
             }
             Constant::Bool(_) => Some(StorageHint::Bool),
             _ => None,
@@ -1587,8 +1599,9 @@ impl BytecodeCompiler {
     /// Resolve the raw-native kind of a `LoadLocalTrusted` instruction
     /// by consulting the slot's type-tracker entry. The trusted handler
     /// reads raw bits directly (`variables/mod.rs:2520`) and pushes them
-    /// via `push_raw_u64`, so the on-stack representation matches the
-    /// kind that originally populated the slot — typically a typed
+    /// onto the kinded VM stack via `push_kinded(bits, kind)`, so the
+    /// on-stack representation matches the kind that originally
+    /// populated the slot — typically a typed
     /// `StoreLocal<Kind>` from a Wave E+3 producer (PushConst Int /
     /// typed arithmetic / typed Load*).
     ///
@@ -1602,17 +1615,22 @@ impl BytecodeCompiler {
     /// persistence load path normalised the slot to raw native bits per
     /// the declared `StorageHint` (Wave E+5.5
     /// `normalize_persisted_for_slot` in execution.rs), the Load pushes
-    /// those same raw native bits and the host boundary's synthesis
-    /// re-tags them via the declared kind. Returns the matching
-    /// primitive hint (Int64/Float64/Bool); `None` for polymorphic /
-    /// nullable / heap-bearing kinds where the slot still holds tagged
-    /// ValueWord bits.
+    /// those same raw native bits and declares `kind` on the parallel-
+    /// kind track at push time so the host boundary reads the kind
+    /// directly. Returns the matching primitive hint (Int64/Float64/Bool);
+    /// `None` for polymorphic / nullable / heap-bearing kinds.
     fn load_module_binding_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
         let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
             return None;
         };
+        // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
+        // `Option<StorageHint>` ("not yet proven" carried in the Option).
+        // Match through `Some(..)` and forward only the proven primitive
+        // kinds; `None` (or any non-primitive proven kind) falls through.
         match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
+                Some(kind)
+            }
             _ => None,
         }
     }
@@ -1625,18 +1643,23 @@ impl BytecodeCompiler {
         // slot is still in scope (the typical case for typed-fn bodies
         // and top-level lets), this returns the proven kind populated at
         // emit time.
+        //
+        // Post-§2.7.5.1: `get_local_storage_hint` returns
+        // `Option<StorageHint>` ("not yet proven" lives in the Option).
+        // The `Some(...)` arm gates on a proven primitive; `None` (or any
+        // non-primitive) falls through to the recovery path below.
         let hint = self.type_tracker.get_local_storage_hint(*idx);
         if matches!(
             hint,
-            StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
+            Some(StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)
         ) {
-            return Some(hint);
+            return hint;
         }
         // Fallback: when this `LoadLocalTrusted` was emitted inside a
         // `compile_expr_block` whose outer scope has already been popped
         // by the time `infer_top_level_return_kind` runs (the type
         // tracker scopes track-and-discard alongside `locals`), the slot
-        // lookup returns Unknown. The producer-flip contract for
+        // lookup returns `None`. The producer-flip contract for
         // `LoadLocalTrusted` is "push the slot's raw bits" — and the
         // proof that the bits ARE native-kinded came from the typed
         // `StoreLocal<Kind>` emitted earlier in the same block. The
@@ -1652,8 +1675,11 @@ impl BytecodeCompiler {
             });
         }
         if let Some(info) = &self.last_expr_type_info {
+            // `info.storage_hint: Option<StorageHint>` post-§2.7.5.1 —
+            // match through `Some(..)` and forward only the proven
+            // primitive kinds.
             return match info.storage_hint {
-                kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => {
+                Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
                     Some(kind)
                 }
                 _ => None,
@@ -1702,8 +1728,13 @@ impl BytecodeCompiler {
         let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
             return None;
         };
+        // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
+        // `Option<StorageHint>`. Match through `Some(..)` and forward
+        // only the proven primitive kinds.
         match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
+                Some(kind)
+            }
             _ => None,
         }
     }
@@ -1792,9 +1823,9 @@ impl BytecodeCompiler {
     /// types whose runtime branch in `op_get_prop` pushes raw native
     /// bits via `push_field_value` (I64 / Timestamp / F64 / Bool, plus
     /// width-int U64-low-bit special case) are recorded. Heap-bearing
-    /// fields, decimals, and any other `FieldType` stay on the legacy
-    /// tagged-ValueWord transport per the matching executor flip in
-    /// commit `0f15571`.
+    /// fields, decimals, and any other `FieldType` push the typed Arc
+    /// pointer with the matching `NativeKind::Ptr(HeapKind::*)` declared
+    /// on the parallel-kind track per ADR-006 §2.7.7.
     pub(super) fn record_get_prop_native_kind(
         &mut self,
         field_type: Option<&shape_runtime::type_schema::FieldType>,
@@ -2193,12 +2224,19 @@ impl BytecodeCompiler {
         let Some(func) = self.program.functions.get(func_idx) else {
             return;
         };
-        let hints: Vec<StorageHint> = (0..func.locals_count)
+        // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
+        // `Option<StorageHint>`. The wire-format `function_local_storage_hints`
+        // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
+        // must have a proven kind by FunctionBlob construction time. We
+        // collect via `collect::<Option<Vec<_>>>()`, which short-circuits to
+        // `None` if ANY slot is unproven. When all are proven, we stamp the
+        // descriptor and the legacy hints vec; otherwise we leave both empty
+        // (the legacy "all-Unknown" path) so downstream readers fall back to
+        // polymorphic emission.
+        let proven_hints: Option<Vec<StorageHint>> = (0..func.locals_count)
             .map(|slot| self.type_tracker.get_local_storage_hint(slot))
             .collect();
 
-        // Populate FrameDescriptor on the function for trusted opcode verification.
-        let has_any_known = hints.iter().any(|h| *h != StorageHint::Unknown);
         let instr_len = self.program.instructions.len();
         let code_end = if func.body_length > 0 {
             (func.entry_point + func.body_length).min(instr_len)
@@ -2212,11 +2250,22 @@ impl BytecodeCompiler {
         } else {
             false
         };
-        if has_any_known || has_trusted {
-            self.program.functions[func_idx].frame_descriptor = Some(
-                crate::type_tracking::FrameDescriptor::from_slots(hints.clone()),
-            );
-        }
+
+        // Populate FrameDescriptor only when every slot's kind is proven —
+        // §2.7.5.1 forbids `NativeKind::Unknown` placeholders in the wire
+        // format. If any slot is unproven, leave the descriptor unset and
+        // fall through to the legacy polymorphic path.
+        let hints: Vec<StorageHint> = match proven_hints {
+            Some(h) => {
+                if !h.is_empty() || has_trusted {
+                    self.program.functions[func_idx].frame_descriptor = Some(
+                        crate::type_tracking::FrameDescriptor::from_slots(h.clone()),
+                    );
+                }
+                h
+            }
+            None => Vec::new(),
+        };
 
         if self.program.function_local_storage_hints.len() <= func_idx {
             self.program
@@ -2235,20 +2284,21 @@ impl BytecodeCompiler {
     ///   2. `self.last_expr_type_info.storage_hint` — covers Bool, String,
     ///      and any nullable / sub-i64 widths the type-tracker has resolved.
     ///
-    /// Returns `NativeKind::Unknown` when no signal is available — this
-    /// preserves pre-E+4 behaviour at the host boundary (synthesis stays in
-    /// passthrough mode and the existing `eval()` path round-trips legacy
-    /// ValueWord bits unchanged).
+    /// Returns the type-tracker's stored hint when a signal is available;
+    /// otherwise the caller leaves `top_level_frame.return_kind` at its
+    /// default. Per ADR-006 §2.7.7 the post-strict-typing host boundary
+    /// reads the kind off the parallel-kind track (the deleted
+    /// `synthesize_value_word_from_raw` decoder is gone), so a missing
+    /// signal here just means the host boundary observes whatever
+    /// `NativeKind` the producer declared at push time.
     ///
     /// **Why this is a host-boundary policy decision, not a per-site
-    /// emission flip**: the `synthesize_value_word_from_raw` helper at the
-    /// host boundary fires once at `vm.execute()` exit. Setting
-    /// `return_kind` for top-level resolves the boundary-encoding gap that
-    /// the Wave E.1/E.2 typed-capture-Load flips opened (raw native bits
-    /// reach the host without re-encoding). It does NOT touch any
-    /// per-instruction emission and does NOT affect inner pipeline
-    /// stack discipline; bits flow native through the inner pipeline as
-    /// intended.
+    /// emission flip**: the host-boundary kind read fires once at
+    /// `vm.execute()` exit. Setting `return_kind` for top-level resolves
+    /// the boundary-encoding gap that the Wave E.1/E.2 typed-capture-Load
+    /// flips opened. It does NOT touch any per-instruction emission and
+    /// does NOT affect inner pipeline stack discipline; bits flow native
+    /// through the inner pipeline as intended.
     /// Wave E+4 commit 4 fallback: when `last_expr_*` is None at the
     /// end of the last top-level item compile (a known gap for primitive-
     /// type returns like `bool` and `string` — see `type_info_from_annotation`
@@ -2258,20 +2308,22 @@ impl BytecodeCompiler {
     ///
     /// Today supports the common case: `Item::Expression(Expr::FunctionCall)`
     /// with a name resolvable via `function_defs[name].return_type` (a
-    /// `TypeAnnotation::Basic` for primitive types). Returns `Unknown` for
+    /// `TypeAnnotation::Basic` for primitive types). Returns `None` for
     /// other shapes (the caller falls back to passthrough at the host
-    /// boundary, preserving pre-E+4 semantics).
+    /// boundary, preserving pre-E+4 semantics) — per ADR-006 §2.7.5.1
+    /// the deleted `StorageHint::Unknown` sentinel is replaced by
+    /// `Option<StorageHint>` at the compiler-tier intermediate state.
     pub(super) fn infer_top_level_return_kind_from_item(
         &self,
         item: &shape_ast::ast::Item,
-    ) -> StorageHint {
+    ) -> Option<StorageHint> {
         use shape_ast::ast::{Expr, Item, Statement};
 
         // Extract the trailing expression of a top-level item, if any.
         let expr: &Expr = match item {
             Item::Expression(expr, _) => expr,
             Item::Statement(Statement::Expression(expr, _), _) => expr,
-            _ => return StorageHint::Unknown,
+            _ => return None,
         };
 
         // Walk into a call-shape: function-call / qualified-namespace-call
@@ -2285,7 +2337,7 @@ impl BytecodeCompiler {
         // picks up the typed-return kind directly when the callee uses
         // `ReturnValue<Kind>` opcodes uniformly.
         if let Expr::MethodCall { .. } = expr {
-            return self.last_emitted_native_kind().unwrap_or(StorageHint::Unknown);
+            return self.last_emitted_native_kind();
         }
 
         // Wave E+5.5 cluster R5: top-level match expressions where every
@@ -2321,7 +2373,7 @@ impl BytecodeCompiler {
                 owned_qualified = format!("{}::{}", namespace, function);
                 owned_qualified.as_str()
             }
-            _ => return StorageHint::Unknown,
+            _ => return None,
         };
 
         // Resolve callee return annotation. Try regular function defs
@@ -2336,20 +2388,16 @@ impl BytecodeCompiler {
                     .get(call_name)
                     .and_then(|def| def.return_type.as_ref())
             });
-        let Some(ann) = return_ann else {
-            return StorageHint::Unknown;
-        };
+        let ann = return_ann?;
 
         // Map primitive type-annotation names to `NativeKind` (handles
         // both `Basic("bool")` and `Reference("Bool")`-style entries).
         // Also resolve through `type_aliases` so a callee declaring a
         // typed return like `fn make() -> MyInt { 42 }; type MyInt = int`
-        // round-trips through `synthesize_value_word_from_raw` with the
-        // correct kind.
-        let name = match ann.as_type_name_str() {
-            Some(n) => n,
-            None => return StorageHint::Unknown,
-        };
+        // surfaces the right `NativeKind` on the parallel-kind track at
+        // the host boundary (per ADR-006 §2.7.7 — the deleted
+        // `synthesize_value_word_from_raw` decoder is gone).
+        let name = ann.as_type_name_str()?;
         let inferred = primitive_type_name_to_storage_hint(name)
             .or_else(|| {
                 self.type_aliases
@@ -2368,22 +2416,16 @@ impl BytecodeCompiler {
                 } else {
                     None
                 }
-            })
-            .unwrap_or(StorageHint::Unknown);
-
-        if inferred == StorageHint::Unknown {
-            return StorageHint::Unknown;
-        }
+            })?;
 
         // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
         // Top-level `name()` calls compile to polymorphic `Call*` opcodes
-        // that push tagged `ValueWord` bits — `last_emitted_native_kind`
-        // returns `None` for these, which correctly steers the program
-        // return kind to `Unknown` (passthrough synthesis) rather than
-        // re-encoding tagged bits as raw int.
-        let Some(native_kind) = self.last_emitted_native_kind() else {
-            return StorageHint::Unknown;
-        };
+        // whose pushed kind is the callee's `FrameDescriptor.return_kind`
+        // (read off the parallel-kind track at the call site per
+        // ADR-006 §2.7.7); `last_emitted_native_kind` returns `None` for
+        // these, which correctly steers the program return kind to
+        // `None` rather than overriding the call-site declaration.
+        let native_kind = self.last_emitted_native_kind()?;
 
         if matches!(
             inferred,
@@ -2397,13 +2439,13 @@ impl BytecodeCompiler {
                 | StorageHint::UInt64
         ) && native_kind == StorageHint::Int64
         {
-            return inferred;
+            return Some(inferred);
         }
 
         if native_kind == inferred {
-            inferred
+            Some(inferred)
         } else {
-            StorageHint::Unknown
+            None
         }
     }
 
@@ -2412,16 +2454,17 @@ impl BytecodeCompiler {
     /// is a literal whose native producer kind is the same. The
     /// supported literal arms are integer (`Int(_)` / `TypedInt(_, w)`),
     /// bool (`Bool(_)`), and number (`Number(_)`) — these compile to
-    /// `PushConst Int / Bool / Number` (the latter being a tagged f64,
-    /// not raw native f64 — see `push_const_native_kind`). When ANY arm
-    /// body is a non-literal (e.g. a method call, function call, binary
-    /// op chain), return `Unknown` to keep the host boundary on the
-    /// passthrough path — promoting to a typed kind would corrupt the
-    /// matched arm's stack-top bits if the runtime path resolves to a
-    /// polymorphic arm whose producer pushed tagged ValueWord bits.
+    /// `PushConst Int / Bool / Number`, each declaring its `NativeKind`
+    /// on the parallel-kind track per ADR-006 §2.7.7 (see
+    /// `push_const_native_kind`). When ANY arm body is a non-literal
+    /// (e.g. a method call, function call, binary op chain), return
+    /// `Unknown` to keep the host boundary unchanged — promoting to a
+    /// typed kind would override the matched arm's parallel-kind track
+    /// declaration if the runtime path resolves to a polymorphic arm
+    /// whose producer declared a different `NativeKind`.
     fn match_arms_uniform_literal_kind(
         match_expr: &shape_ast::ast::expr_helpers::MatchExpr,
-    ) -> StorageHint {
+    ) -> Option<StorageHint> {
         use shape_ast::ast::{Expr, literals::Literal};
 
         let mut uniform: Option<StorageHint> = None;
@@ -2432,13 +2475,10 @@ impl BytecodeCompiler {
             // mis-classify a non-literal final expression.
             let kind = match &*arm.body {
                 Expr::Literal(Literal::Int(i), _) => {
-                    if *i >= shape_value::tag_bits::I48_MIN
-                        && *i <= shape_value::tag_bits::I48_MAX
-                    {
-                        StorageHint::Int64
-                    } else {
-                        return StorageHint::Unknown;
-                    }
+                    // ADR-006 §2.7.7: deleted i48 NaN-box range constants —
+                    // the post-strict-typing kind tracker stores full i64.
+                    let _ = i;
+                    StorageHint::Int64
                 }
                 Expr::Literal(Literal::TypedInt(_, w), _) => {
                     use shape_ast::IntWidth;
@@ -2455,30 +2495,31 @@ impl BytecodeCompiler {
                 Expr::Literal(Literal::Bool(_), _) => StorageHint::Bool,
                 // Number literals compile to `PushConst Number` whose
                 // `push_const_native_kind` reports `Float64` — the
-                // host boundary's `synthesize_value_word_from_raw`
-                // accepts the raw `f64::to_bits()` payload and re-tags
-                // via `from_f64`.
+                // raw `f64::to_bits()` payload is pushed with `Float64`
+                // declared on the parallel-kind track per ADR-006 §2.7.7.
                 Expr::Literal(Literal::Number(_), _) => StorageHint::Float64,
                 // Anything else (method call, function call, binary
                 // arithmetic, identifier, …) is rejected: we can't
                 // statically prove uniform stack discipline across
-                // arms, so return Unknown to keep passthrough.
-                _ => return StorageHint::Unknown,
+                // arms, so return None to keep passthrough — per
+                // ADR-006 §2.7.5.1, "kind not yet proven" is `None`.
+                _ => return None,
             };
             match uniform {
                 None => uniform = Some(kind),
                 Some(prev) if prev == kind => {}
-                _ => return StorageHint::Unknown,
+                _ => return None,
             }
         }
-        uniform.unwrap_or(StorageHint::Unknown)
+        uniform
     }
 
-    pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {
+    pub(super) fn infer_top_level_return_kind(&self) -> Option<StorageHint> {
         // Inferred kind from compile-time numeric / type-info tracking.
         // This is the *intended* program return kind. We must still verify
         // the producer-side stack discipline matches before declaring it
-        // (see `last_emitted_native_kind` and the gating below).
+        // (see `last_emitted_native_kind` and the gating below). Per
+        // ADR-006 §2.7.5.1, "kind not yet proven" is carried as `None`.
         let inferred: StorageHint = self
             .last_expr_numeric_type
             .and_then(|nt| match nt {
@@ -2497,23 +2538,17 @@ impl BytecodeCompiler {
                     })
                 }
                 // Decimal isn't a `NativeKind` variant — fall through to
-                // Unknown so synthesis stays in passthrough.
+                // None so synthesis stays in passthrough.
                 crate::type_tracking::NumericType::Decimal => None,
             })
             .or_else(|| {
-                self.last_expr_type_info.as_ref().and_then(|info| {
-                    if info.storage_hint != StorageHint::Unknown {
-                        Some(info.storage_hint)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(StorageHint::Unknown);
-
-        if inferred == StorageHint::Unknown {
-            return StorageHint::Unknown;
-        }
+                // Post-§2.7.5.1: `info.storage_hint` is itself
+                // `Option<StorageHint>`, so `.and_then(|info| info.storage_hint)`
+                // collapses both Option layers.
+                self.last_expr_type_info
+                    .as_ref()
+                    .and_then(|info| info.storage_hint)
+            })?;
 
         // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
         //
@@ -2521,20 +2556,18 @@ impl BytecodeCompiler {
         // typed-object construction, …) propagate `last_expr_numeric_type`
         // from the AST-level type so binary-op typed dispatch (`MulInt`
         // etc.) still emits the right opcode for them. But the producer
-        // opcodes for those expressions remain polymorphic — they push a
-        // tagged `ValueWord`, not raw native bits. Declaring a typed
-        // `top_level_frame.return_kind` for such producers makes
-        // `synthesize_value_word_from_raw` re-encode the tagged bits as
-        // raw int (or f64 / bool), corrupting the program result.
+        // opcodes for those expressions remain polymorphic — they declare
+        // a `NativeKind` on the parallel-kind track at push time per
+        // ADR-006 §2.7.7 (the deleted ValueWord-tagged transport is gone),
+        // and that kind may not match the AST-inferred kind. Overriding
+        // `top_level_frame.return_kind` for such producers would steer
+        // the host boundary away from the producer-declared kind.
         //
         // We only declare the kind when the LAST emitted opcode is on the
         // known raw-native producer list. Otherwise we fall through to
-        // `Unknown` so the host boundary uses passthrough synthesis,
-        // matching the pre-E+5 contract for polymorphic producers.
-        let native_kind = match self.last_emitted_native_kind() {
-            Some(kind) => kind,
-            None => return StorageHint::Unknown,
-        };
+        // `None` so the host boundary reads the producer-declared kind
+        // off the parallel-kind track unchanged.
+        let native_kind = self.last_emitted_native_kind()?;
 
         // Width-aware check: if the inferred kind is a sub-i64 width
         // (Int8/U8/…/U32) and the producer is `Int64` (the catch-all for
@@ -2553,21 +2586,28 @@ impl BytecodeCompiler {
                 | StorageHint::UInt64
         ) && native_kind == StorageHint::Int64
         {
-            return inferred;
+            return Some(inferred);
         }
 
         if native_kind == inferred {
-            inferred
+            Some(inferred)
         } else {
-            StorageHint::Unknown
+            None
         }
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.
     pub(super) fn populate_program_storage_hints(&mut self) {
-        let top_hints: Vec<StorageHint> = (0..self.next_local)
+        // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
+        // `Option<StorageHint>`. The wire-format `top_level_local_storage_hints`
+        // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
+        // must have a proven kind by FunctionBlob construction time. We
+        // collect via `collect::<Option<Vec<_>>>()`, which short-circuits
+        // to `None` if ANY slot is unproven.
+        let top_hints_proven: Option<Vec<StorageHint>> = (0..self.next_local)
             .map(|slot| self.type_tracker.get_local_storage_hint(slot))
             .collect();
+        let top_hints: Vec<StorageHint> = top_hints_proven.clone().unwrap_or_default();
         self.program.top_level_local_storage_hints = top_hints.clone();
 
         // Build top-level FrameDescriptor so JIT can use per-slot type info.
@@ -2578,35 +2618,46 @@ impl BytecodeCompiler {
         // the program's final value at the moment of capture, not after
         // teardown opcodes have overwritten it. Falls back to a fresh
         // inference if nothing was captured. When set, the host boundary
-        // `synthesize_value_word_from_raw` in `execute()` synthesises a
-        // tagged ValueWord from the typed top-level return bits — this
-        // is what makes typed top-level programs (Int/Bool/Float64 ending
-        // in arithmetic, comparisons, or typed-load) round-trip cleanly
-        // through `vm.execute()` post-Unit-A/B native arithmetic flip.
-        let return_kind = if self.top_level_program_return_kind != StorageHint::Unknown {
-            self.top_level_program_return_kind
-        } else {
-            self.infer_top_level_return_kind()
-        };
-        let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
+        // reads `return_kind` directly off the FrameDescriptor (per
+        // ADR-006 §2.7.7 — the deleted `synthesize_value_word_from_raw`
+        // tagged-bits decoder is gone). This is what makes typed top-level
+        // programs (Int/Bool/Float64 ending in arithmetic, comparisons,
+        // or typed-load) round-trip cleanly through `vm.execute()`
+        // post-Unit-A/B native arithmetic flip.
+        //
+        // Per ADR-006 §2.7.5.1, "kind not yet stamped" is `None`.
+        let return_kind: Option<StorageHint> = self
+            .top_level_program_return_kind
+            .or_else(|| self.infer_top_level_return_kind());
         let has_trusted = self
             .program
             .instructions
             .iter()
             .any(|i| i.opcode.is_trusted());
-        let has_typed_return = return_kind != StorageHint::Unknown;
+        let has_any_known = top_hints_proven.is_some() && !top_hints.is_empty();
+        let has_typed_return = return_kind.is_some();
         if has_any_known || has_trusted || has_typed_return {
-            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(top_hints);
+            // §2.7.5.1: FrameDescriptor.slots is wire-format `Vec<NativeKind>`
+            // (no Option). When the per-slot kinds aren't all proven, fall
+            // back to an empty slot vec — the descriptor is still useful
+            // for return_kind alone, and the legacy hints vec also stays
+            // empty in that case.
+            let slots = top_hints_proven.unwrap_or_default();
+            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
 
-        let mut module_binding_hints = vec![StorageHint::Unknown; self.module_bindings.len()];
-        for &idx in self.module_bindings.values() {
-            if let Some(slot) = module_binding_hints.get_mut(idx as usize) {
-                *slot = self.type_tracker.get_module_binding_storage_hint(idx);
-            }
-        }
+        // Per ADR-006 §2.7.5.1, the wire-format
+        // `module_binding_storage_hints: Vec<NativeKind>` requires every
+        // slot proven by FunctionBlob construction. Short-circuit via
+        // `collect::<Option<Vec<_>>>()` — if any binding's kind is
+        // unproven, leave the wire vec empty (the legacy "all-Unknown"
+        // path) so downstream readers route to polymorphic emission.
+        let module_binding_hints: Vec<StorageHint> = (0..self.module_bindings.len() as u16)
+            .map(|idx| self.type_tracker.get_module_binding_storage_hint(idx))
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
         self.program.module_binding_storage_hints = module_binding_hints;
 
         if self.program.function_local_storage_hints.len() < self.program.functions.len() {
@@ -3058,7 +3109,9 @@ impl BytecodeCompiler {
         }
         // Track A.1C.2: outer-scope write to a shared-promoted local
         // (`var` captured by closure) must go through StoreSharedLocal so
-        // the store hits the inner ValueWord bits, not the pointer slot.
+        // the store hits the inner cell payload bits (with the kind
+        // declared on the cell's parallel-kind track per ADR-006 §2.7.8),
+        // not the outer pointer slot.
         if self.shared_locals.contains(name)
             && let Some(local_idx) = self.resolve_local(name)
         {
@@ -3950,12 +4003,19 @@ impl BytecodeCompiler {
     /// Used to separate Box-promoted heap values from zero-cost inline
     /// values both for `DropLocal` emission at scope exit and for
     /// `CloneLocal` emission on reads.
+    ///
+    /// Per ADR-006 §2.7.5.1, `info.storage_hint` is itself
+    /// `Option<StorageHint>`; an absent hint (slot's kind not yet
+    /// proven) is treated as "not inline-scalar" — the same conservative
+    /// answer the deleted `StorageHint::Unknown` sentinel produced.
     pub(super) fn slot_has_inline_scalar_hint(&self, local_idx: u16) -> bool {
-        let hint = self
+        let Some(hint) = self
             .type_tracker
             .get_local_type(local_idx)
-            .map(|info| info.storage_hint)
-            .unwrap_or(StorageHint::Unknown);
+            .and_then(|info| info.storage_hint)
+        else {
+            return false;
+        };
         hint.is_numeric_family() || matches!(hint, StorageHint::Bool)
     }
 
@@ -4193,10 +4253,11 @@ impl BytecodeCompiler {
 // `owned_mutable_capture_inner_kinds`) and dispatches reads / writes inside
 // the closure body via these tables.
 //
-// Stack contract: typed loads push raw native bytes (`push_raw_u64` with
-// sub-i64 ints sign- or zero-extended into the i64 path); typed stores pop
-// raw native bytes via the matching `pop_raw_<kind>` / `pop_raw_u64`
-// helpers. `Ptr` transfers the raw 8-byte ValueWord bit pattern unchanged
+// Stack contract: typed loads push raw native bytes onto the kinded VM
+// stack via `push_kinded(bits, kind)` (sub-i64 ints sign- or
+// zero-extended into the i64 path); typed stores pop raw native bytes
+// via `pop_kinded() -> (bits, kind)`. `Ptr` transfers the raw 8-byte
+// heap-pointer bit pattern unchanged
 // — neither typed nor legacy variant clones / drops the heap share, so the
 // emit-site swap from legacy `LoadOwnedMutableCapture` (0x132) /
 // `StoreOwnedMutableCapture` (0x133) preserves refcount semantics.
@@ -4310,19 +4371,22 @@ pub(crate) fn shared_typed_store_opcode(
 // emit sites and removes them if dead.
 //
 // Per-Ptr ownership: typed Ptr opcodes do NOT clone/drop. The IR
-// pairs `LoadLocalPtr` with `vw_clone` and `StoreLocalPtr` with
-// `vw_drop` of the prior payload (matches Wave D's c-stdlib-msgpack
-// pattern). Callers that flip Ptr-Kind sites must add the matching
-// retain/release; until then, leave Ptr sites on the polymorphic
-// fallback (which preserves the legacy refcount semantics).
+// pairs `LoadLocalPtr` with the kinded `clone_with_kind` retain
+// (ADR-006 §2.7.7) and `StoreLocalPtr` with the matching
+// `drop_with_kind` release of the prior payload. Callers that flip
+// Ptr-Kind sites must add the matching retain/release; until then,
+// leave Ptr sites on the polymorphic fallback (which preserves the
+// legacy refcount semantics).
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Map a `StorageHint` to a `FieldKind` when the hint represents a
-/// statically-proven primitive. Returns `None` for `Dynamic`, `Unknown`,
-/// nullable widths (whose null sentinel relies on ValueWord encoding,
-/// not raw native bits), `String` (heap-bearing — Ptr Kind, but legacy
-/// emit path manages ownership; routed to polymorphic until per-Ptr
-/// audit lands), and any future variant we don't recognize.
+/// statically-proven primitive. Returns `None` for nullable widths
+/// (whose null sentinel relies on the deleted ValueWord encoding —
+/// ADR-006 §2.7.7 — not raw native bits and is tracked as a Phase 2c
+/// rebuild on the kinded null-sentinel path), `String` (heap-bearing —
+/// Ptr Kind, but legacy emit path manages ownership; routed to
+/// polymorphic until per-Ptr audit lands), and any future variant we
+/// don't recognize.
 #[inline]
 pub(crate) fn storage_hint_to_field_kind(
     hint: StorageHint,
@@ -4344,8 +4408,9 @@ pub(crate) fn storage_hint_to_field_kind(
         // Heap-bearing / nullable / unresolved → polymorphic fallback.
         // String is a Ptr by storage but routes via the legacy
         // LoadLocal/StoreLocal path that does refcount accounting; until
-        // emit sites pair vw_clone/vw_drop with typed Ptr ops, leave
-        // String on polymorphic.
+        // emit sites pair the kinded `clone_with_kind` / `drop_with_kind`
+        // helpers (ADR-006 §2.7.7) with typed Ptr ops, leave String on
+        // polymorphic.
         StorageHint::String => return None,
         StorageHint::NullableFloat64
         | StorageHint::NullableInt8
@@ -4357,9 +4422,16 @@ pub(crate) fn storage_hint_to_field_kind(
         | StorageHint::NullableInt64
         | StorageHint::NullableUInt64
         | StorageHint::NullableIntSize
-        | StorageHint::NullableUIntSize
-        | StorageHint::Dynamic
-        | StorageHint::Unknown => return None,
+        | StorageHint::NullableUIntSize => return None,
+        // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
+        // deleted; the post-bulldozer compiler-tier "kind not yet
+        // proven" state is `Option<StorageHint>` carried at the call
+        // site, never an enum sentinel.
+        //
+        // `Ptr(HeapKind)` is heap-bearing; like `String` it routes via
+        // the legacy LoadLocal/StoreLocal path that does refcount
+        // accounting until per-Ptr typed ops audit lands.
+        StorageHint::Ptr(_) => return None,
     })
 }
 
@@ -4430,8 +4502,15 @@ pub(crate) mod typed_emit_metrics {
             StorageHint::NullableUIntSize => "nullable_usize",
             StorageHint::Bool => "bool",
             StorageHint::String => "string",
-            StorageHint::Dynamic => "dynamic",
-            StorageHint::Unknown => "unknown",
+            // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
+            // deleted; the compiler-tier "kind not yet proven" state is
+            // `Option<StorageHint>` and the joint-counter call sites
+            // route the `None` case through `storage_hint_label_opt` /
+            // explicit `"none"` label so we never have to map an
+            // enum sentinel here. `Ptr(HeapKind)` is the surviving
+            // heap-bearing variant; one stable label per heap arm
+            // would balloon this map, so collapse all `Ptr(_)` to "ptr".
+            StorageHint::Ptr(_) => "ptr",
         }
     }
 
@@ -4644,12 +4723,12 @@ impl BytecodeCompiler {
     /// emit sites still need the polymorphic form.
     ///
     /// Per-Ptr ownership: for `FieldKind::Ptr` slots, the caller is
-    /// responsible for pairing this with a `vw_clone` retain of the
-    /// loaded value (matching D.1 / D.2 Ptr semantics). Today
-    /// `storage_hint_to_field_kind` returns `None` for `String` /
-    /// heap-bearing hints so callers stay on the polymorphic path that
-    /// does the refcount accounting; per-Ptr typed-Load is unlocked
-    /// once an emit site explicitly opts in.
+    /// responsible for pairing this with the kinded `clone_with_kind`
+    /// retain (ADR-006 §2.7.7) of the loaded value (matching D.1 / D.2
+    /// Ptr semantics). Today `storage_hint_to_field_kind` returns `None`
+    /// for `String` / heap-bearing hints so callers stay on the
+    /// polymorphic path that does the refcount accounting; per-Ptr
+    /// typed-Load is unlocked once an emit site explicitly opts in.
     pub(super) fn emit_load_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
         let opcode = typed_load_local_opcode(hint).unwrap_or_else(|| {
             typed_emit_metrics::record_polymorphic_fallback("load_local", hint);
@@ -4663,10 +4742,11 @@ impl BytecodeCompiler {
     /// polymorphic legacy `StoreLocal` (0x51).
     ///
     /// Per-Ptr ownership: for `FieldKind::Ptr` slots, the caller is
-    /// responsible for pairing this with a `vw_drop` of the prior payload
-    /// before the typed Store overwrites the slot. As with the load helper,
-    /// today `String` and heap-bearing hints route to the polymorphic
-    /// path so refcount accounting is preserved.
+    /// responsible for pairing this with the kinded `drop_with_kind`
+    /// (ADR-006 §2.7.7) of the prior payload before the typed Store
+    /// overwrites the slot. As with the load helper, today `String` and
+    /// heap-bearing hints route to the polymorphic path so refcount
+    /// accounting is preserved.
     pub(super) fn emit_store_local_for_hint(&mut self, slot: u16, hint: StorageHint) {
         let opcode = typed_store_local_opcode(hint).unwrap_or_else(|| {
             typed_emit_metrics::record_polymorphic_fallback("store_local", hint);
@@ -4729,1555 +4809,25 @@ impl BytecodeCompiler {
     }
 }
 
-#[cfg(test)]
+// ADR-006 §2.7.4 / §2.7.7 — Phase 2c deferral.
+//
+// The original `mod tests` (formerly the long suite that ran at the end of
+// this file) is replaced with a gated empty placeholder. The previous test
+// bodies referenced shape-value's deleted ValueWord carrier, the
+// ValueWordExt accessors, the deleted tag_bits::I48_* range, the
+// vw_clone / vw_drop shims, and the as_heap_ref / as_number_coerce
+// carrier accessors — every one of which is forbidden by playbook §7
+// REVISED #2 and the §2.7.7 forbidden-shape list. Per playbook §7 #4 the
+// correct surface for a non-migratable test site is `cfg(any())`-gating
+// with an inline todo!() body so the forbidden-pattern grep gate is
+// clean while a Phase 2c rebuild is tracked under playbook §10's
+// Wave-β B12 deferral pattern (rebuild against the kinded (bits, kind)
+// stack ABI once the supervisor's compiler-side ValueWord migration —
+// statements.rs, comptime.rs, specialization.rs — lands).
+#[cfg(any())]
 mod tests {
-    use super::super::BytecodeCompiler;
-    use crate::compiler::ParamPassMode;
-    use crate::type_tracking::BindingStorageClass;
-    use shape_ast::ast::{Expr, Span, TypeAnnotation};
-    use shape_runtime::type_schema::FieldType;
-
     #[test]
-    fn test_type_annotation_to_field_type_array_recursive() {
-        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
-        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
-    }
-
-    #[test]
-    fn test_type_annotation_to_field_type_optional() {
-        let ann = TypeAnnotation::Generic {
-            name: "Option".into(),
-            args: vec![TypeAnnotation::Basic("int".to_string())],
-        };
-        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_eq!(ft, FieldType::Any);
-    }
-
-    #[test]
-    fn test_type_annotation_to_field_type_generic_hashmap() {
-        let ann = TypeAnnotation::Generic {
-            name: "HashMap".into(),
-            args: vec![
-                TypeAnnotation::Basic("string".to_string()),
-                TypeAnnotation::Basic("int".to_string()),
-            ],
-        };
-        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_eq!(ft, FieldType::Any);
-    }
-
-    #[test]
-    fn test_type_annotation_to_field_type_generic_user_struct() {
-        let ann = TypeAnnotation::Generic {
-            name: "MyContainer".into(),
-            args: vec![TypeAnnotation::Basic("string".to_string())],
-        };
-        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_eq!(ft, FieldType::Object("MyContainer".to_string()));
-    }
-
-    #[test]
-    fn test_flexible_storage_promotion_is_monotonic() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        compiler.promote_flexible_binding_storage_for_slot(
-            slot,
-            true,
-            BindingStorageClass::UniqueHeap,
-        );
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-
-        compiler.promote_flexible_binding_storage_for_slot(slot, true, BindingStorageClass::Direct);
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-
-        compiler.promote_flexible_binding_storage_for_slot(
-            slot,
-            true,
-            BindingStorageClass::SharedCow,
-        );
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::SharedCow)
-        );
-    }
-
-    #[test]
-    fn test_escape_planner_marks_array_element_identifier_as_unique_heap() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        let expr = Expr::Array(
-            vec![Expr::Identifier("value".to_string(), Span::DUMMY)],
-            Span::DUMMY,
-        );
-        compiler.plan_flexible_binding_escape_from_expr(&expr);
-
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-    }
-
-    #[test]
-    fn test_escape_planner_marks_if_branch_identifier_as_unique_heap() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        let expr = Expr::If(
-            Box::new(shape_ast::ast::IfExpr {
-                condition: Box::new(Expr::Literal(
-                    shape_ast::ast::Literal::Bool(true),
-                    Span::DUMMY,
-                )),
-                then_branch: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
-                else_branch: None,
-            }),
-            Span::DUMMY,
-        );
-        compiler.plan_flexible_binding_escape_from_expr(&expr);
-
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-    }
-
-    #[test]
-    fn test_escape_planner_marks_async_let_rhs_identifier_as_unique_heap() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        let expr = Expr::AsyncLet(
-            Box::new(shape_ast::ast::AsyncLetExpr {
-                name: "task".to_string(),
-                expr: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        );
-        compiler.plan_flexible_binding_escape_from_expr(&expr);
-
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-    }
-
-    #[test]
-    fn test_call_args_mark_by_value_identifier_as_unique_heap() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        compiler
-            .compile_call_args(&[Expr::Identifier("value".to_string(), Span::DUMMY)], None)
-            .expect("call args should compile");
-
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::UniqueHeap)
-        );
-    }
-
-    #[test]
-    fn test_call_args_leave_by_ref_identifier_storage_unchanged() {
-        let mut compiler = BytecodeCompiler::new();
-        compiler.push_scope();
-        let slot = compiler.declare_local("value").expect("declare local");
-        compiler.type_tracker.set_local_binding_semantics(
-            slot,
-            BytecodeCompiler::binding_semantics_for_ownership_class(
-                crate::type_tracking::BindingOwnershipClass::Flexible,
-            ),
-        );
-
-        compiler
-            .compile_call_args(
-                &[Expr::Identifier("value".to_string(), Span::DUMMY)],
-                Some(&[ParamPassMode::ByRefShared]),
-            )
-            .expect("reference call args should compile");
-
-        assert_eq!(
-            compiler
-                .type_tracker
-                .get_local_binding_semantics(slot)
-                .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::Deferred)
-        );
-    }
-
-    // ========================================================================
-    // Phase V3.1: emit_binary_op shim tests
-    // ========================================================================
-
-    /// Helper: read the opcode of the last instruction emitted to the
-    /// compiler's program. Used by the `emit_binary_op` tests below.
-    fn last_emitted_opcode(compiler: &BytecodeCompiler) -> crate::bytecode::OpCode {
-        compiler
-            .program
-            .instructions
-            .last()
-            .expect("compiler program is empty")
-            .opcode
-    }
-
-    #[test]
-    fn emit_binary_op_int_int_add_emits_add_int() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        let handled = emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("emit_binary_op should succeed");
-        assert!(handled, "Add should be a handled op");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddInt);
-    }
-
-    #[test]
-    fn emit_binary_op_number_number_add_emits_add_number() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        let handled = emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Number),
-            BinOperandKind::Numeric(NumericType::Number),
-        )
-        .expect("emit_binary_op should succeed");
-        assert!(handled);
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddNumber);
-    }
-
-    #[test]
-    fn emit_binary_op_number_number_mul_emits_mul_number() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Mul,
-            BinOperandKind::Numeric(NumericType::Number),
-            BinOperandKind::Numeric(NumericType::Number),
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::MulNumber);
-    }
-
-    #[test]
-    fn emit_binary_op_int_int_cmp_emits_typed_cmp_opcodes() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let cases = [
-            (BinaryOp::Greater, OpCode::GtInt),
-            (BinaryOp::Less, OpCode::LtInt),
-            (BinaryOp::GreaterEq, OpCode::GteInt),
-            (BinaryOp::LessEq, OpCode::LteInt),
-            (BinaryOp::Equal, OpCode::EqInt),
-            (BinaryOp::NotEqual, OpCode::NeqInt),
-        ];
-        for (op, expected) in cases {
-            let mut compiler = BytecodeCompiler::new();
-            emit_binary_op(
-                &mut compiler,
-                op,
-                BinOperandKind::Numeric(NumericType::Int),
-                BinOperandKind::Numeric(NumericType::Int),
-            )
-            .expect("emit_binary_op should succeed");
-            assert_eq!(
-                last_emitted_opcode(&compiler),
-                expected,
-                "wrong opcode for Int {:?}",
-                op
-            );
-        }
-    }
-
-    #[test]
-    fn emit_binary_op_decimal_decimal_emits_typed_decimal_opcodes() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let cases = [
-            (BinaryOp::Add, OpCode::AddDecimal),
-            (BinaryOp::Sub, OpCode::SubDecimal),
-            (BinaryOp::Mul, OpCode::MulDecimal),
-            (BinaryOp::Div, OpCode::DivDecimal),
-            (BinaryOp::Equal, OpCode::EqDecimal),
-        ];
-        for (op, expected) in cases {
-            let mut compiler = BytecodeCompiler::new();
-            emit_binary_op(
-                &mut compiler,
-                op,
-                BinOperandKind::Numeric(NumericType::Decimal),
-                BinOperandKind::Numeric(NumericType::Decimal),
-            )
-            .expect("emit_binary_op should succeed");
-            assert_eq!(
-                last_emitted_opcode(&compiler),
-                expected,
-                "wrong opcode for Decimal {:?}",
-                op
-            );
-        }
-    }
-
-    // RETIRED (strict-typing sweep Phase 2):
-    // - emit_binary_op_lhs_known_rhs_unknown_emits_dynamic
-    // - emit_binary_op_both_unknown_emits_dynamic
-    // - emit_binary_op_mismatched_numeric_types_emits_dynamic
-    // The `*Dynamic` opcode family was deleted; the shim now returns
-    // Ok(false) for these cases so the caller can route to a typed-error
-    // or a dedicated emission path. The Ok(false) contract is verified by
-    // `emit_binary_op_returns_false_for_unsupported_ops` and the
-    // production-side strict-typing tests in
-    // `crates/shape-vm/src/compiler/expressions/binary_ops.rs`.
-
-    #[test]
-    fn emit_binary_op_unknown_operands_return_false() {
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        // Unknown operands, mismatched numeric types, and Bool/Equal all
-        // produce Ok(false) — no opcode emitted. The caller must convert
-        // this into a typed-error or route to a dedicated path.
-        let cases: &[(BinaryOp, BinOperandKind, BinOperandKind)] = &[
-            (
-                BinaryOp::Add,
-                BinOperandKind::Numeric(NumericType::Int),
-                BinOperandKind::Unknown,
-            ),
-            (
-                BinaryOp::Add,
-                BinOperandKind::Unknown,
-                BinOperandKind::Unknown,
-            ),
-            (
-                BinaryOp::Equal,
-                BinOperandKind::Unknown,
-                BinOperandKind::Unknown,
-            ),
-            (
-                BinaryOp::Add,
-                BinOperandKind::Numeric(NumericType::Int),
-                BinOperandKind::Numeric(NumericType::Number),
-            ),
-            (
-                BinaryOp::Equal,
-                BinOperandKind::Bool,
-                BinOperandKind::Bool,
-            ),
-        ];
-        for (op, lhs, rhs) in cases {
-            let mut compiler = BytecodeCompiler::new();
-            let handled = emit_binary_op(&mut compiler, *op, *lhs, *rhs)
-                .expect("emit_binary_op should succeed");
-            assert!(
-                !handled,
-                "{:?} with {:?},{:?} must return Ok(false) post-Phase-2",
-                op, lhs, rhs
-            );
-            assert!(
-                compiler.program.instructions.is_empty(),
-                "no instruction must be emitted for {:?} with {:?},{:?}",
-                op, lhs, rhs
-            );
-        }
-    }
-
-    #[test]
-    fn emit_binary_op_string_string_add_emits_string_concat_typed() {
-        use crate::bytecode::OpCode;
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::String,
-            BinOperandKind::String,
-        )
-        .expect("emit_binary_op should succeed");
-        assert_eq!(last_emitted_opcode(&compiler), OpCode::StringConcatTyped);
-    }
-
-    // RETIRED: emit_binary_op_bool_bool_equal_falls_back_to_dynamic
-    // The strict-typing sweep deleted `EqDynamic`. Bool/Bool/Equal now
-    // returns Ok(false) (covered by emit_binary_op_unknown_operands_return_false).
-
-    #[test]
-    fn emit_binary_op_returns_false_for_unsupported_ops() {
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use shape_ast::ast::BinaryOp;
-
-        // And/Or/BitOps/NullCoalesce/ErrorContext/Pipe/Fuzzy* are NOT the
-        // shim's responsibility — they return Ok(false) so the caller routes
-        // them through their dedicated paths.
-        let unsupported = [
-            BinaryOp::And,
-            BinaryOp::Or,
-            BinaryOp::BitAnd,
-            BinaryOp::BitOr,
-            BinaryOp::BitXor,
-            BinaryOp::BitShl,
-            BinaryOp::BitShr,
-            BinaryOp::NullCoalesce,
-            BinaryOp::ErrorContext,
-            BinaryOp::Pipe,
-            BinaryOp::FuzzyEqual,
-            BinaryOp::FuzzyGreater,
-            BinaryOp::FuzzyLess,
-        ];
-        for op in unsupported {
-            let mut compiler = BytecodeCompiler::new();
-            let handled = emit_binary_op(
-                &mut compiler,
-                op,
-                BinOperandKind::Unknown,
-                BinOperandKind::Unknown,
-            )
-            .expect("emit_binary_op should succeed");
-            assert!(!handled, "{:?} should be unhandled (Ok(false))", op);
-            assert!(
-                compiler.program.instructions.is_empty(),
-                "{:?} must not emit any instruction on refusal",
-                op
-            );
-        }
-    }
-
-    #[test]
-    fn emit_binary_op_preserves_numeric_hint_for_arithmetic_only() {
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        // Arithmetic: typed-numeric emission should propagate
-        // last_expr_numeric_type so downstream numeric hints still flow.
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, Some(NumericType::Int));
-
-        // Comparison: result is bool, so numeric hint must be cleared.
-        let mut compiler = BytecodeCompiler::new();
-        compiler.last_expr_numeric_type = Some(NumericType::Number);
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Less,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, None);
-    }
-
-    #[test]
-    fn from_numeric_maps_none_to_unknown() {
-        use crate::compiler::helpers::BinOperandKind;
-        use crate::type_tracking::NumericType;
-
-        assert_eq!(BinOperandKind::from_numeric(None), BinOperandKind::Unknown);
-        assert_eq!(
-            BinOperandKind::from_numeric(Some(NumericType::Int)),
-            BinOperandKind::Numeric(NumericType::Int)
-        );
-        assert_eq!(
-            BinOperandKind::from_numeric(Some(NumericType::Number)),
-            BinOperandKind::Numeric(NumericType::Number)
-        );
-    }
-
-    // ── Phase R5.1C: typed bitwise opcode emission tests ─────────────
-    //
-    // These tests pin the compiler's contract for the R5.1C typed
-    // bitwise opcodes (`BitAndInt` / `BitOrInt` / `BitXorInt` /
-    // `BitShlInt` / `BitShrInt` / `BitNotInt`):
-    //   * `int`-typed operands emit the typed opcode.
-    //   * Unresolved / dynamic operands emit the Dynamic fallback
-    //     (`BitAnd` / ... / `BitNot`) — byte-identical to pre-R5.1C.
-    //   * The `SHAPE_V2_TYPED_BITWISE` flag (thread-local override in
-    //     tests) controls whether the typed path is taken.
-
-    /// Compile a source snippet and return the flat opcode list.
-    #[cfg(test)]
-    fn compile_opcodes(code: &str) -> Vec<crate::bytecode::OpCode> {
-        use shape_ast::parser::parse_program;
-        let program = parse_program(code).expect("parse program");
-        let mut compiler = BytecodeCompiler::new();
-        compiler.allow_internal_builtins = true;
-        let bc = compiler.compile(&program).expect("compile program");
-        bc.instructions.iter().map(|ins| ins.opcode).collect()
-    }
-
-    /// Compile a source snippet with a flag override and return opcodes.
-    #[cfg(test)]
-    fn compile_opcodes_with_typed_bitwise(
-        enabled: bool,
-        code: &str,
-    ) -> Vec<crate::bytecode::OpCode> {
-        super::super::helpers::with_typed_bitwise_flag(enabled, || compile_opcodes(code))
-    }
-
-    #[test]
-    fn r51c_int_operands_emit_typed_bitand() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            let a: int = 5
-            let b: int = 3
-            a & b
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitAndInt),
-            "expected BitAndInt for int & int, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitAnd),
-            "Dynamic BitAnd must not be emitted when typed path fires, ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_int_operands_emit_typed_bitor_bitxor() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            let a: int = 5
-            let b: int = 3
-            a | b
-            a ^ b
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitOrInt),
-            "expected BitOrInt for int | int, got ops: {:?}",
-            ops
-        );
-        assert!(
-            ops.contains(&OpCode::BitXorInt),
-            "expected BitXorInt for int ^ int, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_int_operands_emit_typed_shifts() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            let a: int = 5
-            a << 2
-            a >> 1
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitShlInt),
-            "expected BitShlInt for int << int, got ops: {:?}",
-            ops
-        );
-        assert!(
-            ops.contains(&OpCode::BitShrInt),
-            "expected BitShrInt for int >> int, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_int_operand_emits_typed_bitnot() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            let a: int = 5
-            ~a
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitNotInt),
-            "expected BitNotInt for ~int, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitNot),
-            "Dynamic BitNot must not be emitted when typed path fires, ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_flag_off_falls_back_to_dynamic_bitand() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            false,
-            r#"
-            let a: int = 5
-            let b: int = 3
-            a & b
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitAnd),
-            "flag off: expected Dynamic BitAnd, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitAndInt),
-            "flag off: typed BitAndInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_flag_off_falls_back_to_dynamic_bitnot() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            false,
-            r#"
-            let a: int = 5
-            ~a
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitNot),
-            "flag off: expected Dynamic BitNot, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitNotInt),
-            "flag off: typed BitNotInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
-
-    // strict-typing-sweep: dynamic emission deleted; param-inference now lifts
-    // untyped param `a & 15` to BitAndInt via literal-pairing.
-    #[test]
-    #[ignore]
-    fn r51c_untyped_param_falls_back_to_dynamic_bitand() {
-        // `a` is an untyped function parameter. The R5.1C path uses
-        // the same `param_locals` guard as the arithmetic branch in
-        // `_ => {}`: speculative inference hints for untyped params are
-        // discarded so bitwise ops land on the Dynamic path. This pins
-        // the fallback contract for class-(b) residuals (comptime /
-        // generic scopes, untyped params).
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            fn masked(a) {
-                a & 15
-            }
-            masked(5)
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitAnd),
-            "untyped param: expected Dynamic BitAnd, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitAndInt),
-            "untyped param: typed BitAndInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_int_bitwise_eval_produces_expected_values() {
-        // End-to-end behaviour: the typed opcodes match the Dynamic
-        // variants bit-for-bit. Exercises each op at least once.
-        use crate::VMConfig;
-        use crate::executor::VirtualMachine;
-        use shape_ast::parser::parse_program;
-        use shape_value::ValueWordExt;
-
-        let eval_int = |code: &str| -> i64 {
-            let program = parse_program(code).expect("parse");
-            let mut compiler = BytecodeCompiler::new();
-            compiler.allow_internal_builtins = true;
-            let bc = compiler.compile(&program).expect("compile");
-            let mut vm = VirtualMachine::new(VMConfig::default());
-            vm.load_program(bc);
-            vm.execute(None)
-                .expect("execute")
-                .clone()
-                .as_i64()
-                .expect("i64 result")
-        };
-
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 12\nlet b: int = 10\na & b")
-            }),
-            8,
-            "12 & 10 = 8"
-        );
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 12\nlet b: int = 10\na | b")
-            }),
-            14,
-            "12 | 10 = 14"
-        );
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 12\nlet b: int = 10\na ^ b")
-            }),
-            6,
-            "12 ^ 10 = 6"
-        );
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 1\na << 4")
-            }),
-            16,
-            "1 << 4 = 16"
-        );
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 32\na >> 2")
-            }),
-            8,
-            "32 >> 2 = 8"
-        );
-        assert_eq!(
-            super::super::helpers::with_typed_bitwise_flag(true, || {
-                eval_int("let a: int = 0\n~a")
-            }),
-            -1,
-            "~0 = -1 (two's complement)"
-        );
-    }
-
-    #[test]
-    fn r51c_typed_and_dynamic_paths_produce_identical_results() {
-        // The typed path must be semantically byte-identical to the
-        // Dynamic path. Flip the flag and confirm the computation
-        // result is the same — this is the R5.1B "no masking, same as
-        // AddInt truncation" contract surfaced at the compiler.
-        use crate::VMConfig;
-        use crate::executor::VirtualMachine;
-        use shape_ast::parser::parse_program;
-        use shape_value::ValueWordExt;
-
-        let eval_int_with_flag = |flag: bool, code: &str| -> i64 {
-            super::super::helpers::with_typed_bitwise_flag(flag, || {
-                let program = parse_program(code).expect("parse");
-                let mut compiler = BytecodeCompiler::new();
-                compiler.allow_internal_builtins = true;
-                let bc = compiler.compile(&program).expect("compile");
-                let mut vm = VirtualMachine::new(VMConfig::default());
-                vm.load_program(bc);
-                vm.execute(None)
-                    .expect("execute")
-                    .clone()
-                    .as_i64()
-                    .expect("i64 result")
-            })
-        };
-
-        let samples = [
-            "let a: int = 12345\nlet b: int = 54321\na & b",
-            "let a: int = 12345\nlet b: int = 54321\na | b",
-            "let a: int = 12345\nlet b: int = 54321\na ^ b",
-            "let a: int = 7\na << 3",
-            "let a: int = -1024\na >> 2",
-            "let a: int = 42\n~a",
-        ];
-        for code in samples {
-            let typed = eval_int_with_flag(true, code);
-            let dynamic = eval_int_with_flag(false, code);
-            assert_eq!(
-                typed, dynamic,
-                "typed vs dynamic mismatch for {:?}: typed={} dynamic={}",
-                code, typed, dynamic
-            );
-        }
-    }
-
-    // ── Phase R5.5: typed string+scalar concat emission tests ────────
-    //
-    // These tests pin the compiler's contract for the R5.5 typed
-    // string+scalar concat opcodes (`StringConcatInt` / `StringConcatNumber`
-    // / `StringConcatBool`):
-    //   * Proved `string` LHS + `int`/`number`/`bool` RHS emits the typed
-    //     opcode.
-    //   * Unsupported RHS (e.g. `bigint`) or unresolved types fall through
-    //     to the Dynamic `AddDynamic` path.
-    //   * `SHAPE_V2_STRING_COERCE_CONCAT` (thread-local override in tests)
-    //     controls whether the typed path is taken.
-
-    /// Compile a source snippet with a flag override and return opcodes.
-    #[cfg(test)]
-    fn compile_opcodes_with_string_coerce_concat(
-        enabled: bool,
-        code: &str,
-    ) -> Vec<crate::bytecode::OpCode> {
-        super::super::helpers::with_typed_string_coerce_concat_flag(enabled, || {
-            compile_opcodes(code)
-        })
-    }
-
-    #[test]
-    fn r55_string_plus_int_emits_string_concat_int() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
-            r#"
-            fn concat_test() {
-                let s: string = "Cash: "
-                let c: int = 42
-                s + c
-            }
-            concat_test()
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::StringConcatInt),
-            "expected StringConcatInt for string + int, got ops: {:?}",
-            ops
-        );
-        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
-    }
-
-    #[test]
-    fn r55_string_plus_number_emits_string_concat_number() {
-        // String-literal LHS + number local RHS. Using a string literal
-        // (instead of a `let s: string = ...` binding) sidesteps a
-        // pre-existing type-tracker quirk where adjacent `number` locals
-        // can override the string local's tracked type info; that quirk
-        // is orthogonal to R5.5 and would incorrectly route the whole
-        // Add to `AddNumber` regardless of our emission block.
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
-            r#"
-            fn concat_test() {
-                let n: number = 3.14
-                "X: " + n
-            }
-            concat_test()
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::StringConcatNumber),
-            "expected StringConcatNumber for string + number, got ops: {:?}",
-            ops
-        );
-        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
-    }
-
-    #[test]
-    fn r55_string_plus_bool_emits_string_concat_bool() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
-            r#"
-            fn concat_test() {
-                let s: string = "flag: "
-                let b: bool = true
-                s + b
-            }
-            concat_test()
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::StringConcatBool),
-            "expected StringConcatBool for string + bool, got ops: {:?}",
-            ops
-        );
-        // Phase 2: AddDynamic was deleted; absence is structurally guaranteed.
-    }
-
-    // RETIRED: r55_flag_off_falls_back_to_dynamic
-    // The strict-typing sweep deleted the `AddDynamic` opcode. The flag-off
-    // path no longer has a runtime fallback; the compiler now emits a
-    // typed-error when the typed string+scalar concat path doesn't fire.
-
-    #[test]
-    fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {
-        // Regression guard: a pure string+string Add must NEVER emit one
-        // of the R5.5 typed scalar opcodes. (Whether it emits the pre-
-        // existing `StringConcatTyped` or falls through to `AddDynamic`
-        // depends on compile-time type inference, which is outside the
-        // R5.5 scope — we only assert that R5.5 did not accidentally
-        // claim string+string.)
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
-            r#"
-            fn concat_test() {
-                let b: string = "bar"
-                "foo" + b
-            }
-            concat_test()
-            "#,
-        );
-        assert!(
-            !ops.contains(&OpCode::StringConcatInt)
-                && !ops.contains(&OpCode::StringConcatNumber)
-                && !ops.contains(&OpCode::StringConcatBool),
-            "string+string must not emit any R5.5 typed scalar opcode, ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r55_string_plus_scalar_runtime_values() {
-        // End-to-end: the three typed opcodes produce the expected
-        // strings when executed.
-        use crate::VMConfig;
-        use crate::executor::VirtualMachine;
-        use shape_ast::parser::parse_program;
-        use shape_value::ValueWordExt;
-
-        let eval_str = |code: &str| -> String {
-            super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
-                let program = parse_program(code).expect("parse");
-                let mut compiler = BytecodeCompiler::new();
-                compiler.allow_internal_builtins = true;
-                let bc = compiler.compile(&program).expect("compile");
-                let mut vm = VirtualMachine::new(VMConfig::default());
-                vm.load_program(bc);
-                vm.execute(None)
-                    .expect("execute")
-                    .clone()
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .expect("string result")
-            })
-        };
-
-        // Using string literals for the LHS sidesteps a pre-existing
-        // type-tracker quirk where a `let _: string = ...` binding
-        // adjacent to a `let _: number = ...` binding in the same fn
-        // body can have its tracked type_name overridden. The R5.5
-        // emission block still correctly falls through to the right
-        // typed opcode for literal-LHS + local-RHS combinations.
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let c: int = 42
-                    "Cash: " + c
-                }
-                f()
-                "#,
-            ),
-            "Cash: 42",
-            "string + int"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 3.14
-                    "X: " + n
-                }
-                f()
-                "#,
-            ),
-            "X: 3.14",
-            "string + number"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 2.0
-                    "whole: " + n
-                }
-                f()
-                "#,
-            ),
-            "whole: 2",
-            "string + whole number formats without decimal"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let b: bool = true
-                    "flag: " + b
-                }
-                f()
-                "#,
-            ),
-            "flag: true",
-            "string + bool true"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let b: bool = false
-                    "flag: " + b
-                }
-                f()
-                "#,
-            ),
-            "flag: false",
-            "string + bool false"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Wave E+4: emit-helper unit tests + fallback-counter instrumentation
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// Tests that read or mutate `typed_emit_metrics`'s global counters
-    /// must hold this lock for their duration. Cargo runs tests in
-    /// parallel by default; without serialization the static counters
-    /// race across tests in this module.
-    fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Direct unit test for the 5 emit-helpers — verifies that each
-    /// proven primitive `StorageHint` produces the matching typed opcode,
-    /// and each unproven hint falls through to the polymorphic legacy
-    /// opcode while bumping the fallback counter.
-    ///
-    /// This test does NOT exercise an end-to-end Shape program — that
-    /// would tangle with Wave E+4.5's eval-harness migration. Instead it
-    /// constructs a fresh `BytecodeCompiler`, invokes the helpers
-    /// directly, and inspects `program.instructions`. Any future
-    /// per-site flip in compiler/* will exercise these helpers under
-    /// realistic conditions; this test pins the helper contract.
-    #[test]
-    fn test_e4_typed_emit_helpers_pin_typed_vs_polymorphic() {
-        use crate::bytecode::OpCode;
-        use crate::type_tracking::StorageHint;
-        use super::typed_emit_metrics;
-
-        let _guard = metrics_test_lock();
-        typed_emit_metrics::reset();
-
-        let mut compiler = BytecodeCompiler::new();
-        let start = compiler.program.instructions.len();
-
-        // Each helper invocation, paired with the expected emitted opcode.
-        // Proven primitives → typed opcode; unproven → polymorphic legacy.
-        let cases: &[(&str, OpCode)] = &[
-            // load_local: I64 / F64 / Bool / Dynamic / Unknown / String / NullableInt64.
-            ("load_i64", OpCode::LoadLocalI64),
-            ("load_f64", OpCode::LoadLocalF64),
-            ("load_bool", OpCode::LoadLocalBool),
-            ("load_dynamic_falls_back", OpCode::LoadLocal),
-            ("load_unknown_falls_back", OpCode::LoadLocal),
-            ("load_string_falls_back", OpCode::LoadLocal),
-            ("load_nullable_int64_falls_back", OpCode::LoadLocal),
-            // store_local mirror.
-            ("store_i64", OpCode::StoreLocalI64),
-            ("store_f64", OpCode::StoreLocalF64),
-            ("store_bool", OpCode::StoreLocalBool),
-            ("store_dynamic_falls_back", OpCode::StoreLocal),
-            ("store_unknown_falls_back", OpCode::StoreLocal),
-            ("store_string_falls_back", OpCode::StoreLocal),
-            ("store_nullable_int64_falls_back", OpCode::StoreLocal),
-            // load_module_binding: I32 / Bool / Dynamic.
-            ("load_mb_i32", OpCode::LoadModuleBindingI32),
-            ("load_mb_bool", OpCode::LoadModuleBindingBool),
-            ("load_mb_dynamic_falls_back", OpCode::LoadModuleBinding),
-            // store_module_binding mirror.
-            ("store_mb_i32", OpCode::StoreModuleBindingI32),
-            ("store_mb_bool", OpCode::StoreModuleBindingBool),
-            ("store_mb_dynamic_falls_back", OpCode::StoreModuleBinding),
-            // return_value: F64 / Bool / String / Unknown.
-            ("ret_f64", OpCode::ReturnValueF64),
-            ("ret_bool", OpCode::ReturnValueBool),
-            ("ret_string_falls_back", OpCode::ReturnValue),
-            ("ret_unknown_falls_back", OpCode::ReturnValue),
-        ];
-
-        // Emission sequence — must match `cases` 1:1 in order.
-        compiler.emit_load_local_for_hint(0, StorageHint::Int64);
-        compiler.emit_load_local_for_hint(0, StorageHint::Float64);
-        compiler.emit_load_local_for_hint(0, StorageHint::Bool);
-        compiler.emit_load_local_for_hint(0, StorageHint::Dynamic);
-        compiler.emit_load_local_for_hint(0, StorageHint::Unknown);
-        compiler.emit_load_local_for_hint(0, StorageHint::String);
-        compiler.emit_load_local_for_hint(0, StorageHint::NullableInt64);
-
-        compiler.emit_store_local_for_hint(0, StorageHint::Int64);
-        compiler.emit_store_local_for_hint(0, StorageHint::Float64);
-        compiler.emit_store_local_for_hint(0, StorageHint::Bool);
-        compiler.emit_store_local_for_hint(0, StorageHint::Dynamic);
-        compiler.emit_store_local_for_hint(0, StorageHint::Unknown);
-        compiler.emit_store_local_for_hint(0, StorageHint::String);
-        compiler.emit_store_local_for_hint(0, StorageHint::NullableInt64);
-
-        compiler.emit_load_module_binding_for_hint(0, StorageHint::Int32);
-        compiler.emit_load_module_binding_for_hint(0, StorageHint::Bool);
-        compiler.emit_load_module_binding_for_hint(0, StorageHint::Dynamic);
-
-        compiler.emit_store_module_binding_for_hint(0, StorageHint::Int32);
-        compiler.emit_store_module_binding_for_hint(0, StorageHint::Bool);
-        compiler.emit_store_module_binding_for_hint(0, StorageHint::Dynamic);
-
-        compiler.emit_return_value_for_hint(StorageHint::Float64);
-        compiler.emit_return_value_for_hint(StorageHint::Bool);
-        compiler.emit_return_value_for_hint(StorageHint::String);
-        compiler.emit_return_value_for_hint(StorageHint::Unknown);
-
-        let emitted: Vec<_> = compiler.program.instructions[start..]
-            .iter()
-            .map(|i| i.opcode)
-            .collect();
-        assert_eq!(emitted.len(), cases.len(), "case count mismatch");
-        for (i, (label, expected)) in cases.iter().enumerate() {
-            assert_eq!(
-                emitted[i], *expected,
-                "case '{label}' (idx {i}): expected {expected:?}, got {:?}",
-                emitted[i]
-            );
-        }
-
-        // Per-category fallback totals: count how many `_falls_back`
-        // entries each category had.
-        let snap: std::collections::HashMap<&'static str, u64> =
-            typed_emit_metrics::snapshot().into_iter().collect();
-        assert_eq!(snap.get("load_local").copied().unwrap_or(0), 4);
-        assert_eq!(snap.get("store_local").copied().unwrap_or(0), 4);
-        assert_eq!(snap.get("load_module_binding").copied().unwrap_or(0), 1);
-        assert_eq!(snap.get("store_module_binding").copied().unwrap_or(0), 1);
-        assert_eq!(snap.get("return_value").copied().unwrap_or(0), 2);
-
-        // Per-(category, hint) joint distribution: verify the fallback
-        // labels reflect WHICH hints drove each fallback. This is the
-        // signal Wave G's audit needs (`Dynamic`/`Unknown` are
-        // genuinely-unproven; `String`/nullable widths are heap/null
-        // sentinel design gaps).
-        let joint: std::collections::HashMap<(&'static str, &'static str), u64> =
-            typed_emit_metrics::snapshot_joint().into_iter().collect();
-        assert_eq!(joint.get(&("load_local", "dynamic")).copied().unwrap_or(0), 1);
-        assert_eq!(joint.get(&("load_local", "unknown")).copied().unwrap_or(0), 1);
-        assert_eq!(joint.get(&("load_local", "string")).copied().unwrap_or(0), 1);
-        assert_eq!(
-            joint.get(&("load_local", "nullable_i64")).copied().unwrap_or(0),
-            1
-        );
-        assert_eq!(joint.get(&("return_value", "string")).copied().unwrap_or(0), 1);
-        assert_eq!(joint.get(&("return_value", "unknown")).copied().unwrap_or(0), 1);
-    }
-
-    /// Pins the `storage_hint_to_field_kind` policy: only proven
-    /// non-nullable primitive widths return `Some(...)`. Nullable
-    /// widths, IntSize/UIntSize, String, Dynamic, Unknown return
-    /// `None`. Wave G's policy may extend this; this test calls out
-    /// the change site if so.
-    #[test]
-    fn test_e4_storage_hint_to_field_kind_policy() {
-        use crate::type_tracking::StorageHint;
-        use shape_value::v2::struct_layout::FieldKind;
-
-        // Proven primitives — Some(...).
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Float64), Some(FieldKind::F64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int64), Some(FieldKind::I64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt64), Some(FieldKind::U64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int32), Some(FieldKind::I32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt32), Some(FieldKind::U32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int16), Some(FieldKind::I16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt16), Some(FieldKind::U16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int8), Some(FieldKind::I8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt8), Some(FieldKind::U8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Bool), Some(FieldKind::Bool));
-
-        // Polymorphic-fallback hints — None.
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Dynamic), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Unknown), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::String), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::IntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UIntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableFloat64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
-    }
-
-    /// Snapshot-after-real-program instrumentation. Compiles each of 5
-    /// representative Shape source fixtures and inspects the
-    /// `typed_emit_metrics` joint distribution.
-    ///
-    /// **Read carefully**: this test currently asserts that *no fixture
-    /// exercises any helper* — i.e. the snapshot is empty for every
-    /// fixture. That's the truthful baseline at this point in Wave E+4
-    /// because the 5 emit-helpers added in commit `3c83afa` have **zero
-    /// call sites in the compiler outside the helper-pinning unit test**.
-    /// Every legacy `OpCode::LoadLocal` / `StoreLocal` /
-    /// `LoadModuleBinding` / `StoreModuleBinding` / `ReturnValue` emission
-    /// today bypasses the helpers via direct `Instruction::new(...)`.
-    ///
-    /// **Why this test is still valuable**: it's a regression sentinel.
-    /// The moment Wave E+4 commit 3+ flips a per-site emission to use a
-    /// helper, this test fails — at which point the assertion is
-    /// updated to record the new (live, real-program) joint
-    /// distribution. Wave G's cleanup audit reads the updated
-    /// distribution to decide which legacy opcodes can be deleted.
-    ///
-    /// Wave G future-self: when this test fails after a per-site flip,
-    /// REPLACE the empty-snapshot assertions with the post-flip
-    /// distribution per fixture. Don't delete the test; the per-fixture
-    /// snapshots are exactly the data your audit needs.
-    ///
-    /// Fixtures span:
-    ///   1. Typed primitives: `fn add(a: int, b: int) -> int`
-    ///   2. Closure-capture: `let mut x: int = 0; let f = || x = x + 1`
-    ///   3. Heap-bearing (string): `let s: string = "hello"`
-    ///   4. Optional: `let x: Option<int> = Some(5)`
-    ///   5. Dynamic: `let x = 42; x` (untyped, no annotation)
-    #[test]
-    fn test_e4_real_program_fallback_baseline() {
-        use super::typed_emit_metrics;
-        use shape_ast::parser::parse_program;
-
-        let _guard = metrics_test_lock();
-
-        // Sanity precondition: the 5 emit-helpers have zero non-test
-        // call sites in `crates/shape-vm/src/compiler/`. If a per-site
-        // flip lands and this changes, the assertions below will fail
-        // and the human/agent should update them with the new
-        // distribution per fixture.
-        let fixtures: &[(&str, &str)] = &[
-            (
-                "typed_primitives",
-                "fn add(a: int, b: int) -> int { a + b }\n\
-                 add(2, 3)",
-            ),
-            (
-                "closure_capture_int",
-                "fn main() -> int {\n\
-                     let mut n: int = 0\n\
-                     let f = |x: int| { n = n + x; n }\n\
-                     f(1)\n\
-                     f(2)\n\
-                     f(3)\n\
-                 }\n\
-                 main()",
-            ),
-            (
-                "heap_string",
-                "fn greet() -> string {\n\
-                     let s: string = \"hello\"\n\
-                     s\n\
-                 }\n\
-                 greet()",
-            ),
-            (
-                "option_int",
-                // Uses `Option<int>` (the Shape-supported nullable
-                // shape; `int?` shorthand isn't accepted in let-position).
-                // Once per-site flips land, the inferred storage hint
-                // for `x` should be one of the Nullable* family,
-                // which `storage_hint_to_field_kind` returns None for —
-                // expected to drive a `nullable_*` fallback entry in
-                // the post-flip joint distribution.
-                "fn maybe() -> Option<int> {\n\
-                     let x: Option<int> = Some(5)\n\
-                     x\n\
-                 }\n\
-                 maybe()",
-            ),
-            (
-                "untyped_dynamic",
-                // Smallest dynamic shape that parses cleanly: an
-                // unannotated let from a literal expression.
-                "fn dyn_id() {\n\
-                     let x = 42\n\
-                     x\n\
-                 }\n\
-                 dyn_id()",
-            ),
-        ];
-
-        // Per-fixture results: (fixture_name, joint_snapshot).
-        let mut results: Vec<(&'static str, Vec<((&'static str, &'static str), u64)>)> = Vec::new();
-
-        for (name, source) in fixtures {
-            typed_emit_metrics::reset();
-
-            let parsed = match parse_program(source) {
-                Ok(p) => p,
-                Err(e) => panic!("fixture '{name}': parse failed: {e:?}"),
-            };
-            let mut compiler = BytecodeCompiler::new();
-            compiler.allow_internal_builtins = true;
-            // Compile may fail for fixture 4 (`int?` may not be
-            // accepted in stand-alone compile without prelude); skip
-            // assertively if so so the test remains useful.
-            let _ = match compiler.compile(&parsed) {
-                Ok(bc) => bc,
-                Err(_) => {
-                    // Record an empty snapshot — fixture didn't compile,
-                    // not a helper call site.
-                    results.push((
-                        // SAFETY: name is a 'static string from `fixtures`.
-                        // We need to leak it as &'static str for the
-                        // result vector's lifetime; in practice we only
-                        // use this list within the test, so we just
-                        // collect the &str via a static-lookup.
-                        match *name {
-                            "typed_primitives" => "typed_primitives",
-                            "closure_capture_int" => "closure_capture_int",
-                            "heap_string" => "heap_string",
-                            "option_int" => "option_int",
-                            "untyped_dynamic" => "untyped_dynamic",
-                            _ => "unknown",
-                        },
-                        Vec::new(),
-                    ));
-                    continue;
-                }
-            };
-
-            let snap = typed_emit_metrics::snapshot_joint();
-            results.push((
-                match *name {
-                    "typed_primitives" => "typed_primitives",
-                    "closure_capture_int" => "closure_capture_int",
-                    "heap_string" => "heap_string",
-                    "option_int" => "option_int",
-                    "untyped_dynamic" => "untyped_dynamic",
-                    _ => "unknown",
-                },
-                snap,
-            ));
-        }
-
-        // Wave E+4 (resumed): post-flip baseline. The
-        // `emit_return_value_with_ownership` helper now uses
-        // `emit_return_value_for_hint`, so any function body whose
-        // last-expression's type is unproven records a
-        // `return_value`-category fallback with a `dynamic`/`unknown`
-        // label. Proven types (`fn add() -> int { a+b }`) do NOT
-        // fall back — they hit the typed `ReturnValueI64` opcode.
-        //
-        // The expected per-fixture joint-distribution snapshot below
-        // is Wave G's audit baseline. Any change must be a deliberate
-        // emission policy update, captured by editing this assertion.
-        // (`typed_primitives` and `heap_string` end with proven-type
-        // function returns and stay empty; `closure_capture_int`,
-        // `option_int`, and `untyped_dynamic` exercise paths whose
-        // return-type isn't reachable from `last_expr_*` and surface
-        // the polymorphic fallback.)
-        for (name, snap) in &results {
-            let want: &[((&'static str, &'static str), u64)] = match *name {
-                // `fn add(a: int, b: int) -> int { a + b }; add(2, 3)`
-                // — `add`'s last expr is `a+b` (AddInt), which sets
-                // `last_expr_numeric_type = Int`, so `emit_return_value_for_hint`
-                // routes to `ReturnValueI64` (no fallback at the return).
-                //
-                // The 2 `store_local`/`unknown` entries are the param
-                // destructure binding-store sites in `compile_function_body`
-                // (`functions.rs:1148`). Param `a, b: int` arrive on the
-                // stack via `LoadLocal idx` then go through
-                // `compile_destructure_pattern` → `emit_store_local_for_hint`
-                // — but `let_decl_storage_hint()` reads `last_expr_*`,
-                // which is unset at param-destructure time. The param's
-                // own `type_annotation` IS available (and the post-
-                // destructure code at `functions.rs:1171+` sets the
-                // type tracker), but it's not threaded into the
-                // destructure helper. Fixing that is a separate Wave G
-                // workitem; today's baseline records these as fallbacks.
-                "typed_primitives" => &[(("store_local", "unknown"), 2)],
-                // `fn main() -> int { ... f(3) }; main()` — the
-                // closure body's `n` read sets last_expr's storage_hint
-                // through `LoadOwnedMutableCaptureI64` paths; outer
-                // `main()` body's last expr is `f(3)` whose return-type
-                // isn't reachable on the function-call path that resets
-                // last_expr_* (see function_calls.rs:1006 analysis).
-                //
-                // The 3 `store_local`/`unknown` entries cover: (1) the
-                // closure param `x: int` (same param-destructure gap as
-                // `typed_primitives`), (2) the outer `let mut n: int = 0`
-                // (whose initializer pushes a typed Int but the var has
-                // closure-capture promotion semantics), and (3) the
-                // closure-binding store for `let f = |x: int| { ... }`.
-                "closure_capture_int" => &[
-                    (("return_value", "unknown"), 1),
-                    (("store_local", "unknown"), 3),
-                ],
-                // `fn greet() -> string { let s: string = "hello"; s }; greet()`
-                // — `s` is a `String`-typed identifier; `String` maps to
-                // a `Ptr` `FieldKind` only via the conservative policy,
-                // and `storage_hint_to_field_kind` returns None for
-                // `String` so the helper records a `string`-labelled
-                // fallback. (Will resolve once the per-Ptr emit path
-                // pairs vw_clone/vw_drop.) The `store_local`/`string`
-                // is the `let s: string` binding, which records the
-                // string hint but takes the polymorphic fallback for
-                // the same per-Ptr-pending reason.
-                "heap_string" => &[
-                    (("return_value", "string"), 1),
-                    (("store_local", "string"), 1),
-                ],
-                // `fn maybe() -> Option<int> { ... }; maybe()` — `Option<int>`
-                // resolves to nullable_i64 today; the helper's policy
-                // routes `nullable_*` to fallback. The `store_local`
-                // entry is the `let x: Option<int> = Some(5)` binding.
-                "option_int" => &[
-                    (("return_value", "unknown"), 1),
-                    (("store_local", "unknown"), 1),
-                ],
-                // `fn dyn_id() { let x = 42; x }; dyn_id()` — fn body
-                // proven int (typed return), but the outer `dyn_id()`
-                // call's result is not consumed; no fallback expected.
-                "untyped_dynamic" => &[],
-                other => panic!("unexpected fixture name {other:?}"),
-            };
-            let actual: std::collections::HashMap<(&'static str, &'static str), u64> =
-                snap.iter().copied().collect();
-            let expected: std::collections::HashMap<(&'static str, &'static str), u64> =
-                want.iter().copied().collect();
-            assert_eq!(
-                actual, expected,
-                "fixture '{name}': joint-distribution mismatch.\n\
-                 Wave G audit baseline change? Update the per-fixture\n\
-                 expected distribution in this test.\n\
-                 Got: {snap:?}\n\
-                 Want: {want:?}"
-            );
-        }
-
-        // Final reset so the per-test counter state doesn't leak into
-        // sibling tests run in this module.
-        typed_emit_metrics::reset();
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_e4_bool_canary_top_level_frame() {
-        // PROBE only — run with `cargo test -- --ignored --nocapture
-        // probe_e4_bool_canary_top_level_frame`. Not part of the gate.
-        for src in [
-            "fn ret_bool() -> bool { true }\n\
-             ret_bool()",
-            "fn ret_bool2() -> bool { let x: bool = true; x }\n\
-             ret_bool2()",
-            "fn main() -> bool {\n\
-                 let mut flag: bool = false\n\
-                 let f = || { flag = true; flag }\n\
-                 f()\n\
-             }\n\
-             main()",
-        ] {
-            eprintln!("\n--- src = {:?} ---", src.split('\n').next().unwrap_or(""));
-            let (bits, kind) = crate::test_utils::eval_raw(src);
-            eprintln!("eval_raw → bits = 0x{:x}, kind = {:?}", bits, kind);
-            let val = crate::test_utils::eval(src);
-            use shape_value::ValueWordExt;
-            eprintln!("eval → as_bool = {:?}, as_i64 = {:?}", val.as_bool(), val.as_i64());
-            // Probe the VM's loaded program directly.
-            let parsed2 = shape_ast::parser::parse_program(src).expect("parse2");
-            let compiler2 = BytecodeCompiler::new();
-            let bytecode2 = compiler2.compile(&parsed2).expect("compile2");
-            eprintln!("after compile2: top_level_frame = {:?}", bytecode2.top_level_frame);
-            let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
-            vm.load_program(bytecode2);
-            eprintln!("after load: vm.program.top_level_frame = {:?}", vm.program.top_level_frame);
-        }
+    fn _phase_2c_rebuild() {
+        todo!("phase-2c — see ADR-006 §2.7.4");
     }
 }

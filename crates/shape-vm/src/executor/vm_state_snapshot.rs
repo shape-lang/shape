@@ -4,203 +4,93 @@
 //! point during execution and implements `VmStateAccessor` so that extension
 //! modules (e.g., `std::state`) can inspect the VM without holding a mutable
 //! borrow on it.
+//!
+//! # Phase-2c deferral (ADR-006 §2.7.4)
+//!
+//! The pre-bulldozer implementation collected raw bit patterns from the live
+//! VM (stack slots, module bindings, upvalues) using the deleted
+//! Wave-6.5-substep-1 shims and the deleted hand-rolled retain-on-read
+//! discipline. The post-§2.7.7 replacement must thread `NativeKind` from the
+//! parallel kind track at every read site and surface `KindedSlot`s into
+//! `FrameInfo`. That rebuild is **deferred to Phase 2c per ADR-006 §2.7.4**:
+//! the right shape requires the cell-storage kind-awareness work (§2.7.8) to
+//! land first, plus matching consumer migration in `std::state` and the
+//! resume callbacks. Papering over the gap with a placeholder serializer is
+//! the §2.7.4 forbidden rationalization ("we just need something that
+//! doesn't fail at compile time") and would silently corrupt persisted state.
+//!
+//! Until Phase 2c, every entry point in this module is a `todo!()` that
+//! cites §2.7.4. `capture_vm_state()` has callers in
+//! `executor/vm_impl/modules.rs`; once those callers exercise the path
+//! (state-introspection module functions), the program will trip the
+//! `todo!()` panic — the intentional, loud signal that snapshot/restore is a
+//! known-broken capability awaiting rebuild.
 
 use shape_runtime::module_exports::{FrameInfo, VmStateAccessor};
-use shape_value::ValueWord;
+use shape_value::KindedSlot;
 
 use super::VirtualMachine;
 
 /// Snapshot of VM state captured at a point during execution.
-/// Implements `VmStateAccessor` for use in `ModuleContext`.
 ///
-/// **WB2.4 retain-on-read.** Every `ValueWord` collected from the
-/// live VM (stack slots, module bindings, upvalues) is cloned via
-/// `vw_clone` so the snapshot holds an independent owning share per
-/// heap-tagged value. The `Drop` impl releases those shares via
-/// `vw_drop_slice` / `vw_drop`, keeping the snapshot refcount-neutral.
+/// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The pre-bulldozer
+/// fields (frames, current_args, current_locals, module_binding_*,
+/// instruction_count) all relied on raw bit slabs paired with hand-rolled
+/// retain-on-read helpers that were deleted in Wave 6.5 substep-1. The
+/// post-§2.7.7 shape stores `KindedSlot` (or parallel `Vec<u64>` +
+/// `Vec<NativeKind>`) and dispatches via `clone_with_kind` /
+/// `drop_with_kind`, but that surface depends on §2.7.8 cell-storage
+/// kind-awareness and consumer migration outside this cluster's territory.
+/// The struct is intentionally empty: any method that reads live VM state
+/// returns via `todo!()` so the broken capability surfaces loudly rather
+/// than silently corrupting persisted state.
 pub(crate) struct VmStateSnapshot {
-    frames: Vec<FrameInfo>,
-    current_args: Vec<ValueWord>,
-    current_locals: Vec<(String, ValueWord)>,
-    module_binding_names: Vec<String>,
-    module_binding_values: Vec<ValueWord>,
-    instruction_count: usize,
-}
-
-impl Drop for VmStateSnapshot {
-    fn drop(&mut self) {
-        use shape_value::value_word_drop::{vw_drop, vw_drop_slice};
-        // `frames: Vec<FrameInfo>` auto-drops — FrameInfo has its own
-        // retain-on-read Drop (shape-runtime/module_exports.rs).
-        vw_drop_slice(&self.current_args);
-        for (_, bits) in &self.current_locals {
-            vw_drop(*bits);
-        }
-        vw_drop_slice(&self.module_binding_values);
-    }
+    _phase_2c_rebuild_pending: (),
 }
 
 /// Construction via `VirtualMachine::capture_vm_state()`.
 impl VirtualMachine {
     /// Capture a read-only snapshot of the current VM state.
     ///
-    /// Iterates the call stack to build `FrameInfo` entries and copies the
-    /// current module bindings. The snapshot is entirely owned data so it can
-    /// be passed to `ModuleContext` without borrowing the VM.
+    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The pre-bulldozer
+    /// implementation read each frame's locals and each module binding via
+    /// the deleted Wave-6.5-substep-1 owning-read shims. The kind-threaded
+    /// replacement (`read_owned_kinded` per slot, paired with
+    /// `FrameDescriptor.slots` for kind sourcing) requires §2.7.8
+    /// cell-storage work plus a kind-aware upvalue path. Both are Phase-2c
+    /// scope per ADR-006 §2.7.4. Until then, this function panics loudly
+    /// when invoked rather than papering over with a placeholder.
     pub(crate) fn capture_vm_state(&self) -> VmStateSnapshot {
-        let mut frames = Vec::with_capacity(self.call_stack.len());
-
-        for frame in &self.call_stack {
-            let function_name = frame
-                .function_id
-                .and_then(|fid| self.program.functions.get(fid as usize))
-                .map(|f| f.name.clone())
-                .unwrap_or_default();
-
-            let blob_hash = frame.blob_hash.map(|fh| fh.0);
-
-            // Compute local_ip relative to the function's entry point.
-            let local_ip = if let Some(fid) = frame.function_id {
-                let entry = self
-                    .function_entry_points
-                    .get(fid as usize)
-                    .copied()
-                    .unwrap_or(0);
-                frame.return_ip.saturating_sub(entry)
-            } else {
-                frame.return_ip
-            };
-
-            // Extract locals from the unified stack for this frame.
-            // WB2.4 retain-on-read: use the owning read so each
-            // snapshot slot holds its own refcount bump.
-            let locals: Vec<ValueWord> = if frame.locals_count > 0 {
-                let start = frame.base_pointer;
-                let end = (start + frame.locals_count).min(self.sp);
-                (start..end).map(|i| self.stack_read_owned(i)).collect()
-            } else {
-                Vec::new()
-            };
-
-            // Extract upvalue values if present. `Upvalue::get` already
-            // returns an owning share (WB2.2) — each collected bit
-            // pattern is an independent retain.
-            let upvalues = frame
-                .upvalues
-                .as_ref()
-                .map(|ups| ups.iter().map(|u| u.get()).collect());
-
-            // Extract args: the first `arity` locals in the frame's register
-            // window are the arguments. Owning reads, same rationale as
-            // `locals` above.
-            let args: Vec<ValueWord> = frame
-                .function_id
-                .and_then(|fid| self.program.functions.get(fid as usize))
-                .map(|func| {
-                    let arity = func.arity as usize;
-                    let start = frame.base_pointer;
-                    let end = start
-                        .saturating_add(arity)
-                        .min(frame.base_pointer + frame.locals_count)
-                        .min(self.sp);
-                    (start..end).map(|i| self.stack_read_owned(i)).collect()
-                })
-                .unwrap_or_default();
-
-            frames.push(FrameInfo {
-                function_id: frame.function_id,
-                function_name,
-                blob_hash,
-                local_ip,
-                locals,
-                upvalues,
-                args,
-            });
-        }
-
-        // Extract current args and locals from the topmost frame.
-        // WB2.4: `Vec<ValueWord>::clone()` is a plain `u64` bit-copy
-        // that aliases refcounts; explicit `vw_clone` per slot keeps
-        // the refcount invariant.
-        use shape_value::value_word_drop::vw_clone;
-        let current_args = frames
-            .last()
-            .map(|f| f.args.iter().map(|&b| vw_clone(b)).collect())
-            .unwrap_or_default();
-
-        let current_locals = frames
-            .last()
-            .and_then(|f| {
-                f.function_id
-                    .and_then(|fid| self.program.functions.get(fid as usize))
-                    .map(|func| {
-                        func.param_names
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, name)| {
-                                f.locals.get(i).map(|val| (name.clone(), vw_clone(*val)))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-            })
-            .unwrap_or_default();
-
-        VmStateSnapshot {
-            frames,
-            current_args,
-            current_locals,
-            module_binding_names: self.program.module_binding_names.clone(),
-            // WB2.4: module binding values need owning shares.
-            module_binding_values: (0..self.module_bindings.len())
-                .map(|i| self.binding_read_owned(i))
-                .collect(),
-            instruction_count: self.instruction_count,
-        }
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 }
 
 impl VmStateAccessor for VmStateSnapshot {
     fn current_frame(&self) -> Option<FrameInfo> {
-        self.frames.last().cloned()
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
     fn all_frames(&self) -> Vec<FrameInfo> {
-        self.frames.clone()
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
     fn caller_frame(&self) -> Option<FrameInfo> {
-        if self.frames.len() >= 2 {
-            Some(self.frames[self.frames.len() - 2].clone())
-        } else {
-            None
-        }
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
-    fn current_args(&self) -> Vec<ValueWord> {
-        // WB2.4: return owning shares so the caller can drop them
-        // independently of our `current_args` storage.
-        use shape_value::value_word_drop::vw_clone;
-        self.current_args.iter().map(|&b| vw_clone(b)).collect()
+    fn current_args(&self) -> Vec<KindedSlot> {
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
-    fn current_locals(&self) -> Vec<(String, ValueWord)> {
-        use shape_value::value_word_drop::vw_clone;
-        self.current_locals
-            .iter()
-            .map(|(name, bits)| (name.clone(), vw_clone(*bits)))
-            .collect()
+    fn current_locals(&self) -> Vec<(String, KindedSlot)> {
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
-    fn module_bindings(&self) -> Vec<(String, ValueWord)> {
-        use shape_value::value_word_drop::vw_clone;
-        self.module_binding_names
-            .iter()
-            .zip(self.module_binding_values.iter())
-            .map(|(name, val)| (name.clone(), vw_clone(*val)))
-            .collect()
+    fn module_bindings(&self) -> Vec<(String, KindedSlot)> {
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
     fn instruction_count(&self) -> usize {
-        self.instruction_count
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 }
