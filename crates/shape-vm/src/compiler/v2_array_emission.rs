@@ -152,10 +152,11 @@ fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Op
     let mut kind: Option<NativeKind> = None;
 
     for elem in elements {
+        // Per ADR-006 §2.7.5.1, `NativeKind::Unknown` / `Dynamic` were
+        // deleted — `expr_storage_hint` returns `Option<NativeKind>` and
+        // the prior "Unknown / Dynamic means refuse" check collapses to
+        // the `?` early-return on `None`.
         let elem_kind = expr_storage_hint(elem, type_tracker)?;
-        if elem_kind == NativeKind::Unknown || elem_kind == NativeKind::Dynamic {
-            return None;
-        }
 
         match kind {
             Some(prev) if prev != elem_kind => return None,
