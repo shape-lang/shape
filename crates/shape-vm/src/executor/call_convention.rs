@@ -81,7 +81,10 @@
 //! enforced via `debug_assert_eq!` at every frame-construction site.
 
 use shape_value::v2::closure_raw::{OwnedClosureBlock, typed_closure_function_id};
-use shape_value::{HeapValue, KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, ValueSlot, VMError};
+
+use super::task_scheduler::TaskStatus;
+use super::vm_impl::stack::clone_with_kind;
 
 use super::{CallFrame, VirtualMachine};
 
@@ -195,34 +198,253 @@ impl VirtualMachine {
 
     /// Execute with automatic async task resolution.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// drove `resolve_spawned_task` (see below) which carries the same
-    /// kinded-ABI rebuild dependency.
+    /// **Filled by W7-cv-async (Round 3 close).** Per W7 playbook §4
+    /// W7-cv-async row, sync-resolution only — suspension state crossing
+    /// a `call_value_immediate_*` boundary is OUT OF SCOPE per ADR-006
+    /// §2.7.11 out-of-scope clause (Phase-2c snapshot tier; same
+    /// out-of-scope clause as §2.7.10).
+    ///
+    /// Drives the program forward via `execute_fast(ctx)` (the standard
+    /// run-to-halt loop that pops the top-of-stack result on completion).
+    /// Inline task resolution at `op_await` / `op_join_await` sites in
+    /// `executor/async_ops/mod.rs` is the integration point with
+    /// [`resolve_spawned_task`] (below) — once the §2.7.4 task-scheduler
+    /// kinded-ABI re-light closes those `todo!()` arms, the await-site
+    /// handler invokes `resolve_spawned_task(task_id)` directly inside
+    /// the dispatch loop, and this driver re-enters `execute_fast` to
+    /// continue the program after the suspended `op_await` opcode
+    /// returns.
+    ///
+    /// The pre-bulldozer `execute_with_async` shape — drive a `loop`
+    /// over `task_scheduler.iter_pending()` calling `resolve_spawned_task`
+    /// per ready task — depends on a public iterator over
+    /// `TaskScheduler.callables` that does not exist in the current
+    /// scheduler API surface (W7-cv-async owns only `call_convention.rs`
+    /// per W7 playbook §10 forbidden zones — `task_scheduler.rs` is
+    /// out-of-territory). When a future cluster lands the iteration
+    /// API, the loop body in this function is the natural extension
+    /// point: while there is a `Pending`-with-callable task, call
+    /// `resolve_spawned_task(id)` and discard the per-task result; the
+    /// program-level result still comes from `execute_fast` at the end.
     pub fn execute_with_async(
         &mut self,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_with_async kinded-ABI rebuild pending"
-        )
+        // Sync-resolution only. The §2.7.11 out-of-scope clause is
+        // explicit: suspension state crossing a `call_value_immediate_*`
+        // boundary is Phase-2c snapshot-tier work and stays outside
+        // Wave 7. The bytecode loop drives the program; per-await-site
+        // inline resolution is the `resolve_spawned_task` integration
+        // point handed to the async_ops dispatch arms when the §2.7.4
+        // scheduler kinded-ABI re-light lands.
+        self.execute_fast(ctx)
     }
 
     /// Resolve a spawned task by executing its callable synchronously.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced deleted `Upvalue::new(vw_clone(raw))` per capture
-    /// (forbidden #8 — replaced by `clone_with_kind(bits, kind)` over
-    /// kind-threaded capture bits per §2.7.8). The post-§2.7.8
-    /// replacement reads each capture's `(bits, kind)` from the
-    /// `VmClosureHandle` over the kind-extended `ClosureCell` layout
-    /// and constructs the new frame's upvalue cell with lockstep kinds.
+    /// **Filled by W7-cv-async (Round 3 close).** Per W7 playbook §4
+    /// W7-cv-async row body shape: look up the task's callable from the
+    /// scheduler, route through `call_closure_with_nb_args_keepalive`
+    /// for closure callables (or `call_function_with_nb_args` for raw
+    /// function-id callables), drive the callee to completion via
+    /// `execute_until_call_depth(saved_depth, None)`, pop the result
+    /// via `pop_kinded`, cache it, and return.
+    ///
+    /// The scheduler stores callables as `(u64, NativeKind)` pairs per
+    /// the §2.7.7 carrier shape (Wave 6.5 R-async-time / E-async close
+    /// already migrated `task_scheduler.rs` off `ValueWord`). The two
+    /// expected callable kinds match the `call_value_immediate_nb`
+    /// dispatch shape from W7-cv-static (Round 2 close):
+    ///
+    /// - `Ptr(HeapKind::Closure)` — recover `OwnedClosureBlock` via
+    ///   `slot.as_heap_value()` + `HeapValue::ClosureRaw(block)` per
+    ///   ADR-005 §1 single-discriminator. Function-id reads from the
+    ///   `TypedClosureHeader` via the unsafe `typed_closure_function_id`
+    ///   helper (the canonical accessor; `OwnedClosureBlock` has no
+    ///   safe public accessor for `function_id`). Frame setup carries
+    ///   the closure-self share through `closure_heap_bits` /
+    ///   `closure_heap_kind` per the B9 lockstep companion fields, so
+    ///   `op_return` releases it via `drop_with_kind` at frame teardown.
+    ///   Spawned tasks have no caller-supplied args — the closure runs
+    ///   with `&[]` for the arg slice.
+    /// - `UInt64` — function-id callable. The bits encode the function
+    ///   id as a raw `u64` payload (`UInt64` is the §2.7.11 callee-
+    ///   classification kind for function references; same convention
+    ///   as `call_value_immediate_nb`'s `UInt64` arm). No Arc share
+    ///   to drop; `drop_with_kind(_, NativeKind::UInt64)` is a no-op.
+    ///   Routes through `call_function_with_nb_args(func_id, &[])` —
+    ///   the non-closure entry-point in this module's frame-setup
+    ///   family (W7-frame-setup, Round 1 close).
+    ///
+    /// **Cached fast-path.** If `task_scheduler.get_result(task_id)`
+    /// returns `TaskStatus::Completed((bits, kind))`, the cached share
+    /// is cloned via `clone_with_kind` and returned directly — same
+    /// pattern as `TaskScheduler::resolve_task` (cached entry retains
+    /// its share; caller gets a fresh share). Cancelled tasks surface
+    /// as `RuntimeError`.
+    ///
+    /// **Suspension out of scope.** If the callee's body suspends mid-
+    /// execution (an `op_await` / `op_suspend` inside the spawned
+    /// closure), the suspension shape crossing this `call_value_immediate_*`
+    /// frame boundary is §2.7.4 Phase-2c snapshot-tier (W7 playbook
+    /// §9 risk row, ADR-006 §2.7.11 out-of-scope clause). The current
+    /// body drives `execute_until_call_depth` to a definite return; a
+    /// `VMError::Suspended` mid-call is propagated upward and the
+    /// task's cached entry remains `Pending` until a future Phase-2c
+    /// rebuild lands the snapshot-tier resumption.
     #[allow(dead_code)]
-    fn resolve_spawned_task(&mut self, _task_id: u64) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             resolve_spawned_task kinded-cell rebuild pending"
-        )
+    fn resolve_spawned_task(&mut self, task_id: u64) -> Result<KindedSlot, VMError> {
+        // Cached fast-path — the scheduler already holds a Completed
+        // share for this task. Hand out a fresh share via
+        // `clone_with_kind` so the cached entry retains its own.
+        match self.task_scheduler.get_result(task_id) {
+            Some(TaskStatus::Completed((bits, kind))) => {
+                let bits = *bits;
+                let kind = *kind;
+                clone_with_kind(bits, kind);
+                return Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+            }
+            Some(TaskStatus::Cancelled) => {
+                return Err(VMError::RuntimeError(format!(
+                    "Task {} was cancelled",
+                    task_id
+                )));
+            }
+            // Pending or unknown — fall through to the take-callable path.
+            Some(TaskStatus::Pending) | None => {}
+        }
+
+        // Take ownership of the callable share — `take_callable`
+        // transfers the strong-count from the scheduler map to us.
+        let (callable_bits, callable_kind) =
+            self.task_scheduler.take_callable(task_id).ok_or_else(|| {
+                VMError::RuntimeError(format!("No callable registered for task {}", task_id))
+            })?;
+
+        // Capture call-stack depth BEFORE frame setup pushes a new
+        // frame. The callee's `op_return` / `op_return_value` pops its
+        // frame, returning the call-stack depth to this saved value;
+        // `execute_until_call_depth(saved_depth, None)` is the canonical
+        // "drive callee to completion" loop. Same pattern as
+        // `call_value_immediate_nb` (W7-cv-static, Round 2 close).
+        let saved_call_depth = self.call_stack.len();
+
+        match callable_kind {
+            NativeKind::Ptr(HeapKind::Closure) => {
+                // Recover `OwnedClosureBlock` via the §2.7.6 / Q8 heap
+                // dispatch path: construct a `ValueSlot` from the raw
+                // bits, call `as_heap_value()`, pattern-match the
+                // `HeapValue::ClosureRaw(block)` arm per ADR-005 §1
+                // single-discriminator. The pattern mirrors
+                // `call_value_immediate_nb`'s closure arm verbatim —
+                // diverging would re-introduce a forbidden parallel
+                // dispatch surface.
+                let callable_slot = ValueSlot::from_raw(callable_bits);
+                let block: &OwnedClosureBlock = match callable_slot.as_heap_value() {
+                    HeapValue::ClosureRaw(b) => b,
+                    other => {
+                        // Drop the callable share before surfacing the
+                        // error so refcount discipline holds (playbook
+                        // §3 drop discipline). `drop_with_kind` on
+                        // `Ptr(HeapKind::Closure)` releases the
+                        // `Arc<HeapValue>` share per W7-closure-retain
+                        // (Round 2.5 close).
+                        let type_name = other.type_name();
+                        super::vm_impl::stack::drop_with_kind(callable_bits, callable_kind);
+                        debug_assert!(
+                            false,
+                            "resolve_spawned_task: HeapKind::Closure label with \
+                             non-ClosureRaw HeapValue payload: {:?}",
+                            type_name
+                        );
+                        return Err(VMError::RuntimeError(format!(
+                            "resolve_spawned_task: HeapKind::Closure label with \
+                             non-ClosureRaw payload: {}",
+                            type_name
+                        )));
+                    }
+                };
+                // SAFETY: `block` is a live `OwnedClosureBlock` borrowed
+                // through the live `&HeapValue` returned by
+                // `as_heap_value()`; its `as_ptr()` points to a
+                // `TypedClosureHeader` block allocated by
+                // `alloc_typed_closure` per the construction invariant.
+                let function_id = unsafe { typed_closure_function_id(block.as_ptr()) };
+
+                // Frame setup. The B9 lockstep companion fields carry
+                // the closure-self share so `op_return` /
+                // `op_return_value` can release it via
+                // `drop_with_kind(bits, kind)` on frame teardown — the
+                // share transfers from `take_callable` into the
+                // `CallFrame.closure_heap_bits` field. Spawned tasks
+                // have no caller args, so the arg slice is empty.
+                self.call_closure_with_nb_args_keepalive(
+                    function_id,
+                    block,
+                    &[],
+                    Some(callable_bits),
+                    Some(callable_kind),
+                )?;
+            }
+            NativeKind::UInt64 => {
+                // Function-id callable: bits encode the function id as
+                // a raw `u64` payload. `UInt64` is the §2.7.11 callee-
+                // classification kind for function references — same
+                // convention as `call_value_immediate_nb`'s `UInt64`
+                // arm (W7-cv-static, Round 2 close). No Arc share to
+                // drop; `drop_with_kind(_, NativeKind::UInt64)` is a
+                // no-op.
+                //
+                // Truncate to `u16` since `BytecodeProgram::functions`
+                // is indexed by `u16` and `call_function_with_nb_args`
+                // takes `func_id: u16`. A bits value that doesn't index
+                // into the function table surfaces as
+                // `VMError::InvalidCall` from `call_function_with_nb_args`
+                // itself per its existing
+                // `program.functions.get(func_id as usize).ok_or(VMError::InvalidCall)?`
+                // guard.
+                let function_id = callable_bits as u16;
+                self.call_function_with_nb_args(function_id, &[])?;
+            }
+            other => {
+                // Unsupported callable kind — release the share before
+                // surfacing (playbook §3). The kind classification list
+                // for spawned-task callables matches
+                // `call_value_immediate_nb` (W7-cv-static): closure or
+                // function-id; trait-object closure dispatch (W9 TR
+                // territory) routes through this RuntimeError until
+                // that wave lands.
+                super::vm_impl::stack::drop_with_kind(callable_bits, callable_kind);
+                return Err(VMError::RuntimeError(format!(
+                    "resolve_spawned_task: callable must be \
+                     NativeKind::Ptr(HeapKind::Closure) or \
+                     NativeKind::UInt64, got {:?}",
+                    other
+                )));
+            }
+        }
+
+        // Drive the callee to completion. `execute_until_call_depth`
+        // returns when `self.call_stack.len() == saved_call_depth`
+        // (the callee's frame has been popped by `op_return`). The
+        // return value is left on the value stack by `op_return_value`;
+        // `pop_kinded` transfers the share cleanly into the result
+        // `KindedSlot`.
+        //
+        // §2.7.4 Phase-2c — suspension state crossing this frame
+        // boundary stays out of scope per ADR-006 §2.7.11 out-of-scope
+        // clause. A `VMError::Suspended` propagates upward; the
+        // task's cached entry remains `Pending`.
+        self.execute_until_call_depth(saved_call_depth, None)?;
+        let (result_bits, result_kind) = self.pop_kinded()?;
+
+        // Cache the result — clone the share so the scheduler entry
+        // and the returned `KindedSlot` each own one independent
+        // strong-count. Same pattern as `TaskScheduler::resolve_task`
+        // and `try_resolve_external` cached-completion paths.
+        clone_with_kind(result_bits, result_kind);
+        self.task_scheduler.complete(task_id, result_bits, result_kind);
+        Ok(KindedSlot::new(ValueSlot::from_raw(result_bits), result_kind))
     }
 
     /// Non-closure frame setup from a `&[KindedSlot]` arg slice
