@@ -371,27 +371,56 @@ migration in any cluster — the kind-sourcing patterns + push/pop discipline ar
 
 ---
 
-## 7. Per-cluster definition of done
+## 7. Per-cluster definition of done (REVISED 2026-05-09)
 
 A cluster closes when **all** of the following hold inside its file list:
 
 1. **No mandatory-shim references remain in cluster files**:
    ```
    grep -n 'push_raw_u64\|pop_raw_u64\|push_native_i64\|stack_read_owned\|stack_peek_raw' <cluster files>
-   # Expected: zero hits in cluster's territory
    ```
-2. **No sibling-shim references remain in cluster files**:
-   ```
-   grep -n 'pop_native_i64\|push_native_bool\|pop_native_bool\|push_raw_u64_slow\|push_raw_f64\|pop_raw_f64\|push_tagged_\|pop_tagged_\|stack_top_both_i48\|stack_top_is_i48\|stack_top_both_f64\|stack_top_is_f64\|stack_top_is_bool\|stack_read_raw\|stack_write_raw\|stack_take_raw\|stack_slice_raw\|peek_args_slice\|bindings_slice_raw\|binding_read_raw\|binding_read_owned\|binding_write_raw\|binding_take_raw' <cluster files>
-   # Expected: zero hits in cluster's territory
-   ```
-3. **No new forbidden shapes** per §4 of this playbook (§2.7.7 list).
-4. **`cargo check -p shape-vm --lib` error count strictly decreased** vs the cluster's branchpoint
-   (parent: `bulldozer-strictly-typed-phase-1b-vm` HEAD = 2591 errors at substep-1 close). Partial
-   close acceptable; the goal is monotonic decrease across the 5 clusters, not zero per-cluster.
+2. **No sibling-shim references remain in cluster files** (full sibling list — `pop_native_i64`,
+   `push_native_bool`, `pop_native_bool`, `push_raw_u64_slow`, `push_raw_f64`, `pop_raw_f64`,
+   `push_tagged_*`, `pop_tagged_*`, `stack_top_both_*`, `stack_top_is_*`, `stack_read_raw`,
+   `stack_write_raw`, `stack_take_raw`, `stack_slice_raw`, `peek_args_slice`,
+   `bindings_slice_raw`, `binding_read_*`, `binding_write_raw`, `binding_take_raw`).
+3. **No new forbidden-pattern introductions** (the §2.7.7 / §2.7.8 §4 list of this playbook).
+   Forbidden patterns the cluster file already had (pre-existing `ValueWord`, `tag_bits::*`,
+   `as_heap_ref`, `synthesize_value_word_from_raw`, `vw_clone`, `vw_drop`, `NativeKind::Unknown`,
+   `vmarray_from_vec`, `value_word_drop`, etc.) are **migrated off** during the cluster work —
+   never preserved, never copied to a new file, never reintroduced in a different shape. If a
+   call site cannot be migrated cleanly, the correct shape is `NotImplemented(SURFACE)` /
+   `todo!("phase-2c — see ADR-006 §2.7.4")` / surface-and-stop, never a forbidden-pattern
+   workaround.
+4. **Cluster files compile cleanly OR the un-compiling sites have a documented surface**: if a
+   call site cannot be migrated this round, leave a `NotImplemented(SURFACE: <why>)` /
+   `todo!("phase-2c <X>")` placeholder per §2.7.4. The placeholder is tracked, not silently
+   left as a compile error.
 5. **`bash scripts/check-no-dynamic.sh` exits 0** (defection guard — frozen baseline).
 6. **AGENTS.md updated**: cluster's row flipped to `idle` with close commit hash.
-7. **Cluster commit message** cites this playbook + ADR-006 §2.7.7 + the per-cluster pattern.
+7. **Cluster commit message** cites this playbook + the relevant ADR-006 §2.7.x section + the
+   per-cluster pattern.
+
+**`cargo check -p shape-vm --lib` error count is INFORMATIONAL, NOT GATING.** Capture before/after
+counts in the close report so the supervisor sees the cumulative arc, but the count CAN go up when
+a cluster correctly migrates off forbidden patterns and exposes downstream cascade in non-territory
+files. **Do not introduce forbidden patterns to keep the count down.** That is the W-series
+defection-attractor verbatim.
+
+Examples of legitimate count rises:
+- Migrating `as_heap_ref` consumers to `as_heap_value` exposes pre-existing `as_heap_ref` callers
+  in OOR files that were previously hidden by upstream errors.
+- Replacing a `ValueWord::from_*` constructor with `Arc::into_raw + push_kinded` exposes
+  type-annotation gaps in callers that the old shape papered over.
+- Removing forbidden imports from a header makes the rest of the file's body errors visible.
+
+In all of these cases, the cluster did the right thing. The count delta is a measurement of the
+cleanup surface, not a quality signal.
+
+**Do NOT run `cargo check` yourself unless investigating a specific compile error.** With many
+parallel clusters, running `cargo check -p shape-vm --lib` 15× in parallel thrashes the build
+cache. The supervisor runs check at merge time. Per-cluster verification: grep gates (above) +
+spot-read your modified files for forbidden-pattern reintroduction.
 
 ---
 
@@ -434,3 +463,77 @@ at heap-kind dispatch (use `slot.as_heap_value()` + `HeapValue::*` match per Q8)
 
 *Playbook closed for edits during cluster fan-out. Amendments require supervisor sign-off and a
 fresh dispatch round.*
+
+---
+
+## 10. Wave-α fine-grained sub-cluster split (2026-05-09 — for massive parallelism)
+
+**Why:** clusters A/B/C ran one agent each over 167-660 sites. Cluster B partial-closed correctly
+on architectural surfaces; clusters D/E first-round were aborted after the strictly-decreased gate
+(removed in §7 above) pushed an agent toward forbidden-pattern workarounds. Wave-α splits the
+remaining D/E territory + cluster B-round-2 into per-file or per-handler-class units so 15-20
+agents can run in parallel and the surface-and-stop discipline scales — each agent has small
+enough scope to fit in one context window and one focused topic.
+
+**Branch convention:** `bulldozer-strictly-typed-phase-1b-vm-<name>` per sub-cluster, all branched
+from phase-1b-vm HEAD `ad0a954` (post-§2.7.8 amendment). Worktree at
+`/home/dev/dev/shape-lang/shape-phase-1b-vm-<name>`.
+
+### Wave-α — independent sub-clusters (dispatch all in parallel)
+
+Each sub-cluster owns the listed file(s); no overlap between sub-clusters; ordering doesn't matter.
+
+| Sub-cluster | Files | Sites | Pattern |
+|---|---|---|---|
+| `D-prop-access` | `executor/objects/property_access.rs` | 61 | TypedObject property dispatch via `slot.as_heap_value()` + `HeapValue::TypedObject` match |
+| `D-array-joins` | `executor/objects/array_joins.rs` | 40 | Multi-array element-kind dispatch from `TypedArrayData` |
+| `D-objects-mod` | `executor/objects/mod.rs` | 39 | Generic object dispatch shell |
+| `D-array-ops` | `executor/objects/array_operations.rs` | 38 | Array push/pop/concat |
+| `D-type-ops` | `executor/builtins/type_ops.rs` | 36 | Type predicates (`is_int`, `typeof`, `instanceof`) — dispatch on `kind` directly |
+| `D-typed-access` | `executor/objects/typed_access.rs` | 34 | Typed field access fast path |
+| `D-window-join` | `executor/window_join.rs` | 21 | Window/join element kinds |
+| `D-obj-create` | `executor/objects/object_creation.rs` | 19 | TypedObject factory |
+| `D-typed-obj-ops` | `executor/typed_object_ops.rs` | 14 | TypedObject ops |
+| `D-trait-obj` | `executor/trait_object_ops.rs` | 10 | Trait dispatch — vtable + Arc shape |
+| `D-obj-tail` | `executor/objects/{concat,object_operations,concurrency_methods}.rs` | 16 combined | Tail object files; concat/object_ops/concurrency |
+| `D-raw-helpers` | `executor/objects/raw_helpers.rs` | 0 mandatory + uses forbidden tag_bits | **P1 — unblocks B-round-2.** Default disposition: rewrite `extract_filter_expr` to take `(bits, kind)` directly + delete forbidden helpers. Verify `logical/mod.rs` filter-expr branch still compiles after. |
+| `D-array-detect` | `executor/typed_handlers/array_detect.rs` (~829 lines) | forbidden-helper carrier (no mandatory shim) | Audit liveness per opcode; migrate live ones to kinded; stub dead ones to `NotImplemented(SURFACE: phase-2c reentry)` |
+| `D-v2-array-detect` | `executor/v2_handlers/v2_array_detect.rs` (~1118 lines) | forbidden-helper carrier | Same approach as `D-array-detect` |
+| `E-snapshot` | `executor/snapshot.rs` + `executor/vm_state_snapshot.rs` | 5 | **§2.7.4 Phase-2c deferral pattern** — `todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")` |
+| `E-exceptions` | `executor/exceptions/mod.rs` | 26 | Exception payload kind = `NativeKind::Ptr(HeapKind::TypedObject)` |
+| `E-async` | `executor/async_ops/mod.rs` | 13 | Future/TaskGroup payload kinds |
+| `E-tests` | `executor/v2_stack_tests.rs` + `executor/tests/{table_iteration,mod}.rs` | 75 | Test harness — migrate `push_kinded`/`pop_kinded` directly |
+| `E-vm-impl-tail` | `executor/vm_impl/{program,output,builtins,modules,stack}.rs` | 14 | Internal — verify and delete remainder |
+| `E-execution` | `executor/execution.rs` | 3 | Top-level execute loop |
+| `E-compiler` | `crates/shape-vm/src/compiler/{helpers.rs, expressions/identifiers.rs, loops.rs}` | 13 | Compile-time helpers |
+| `E-builtins-backlog` | `executor/builtins/{array_ops,object_ops,intrinsics/*,…}.rs` (Wave 5b deferred) | TBD | Body migration to `&[KindedSlot]` per Wave 5b template (`fa2bafc`) |
+| `E-printing` | `executor/printing.rs` | (formatter rewrite) | `PrintResult` / `PrintSpan` post-§2.7.4 — finish formatter call sites |
+| `B7-closure-cells` | `executor/closure_raw.rs` (or current closure-layout struct) — STRUCTURAL | §2.7.8 / Q10 | Extend `ClosureCell` with `kinds: Vec<NativeKind>`; constructors + push/pop signatures accept/return `(bits, kind)` |
+| `B8-shared-cell` | shared-cell payload struct (locate via grep) — STRUCTURAL | §2.7.8 / Q10 | Extend `SharedCell` with `kind: NativeKind` (single-slot, set at construction) |
+| `B9-callframe-kind` | `executor/mod.rs:188` `CallFrame.closure_heap_bits` — STRUCTURAL | §2.7.8 / Q10 | Add companion `closure_heap_kind: Option<NativeKind>`; teardown calls `drop_with_kind` |
+
+### Wave-β — depends on Wave-α (dispatch after merges)
+
+| Sub-cluster | Files | Depends on | Pattern |
+|---|---|---|---|
+| `B6-variables-loadptr` | `executor/variables/mod.rs` (Load*Ptr/Store*Ptr handlers — the 130 mandatory + 33 sibling sites cluster B partial-closed leaving as `NotImplemented(SURFACE)`) | B7 + B8 + B9 (cell extension landed) | Replace `NotImplemented(SURFACE)` returns with kind-threaded reads via the §2.7.8 cell-storage parallel-kind tracks |
+| `B10-loops-heap` | `executor/loops/mod.rs` (`as_heap_ref` heap-side dispatch in `op_iter_next`/`op_iter_done` — the 16 mandatory + 10 sibling sites cluster B couldn't migrate) | D-raw-helpers (raw_helpers rewritten/deleted) | Replace `as_heap_ref` with `slot.as_heap_value()` + `HeapValue::*` match; element kind from iterator FieldType |
+| `B11-control-flow-heap` | `executor/control_flow/mod.rs` (the 18 remaining mandatory sites in arg-slicing / op_call_value / op_call_closure paths) | D-raw-helpers | Same replacement; return-kind from `FrameDescriptor.return_kind` per playbook §2 |
+| `B12-polymorphic-defer` | the polymorphic / legacy paths cluster B surface-3 listed (op_load_local polymorphic, op_make_ref, etc.) | none structural — pure §2.7.4 deferral | Phase-2c todo!() pattern at every cited call site |
+
+### Dispatch protocol for Wave-α
+
+Each agent prompt must:
+- Cite this playbook §10 + the agent's specific row
+- Cite ADR-006 §2.7.6, §2.7.7, **§2.7.8 (binding for B7-B9 + cell-bound consumers)**, Q7-Q10
+- **Forbid running `cargo check`** except for spot-checking a specific compile error (per §7
+  REVISED) — the supervisor runs check at merge time. Saves the build cache from 15× thrash.
+- Forbid editing files outside the sub-cluster's listed territory (cross-cluster cascade →
+  surface-and-stop).
+- Mandate `NotImplemented(SURFACE: <reason>)` or `todo!("phase-2c — <reason>")` over forbidden-
+  pattern workarounds. The agent's job is to migrate or surface, never to keep error count down
+  by reintroducing forbidden patterns.
+
+**AGENTS.md** is hand-written by supervisor for Wave-α — agents do NOT update AGENTS.md
+themselves to avoid 15-way merge conflict. Each agent's commit message documents its territory,
+sites migrated, surfaces, and close hash; supervisor consolidates into AGENTS.md at merge time.
