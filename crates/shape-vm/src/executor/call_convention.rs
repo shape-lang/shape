@@ -96,7 +96,7 @@
 //! (`closure_heap_bits.is_some() == closure_heap_kind.is_some()`) is
 //! preserved on every surviving frame-push site.
 
-use shape_value::VMError;
+use shape_value::{KindedSlot, NativeKind, VMError};
 
 use super::VirtualMachine;
 
@@ -112,9 +112,9 @@ impl VirtualMachine {
     pub fn execute_function_by_name(
         &mut self,
         _name: &str,
-        _args: Vec<shape_value::ValueWord>,
+        _args: Vec<KindedSlot>,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_function_by_name kinded-ABI rebuild pending"
@@ -128,9 +128,9 @@ impl VirtualMachine {
     pub fn execute_function_by_id(
         &mut self,
         _func_id: u16,
-        _args: Vec<shape_value::ValueWord>,
+        _args: Vec<KindedSlot>,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_function_by_id kinded-ABI rebuild pending"
@@ -146,10 +146,10 @@ impl VirtualMachine {
     pub fn execute_closure(
         &mut self,
         _function_id: u16,
-        _upvalues: Vec<shape_value::Upvalue>,
-        _args: Vec<shape_value::ValueWord>,
+        _upvalue_bits: Vec<u64>,
+        _args: Vec<KindedSlot>,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_closure kinded-cell rebuild pending"
@@ -164,7 +164,7 @@ impl VirtualMachine {
         &mut self,
         _func_id: u16,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_function_fast kinded-ABI rebuild pending"
@@ -180,9 +180,9 @@ impl VirtualMachine {
     pub fn execute_function_with_named_args(
         &mut self,
         _func_id: u16,
-        _named_args: &[(String, shape_value::ValueWord)],
+        _named_args: &[(String, KindedSlot)],
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_function_with_named_args kinded-ABI rebuild pending"
@@ -199,7 +199,7 @@ impl VirtualMachine {
     /// `FrameDescriptor.return_kind`.
     pub fn resume(
         &mut self,
-        _value: shape_value::ValueWord,
+        _value: KindedSlot,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<super::ExecutionResult, VMError> {
         todo!(
@@ -216,7 +216,7 @@ impl VirtualMachine {
     pub fn execute_with_async(
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              execute_with_async kinded-ABI rebuild pending"
@@ -233,14 +233,17 @@ impl VirtualMachine {
     /// `VmClosureHandle` over the kind-extended `ClosureCell` layout
     /// and constructs the new frame's upvalue cell with lockstep kinds.
     #[allow(dead_code)]
-    fn resolve_spawned_task(&mut self, _task_id: u64) -> Result<shape_value::ValueWord, VMError> {
+    fn resolve_spawned_task(&mut self, _task_id: u64) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              resolve_spawned_task kinded-cell rebuild pending"
         )
     }
 
-    /// ValueWord-module function call: takes ValueWord args directly.
+    /// Module function call: takes a `&[KindedSlot]` arg slice (ADR-006
+    /// §2.7.10 / Q11 caller-side carrier) and threads each slot's
+    /// `(bits, kind)` onto the kind-tracked stack via
+    /// `stack_write_kinded(idx, bits, kind)`.
     ///
     /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
     /// referenced deleted `vw_clone` retain-on-read + the deleted
@@ -255,7 +258,7 @@ impl VirtualMachine {
     pub(crate) fn call_function_with_nb_args(
         &mut self,
         _func_id: u16,
-        _args: &[shape_value::ValueWord],
+        _args: &[KindedSlot],
     ) -> Result<(), VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
@@ -263,7 +266,11 @@ impl VirtualMachine {
         )
     }
 
-    /// ValueWord-host closure call: takes ValueWord args directly.
+    /// Host closure call: takes a `Vec<u64>` raw-bits upvalue payload
+    /// (matching `CallFrame.upvalues: Option<Vec<u64>>`, with the
+    /// parallel `NativeKind` track sourced from `ClosureLayout::
+    /// capture_native_kinds` per §2.7.8 / Q10) and a `&[KindedSlot]`
+    /// arg slice per §2.7.10 / Q11.
     ///
     /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Thin
     /// wrapper over `call_closure_with_nb_args_keepalive` with `(None,
@@ -272,8 +279,8 @@ impl VirtualMachine {
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
         _func_id: u16,
-        _upvalues: Vec<shape_value::Upvalue>,
-        _args: &[shape_value::ValueWord],
+        _upvalue_bits: Vec<u64>,
+        _args: &[KindedSlot],
     ) -> Result<(), VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
@@ -293,10 +300,10 @@ impl VirtualMachine {
     pub(crate) fn call_closure_with_nb_args_keepalive(
         &mut self,
         _func_id: u16,
-        _upvalues: Vec<shape_value::Upvalue>,
-        _args: &[shape_value::ValueWord],
+        _upvalue_bits: Vec<u64>,
+        _args: &[KindedSlot],
         closure_heap_bits: Option<u64>,
-        closure_heap_kind: Option<shape_value::NativeKind>,
+        closure_heap_kind: Option<NativeKind>,
     ) -> Result<(), VMError> {
         debug_assert_eq!(
             closure_heap_bits.is_some(),
@@ -310,7 +317,9 @@ impl VirtualMachine {
         )
     }
 
-    /// ValueWord-native call_value_immediate: dispatches on callee kind.
+    /// `call_value_immediate` (kinded carrier form): dispatches on the
+    /// callee's `KindedSlot.kind`. ADR-006 §2.7.10 / Q11 caller-side
+    /// shape — both callee and args travel as `KindedSlot`.
     ///
     /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
     /// referenced the deleted `tag_bits::{is_tagged, get_tag,
@@ -323,10 +332,10 @@ impl VirtualMachine {
     /// per ADR-005 §1 single-discriminator.
     pub fn call_value_immediate_nb(
         &mut self,
-        _callee: &shape_value::ValueWord,
-        _args: &[shape_value::ValueWord],
+        _callee: &KindedSlot,
+        _args: &[KindedSlot],
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<shape_value::ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              call_value_immediate_nb kind-threaded callee dispatch rebuild pending"
@@ -347,8 +356,8 @@ impl VirtualMachine {
     pub fn jit_trampoline_call_closure(
         &mut self,
         _func_id: u16,
-        _upvalue_bits: &[u64],
-        _args: &[shape_value::ValueWord],
+        _upvalue_bits: &[(u64, NativeKind)],
+        _args: &[(u64, NativeKind)],
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         todo!(
@@ -374,7 +383,8 @@ impl VirtualMachine {
     pub fn call_value_immediate_raw(
         &mut self,
         _callee_bits: u64,
-        _args: &[u64],
+        _callee_kind: NativeKind,
+        _args: &[(u64, NativeKind)],
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         todo!(
@@ -396,7 +406,7 @@ impl VirtualMachine {
     pub(crate) fn call_function_with_raw_args(
         &mut self,
         _func_id: u16,
-        _args: &[u64],
+        _args: &[(u64, NativeKind)],
     ) -> Result<(), VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
@@ -414,8 +424,8 @@ impl VirtualMachine {
     pub(crate) fn call_closure_with_raw_args(
         &mut self,
         _func_id: u16,
-        _upvalues: &[shape_value::Upvalue],
-        _args: &[u64],
+        _upvalue_bits: &[(u64, NativeKind)],
+        _args: &[(u64, NativeKind)],
     ) -> Result<(), VMError> {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
