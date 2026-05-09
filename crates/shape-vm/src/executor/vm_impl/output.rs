@@ -35,19 +35,25 @@ impl VirtualMachine {
 
     /// Set a module_binding variable by name using ValueWord directly.
     ///
-    /// Phase-1b-vm: the underlying module-binding raw-write shim was
-    /// deleted when the VM stack carrier flipped to the kinded API
-    /// (ADR-006 §2.7.7). Module-binding storage will gain its own
-    /// parallel-kind track (§2.7.8 / Q10 — owned by sub-cluster
-    /// `B8-shared-cell` / `B6-variables-loadptr`); until that lands,
-    /// host-tier mutators that take a legacy `ValueWord` value cannot
-    /// be implemented without re-introducing a the deleted tag_bits dispatch. Defer to
-    /// the Phase-2c host-API rebuild per ADR-006 §2.7.4.
+    /// Phase-1b-vm: the storage-tier parallel-kind track for module
+    /// bindings has landed (`module_binding_kinds` companion vec, ADR-
+    /// 006 §2.7.8 / Q10) and `module_binding_write_kinded` is the
+    /// kinded implementation backbone for any future host-API mutator.
+    /// This particular method, however, still has a deleted-carrier
+    /// `ValueWord` parameter type — the kind cannot be sourced from a
+    /// `ValueWord` (the carrier itself is deleted, CLAUDE.md
+    /// "Forbidden Patterns"), so re-lighting requires the host-API
+    /// signature flip to a kinded shape (e.g. `(name, KindedSlot)` or
+    /// `(name, bits, NativeKind)`). That signature flip is
+    /// host-boundary work, scheduled with the Phase-2c host-API
+    /// rebuild per ADR-006 §2.7.4.
     pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: ValueWord) {
         todo!(
             "phase-2c — see ADR-006 §2.7.4: set_module_binding_by_name_nb \
-             needs a kinded host-binding API (parallel-kind track for \
-             module_bindings landing with §2.7.8 / Q10)"
+             still takes a `ValueWord` (deleted carrier); flip the host- \
+             API signature to a kinded shape, then dispatch through \
+             `module_binding_write_kinded` (§2.7.8 parallel track is \
+             live)"
         );
     }
 

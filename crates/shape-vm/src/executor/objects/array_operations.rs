@@ -24,12 +24,12 @@
 //!
 //! - The `op_array_push_local` body depends on `read_ref_target` /
 //!   `write_ref_target` in `executor/variables/mod.rs` (cluster B
-//!   `B6-variables-loadptr` territory; still on the legacy ValueWord API),
-//!   AND on `module_bindings` carrying its own parallel-kinds track
-//!   (cluster B `B7-closure-cells` / `B8-shared-cell` / `B9-callframe-kind`
-//!   territory per playbook §10 Wave-α). The kind-source for the
-//!   referenced array slot is unavailable from the call site; surface
-//!   per playbook §8.
+//!   `B6-variables-loadptr` territory; still on the legacy ValueWord API).
+//!   The §2.7.8 / Q10 parallel-kinds track on `module_bindings` is now
+//!   live (Wave-γ `G-module-bindings-kind`, alongside Wave-α B7/B8/B9
+//!   for ClosureCell / SharedCell / CallFrame.closure_heap_kind), but
+//!   the `read_ref_target` / `write_ref_target` consumer migration is
+//!   B6-round-2 territory. Surface per playbook §8 until B6 lands.
 //! - The `as_v2_typed_array` / `push_element` / `pop_element` helpers in
 //!   `executor/v2_handlers/v2_array_detect.rs` are themselves
 //!   forbidden-helper carriers (cluster D `D-v2-array-detect` territory)
@@ -126,14 +126,17 @@ impl VirtualMachine {
     /// 1. `read_ref_target` / `write_ref_target` in
     ///    `executor/variables/mod.rs` (cluster B `B6-variables-loadptr`
     ///    territory; still ValueWord-flavoured pending Wave-β).
-    /// 2. `module_bindings` carrying a parallel-kinds track for the
-    ///    binding being mutated (cluster B `B7`-`B9` Wave-α STRUCTURAL
-    ///    items: closure-cell / shared-cell / call-frame kind tracks).
+    /// 2. The parallel-kinds track on `module_bindings` / closure cells /
+    ///    shared cells / call-frame closure-heap (Wave-α B7/B8/B9 +
+    ///    Wave-γ G-module-bindings-kind: ALL LANDED). The kind-source
+    ///    for module-binding slots is now `module_binding_read_kinded_raw`
+    ///    on `VirtualMachine`.
     /// 3. `binding_take_raw` / `binding_write_raw` / `stack_take_raw` /
     ///    `stack_write_raw` / `stack_peek_raw` — substep-1 DELETED.
     ///
-    /// The cross-cluster cascade rule in playbook §8 forbids editing
-    /// `variables/mod.rs` from this territory. Surface per §8.
+    /// Remaining blocker is item #1 (B6-round-2). The cross-cluster
+    /// cascade rule in playbook §8 forbids editing `variables/mod.rs`
+    /// from this territory. Surface per §8 until B6 lands.
     pub(in crate::executor) fn op_array_push_local(
         &mut self,
         _instruction: &crate::bytecode::Instruction,
@@ -144,10 +147,11 @@ impl VirtualMachine {
         drop_with_kind(value_bits, value_kind);
         Err(VMError::NotImplemented(
             "ArrayPushLocal: depends on cluster B `B6-variables-loadptr` \
-             (read_ref_target / write_ref_target ValueWord migration) and \
-             cluster B `B7`-`B9` STRUCTURAL items (parallel-kinds track \
-             on module_bindings / closure cells / shared cells / call \
-             frames per ADR-006 §2.7.8). Wave-β reentry — see playbook \
+             (read_ref_target / write_ref_target ValueWord migration). \
+             The §2.7.8 parallel-kinds tracks on module_bindings / \
+             closure cells / shared cells / call frames are live (Wave- \
+             α B7/B8/B9 + Wave-γ G-module-bindings-kind), so the kind- \
+             source side is unblocked. Wave-β reentry — see playbook \
              §10."
                 .to_string(),
         ))
