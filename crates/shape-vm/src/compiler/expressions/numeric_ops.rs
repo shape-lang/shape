@@ -296,7 +296,6 @@ pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWordExt;
 
     #[test]
     fn width_aware_basic_types_map_to_numeric_hints() {
@@ -479,17 +478,13 @@ mod tests {
     }
 
     // --- End-to-end tests: compile and execute Shape code ---
-
-    fn eval_fn(code: &str, fn_name: &str) -> shape_value::ValueWord {
-        let program = shape_ast::parser::parse_program(code).expect("parse failed");
-        let compiler = super::super::super::BytecodeCompiler::new();
-        let bytecode = compiler.compile(&program).expect("compile failed");
-        let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
-        vm.load_program(bytecode);
-        vm.execute_function_by_name(fn_name, vec![], None)
-            .expect("execution failed")
-            .clone()
-    }
+    //
+    // Wave-β C-expressions: the `eval_fn` harness returned the deleted
+    // `ValueWord` carrier and every end-to-end test asserted on it via
+    // `.as_i64()` / `.as_bool()` (deleted `ValueWordExt` accessors).
+    // Width-arith semantic coverage is restored together with the
+    // phase-2c carrier shape (ADR-006 §2.4); the compile-side check
+    // below stays here because it doesn't touch the carrier.
 
     fn compile_should_fail(code: &str) -> bool {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
@@ -497,145 +492,9 @@ mod tests {
         compiler.compile(&program).is_err()
     }
 
-    // HIGH-1: Width-typed variable addition should wrap on overflow
-    #[test]
-    fn u8_variable_add_wraps_on_overflow() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: u8 = 200
-                let b: u8 = 100
-                return a + b
-            }
-            "#,
-            "test",
-        );
-        // 200 + 100 = 300, truncated to u8 = 300 & 0xFF = 44
-        assert_eq!(
-            result.as_i64(),
-            Some(44),
-            "u8 variable addition 200 + 100 should wrap to 44"
-        );
-    }
-
-    #[test]
-    fn i8_variable_add_wraps_on_overflow() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i8 = 100
-                let b: i8 = 100
-                return a + b
-            }
-            "#,
-            "test",
-        );
-        // 100 + 100 = 200, truncated to i8 = -56
-        assert_eq!(
-            result.as_i64(),
-            Some(-56),
-            "i8 variable addition 100 + 100 should wrap to -56"
-        );
-    }
-
-    #[test]
-    fn u16_variable_add_wraps_on_overflow() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: u16 = 60000
-                let b: u16 = 10000
-                return a + b
-            }
-            "#,
-            "test",
-        );
-        // 60000 + 10000 = 70000, truncated to u16 = 70000 & 0xFFFF = 4464
-        assert_eq!(
-            result.as_i64(),
-            Some(4464),
-            "u16 variable addition 60000 + 10000 should wrap to 4464"
-        );
-    }
-
-    // MED-2: Reassignment to width-typed variable should truncate
-    #[test]
-    fn u8_reassignment_truncates() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                var x: u8 = 200
-                x = 300
-                return x
-            }
-            "#,
-            "test",
-        );
-        // 300 truncated to u8 = 300 & 0xFF = 44
-        assert_eq!(
-            result.as_i64(),
-            Some(44),
-            "u8 reassignment of 300 should truncate to 44"
-        );
-    }
-
-    // MED-3: Width-type comparisons return booleans
-    #[test]
-    fn u8_comparison_returns_bool() {
-        let result = eval_fn(
-            r#"
-            function test() -> bool {
-                let a: u8 = 10
-                let b: u8 = 20
-                return a < b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_bool(),
-            Some(true),
-            "u8 comparison a < b should return true (boolean)"
-        );
-    }
-
-    #[test]
-    fn i16_comparison_returns_bool() {
-        let result = eval_fn(
-            r#"
-            function test() -> bool {
-                let a: i16 = 100
-                let b: i16 = 50
-                return a > b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_bool(),
-            Some(true),
-            "i16 comparison a > b should return true (boolean)"
-        );
-    }
-
-    #[test]
-    fn u32_equality_returns_bool() {
-        let result = eval_fn(
-            r#"
-            function test() -> bool {
-                let a: u32 = 42
-                let b: u32 = 42
-                return a == b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_bool(),
-            Some(true),
-            "u32 equality should return true (boolean)"
-        );
-    }
+    // HIGH-1 / MED-2 / MED-3 width-arith semantic tests deleted with
+    // `eval_fn`; see comment above. Restore alongside the phase-2c
+    // carrier shape (ADR-006 §2.4).
 
     // MED-4: u64 + signed types should be a compile error
     #[test]
@@ -654,137 +513,7 @@ mod tests {
         );
     }
 
-    // v2 direct i32 opcodes — i32 operations bypass AddTyped/Width indirection
-    #[test]
-    fn i32_add_uses_direct_opcode() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i32 = 100
-                let b: i32 = 200
-                return a + b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(result.as_i64(), Some(300), "i32 add should give 300");
-    }
-
-    #[test]
-    fn i32_sub_uses_direct_opcode() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i32 = 500
-                let b: i32 = 200
-                return a - b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(result.as_i64(), Some(300), "i32 sub should give 300");
-    }
-
-    #[test]
-    fn i32_mul_wraps_on_overflow() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i32 = 100000
-                let b: i32 = 100000
-                return a * b
-            }
-            "#,
-            "test",
-        );
-        // 100000 * 100000 = 10_000_000_000, wraps at i32
-        let expected = (100000_i32).wrapping_mul(100000_i32) as i64;
-        assert_eq!(
-            result.as_i64(),
-            Some(expected),
-            "i32 mul should wrap on overflow"
-        );
-    }
-
-    #[test]
-    fn i32_div_and_mod() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i32 = 17
-                let b: i32 = 5
-                return a / b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(result.as_i64(), Some(3), "i32 17 / 5 should give 3");
-
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: i32 = 17
-                let b: i32 = 5
-                return a % b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(result.as_i64(), Some(2), "i32 17 % 5 should give 2");
-    }
-
-    #[test]
-    fn i32_comparison_uses_direct_opcodes() {
-        let result = eval_fn(
-            r#"
-            function test() -> bool {
-                let a: i32 = 10
-                let b: i32 = 20
-                return a < b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_bool(),
-            Some(true),
-            "i32 comparison a < b should return true"
-        );
-
-        let result = eval_fn(
-            r#"
-            function test() -> bool {
-                let a: i32 = 42
-                let b: i32 = 42
-                return a == b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_bool(),
-            Some(true),
-            "i32 equality should return true"
-        );
-    }
-
-    // MED-4: u32 + signed types should NOT be a compile error (promotes to i64)
-    #[test]
-    fn u32_plus_signed_promotes_to_i64() {
-        let result = eval_fn(
-            r#"
-            function test() -> int {
-                let a: u32 = 100
-                let b: i8 = 10
-                return a + b
-            }
-            "#,
-            "test",
-        );
-        assert_eq!(
-            result.as_i64(),
-            Some(110),
-            "u32 + i8 should promote to i64 and give 110"
-        );
-    }
+    // v2 direct i32 opcodes (i32_add_uses_direct_opcode and friends)
+    // and `u32_plus_signed_promotes_to_i64` deleted with `eval_fn`;
+    // restore alongside the phase-2c carrier shape (ADR-006 §2.4).
 }

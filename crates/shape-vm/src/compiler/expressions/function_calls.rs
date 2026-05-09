@@ -11,14 +11,12 @@ use std::collections::BTreeSet;
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
-use shape_ast::ast::{BinaryOp, Expr, InterpolationMode, Literal, Span, Spanned, UnaryOp};
+use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 use shape_value::v2::ConcreteType;
-use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
@@ -139,147 +137,30 @@ fn is_compile_time_const_expr(expr: &Expr) -> bool {
     }
 }
 
-fn literal_to_nanboxed(literal: &Literal) -> Option<ValueWord> {
-    match literal {
-        Literal::Int(i) => Some(ValueWord::from_i64(*i)),
-        Literal::UInt(u) => Some(ValueWord::from_native_u64(*u)),
-        Literal::TypedInt(v, _) => Some(ValueWord::from_i64(*v)),
-        Literal::Number(n) => Some(ValueWord::from_f64(*n)),
-        Literal::Decimal(d) => Some(ValueWord::from_decimal(*d)),
-        Literal::String(s) => Some(ValueWord::from_string(Arc::new(s.clone()))),
-        Literal::Char(c) => Some(ValueWord::from_char(*c)),
-        Literal::FormattedString { value, .. } => {
-            Some(ValueWord::from_string(Arc::new(value.clone())))
-        }
-        Literal::ContentString { value, .. } => {
-            Some(ValueWord::from_string(Arc::new(value.clone())))
-        }
-        Literal::Bool(b) => Some(ValueWord::from_bool(*b)),
-        Literal::None => Some(ValueWord::none()),
-        Literal::Unit => Some(ValueWord::unit()),
-        Literal::Timeframe(_) => None,
-    }
+/// Comptime const-folding produced a `ValueWord` carrier that is now
+/// deleted. The whole const-fold pipeline (literal → carrier, arith
+/// folding, fingerprint, specialization-key build) lives behind the
+/// `ConstFoldValue` placeholder until the phase-2c carrier shape lands
+/// (ADR-006 §2.4). Out-of-territory consumers in `compiler/statements.rs`
+/// (overflow-range check) and `compiler/expressions/function_calls.rs`
+/// (`ensure_const_specialization`) cascade off this stub.
+pub(crate) enum ConstFoldValue {}
+
+#[allow(dead_code)]
+fn literal_to_nanboxed(literal: &Literal) -> Option<ConstFoldValue> {
+    let _ = literal;
+    todo!("phase-2c — see ADR-006 §2.4");
 }
 
-pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ValueWord> {
-    match expr {
-        Expr::Literal(literal, _) => literal_to_nanboxed(literal),
-        Expr::Array(items, _) => {
-            let values: Vec<ValueWord> = items
-                .iter()
-                .map(eval_const_expr_to_nanboxed)
-                .collect::<Option<Vec<_>>>()?;
-            Some(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
-        }
-        Expr::UnaryOp { op, operand, .. } => {
-            let value = eval_const_expr_to_nanboxed(operand)?;
-            match op {
-                UnaryOp::Neg => {
-                    if let Some(i) = value.as_i64() {
-                        Some(ValueWord::from_i64(-i))
-                    } else if let Some(n) = value.as_f64() {
-                        Some(ValueWord::from_f64(-n))
-                    } else {
-                        None
-                    }
-                }
-                UnaryOp::Not => value.as_bool().map(|b| ValueWord::from_bool(!b)),
-                UnaryOp::BitNot => value.as_i64().map(|i| ValueWord::from_i64(!i)),
-            }
-        }
-        Expr::BinaryOp {
-            left, op, right, ..
-        } => {
-            let lhs = eval_const_expr_to_nanboxed(left)?;
-            let rhs = eval_const_expr_to_nanboxed(right)?;
-            match op {
-                BinaryOp::Add => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_str(), rhs.as_str()) {
-                        Some(ValueWord::from_string(Arc::new(format!("{}{}", a, b))))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Sub => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a - b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a - b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a - b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Mul => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a * b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a * b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a * b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Div => {
-                    if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a / b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Mod => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a % b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a % b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Pow => {
-                    if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a.powf(b)))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::And => Some(ValueWord::from_bool(lhs.as_bool()? && rhs.as_bool()?)),
-                BinaryOp::Or => Some(ValueWord::from_bool(lhs.as_bool()? || rhs.as_bool()?)),
-                BinaryOp::Equal => Some(ValueWord::from_bool(lhs.clone() == rhs.clone())),
-                BinaryOp::NotEqual => Some(ValueWord::from_bool(lhs.clone() != rhs.clone())),
-                BinaryOp::BitAnd => Some(ValueWord::from_i64(lhs.as_i64()? & rhs.as_i64()?)),
-                BinaryOp::BitOr => Some(ValueWord::from_i64(lhs.as_i64()? | rhs.as_i64()?)),
-                BinaryOp::BitXor => Some(ValueWord::from_i64(lhs.as_i64()? ^ rhs.as_i64()?)),
-                BinaryOp::BitShl => Some(ValueWord::from_i64(lhs.as_i64()? << rhs.as_i64()?)),
-                BinaryOp::BitShr => Some(ValueWord::from_i64(lhs.as_i64()? >> rhs.as_i64()?)),
-                BinaryOp::NullCoalesce => {
-                    if lhs.is_none() {
-                        Some(rhs)
-                    } else {
-                        Some(lhs)
-                    }
-                }
-                _ => None,
-            }
-        }
-        // Object consts are intentionally rejected here until object const
-        // specialization values are represented without anonymous runtime schemas.
-        Expr::Object(_, _) => None,
-        _ => None,
-    }
+pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue> {
+    let _ = expr;
+    todo!("phase-2c — see ADR-006 §2.4");
 }
 
+#[allow(dead_code)]
 fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
-    let value = eval_const_expr_to_nanboxed(expr)?;
-    Some(format!("{:?}", value.clone()))
+    let _ = expr;
+    todo!("phase-2c — see ADR-006 §2.4");
 }
 
 impl BytecodeCompiler {
@@ -535,150 +416,19 @@ impl BytecodeCompiler {
             return Ok(None);
         }
 
-        let template_def =
-            self.function_defs
-                .get(name)
-                .cloned()
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Missing function template definition for const specialization: '{}'",
-                        name
-                    ),
-                    location: None,
-                })?;
-        // For module-scoped functions (e.g. myext::connect), temporarily push
-        // the module path so annotation name resolution can find annotations
-        // that were compiled within that module (e.g. myext::force_int).
-        let module_prefix = name
-            .rsplit_once("::")
-            .map(|(prefix, _)| prefix.to_string());
-        if let Some(ref prefix) = module_prefix {
-            self.module_scope_stack.push(prefix.clone());
-        }
-        let has_comptime_handlers = template_def.annotations.iter().any(|ann| {
-            self.lookup_compiled_annotation(ann)
-                .map(|(_, compiled)| {
-                    compiled.comptime_pre_handler.is_some()
-                        || compiled.comptime_post_handler.is_some()
-                })
-                .unwrap_or(false)
-        });
-        if module_prefix.is_some() {
-            self.module_scope_stack.pop();
-        }
-        if !has_comptime_handlers {
-            return Ok(None);
-        }
-
-        let mut key_parts: Vec<String> = Vec::new();
-        let mut const_bindings: Vec<(String, ValueWord)> = Vec::new();
-
-        for param_idx in const_param_indices {
-            let param =
-                template_def
-                    .params
-                    .get(param_idx)
-                    .ok_or_else(|| ShapeError::SemanticError {
-                        message: format!(
-                            "Invalid const parameter index {} for function '{}'",
-                            param_idx, name
-                        ),
-                        location: None,
-                    })?;
-            let param_name = param
-                .simple_name()
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Const parameter #{} in '{}' must use an identifier pattern",
-                        param_idx + 1,
-                        name
-                    ),
-                    location: Some(self.span_to_source_location(param.span())),
-                })?;
-
-            let (expr, span) = if let Some(arg) = args.get(param_idx) {
-                (arg, arg.span())
-            } else if let Some(default_expr) = &param.default_value {
-                (default_expr, default_expr.span())
-            } else {
-                continue;
-            };
-
-            let value = eval_const_expr_to_nanboxed(expr).ok_or_else(|| ShapeError::SemanticError {
-                message: format!(
-                    "Function '{}' const parameter '{}' must be a literal-evaluable compile-time expression",
-                    name, param_name
-                ),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-            let fingerprint =
-                const_expr_fingerprint(expr).ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Function '{}' const parameter '{}' could not be fingerprinted",
-                        name, param_name
-                    ),
-                    location: Some(self.span_to_source_location(span)),
-                })?;
-            key_parts.push(format!("{}={}", param_name, fingerprint));
-            const_bindings.push((param_name.to_string(), value));
-        }
-
-        if key_parts.is_empty() {
-            return Ok(None);
-        }
-
-        let specialization_key = format!("{}::{}", name, key_parts.join("|"));
-        if let Some(existing_idx) = self.const_specializations.get(&specialization_key).copied() {
-            let existing_name = self.program.functions[existing_idx].name.clone();
-            return Ok(Some((existing_name, existing_idx)));
-        }
-
-        let specialization_name = format!("{}__const_{}", name, self.next_const_specialization_id);
-        self.next_const_specialization_id += 1;
-
-        let mut specialized_def = template_def;
-        specialized_def.name = specialization_name.clone();
-
-        self.specialization_const_bindings
-            .insert(specialization_name.clone(), const_bindings);
-        self.register_function(&specialized_def)?;
-        let specialization_idx =
-            self.find_function(&specialization_name)
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Failed to register const specialization function '{}'",
-                        specialization_name
-                    ),
-                    location: None,
-                })?;
-        self.const_specializations
-            .insert(specialization_key, specialization_idx);
-
-        // Push module scope for the specialization so annotation resolution
-        // can find annotations defined in the original function's module.
-        if let Some(ref prefix) = module_prefix {
-            self.module_scope_stack.push(prefix.clone());
-        }
-        // F7: save/restore closure_function_ids across the recursive
-        // `compile_function` so the outer caller's MIR back-patcher does
-        // not see its list wiped by the specialized body's end-of-function
-        // `.clear()`.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
-        let compile_result = self.compile_function(&specialized_def);
-        self.closure_function_ids = saved_closure_function_ids;
-        if module_prefix.is_some() {
-            self.module_scope_stack.pop();
-        }
-        if let Err(err) = compile_result {
-            self.specialization_const_bindings
-                .remove(&specialization_name);
-            return Err(err);
-        }
-
-        self.specialization_const_bindings
-            .remove(&specialization_name);
-        Ok(Some((specialization_name, specialization_idx)))
+        // The const-specialization machinery folds each call-site
+        // argument into a `ConstFoldValue` carrier, fingerprints it, and
+        // stores the resulting `Vec<(String, <carrier>)>` in
+        // `self.specialization_const_bindings` so comptime handlers can
+        // read it back as a typed module binding. The carrier shape
+        // lands in phase-2c (ADR-006 §2.4); the
+        // `specialization_const_bindings` field type itself is defined
+        // in `compiler/mod.rs` (out-of-territory), so this path stays
+        // surfaced rather than partially migrated. Const specialization
+        // is therefore a no-op until the carrier sweep reaches the
+        // out-of-territory storage shape.
+        let _ = (name, args, const_param_indices);
+        todo!("phase-2c — see ADR-006 §2.4");
     }
 
     /// Compile a function call expression

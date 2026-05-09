@@ -276,7 +276,7 @@ impl BytecodeCompiler {
                     // A.1B StoreSharedCapture opcode, which takes the
                     // parking_lot mutex on the `Arc<SharedCell>` pointer
                     // stored in the capture slot and overwrites the inner
-                    // ValueWord bits.
+                    // raw bits.
                     if let Some(&shared_idx) = self.shared_closure_captures.get(name.as_str()) {
                         debug_assert_eq!(upvalue_idx, shared_idx);
                         // A2-refined / task #17: dispatch to Wave D.2's typed
@@ -425,7 +425,7 @@ impl BytecodeCompiler {
                     // promoted to `Arc<SharedCell>` by a prior closure
                     // capture, writes must go through
                     // `StoreSharedModuleBinding` (which takes the mutex
-                    // and writes the inner ValueWord). Plain
+                    // and writes the inner raw bits). Plain
                     // `StoreModuleBinding` would overwrite the raw Arc
                     // pointer bits, leaking the Arc and losing the
                     // shared state.
