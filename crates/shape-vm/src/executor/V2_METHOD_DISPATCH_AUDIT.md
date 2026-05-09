@@ -4,6 +4,14 @@
 **Scope**: All method handler signatures (`Vec<ValueWord>`) in the VM executor
 **Goal**: Document what needs to change for typed argument passing (raw i64/f64 instead of ValueWord)
 
+**STATUS (2026-05-09):** Historical analysis. The `ValueWord` carrier and the
+mandatory-shim API (`push_raw_u64` family) have been deleted as of phase-1b-vm
+Wave 6.5 substep-1 (commit `11efd9c`). Code samples below describe the
+pre-deletion state for context; current code uses the kinded API per ADR-006
+§2.7.7. References to "current architecture", file inventories, and
+"Section X needs to change" should be read as describing the pre-substep-1
+codebase that motivated the migration.
+
 ---
 
 ## 1. Current Architecture
@@ -21,9 +29,12 @@ All method calls enter through `op_call_method()` in `objects/mod.rs:164`. Two c
 
 ### 1.2 Argument Marshalling (the bottleneck)
 
-At `mod.rs:211-226`, arguments are always marshalled into `Vec<ValueWord>`:
+In the pre-substep-1 codebase (at `mod.rs:211-226` of that revision), arguments
+were marshalled into `Vec<ValueWord>`. The shape of the deleted code, shown
+here for historical reference:
 
 ```rust
+// pre-substep-1 form (now deleted)
 let mut args_nb = Vec::with_capacity(arg_count + 1);
 for _ in 0..arg_count {
     args_nb.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
@@ -33,7 +44,13 @@ let receiver_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 args_nb.insert(0, receiver_nb.clone());
 ```
 
-This is the core problem: every method call allocates a `Vec`, wraps raw stack u64s into `ValueWord` (NaN-boxed), and passes them through a uniform `MethodFn` signature.
+This was the core motivating problem the audit identified: every method call
+allocated a `Vec`, wrapped raw stack u64s into `ValueWord` (NaN-boxed), and
+passed them through a uniform `MethodFn` signature. Both `pop_raw_u64()` and
+`ValueWord::from_raw_bits` were deleted by Wave 6.5 substep-1 (commit
+`11efd9c`); arguments are now read from the stack via the kinded API
+(parallel `Vec<NativeKind>` track per ADR-006 §2.7.7), with no Vec allocation
+and no NaN-box wrapping at the dispatch entry.
 
 ### 1.3 Handler Signature
 
@@ -167,7 +184,12 @@ Con: Handlers must know the types a priori (already true for typed array/number 
 
 1. **Eliminate Vec allocation**: Replace `Vec<ValueWord>` with a stack slice `&[u64]`. The VM already stores values as raw u64 on the stack. Instead of popping into a Vec, pass a `(stack_ptr, arg_count)` window.
 
-2. **Eliminate ValueWord wrapping**: `ValueWord::from_raw_bits(self.pop_raw_u64()?)` is a no-op bit-wise but allocates the Vec entry. With stack-slice passing, the raw u64 stays on the stack and the handler reads it directly.
+2. **Eliminate ValueWord wrapping**: the pre-substep-1 form
+   `ValueWord::from_raw_bits(self.pop_raw_u64()?)` (now deleted — both calls
+   removed by commit `11efd9c`) was a bit-wise no-op but allocated a Vec
+   entry. The post-substep-1 kinded API replacement reads the raw u64 from
+   the stack alongside its parallel `NativeKind`, so no wrapping happens at
+   the handler boundary.
 
 3. **Return value**: Change from `Result<ValueWord, VMError>` to `Result<u64, VMError>`. The caller pushes the raw u64 onto the stack.
 
