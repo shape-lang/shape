@@ -656,115 +656,59 @@ fn decode_field_bits_for_type(bits: u64, field_type: Option<&FieldType>) -> Valu
 }
 
 /// Convert a ValueWord to a ValueSlot using schema field type when available.
-/// This avoids ambiguous non-heap encodings for `FieldType::Any`.
+///
+/// SURFACE per playbook §8 / ADR-006 §2.4 / §2.7 + cluster-E
+/// `E-shape-value-slot` cascade: the `FieldType::Any` and non-primitive
+/// arms previously called the deleted `ValueSlot::from_value_word`
+/// constructor (commit `e921727` — the W-series ValueWord-bridge family
+/// per CLAUDE.md "Forbidden Patterns" / "Renames to refuse on sight").
+/// Reintroducing that constructor would replay the deleted W-series
+/// pattern. The function has no production callers post-D-typed-obj-
+/// ops `op_set_field_typed` SURFACE (cross-cluster cascade — both
+/// `clone_slots_with_update` here and `op_set_field_typed` in
+/// `typed_object_ops.rs` surface together; the supervisor coordinates
+/// the kinded write-path rebuild). Body surfaces.
 pub(in crate::executor) fn nb_to_slot_with_field_type(
-    nb: &ValueWord,
-    field_type: Option<&FieldType>,
+    _nb: &ValueWord,
+    _field_type: Option<&FieldType>,
 ) -> (ValueSlot, bool) {
-    match field_type {
-        Some(FieldType::I64) => (
-            ValueSlot::from_int(
-                nb.as_i64()
-                    .or_else(|| nb.as_f64().map(|n| n as i64))
-                    .unwrap_or(0),
-            ),
-            false,
-        ),
-        Some(ft) if ft.is_width_integer() => {
-            if matches!(ft, FieldType::U64) {
-                // U64 may exceed i64::MAX — extract via as_u64() for lossless storage
-                let val = nb
-                    .as_u64_value()
-                    .or_else(|| nb.as_i64().map(|i| i as u64))
-                    .or_else(|| nb.as_f64().map(|n| n as u64))
-                    .unwrap_or(0);
-                (ValueSlot::from_int(val as i64), false)
-            } else {
-                let raw = nb
-                    .as_i64()
-                    .or_else(|| nb.as_f64().map(|n| n as i64))
-                    .unwrap_or(0);
-                let truncated = if let Some(w) = field_type_to_int_width(ft) {
-                    w.truncate(raw)
-                } else {
-                    raw
-                };
-                (ValueSlot::from_int(truncated), false)
-            }
-        }
-        Some(FieldType::Bool) => (
-            ValueSlot::from_bool(nb.as_bool().unwrap_or(nb.is_truthy())),
-            false,
-        ),
-        Some(FieldType::F64) | Some(FieldType::Decimal) => (
-            ValueSlot::from_number(
-                nb.as_number_coerce()
-                    .or_else(|| nb.as_decimal().and_then(|d| d.to_f64()))
-                    .unwrap_or(0.0),
-            ),
-            false,
-        ),
-        // `Any` must preserve dynamic type losslessly — including inline inline tag
-        // variants like Function, ModuleFunction, I48, etc.  `from_value_word`
-        // stores raw NaN-boxed bits for inline tags and clones HeapValues for
-        // heap tags, so the exact tag round-trips through `as_value_word`.
-        Some(FieldType::Any) | None => ValueSlot::from_value_word(nb),
-        // For non-primitive schema field types, preserve full value via from_value_word.
-        Some(_) => {
-            if nb.is_none() {
-                (ValueSlot::none(), false)
-            } else {
-                ValueSlot::from_value_word(nb)
-            }
-        }
-    }
+    unimplemented!(
+        "nb_to_slot_with_field_type SURFACE: &ValueWord -> ValueSlot \
+         bridge — the deleted `ValueSlot::from_value_word` constructor \
+         (commit `e921727`) cannot be reintroduced (CLAUDE.md \
+         \"Renames to refuse on sight\" — W-series ValueWord-bridge \
+         family). Cross-cluster cascade with `op_set_field_typed` / \
+         `clone_slots_with_update`; supervisor coordinates the kinded \
+         write-path rebuild per playbook §8."
+    )
 }
 
 /// Read a ValueWord value from a TypedObject slot.
 ///
-/// `field_type` is optional and lets callers preserve i64/bool semantics for non-heap slots.
+/// SURFACE per playbook §8 / ADR-006 §2.4 / §2.7 + cluster-E
+/// `E-shape-value-slot` cascade: the heap-mask and `Any` /
+/// non-primitive arms previously called the deleted
+/// `ValueSlot::as_heap_nb` / `ValueSlot::as_value_word` accessors
+/// (commit `e921727` — the W-series ValueWord-bridge family per
+/// CLAUDE.md "Forbidden Patterns" / "Renames to refuse on sight").
+/// Reintroducing those accessors would replay the deleted W-series
+/// pattern. The function has no production callers post-D-typed-obj-
+/// ops migration; its body surfaces.
 pub(in crate::executor) fn read_slot_nb(
-    slots: &[ValueSlot],
-    index: usize,
-    heap_mask: u64,
-    field_type: Option<&shape_runtime::type_schema::FieldType>,
+    _slots: &[ValueSlot],
+    _index: usize,
+    _heap_mask: u64,
+    _field_type: Option<&shape_runtime::type_schema::FieldType>,
 ) -> ValueWord {
-    if index >= slots.len() {
-        return ValueWord::none();
-    }
-
-    if heap_mask & (1u64 << index) != 0 {
-        return slots[index].as_heap_nb();
-    }
-
-    match field_type {
-        Some(shape_runtime::type_schema::FieldType::I64) => {
-            ValueWord::from_i64(slots[index].as_i64())
-        }
-        Some(shape_runtime::type_schema::FieldType::Bool) => {
-            ValueWord::from_bool(slots[index].as_bool())
-        }
-        Some(shape_runtime::type_schema::FieldType::F64) => {
-            ValueWord::from_f64(slots[index].as_f64())
-        }
-        Some(shape_runtime::type_schema::FieldType::Decimal) => ValueWord::from_decimal(
-            rust_decimal::Decimal::from_f64_retain(slots[index].as_f64()).unwrap_or_default(),
-        ),
-        // Width integer types: stored via from_int(), read back via as_i64()
-        Some(ft) if ft.is_width_integer() => {
-            let raw_bits = slots[index].as_i64() as u64;
-            if matches!(ft, shape_runtime::type_schema::FieldType::U64)
-                && raw_bits > i64::MAX as u64
-            {
-                ValueWord::from_native_u64(raw_bits)
-            } else {
-                ValueWord::from_i64(slots[index].as_i64())
-            }
-        }
-        // Any and non-primitive types: reconstruct via as_value_word to preserve
-        // all inline inline tag variants (Function, ModuleFunction, I48, etc.)
-        Some(_) | None => slots[index].as_value_word(false),
-    }
+    unimplemented!(
+        "read_slot_nb SURFACE: ValueSlot -> ValueWord bridge — the \
+         deleted `ValueSlot::as_heap_nb` / `ValueSlot::as_value_word` \
+         accessors (commit `e921727`) cannot be reintroduced \
+         (CLAUDE.md \"Renames to refuse on sight\" — W-series \
+         ValueWord-bridge family). Cross-cluster cascade with the \
+         kinded read-path rebuild; supervisor coordinates per playbook \
+         §8."
+    )
 }
 
 /// Read a ValueWord from a TypedObject slot with optional schema field type.
