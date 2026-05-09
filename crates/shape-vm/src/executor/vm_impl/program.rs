@@ -438,24 +438,24 @@ impl VirtualMachine {
     /// Reset VM state
     /// Get a snapshot of all module binding values.
     ///
-    /// Phase-1b-vm: the legacy `ValueWord` carrier was deleted along
-    /// with the borrow-only module-binding read shim. The §2.7.8 / Q10
-    /// parallel-kind track is now live on `module_binding_kinds`, and
-    /// `module_binding_read_owned_kinded` returns `KindedSlot` shares
-    /// per binding — the kinded read backbone is in place. This
-    /// particular method's return type, however, is still the deleted
-    /// `Vec<ValueWord>`, which keeps the host-API signature flip on
-    /// the Phase-2c snapshot revival (§2.7.4) — flip to
-    /// `Vec<KindedSlot>` and walk
+    /// Phase-1b-vm Wave-ε E-vm-impl-tail: the legacy `Vec<ValueWord>`
+    /// return type referenced the deleted runtime carrier (CLAUDE.md
+    /// "Forbidden Patterns"). The signature is flipped to the kinded
+    /// carrier `Vec<shape_value::KindedSlot>` per ADR-006 §2.7 / Q7.
+    /// The §2.7.8 / Q10 parallel-kind track is now live on
+    /// `module_binding_kinds`, and `module_binding_read_owned_kinded`
+    /// returns `KindedSlot` shares per binding — the kinded read
+    /// backbone is in place. The body remains a `todo!()` until the
+    /// Phase-2c snapshot revival lands the host-API surface (§2.7.4) —
+    /// at that point the body is one map+collect over
     /// `(0..self.module_bindings_len()).map(|i|
     /// self.module_binding_read_owned_kinded(i)).collect()`.
-    pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
+    pub fn module_bindings_snapshot(&self) -> Vec<shape_value::KindedSlot> {
         todo!(
             "phase-2c — see ADR-006 §2.7.4: module_bindings_snapshot \
-             still returns Vec<ValueWord> (deleted carrier); flip the \
-             return type to Vec<KindedSlot> and walk \
-             `module_binding_read_owned_kinded` per index. The §2.7.8 \
-             parallel-kind track is live, so the body is one map+collect."
+             body deferred to the Phase-2c snapshot revival. The §2.7.8 \
+             parallel-kind track is live, so the body is one map+collect \
+             over `module_binding_read_owned_kinded` per index."
         );
     }
 
@@ -557,18 +557,21 @@ impl VirtualMachine {
 
     /// Push a value onto the stack (public, for testing and host integration).
     ///
-    /// Phase-1b-vm: the legacy `ValueWord` carrier was deleted; the
-    /// kinded replacement is `push_kinded(bits, kind)` directly on the
-    /// VM. Host-integration / test helpers that still build values via
-    /// the legacy carrier need a Phase-2c host-API rebuild (see
-    /// ADR-006 §2.7.4 — output-adapter cluster). The legacy signature
-    /// is preserved as a `todo!()` placeholder so callers fail loudly
-    /// rather than silently dropping the value.
-    pub fn push_value(&mut self, _value: ValueWord) {
+    /// Phase-1b-vm Wave-ε E-vm-impl-tail: the legacy `ValueWord`
+    /// parameter type referenced the deleted runtime carrier (CLAUDE.md
+    /// "Forbidden Patterns"). The signature is flipped to the kinded
+    /// carrier `shape_value::KindedSlot` per ADR-006 §2.7 / Q7. The
+    /// kinded direct-write path on the VM is `push_kinded(bits, kind)`;
+    /// host-integration / test helpers that still build values via the
+    /// legacy carrier need a Phase-2c host-API rebuild (see ADR-006
+    /// §2.7.4 — output-adapter cluster). The body is preserved as a
+    /// `todo!()` so callers fail loudly rather than silently dropping
+    /// the value.
+    pub fn push_value(&mut self, _value: shape_value::KindedSlot) {
         todo!(
-            "phase-2c — see ADR-006 §2.7.4: push_value(ValueWord) is a \
-             legacy host-boundary helper; the kinded surface uses \
-             push_kinded(bits, kind) sourced from the producer."
+            "phase-2c — see ADR-006 §2.7.4: push_value(KindedSlot) is a \
+             host-boundary helper; the in-VM surface uses \
+             push_kinded(bits, kind) sourced directly from the producer."
         );
     }
 }

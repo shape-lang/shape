@@ -43,7 +43,7 @@
 //! slot live on the stack while handing a share out).
 
 use super::super::*;
-use shape_value::{KindedSlot, ValueSlot};
+use shape_value::{KindedSlot, VMError, ValueSlot};
 
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a

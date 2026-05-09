@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::VMError;
 
 impl VirtualMachine {
     // ========================================================================

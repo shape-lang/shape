@@ -311,7 +311,7 @@ impl VirtualMachine {
         // disagrees would silently misclassify the cell on retire.
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreClosure[{}]: source kind {:?} does not match capture kind {:?} \
                  (ADR-006 §2.7.8 / Q10 — capture kind is fixed at closure construction)",
                 upvalue_idx, src_kind, cell_kind
@@ -866,7 +866,7 @@ impl VirtualMachine {
         // match the source kind of every Store.
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreOwnedMutableCapturePtr[{}]: source kind {:?} does not match \
                  capture kind {:?} (ADR-006 §2.7.8 / Q10 — kind fixed at construction)",
                 idx, src_kind, cell_kind
@@ -955,7 +955,7 @@ impl VirtualMachine {
         let cell_kind = cell_ref.kind();
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreSharedCapture[{}]: source kind {:?} does not match cell kind {:?} \
                  (ADR-006 §2.7.8 / Q10 — SharedCell kind is fixed at construction)",
                 idx, src_kind, cell_kind
@@ -1434,7 +1434,7 @@ impl VirtualMachine {
         let cell_kind = cell_ref.kind();
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreSharedCapturePtr[{}]: source kind {:?} does not match cell kind \
                  {:?} (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at construction)",
                 idx, src_kind, cell_kind
@@ -1563,7 +1563,7 @@ impl VirtualMachine {
         let cell_kind = cell_ref.kind();
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreSharedLocal[{}]: source kind {:?} does not match cell kind {:?} \
                  (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at construction)",
                 idx, src_kind, cell_kind
@@ -1710,7 +1710,7 @@ impl VirtualMachine {
         let cell_kind = cell_ref.kind();
         if cell_kind != src_kind {
             crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
-            return Err(VMError::TypeError(format!(
+            return Err(VMError::RuntimeError(format!(
                 "StoreSharedModuleBinding[{}]: source kind {:?} does not match cell \
                  kind {:?} (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at \
                  construction)",
