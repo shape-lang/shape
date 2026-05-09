@@ -1,31 +1,32 @@
 //! Method handlers for concurrency primitive types: Mutex<T>, Atomic<T>, Lazy<T>
 //!
-//! These are compiler-builtin types with interior mutability — the ONLY types
-//! in Shape that have interior mutability. No user-definable interior mutability exists.
+//! Phase 1.B-vm Wave 6.5 substep-2 cluster D-obj-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §10 D-obj-tail row + §7 REVISED
+//! DoD #4. The original implementations relied on the
+//! `HeapValue::Concurrency(ConcurrencyData::*)` enum form (deleted by the
+//! HeapValue-typed-Arc redesign, ADR-006 §2.3) and on
+//! `raw_helpers::{extract_heap_ref, extract_number_coerce}` plus
+//! `ValueWord::{from_raw_bits, from_i64, none, clone_from_bits, from_bool}`
+//! (forbidden #7 / #1 per playbook §4).
+//!
+//! Mandatory-shim sites in `v2_lazy_get` (`vm.push_raw_u64` x2 +
+//! `vm.pop_raw_u64`) cannot be migrated to the kinded API in isolation:
+//! the closure-call pathway through `op_call_value` (B11 territory) is
+//! itself still on raw-u64 / `tag_bits::*` and cannot accept kinded
+//! operands without that cluster's migration. Per ADR-006 §2.7.7 #9 +
+//! CLAUDE.md "Renames to refuse on sight", a Bool-default kinded shim
+//! preserving the closure-call shape is forbidden.
+//!
+//! Resurfacing concurrency primitives is Phase 2c: ConcurrencyData needs
+//! re-modelling on top of typed-Arc HeapValue payloads, after which
+//! Mutex/Atomic/Lazy method dispatch can route through the kinded API.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::HeapValue;
-use shape_value::{ConcurrencyData, VMError, ValueWord, ValueWordExt};
-use std::sync::atomic::Ordering;
-
-use super::raw_helpers::{extract_heap_ref, extract_number_coerce};
-
-/// Transfer ownership of a `ValueWord` into raw u64 bits.
-///
-/// FR.4: With `ValueWord = u64` Copy, there is no destructor to suppress;
-/// the `let _ = vw;` is kept as a marker that ownership transfers to the
-/// returned bits.
-#[inline]
-fn into_raw(vw: ValueWord) -> u64 {
-    let bits = vw.raw_bits();
-    let _ = vw;
-    bits
-}
+use shape_value::VMError;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V2 (MethodFnV2) handlers — raw u64 ABI
+// V2 (MethodFnV2) handlers — raw u64 ABI placeholder bodies
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Mutex<T> ─────────────────────────────────────────────────────────────
@@ -33,65 +34,37 @@ fn into_raw(vw: ValueWord) -> u64 {
 /// `mutex.lock()` — v2 ABI.
 pub fn v2_mutex_lock(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("lock()", "mutex"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => {
-            let guard = data
-                .inner
-                .lock()
-                .map_err(|e| VMError::RuntimeError(format!("Mutex poisoned: {}", e)))?;
-            Ok(into_raw(guard.clone()))
-        }
-        _ => Err(type_mismatch_error("lock()", "mutex")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Mutex.lock(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `mutex.try_lock()` — v2 ABI.
 pub fn v2_mutex_try_lock(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("try_lock()", "mutex"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => match data.inner.try_lock() {
-            Ok(guard) => Ok(into_raw(guard.clone())),
-            Err(_) => Ok(into_raw(ValueWord::none())),
-        },
-        _ => Err(type_mismatch_error("try_lock()", "mutex")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Mutex.try_lock(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `mutex.set(value)` — v2 ABI.
 pub fn v2_mutex_set(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let new_value = if args.len() > 1 {
-        // SAFETY: clone_from_bits increments refcount for heap values.
-        unsafe { ValueWord::clone_from_bits(args[1]) }
-    } else {
-        ValueWord::none()
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("set()", "mutex"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => {
-            let mut guard = data
-                .inner
-                .lock()
-                .map_err(|e| VMError::RuntimeError(format!("Mutex poisoned: {}", e)))?;
-            *guard = new_value;
-            Ok(into_raw(ValueWord::none()))
-        }
-        _ => Err(type_mismatch_error("set()", "mutex")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Mutex.set(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 // ── Atomic<T> ────────────────────────────────────────────────────────────
@@ -99,189 +72,89 @@ pub fn v2_mutex_set(
 /// `atomic.load()` — v2 ABI.
 pub fn v2_atomic_load(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("load()", "atomic"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
-            let val = data.inner.load(Ordering::SeqCst);
-            Ok(into_raw(ValueWord::from_i64(val)))
-        }
-        _ => Err(type_mismatch_error("load()", "atomic")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Atomic.load(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `atomic.store(value)` — v2 ABI.
 pub fn v2_atomic_store(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let new_val = if args.len() > 1 {
-        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
-    } else {
-        0
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("store()", "atomic"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
-            data.inner.store(new_val, Ordering::SeqCst);
-            Ok(into_raw(ValueWord::none()))
-        }
-        _ => Err(type_mismatch_error("store()", "atomic")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Atomic.store(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `atomic.fetch_add(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_add(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let delta = if args.len() > 1 {
-        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
-    } else {
-        0
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("fetch_add()", "atomic"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
-            let prev = data.inner.fetch_add(delta, Ordering::SeqCst);
-            Ok(into_raw(ValueWord::from_i64(prev)))
-        }
-        _ => Err(type_mismatch_error("fetch_add()", "atomic")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Atomic.fetch_add(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `atomic.fetch_sub(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_sub(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let delta = if args.len() > 1 {
-        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
-    } else {
-        0
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("fetch_sub()", "atomic"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
-            let prev = data.inner.fetch_sub(delta, Ordering::SeqCst);
-            Ok(into_raw(ValueWord::from_i64(prev)))
-        }
-        _ => Err(type_mismatch_error("fetch_sub()", "atomic")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Atomic.fetch_sub(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 /// `atomic.compare_exchange(expected, new)` — v2 ABI.
 pub fn v2_atomic_compare_exchange(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let expected = if args.len() > 1 {
-        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
-    } else {
-        0
-    };
-    let new_val = if args.len() > 2 {
-        extract_number_coerce(args[2]).map(|n| n as i64).unwrap_or(0)
-    } else {
-        0
-    };
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("compare_exchange()", "atomic"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
-            match data
-                .inner
-                .compare_exchange(expected, new_val, Ordering::SeqCst, Ordering::SeqCst)
-            {
-                Ok(prev) | Err(prev) => Ok(into_raw(ValueWord::from_i64(prev))),
-            }
-        }
-        _ => Err(type_mismatch_error("compare_exchange()", "atomic")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Atomic.compare_exchange(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
 
 // ── Lazy<T> ──────────────────────────────────────────────────────────────
 
 /// `lazy.get()` — v2 ABI.
 ///
-/// Note: `lazy.get()` may invoke an initializer closure, which requires calling
-/// into the VM (`op_call_value`). This handler therefore needs `vm` (not `_vm`).
+/// Note: `lazy.get()` may invoke an initializer closure, which requires
+/// calling into the VM (`op_call_value`). This handler therefore needs `vm`
+/// (not `_vm`) once Phase 2c re-enables the body.
 pub fn v2_lazy_get(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _vm: &mut VirtualMachine,
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("get()", "lazy"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Lazy(data)) => {
-            // Check if already initialized
-            let existing = data
-                .value
-                .lock()
-                .map_err(|e| VMError::RuntimeError(format!("Lazy value poisoned: {}", e)))?;
-            if let Some(val) = existing.as_ref() {
-                return Ok(into_raw(val.clone()));
-            }
-            drop(existing);
-
-            // Not initialized — get the initializer and call it
-            let initializer = {
-                let init_guard = data.initializer.lock().map_err(|e| {
-                    VMError::RuntimeError(format!("Lazy initializer poisoned: {}", e))
-                })?;
-                init_guard.clone().ok_or_else(|| {
-                    VMError::RuntimeError("Lazy initializer already consumed".to_string())
-                })?
-            };
-
-            // Call the initializer closure with 0 args
-            vm.push_raw_u64(initializer)?;
-            vm.push_raw_u64(ValueWord::from_i64(0))?; // arg count
-            vm.op_call_value()?;
-            let result = vm.pop_raw_u64()?;
-
-            // Store the result (clone for cache, transfer original to caller)
-            let mut val_guard = data
-                .value
-                .lock()
-                .map_err(|e| VMError::RuntimeError(format!("Lazy value poisoned: {}", e)))?;
-            *val_guard = Some(result.clone());
-
-            // Clear the initializer
-            if let Ok(mut init_guard) = data.initializer.lock() {
-                *init_guard = None;
-            }
-
-            Ok(into_raw(result))
-        }
-        _ => Err(type_mismatch_error("get()", "lazy")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Lazy.get(): closure-call dispatch + Concurrency typed-Arc redesign per ADR-006 §2.3 / §2.7.7"
+            .to_string(),
+    ))
 }
 
 /// `lazy.is_initialized()` — v2 ABI.
 pub fn v2_lazy_is_initialized(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let heap = unsafe { extract_heap_ref(args[0]) }
-        .ok_or_else(|| type_mismatch_error("is_initialized()", "lazy"))?;
-    match heap {
-        HeapValue::Concurrency(ConcurrencyData::Lazy(data)) => {
-            let initialized = data.is_initialized();
-            Ok(into_raw(ValueWord::from_bool(initialized)))
-        }
-        _ => Err(type_mismatch_error("is_initialized()", "lazy")),
-    }
+    Err(VMError::NotImplemented(
+        "phase-2c — Lazy.is_initialized(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
+            .to_string(),
+    ))
 }
