@@ -1088,25 +1088,33 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. The 8-byte payload is
-        // a raw heap-pointer bit pattern (Arc/Box). The helper does NOT
-        // clone/retain — refcount semantics are the caller's
-        // responsibility. The IR pairs the Load with the matching retain
-        // before consumption (mirrors `op_load_shared_capture_ptr` in D.2).
+        // ADR-006 §2.7.8 / Q10 SURFACE — REMAINS OPEN POST-Wave-α (B6 close):
         //
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: the owned-mutable-capture
-        // cell encoding (`closure_raw::read_owned_mutable_ptr -> u64`)
-        // does NOT carry per-cell `NativeKind`. Sourcing the kind here
-        // requires either (a) extending the cell layout to store kind
-        // alongside the payload, or (b) reading the closure layout's
-        // `capture_storage_kind` table — both live in `closure_raw.rs` /
-        // closure layout machinery, which is out of cluster B's territory
-        // per playbook §5. Until that architectural fix lands, this Load
-        // remains broken. Cluster B does not introduce a Bool-default
-        // §2.7.7 forbidden-shape transitional shim here.
+        // The owned-mutable-capture cell here is allocated by
+        // `closure_raw::alloc_owned_mutable_ptr` as a bare `Box::into_raw(Box::new(0u64))`
+        // — a heap-allocated 8-byte slot with NO parallel `NativeKind`
+        // companion. Wave-α B7-closure-cells (commit `7bef682`) added a
+        // NEW `closure_raw::ClosureCell { bits: Vec<u64>, kinds: Vec<NativeKind> }`
+        // struct, but that struct is NOT the storage backing this handler;
+        // the `*mut u64` cell here is the legacy `OwnedClosureBlock` raw
+        // byte buffer at `ClosureLayout`-driven offsets, untouched by B7.
+        //
+        // Closing this gap requires extending `OwnedClosureBlock` /
+        // `ClosureLayout` (in `crates/shape-value/src/v2/closure_raw.rs`
+        // and `closure_layout.rs`) with a per-capture `Vec<NativeKind>`
+        // companion alongside the existing per-capture `FieldKind` table,
+        // plus threading the kind into `alloc_owned_mutable_ptr` /
+        // `read_owned_mutable_ptr` / `write_owned_mutable_ptr` /
+        // `drop_owned_mutable_capture`. That is out of cluster B6's
+        // `variables/mod.rs` territory (playbook §10 row scope; surface-
+        // and-stop trigger per playbook §8 "cross-cluster migration
+        // cascade"). Cluster B6 does not introduce a Bool-default
+        // §2.7.8 forbidden-shape transitional shim here (forbidden #9
+        // per ADR-006 §2.7.8); the surface refusal is the correct shape.
         let _value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
         Err(VMError::NotImplemented(
-            "LoadOwnedMutableCapturePtr requires kinded cell encoding (ADR-006 §2.7.7 SURFACE)"
+            "LoadOwnedMutableCapturePtr requires OwnedClosureBlock per-capture kind \
+             extension (ADR-006 §2.7.8 SURFACE — out of B6 territory)"
                 .into(),
         ))
     }
@@ -1341,13 +1349,16 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: see the matching Load
-        // handler. The owned-mutable-capture cell encoding does not carry
-        // per-cell `NativeKind`. The Store side accepts the new bits but
-        // discards the source kind — the IR's pairing with retain/release
-        // assumes the cell holds the kind information separately. Until
-        // the cell layout is extended, the source kind has nowhere
-        // semantic to land.
+        // ADR-006 §2.7.8 / Q10 SURFACE — paired with `op_load_owned_mutable_capture_ptr`
+        // above; the gap is the same. `OwnedClosureBlock` cell layout has
+        // no per-capture `NativeKind` companion (B7-closure-cells's NEW
+        // `ClosureCell` struct is not the storage backing this handler).
+        // The Store accepts the new bits but the source kind has nowhere
+        // semantic to land in the cell — the cell can't track which heap
+        // arm to release on overwrite, so the previous payload's share
+        // would be leaked or the new payload's share double-released.
+        // Closing this requires the same `OwnedClosureBlock` per-capture
+        // kind extension as the Load — out of B6 territory.
         let (new_bits, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u64;
@@ -1360,7 +1371,11 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. `write_owned_mutable_ptr`
         // does NOT release the previous payload nor retain the new one
         // (matches `read_owned_mutable_ptr` symmetry). Refcount management
-        // is the responsibility of the compiler / IR (Wave E).
+        // is the responsibility of the compiler / IR (Wave E). Until the
+        // cell-extension lands, this Store is also a SURFACE site even
+        // though it currently writes — the read-side counterpart returns
+        // `NotImplemented(SURFACE)`, so a roundtrip through this Store
+        // is unobservable; once the Load is fixed, this Store must match.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_ptr(cell_ptr, new_bits) };
         Ok(())
     }
@@ -1714,22 +1729,35 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. The 8-byte payload
-        // is a raw heap-pointer bit pattern (Arc/Box). The helper does
-        // NOT clone/retain — refcount semantics are the caller's
-        // responsibility. The IR pairs the Load with the matching
-        // retain (matching the c-stdlib-msgpack pattern from commit
-        // afb1651).
+        // ADR-006 §2.7.8 / Q10: `SharedCell` carries a `kind: NativeKind`
+        // companion (B8-shared-cell, commit `29aa149`) set at construction
+        // and read alongside the payload bits. The Wave-β B6 close threads
+        // this kind through the Load: read the kind off the cell, take
+        // the cell's lock to read the payload bits coherently, then push
+        // both onto the typed VM stack via `push_kinded`.
         //
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: same kind-sourcing gap
-        // as `op_load_owned_mutable_capture_ptr`. The shared-cell
-        // payload encoding does not carry per-cell `NativeKind`. Until
-        // the cell layout is extended (closure_raw.rs — out of cluster
-        // B's territory), this Load remains broken.
-        let _value = unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr) };
-        Err(VMError::NotImplemented(
-            "LoadSharedCapturePtr requires kinded cell encoding (ADR-006 §2.7.7 SURFACE)".into(),
-        ))
+        // WB2.4 retain-on-read: the cell continues to own its strong-count
+        // share for the payload's lifetime; the pushed stack slot needs
+        // an independent share. `clone_with_kind(bits, kind)` (defined in
+        // `vm_impl/stack.rs:52`, mirror of `KindedSlot::Clone`) performs
+        // the matching `Arc::increment_strong_count::<T>` for heap-bearing
+        // arms and is a no-op for inline scalars. The forbidden
+        // `vw_clone(bits)` (which dispatched on the deleted tag_bits) is
+        // not used.
+        //
+        // SAFETY: `cell_ptr` is non-null and was reached via the upvalue
+        // slot pointer plumbing (`read_capture_raw_pointer_bits`); the
+        // `Arc<SharedCell>` strong-count is held by the closure for as
+        // long as this frame is live. Reborrowing as `&SharedCell` is
+        // sound for the duration of the lock + read.
+        let cell_ref = unsafe { &*cell_ptr };
+        let kind = cell_ref.kind();
+        let payload_bits = {
+            let guard = cell_ref.lock();
+            *guard
+        };
+        crate::executor::vm_impl::stack::clone_with_kind(payload_bits, kind);
+        self.push_kinded(payload_bits, kind)
     }
 
     fn op_store_shared_capture_i64(
@@ -1975,22 +2003,57 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: see the matching Load
-        // handler for the cell-encoding gap.
-        let (new_bits, _src_kind) = self.pop_kinded()?;
+        // ADR-006 §2.7.8 / Q10: `SharedCell` carries a `kind: NativeKind`
+        // companion (B8-shared-cell). The cell's kind is set at
+        // construction and is immutable for the cell's lifetime per the
+        // §2.7.8 lockstep rule ("Mid-life kind changes are forbidden:
+        // every write that changes the kind must replace the whole cell
+        // (drop + reconstruct), never reassign `value` alone"). The Store
+        // therefore (1) verifies the source kind matches the cell's
+        // recorded kind, (2) takes the lock to read the old payload bits,
+        // (3) releases the old payload's heap share via `drop_with_kind`,
+        // (4) writes the new bits (the source already owns one fresh
+        // strong-count share — `pop_kinded` transferred it to us).
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
+            // Source kind owned a strong-count share; release it before
+            // returning the error (drop discipline per playbook §3).
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
                 "Shared capture pointer is null".to_string(),
             ));
         }
+        // SAFETY: `cell_ptr` is non-null, sourced through the closure's
+        // upvalue plumbing; the surrounding `Arc<SharedCell>` keeps the
+        // allocation live for the call frame.
+        let cell_ref = unsafe { &*cell_ptr };
+        let cell_kind = cell_ref.kind();
+        if src_kind != cell_kind {
+            // §2.7.8 mid-life-kind-change refusal. The compiler must emit
+            // either a Store opcode whose kind matches the cell, or a
+            // cell-replacement sequence (drop + reconstruct). This is a
+            // compiler bug, not a runtime fallback — surface as a typed
+            // error and release the source's share.
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::TypeError(format!(
+                "StoreSharedCapturePtr kind mismatch: cell kind {:?}, source kind {:?} \
+                 (ADR-006 §2.7.8 forbids mid-life kind changes on shared cells)",
+                cell_kind, src_kind
+            )));
+        }
         record_heap_write();
-        // SAFETY: section header invariants apply. `write_shared_ptr`
-        // does NOT release the previous payload nor retain the new one
-        // (matches `read_shared_ptr` symmetry). Refcount management is
-        // the responsibility of the compiler / IR (see Wave E plan).
-        unsafe { shape_value::v2::closure_raw::write_shared_ptr(cell_ptr, new_bits) };
+        // Take the lock, read the previous payload bits, write the new
+        // bits, drop the lock — then release the previous payload's heap
+        // share (outside the lock to keep critical-section short).
+        let old_bits = {
+            let mut guard = cell_ref.lock();
+            let old = *guard;
+            *guard = new_bits;
+            old
+        };
+        crate::executor::vm_impl::stack::drop_with_kind(old_bits, cell_kind);
         Ok(())
     }
 
@@ -3846,13 +3909,28 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(_idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: module-binding storage is
-        // `Vec<u64>` (no parallel kind track for bindings). The Ptr load
-        // requires the binding's kind, which is not currently encoded.
-        // Same surface as `op_load_owned_mutable_capture_ptr` — until
-        // bindings carry kind alongside data, this Load remains broken.
+        // ADR-006 §2.7.8 / Q10 SURFACE — REMAINS OPEN POST-Wave-α (B6 close):
+        //
+        // Module-binding storage at `executor/mod.rs:258` is
+        //   `pub(crate) module_bindings: Vec<u64>`
+        // with NO parallel `Vec<NativeKind>` companion. The §2.7.8 ruling
+        // (Q10) lists module-binding storage as one of the cell-bearing
+        // structs that must grow a parallel-kind track, but the Wave-α
+        // structural cluster (B7-closure-cells, B8-shared-cell,
+        // B9-callframe-kind) only landed extensions for `ClosureCell`
+        // (NEW struct, unused by these handlers), `SharedCell`
+        // (closure_layout.rs `kind` field), and `CallFrame.closure_heap_kind`.
+        // Module-binding storage is in `executor/mod.rs` — out of B6's
+        // `variables/mod.rs` territory (playbook §10 row scope). Cluster
+        // B6 does not introduce a Bool-default §2.7.8 forbidden-shape
+        // transitional shim here (§2.7.8 forbidden-shapes #9); the
+        // surface refusal is the correct shape per the cluster B partial-
+        // close report (commit `727143e`).
         Err(VMError::NotImplemented(
-            "LoadModuleBindingPtr requires kinded binding storage (ADR-006 §2.7.7 SURFACE)".into(),
+            "LoadModuleBindingPtr requires module-binding parallel-kind track \
+             (ADR-006 §2.7.8 SURFACE — out of B6 territory; depends on \
+             extending `executor/mod.rs:258` module_bindings: Vec<u64> with \
+             companion Vec<NativeKind>)".into(),
         ))
     }
 
@@ -4047,9 +4125,15 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // ADR-006 §2.7.7 / playbook §8 SURFACE: see Load handler. Source
-        // kind discarded (binding storage is kind-erased). The IR pairs
-        // the Store with retain/release.
+        // ADR-006 §2.7.8 / Q10 SURFACE — paired with `op_load_module_binding_ptr`
+        // above; the gap is the same. `module_bindings: Vec<u64>` at
+        // `executor/mod.rs:258` has no parallel `Vec<NativeKind>`. The
+        // Store side cannot release the previous binding's heap share via
+        // `drop_with_kind(prev_bits, prev_kind)` because `prev_kind` is
+        // not recorded. The current implementation overwrites without
+        // releasing — leak rather than `vw_drop` (forbidden #8) per the
+        // cluster B partial-close disposition. Closing this Store
+        // requires the same `executor/mod.rs` extension as the Load.
         let (value, _src_kind) = self.pop_kinded()?;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
