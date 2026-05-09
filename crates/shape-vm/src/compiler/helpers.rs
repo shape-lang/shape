@@ -1215,9 +1215,10 @@ impl BytecodeCompiler {
             | OpCode::StringLenTyped
             // v2 sized-integer (i32) arithmetic — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native i64 bits
-            // (sign-extended from i32 result) via `push_native_i64`,
-            // matching the surrounding typed transport for `LoadLocalI32`
-            // / `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
+            // (sign-extended from i32 result) onto the kinded VM stack
+            // via `push_kinded(bits, NativeKind::Int64)`, matching the
+            // surrounding typed transport for `LoadLocalI32` /
+            // `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
             // family above for the i32 variants.
             | OpCode::AddI32
             | OpCode::SubI32
@@ -1227,7 +1228,8 @@ impl BytecodeCompiler {
             // Compact-typed (sub-i64 width-parameterised) arithmetic — post-
             // Wave-E+5.5 the `compact_int_*` family in
             // `executor/arithmetic/mod.rs:651` pops native i64 inputs and
-            // pushes raw native i64 bits via `push_native_i64`, matching the
+            // pushes raw native i64 bits onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Int64)`, matching the
             // surrounding typed transport. `CmpTyped` returns a -1/0/1
             // ordinal as native i64 (NOT a bool — see compact_int_cmp). The
             // compact-int width truncation happens before push, so the bits
@@ -1280,7 +1282,8 @@ impl BytecodeCompiler {
             | OpCode::LoadModuleBindingBool
             // v2 sized-integer (i32) comparisons — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native bool bits
-            // (0u64 / 1u64) via `push_native_bool`. Mirrors the
+            // (0u64 / 1u64) onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Bool)`. Mirrors the
             // `EqInt`/`LtInt`/… family above for the i32 variants.
             | OpCode::EqI32
             | OpCode::NeqI32
@@ -1305,9 +1308,11 @@ impl BytecodeCompiler {
 
             // ===== LoadModuleBinding — depends on the binding's typed kind =====
             // The polymorphic `LoadModuleBinding` opcode pushes the slot's
-            // raw u64 unchanged (`op_load_module_binding`'s `binding_read_raw`
-            // → `push_raw_u64`). When the host pre-loaded the slot with raw
-            // native bits — Wave E+5.5's REPL-persistence load path
+            // raw u64 unchanged (the module-binding read path forwards
+            // the slot's bits onto the kinded VM stack via
+            // `push_kinded(bits, kind)`). When the host pre-loaded the
+            // slot with raw native bits — Wave E+5.5's REPL-persistence
+            // load path
             // (`load_module_bindings_from_context` →
             // `normalize_persisted_for_slot` decodes a persisted tagged
             // ValueWord int back to raw native i64 when the bytecode's
@@ -1334,7 +1339,8 @@ impl BytecodeCompiler {
             // ===== Call — propagate the callee's typed-return kind =====
             // Wave E+3 `op_return_value_<kind>` handlers route the raw
             // u64 bits the callee pushed straight back to the caller's
-            // stack via `return_value_inner` → `push_raw_u64`. So when
+            // stack via `return_value_inner` →
+            // `push_kinded(bits, return_kind)`. So when
             // the callee body ends in `ReturnValueI64`, the caller sees
             // raw native i64 bits on top of stack after the Call. We
             // need to declare that to the host boundary so the
@@ -1352,8 +1358,9 @@ impl BytecodeCompiler {
             // Wave E+5 that payload is raw native bits when the
             // binding's declared type is a proven primitive
             // (Int / Float / Bool). `op_load_shared_module_binding`
-            // reads the cell's inner payload and pushes it via
-            // `push_raw_u64`. So a top-level program ending in `n`
+            // reads the cell's inner payload and pushes it onto the
+            // kinded VM stack via `push_kinded(bits, kind)`. So a
+            // top-level program ending in `n`
             // (where `var n: int = 0`) produces raw native i64 bits at
             // the eval boundary; without this arm,
             // `synthesize_value_word_from_raw` falls back to
@@ -1587,8 +1594,9 @@ impl BytecodeCompiler {
     /// Resolve the raw-native kind of a `LoadLocalTrusted` instruction
     /// by consulting the slot's type-tracker entry. The trusted handler
     /// reads raw bits directly (`variables/mod.rs:2520`) and pushes them
-    /// via `push_raw_u64`, so the on-stack representation matches the
-    /// kind that originally populated the slot — typically a typed
+    /// onto the kinded VM stack via `push_kinded(bits, kind)`, so the
+    /// on-stack representation matches the kind that originally
+    /// populated the slot — typically a typed
     /// `StoreLocal<Kind>` from a Wave E+3 producer (PushConst Int /
     /// typed arithmetic / typed Load*).
     ///
@@ -4193,10 +4201,11 @@ impl BytecodeCompiler {
 // `owned_mutable_capture_inner_kinds`) and dispatches reads / writes inside
 // the closure body via these tables.
 //
-// Stack contract: typed loads push raw native bytes (`push_raw_u64` with
-// sub-i64 ints sign- or zero-extended into the i64 path); typed stores pop
-// raw native bytes via the matching `pop_raw_<kind>` / `pop_raw_u64`
-// helpers. `Ptr` transfers the raw 8-byte ValueWord bit pattern unchanged
+// Stack contract: typed loads push raw native bytes onto the kinded VM
+// stack via `push_kinded(bits, kind)` (sub-i64 ints sign- or
+// zero-extended into the i64 path); typed stores pop raw native bytes
+// via `pop_kinded() -> (bits, kind)`. `Ptr` transfers the raw 8-byte
+// heap-pointer bit pattern unchanged
 // — neither typed nor legacy variant clones / drops the heap share, so the
 // emit-site swap from legacy `LoadOwnedMutableCapture` (0x132) /
 // `StoreOwnedMutableCapture` (0x133) preserves refcount semantics.
