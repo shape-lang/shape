@@ -271,17 +271,28 @@ impl BytecodeCompiler {
         // slot's StorageHint maps to a `FieldKind` (proven Int / Bool /
         // F64 / sub-i64 widths). The typed handler reads raw 8-byte bits
         // and pushes them unchanged — preserves the post-Unit-A native
-        // discipline through the slot. For unproven hints (Dynamic,
-        // Unknown, String, nullable widths, etc.) the helper falls back
-        // to the polymorphic legacy `LoadLocal`. This wires the
+        // discipline through the slot. For unproven hints (String,
+        // nullable widths, etc., or absent type info) the helper falls
+        // back to the polymorphic legacy `LoadLocal`. This wires the
         // primary local-load emit site to the typed-flip pathway from
         // commit `3c83afa`.
+        //
+        // Per ADR-006 §2.7.5.1 (compiler-tier intermediate state policy),
+        // "kind not yet known" is carried as `Option<StorageHint>` locally
+        // — there is no `StorageHint::Unknown` sentinel.
         let hint = self
             .type_tracker
             .get_local_type(slot)
-            .map(|info| info.storage_hint)
-            .unwrap_or(crate::type_tracking::StorageHint::Unknown);
-        self.emit_load_local_for_hint(slot, hint);
+            .map(|info| info.storage_hint);
+        match hint {
+            Some(h) => self.emit_load_local_for_hint(slot, h),
+            None => {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(slot)),
+                ));
+            }
+        }
     }
 
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
@@ -362,67 +373,77 @@ impl BytecodeCompiler {
         ) {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
+        // Per ADR-006 §2.7.5.1, the proven-hint state is carried locally
+        // as `Option<StorageHint>`. `None` ≡ "no proven kind" — the helper
+        // routes to the polymorphic legacy `ReturnValue`.
         let hint = self.last_expr_numeric_type_to_storage_hint();
-        let gated_hint = if hint == StorageHint::Unknown {
-            hint
-        } else {
-            match self.last_emitted_native_kind() {
-                None => StorageHint::Unknown,
-                Some(native_kind) => {
-                    let is_int_family = matches!(
-                        hint,
-                        StorageHint::Int8
-                            | StorageHint::UInt8
-                            | StorageHint::Int16
-                            | StorageHint::UInt16
-                            | StorageHint::Int32
-                            | StorageHint::UInt32
-                            | StorageHint::Int64
-                            | StorageHint::UInt64
-                    );
-                    if is_int_family && native_kind == StorageHint::Int64 {
-                        hint
-                    } else if native_kind == hint {
-                        hint
-                    } else {
-                        StorageHint::Unknown
-                    }
+        let gated_hint: Option<StorageHint> = hint.and_then(|h| {
+            self.last_emitted_native_kind().and_then(|native_kind| {
+                let is_int_family = matches!(
+                    h,
+                    StorageHint::Int8
+                        | StorageHint::UInt8
+                        | StorageHint::Int16
+                        | StorageHint::UInt16
+                        | StorageHint::Int32
+                        | StorageHint::UInt32
+                        | StorageHint::Int64
+                        | StorageHint::UInt64
+                );
+                if is_int_family && native_kind == StorageHint::Int64 {
+                    Some(h)
+                } else if native_kind == h {
+                    Some(h)
+                } else {
+                    None
                 }
+            })
+        });
+        match gated_hint {
+            Some(h) => self.emit_return_value_for_hint(h),
+            None => {
+                self.emit(Instruction::simple(OpCode::ReturnValue));
             }
-        };
-        self.emit_return_value_for_hint(gated_hint);
+        }
     }
 
     /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
     /// `last_expr_type_info` for the typed-Return helper. Mirrors the
     /// E+5.5 Unit C step 1: combined storage-hint inference for let-decl
     /// site. Reads `last_expr_numeric_type` (priority 1) then
-    /// `last_expr_type_info.storage_hint` (priority 2). Returns
-    /// `StorageHint::Unknown` when neither signal is set.
-    pub(in crate::compiler) fn let_decl_storage_hint(&self) -> crate::type_tracking::StorageHint {
-        use crate::type_tracking::StorageHint;
-        let from_numeric = self.last_expr_numeric_type_to_storage_hint();
-        if from_numeric != StorageHint::Unknown {
-            return from_numeric;
+    /// `last_expr_type_info.storage_hint` (priority 2). Returns `None`
+    /// when neither signal is set.
+    ///
+    /// Per ADR-006 §2.7.5.1, "kind not yet known" is carried locally as
+    /// `Option<StorageHint>` — there is no `StorageHint::Unknown` sentinel.
+    pub(in crate::compiler) fn let_decl_storage_hint(
+        &self,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        if let Some(hint) = self.last_expr_numeric_type_to_storage_hint() {
+            return Some(hint);
         }
-        if let Some(info) = &self.last_expr_type_info {
-            return info.storage_hint;
-        }
-        StorageHint::Unknown
+        // `info.storage_hint` is itself a `StorageHint` today; when the
+        // sibling `type_tracking.rs` migration lands and the field becomes
+        // `Option<StorageHint>`, this wrap will collapse naturally.
+        self.last_expr_type_info
+            .as_ref()
+            .map(|info| info.storage_hint)
     }
 
-    /// priority order used by `infer_top_level_return_kind`. Returns
-    /// `StorageHint::Unknown` when no signal is available — the helper
-    /// then routes to the polymorphic legacy `ReturnValue`.
-    pub(in crate::compiler) fn last_expr_numeric_type_to_storage_hint(&self) -> crate::type_tracking::StorageHint {
+    /// Priority order used by `infer_top_level_return_kind`. Returns
+    /// `None` when no signal is available — the caller then routes to
+    /// the polymorphic legacy `ReturnValue`. Per ADR-006 §2.7.5.1.
+    pub(in crate::compiler) fn last_expr_numeric_type_to_storage_hint(
+        &self,
+    ) -> Option<crate::type_tracking::StorageHint> {
         use crate::type_tracking::StorageHint;
         if let Some(nt) = self.last_expr_numeric_type {
             match nt {
-                crate::type_tracking::NumericType::Number => return StorageHint::Float64,
-                crate::type_tracking::NumericType::Int => return StorageHint::Int64,
+                crate::type_tracking::NumericType::Number => return Some(StorageHint::Float64),
+                crate::type_tracking::NumericType::Int => return Some(StorageHint::Int64),
                 crate::type_tracking::NumericType::IntWidth(w) => {
                     use shape_ast::IntWidth;
-                    return match w {
+                    return Some(match w {
                         IntWidth::I8 => StorageHint::Int8,
                         IntWidth::U8 => StorageHint::UInt8,
                         IntWidth::I16 => StorageHint::Int16,
@@ -430,17 +451,18 @@ impl BytecodeCompiler {
                         IntWidth::I32 => StorageHint::Int32,
                         IntWidth::U32 => StorageHint::UInt32,
                         IntWidth::U64 => StorageHint::UInt64,
-                    };
+                    });
                 }
                 crate::type_tracking::NumericType::Decimal => {}
             }
         }
-        if let Some(info) = &self.last_expr_type_info {
-            if info.storage_hint != StorageHint::Unknown {
-                return info.storage_hint;
-            }
-        }
-        StorageHint::Unknown
+        // `info.storage_hint` is currently a `StorageHint`. The sibling
+        // type_tracking.rs migration (per ADR-006 §2.7.5.1) makes the
+        // VariableTypeInfo field `Option<StorageHint>`; until that lands,
+        // we wrap the field directly.
+        self.last_expr_type_info
+            .as_ref()
+            .map(|info| info.storage_hint)
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
