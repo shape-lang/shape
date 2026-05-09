@@ -809,12 +809,14 @@ define_opcodes! {
     //     legacy opcodes once Wave E flips every emit site.
     //
     // Stack effect: Load reads the typed cell and pushes a raw native value
-    // onto the stack via the matching `push_raw_<kind>` / `push_raw_u64`
-    // helper (sub-i64 ints sign- or zero-extended into the i64 path,
-    // matching the existing typed-opcode convention in `arithmetic/`).
-    // Store pops a native value via the matching `pop_raw_<kind>` /
-    // `pop_raw_u64` helper, truncates as needed for sub-i64 widths, and
-    // writes through the typed cell.
+    // onto the stack via `push_kinded(bits, NativeKind::<Kind>)` (sub-i64
+    // ints sign- or zero-extended into the i64 path, matching the existing
+    // typed-opcode convention in `arithmetic/`). Store pops a native value
+    // via `pop_kinded() -> (bits, NativeKind::<Kind>)`, truncates as needed
+    // for sub-i64 widths, and writes through the typed cell. The
+    // pre-Wave-6.5 ValueWord-shape stack shims were deleted per ADR-006
+    // §2.7.7; every push site sources kind locally from the opcode's
+    // payload-kind suffix.
 
     /// Load `i64` through an `OwnedMutable` capture's `*mut i64` cell.
     /// Operand: Local(idx). Pushes the dereferenced i64 onto the stack as
@@ -928,10 +930,11 @@ define_opcodes! {
     //
     // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
     // Load reads from the lock-gated cell and pushes a raw native value
-    // onto the stack via the matching `push_raw_<kind>`/`push_raw_u64`
-    // helper. Store pops a native value via the matching
-    // `pop_raw_<kind>`/`pop_raw_u64` helper, then writes it through the
-    // lock-gated helper.
+    // onto the stack via `push_kinded(bits, NativeKind::<Kind>)`. Store
+    // pops a native value via `pop_kinded() -> (bits, NativeKind::<Kind>)`,
+    // then writes it through the lock-gated helper. The pre-Wave-6.5
+    // ValueWord-shape stack shims were deleted per ADR-006 §2.7.7; every
+    // push site sources kind locally from the opcode's payload-kind suffix.
     //
     // SAFETY invariants — enforced by the compiler (Wave E codegen):
     //   * `LoadSharedCapture<Kind>` / `StoreSharedCapture<Kind>` are only
@@ -1078,8 +1081,11 @@ define_opcodes! {
     //
     // Stack effect mirrors D.1 (typed OwnedMutable opcodes 0x140-0x155):
     // Load reads from the local slot and pushes a raw native value onto
-    // the stack via `push_raw_u64`. Store pops a native value via
-    // `pop_raw_u64`, then writes the raw 8-byte bits to the slot.
+    // the stack via `push_kinded(bits, NativeKind::<Kind>)`. Store pops a
+    // native value via `pop_kinded() -> (bits, NativeKind::<Kind>)`, then
+    // writes the raw 8-byte bits to the slot. The pre-Wave-6.5
+    // ValueWord-shape stack shims were deleted per ADR-006 §2.7.7; every
+    // push site sources kind locally from the opcode's payload-kind suffix.
     //
     // The legacy `LoadLocal` (0x50) / `StoreLocal` (0x51) stay live for
     // unproven-type positions; the typed forms are dead until Wave E+4
@@ -1184,9 +1190,12 @@ define_opcodes! {
     //     `module_bindings[idx]`.
     //
     // Stack convention mirrors Wave D (typed OwnedMutable opcodes
-    // 0x140-0x155): Load pushes via `push_raw_u64` with the native value
-    // sign- or zero-extended into the 8-byte stack slot. Store pops via
-    // `pop_raw_u64` and reinterprets the low bits as the declared type.
+    // 0x140-0x155): Load pushes via `push_kinded(bits, NativeKind::<Kind>)`
+    // with the native value sign- or zero-extended into the 8-byte stack
+    // slot. Store pops via `pop_kinded() -> (bits, NativeKind::<Kind>)`
+    // and reinterprets the low bits as the declared type. The pre-Wave-6.5
+    // ValueWord-shape stack shims were deleted per ADR-006 §2.7.7; every
+    // push site sources kind locally from the opcode's payload-kind suffix.
     //
     // The legacy `LoadModuleBinding` (0x52) / `StoreModuleBinding` (0x53)
     // remain live for unproven-type module bindings; the typed opcodes

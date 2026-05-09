@@ -452,256 +452,45 @@ impl VirtualMachine {
     // in this module.
     // ────────────────────────────────────────────────────────────────────
 
-    /// **Transitional shim.** Push raw u64 bits onto the stack with a
-    /// `Bool` default kind. Callers that know their value's `NativeKind`
-    /// should use `push_kinded(bits, kind)` directly.
-    #[inline(always)]
-    pub fn push_raw_u64(&mut self, bits: u64) -> Result<(), VMError> {
-        self.push_kinded(bits, NativeKind::Bool)
-    }
+    // ────────────────────────────────────────────────────────────────────
+    // ADR-006 §2.7.7 Wave 6.5 (commit `a3fbe7f`+1): the Wave 6.0
+    // transitional shim layer (`push_raw_u64`, `pop_raw_u64`,
+    // `push_native_i64`, `stack_read_owned`, `stack_peek_raw`, ...) has
+    // been DELETED. The shims dressed up Bool-default kinded primitives
+    // as legacy ValueWord-shape names; per ADR-006 §2.7.7 "Forbidden
+    // shapes" the pattern is the W-series "borrowed slot with
+    // call-pattern invariants" defection-attractor. Every caller must
+    // source kind locally and call `push_kinded(bits, kind)` /
+    // `pop_kinded() -> (bits, kind)` directly.
+    //
+    // The sentinel constant for the zero/Bool slot is kept as a public
+    // re-export so callers that need a "dead slot" placeholder can name
+    // it without re-encoding the convention.
+    // ────────────────────────────────────────────────────────────────────
 
-    /// **Transitional shim.** Pop raw u64 bits, discarding the per-slot
-    /// `NativeKind`. Callers that care about the kind should use
-    /// `pop_kinded()` directly.
-    #[inline(always)]
-    pub fn pop_raw_u64(&mut self) -> Result<u64, VMError> {
-        self.pop_kinded().map(|(bits, _kind)| bits)
-    }
-
-    /// **Transitional shim.** Push raw f64 bits with `Float64` kind.
-    #[inline(always)]
-    pub(crate) fn push_raw_f64(&mut self, value: f64) -> Result<(), VMError> {
-        let bits = if value.is_nan() {
-            f64::NAN.to_bits()
-        } else {
-            value.to_bits()
-        };
-        self.push_kinded(bits, NativeKind::Float64)
-    }
-
-    /// **Transitional shim.** Pop raw f64 bits.
-    #[inline(always)]
-    pub(crate) fn pop_raw_f64(&mut self) -> Result<f64, VMError> {
-        self.pop_kinded().map(|(bits, _k)| f64::from_bits(bits))
-    }
-
-    /// **Transitional shim.** Push raw native i64 bits with `Int64` kind.
-    #[inline(always)]
-    pub fn push_native_i64(&mut self, value: i64) -> Result<(), VMError> {
-        self.push_kinded(value as u64, NativeKind::Int64)
-    }
-
-    /// **Transitional shim.** Pop raw native i64 bits.
-    #[inline(always)]
-    pub fn pop_native_i64(&mut self) -> Result<i64, VMError> {
-        self.pop_kinded().map(|(bits, _k)| bits as i64)
-    }
-
-    /// **Transitional shim.** Push raw native bool bits with `Bool` kind.
-    #[inline(always)]
-    pub fn push_native_bool(&mut self, value: bool) -> Result<(), VMError> {
-        self.push_kinded(value as u64, NativeKind::Bool)
-    }
-
-    /// **Transitional shim.** Pop raw native bool bits.
-    #[inline(always)]
-    pub fn pop_native_bool(&mut self) -> Result<bool, VMError> {
-        self.pop_kinded().map(|(bits, _k)| bits != 0)
-    }
-
-    /// **Transitional shim.** Borrow-read raw bits at `idx`.
-    #[inline(always)]
-    pub(crate) fn stack_read_raw(&self, idx: usize) -> u64 {
-        self.stack[idx]
-    }
-
-    /// **Transitional shim.** Owning-share read of raw bits at `idx`.
-    /// Bumps the per-slot share via `clone_with_kind`.
-    #[inline(always)]
-    pub(crate) fn stack_read_owned(&self, idx: usize) -> u64 {
-        let bits = self.stack[idx];
-        let kind = self.kinds[idx];
-        clone_with_kind(bits, kind);
-        bits
-    }
-
-    /// **Transitional shim.** Write raw bits at `idx`, retiring the
-    /// previous occupant via `drop_with_kind`. New slot kind defaults
-    /// to `Bool` (Drop-safe sentinel).
-    #[inline(always)]
-    pub(crate) fn stack_write_raw(&mut self, idx: usize, value: u64) {
-        let old_bits = self.stack[idx];
-        let old_kind = self.kinds[idx];
-        drop_with_kind(old_bits, old_kind);
-        self.stack[idx] = value;
-        self.kinds[idx] = NativeKind::Bool;
-    }
-
-    /// **Transitional shim.** Take ownership of slot `idx`, replacing it
-    /// with the zero/Bool sentinel.
-    #[inline(always)]
-    pub(crate) fn stack_take_raw(&mut self, idx: usize) -> u64 {
-        let bits = self.stack[idx];
-        self.stack[idx] = 0u64;
-        self.kinds[idx] = NativeKind::Bool;
-        bits
-    }
-
-    /// **Transitional shim.** Read-only `&[u64]` view of a stack range.
-    #[inline(always)]
-    pub(crate) fn stack_slice_raw(&self, range: std::ops::Range<usize>) -> &[u64] {
-        &self.stack[range]
-    }
-
-    /// **Transitional shim.** Peek the top N raw u64 values without popping.
-    /// Returns `slice[0]` = deepest, `slice[count-1]` = TOS.
-    #[inline(always)]
-    pub(crate) fn peek_args_slice(&self, count: usize) -> Result<&[u64], VMError> {
-        if count > self.sp {
-            return Err(VMError::StackUnderflow);
-        }
-        let start = self.sp - count;
-        Ok(&self.stack[start..self.sp])
-    }
-
-    /// **Transitional shim.** `&[u64]` view of module bindings.
-    #[inline(always)]
-    pub(crate) fn bindings_slice_raw(&self) -> &[u64] {
-        &self.module_bindings
-    }
-
-    /// **Transitional shim.** Borrow-read raw bits from module binding.
-    #[inline(always)]
-    pub(crate) fn binding_read_raw(&self, idx: usize) -> u64 {
-        self.module_bindings[idx]
-    }
-
-    /// **Transitional shim.** Owning-share read of module binding bits.
-    /// Module bindings do not yet have a parallel kind track; treat as
-    /// `Bool` (no-op clone). Wave 7 owns the binding kind track.
-    #[inline(always)]
-    pub(crate) fn binding_read_owned(&self, idx: usize) -> u64 {
-        // Bool-default — clone is a no-op. Wave 7 will source the kind
-        // from a parallel module-bindings kind track.
-        self.module_bindings[idx]
-    }
-
-    /// **Transitional shim.** Write raw bits into module binding `idx`.
-    /// Pre-Wave-7: drop is a no-op (Bool default).
-    #[inline(always)]
-    pub(crate) fn binding_write_raw(&mut self, idx: usize, value: u64) {
-        self.module_bindings[idx] = value;
-    }
-
-    /// **Transitional shim.** Take ownership of module binding `idx`.
-    #[inline(always)]
-    pub(crate) fn binding_take_raw(&mut self, idx: usize) -> u64 {
-        let bits = self.module_bindings[idx];
-        self.module_bindings[idx] = 0u64;
-        bits
-    }
-
-    /// **Transitional shim — DELETED PATH.** Top-of-stack tag inspection.
-    /// Pre-Wave-6 typed opcodes used these to dispatch between tagged-
-    /// fallback and native fast paths; with Wave 6's parallel kind
-    /// track, the kind is known by construction so probing is unnecessary.
-    /// These shims always return `false` (the native fast path is
-    /// universal post-Wave-6); the typed-arithmetic / typed-comparison
-    /// migration owns wiring the call sites to the kinds track.
-    #[inline(always)]
-    pub(crate) fn stack_top_both_i48(&self) -> bool {
-        false
-    }
-    #[inline(always)]
-    pub(crate) fn stack_top_is_i48(&self) -> bool {
-        false
-    }
-    #[inline(always)]
-    pub(crate) fn stack_top_both_f64(&self) -> bool {
-        false
-    }
-    #[inline(always)]
-    pub(crate) fn stack_top_is_f64(&self) -> bool {
-        false
-    }
-    #[inline(always)]
-    pub(crate) fn stack_top_is_bool(&self) -> bool {
-        false
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 NaN-tagged i64 push. With native
-    /// kinds, this is just `push_native_i64` — typed-arithmetic
-    /// migration removes the tagged/native distinction.
-    #[inline(always)]
-    pub(crate) fn push_tagged_i64(&mut self, value: i64) -> Result<(), VMError> {
-        self.push_native_i64(value)
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 NaN-tagged i64 pop.
-    #[inline(always)]
-    pub(crate) fn pop_tagged_i64(&mut self) -> Result<i64, VMError> {
-        self.pop_native_i64()
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 NaN-tagged bool push.
-    #[inline(always)]
-    pub(crate) fn push_tagged_bool(&mut self, value: bool) -> Result<(), VMError> {
-        self.push_native_bool(value)
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 NaN-tagged bool pop.
-    #[inline(always)]
-    pub(crate) fn pop_tagged_bool(&mut self) -> Result<bool, VMError> {
-        self.pop_native_bool()
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 cold-path push. Now backed by
-    /// `push_kinded_slow` with a Bool default kind.
-    #[cold]
-    #[inline(never)]
-    pub fn push_raw_u64_slow(&mut self, bits: u64) -> Result<(), VMError> {
-        self.push_kinded_slow(bits, NativeKind::Bool)
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 callable that returned a
-    /// `ValueWord` (deleted). Returns the raw u64 bits of the topmost
-    /// pop instead — callers that needed a `ValueWord` are pre-existing
-    /// errors not in Wave 6 territory.
-    #[inline(always)]
-    pub fn pop(&mut self) -> Result<u64, VMError> {
-        self.pop_raw_u64()
-    }
-
-    /// `NONE_BITS` constant kept for legacy callers (snapshot.rs, etc.).
-    /// Post-deletion of `ValueWord`, this is just `0u64` — the
-    /// zero/Bool sentinel.
+    /// Sentinel "dead slot" payload: zero bits paired with `NativeKind::Bool`
+    /// is Drop-safe (no refcount dispatch). Wave 6.5 retains the constant
+    /// so callers (snapshot.rs, OSR re-materialization, etc.) can name the
+    /// convention without re-encoding it.
     pub(crate) const NONE_BITS: u64 = 0u64;
 
-    // ── Pre-existing peek-by-closure helper (compatibility) ───────────────
+    // ── Read-only peek-by-closure helper ──────────────────────────────────
 
-    /// Read-only inspection of stack[idx] via a closure receiving raw
-    /// bits + kind. Replaces the pre-Wave-6 `stack_peek_raw` (which
-    /// reconstructed a temporary `ValueWord`). The closure must NOT
-    /// retain the bits past its return.
+    /// Read-only inspection of `stack[idx]` via a closure receiving raw
+    /// bits + kind. The closure must NOT retain the bits past its
+    /// return — the slot still owns the underlying share.
+    ///
+    /// Replaces the deleted `stack_peek_raw` shim (which handed out raw
+    /// bits without the kind, fitting the W-series "borrowed slot with
+    /// call-pattern invariants" defection-attractor). Post-Wave-6.5,
+    /// every peek site receives kind alongside bits so downstream
+    /// dispatch can match on kind without re-probing.
     #[inline(always)]
     pub(crate) fn stack_peek_kinded<F, R>(&self, idx: usize, f: F) -> R
     where
         F: FnOnce(u64, NativeKind) -> R,
     {
         f(self.stack[idx], self.kinds[idx])
-    }
-
-    /// **Transitional shim.** Pre-Wave-6 `stack_peek_raw` accepted a
-    /// closure receiving `&ValueWord`. Post-deletion, the closure
-    /// receives the raw `u64` bits — pre-existing call sites that
-    /// invoked `ValueWord` accessors are pre-existing errors not in
-    /// Wave 6 territory.
-    #[inline(always)]
-    pub(crate) fn stack_peek_raw<F, R>(&self, idx: usize, f: F) -> R
-    where
-        F: FnOnce(u64) -> R,
-    {
-        f(self.stack[idx])
     }
 }
 
