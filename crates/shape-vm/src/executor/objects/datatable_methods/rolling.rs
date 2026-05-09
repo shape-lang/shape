@@ -13,93 +13,108 @@
 //! `NativeKind::Int64`, and pushes the result table via `Arc::into_raw +
 //! push_kinded(bits, NativeKind::Ptr(HeapKind::DataTable))`.
 
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
+use shape_runtime::context::ExecutionContext;
 
 use crate::executor::VirtualMachine;
 
-#[inline]
-fn stub(name: &str, kind_source: &str) -> VMError {
-    VMError::NotImplemented(format!(
-        "datatable.{} — SURFACE: phase-2c body migration. Receiver kind = \
-         NativeKind::Ptr(HeapKind::DataTable) (or Ptr(HeapKind::TableView) \
-         for typed/indexed variants); body re-shape requires kinded receiver \
-         dispatch via slot.as_heap_value() + HeapValue::DataTable / \
-         HeapValue::TableView match per ADR-005 §1, kinded column-name arg \
-         (NativeKind::String) and integer window arg (NativeKind::Int64), \
-         and result push via Arc::into_raw + push_kinded per playbook §3 \
-         ({}).",
-        name, kind_source
-    ))
-}
+// Pre-§2.7.9 surface helper `stub` deleted with its callers' bodies —
+// each handler now carries the §2.7.9-aware migration contract inline
+// per the M-datatable Wave-β `joins.rs` precedent. Wave-γ-followup
+// body migration territory (D-datatable-rolling-class).
 
 /// `dt.correlation(col_a, col_b)` — Pearson correlation between two columns.
 pub(crate) fn handle_correlation(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("correlation", "result kind = NativeKind::Float64"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_correlation — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.covariance(col_a, col_b)` — covariance between two columns.
 pub(crate) fn handle_covariance(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("covariance", "result kind = NativeKind::Float64"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_covariance — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.rolling_sum(col, window)` — append rolling-sum column.
 pub(crate) fn handle_rolling_sum(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("rolling_sum", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_rolling_sum — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.rolling_mean(col, window)`.
 pub(crate) fn handle_rolling_mean(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("rolling_mean", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_rolling_mean — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.rolling_std(col, window)`.
 pub(crate) fn handle_rolling_std(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("rolling_std", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_rolling_std — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.diff(col)` — append first-difference column.
 pub(crate) fn handle_diff(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("diff", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_diff — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.pct_change(col)` — append percent-change column.
 pub(crate) fn handle_pct_change(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("pct_change", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_pct_change — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }
 
 /// `dt.forward_fill(col)` — append forward-filled column.
 pub(crate) fn handle_forward_fill(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    Err(stub("forward_fill", "result kind = receiver kind"))
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "handle_forward_fill — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
+            .to_string(),
+    ))
 }

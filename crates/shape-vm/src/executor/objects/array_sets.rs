@@ -16,6 +16,7 @@
 //!   - decoding kind from the raw `u64` bits (forbidden — the deleted
 //!     tag_bits dispatch, §2.7.7 #4 / #7), or
 //!   - defaulting to `NativeKind::Bool` "because Drop is a no-op"
+use shape_runtime::context::ExecutionContext;
 //!     (forbidden §2.7.7 #9 — the W-series rationalization the
 //!     playbook names verbatim), or
 //!   - probing a heap discriminant via a deleted heap-ref accessor /
@@ -33,7 +34,7 @@
 //! pattern workaround.
 
 use crate::executor::VirtualMachine;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) handlers
@@ -44,48 +45,11 @@ use shape_value::VMError;
 /// args: [array, other_array]
 pub(crate) fn handle_union_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: the MethodFnV2 ABI's `args: &mut [u64]` is kind-blind.
-    // This handler needs:
-    //
-    //   1. To interpret args[0] and args[1] as arrays — requires
-    //      `kind == NativeKind::Ptr(HeapKind::TypedArray)` proof per
-    //      §2.7.7, then `slot.as_heap_value() + HeapValue::TypedArray
-    //      (arc)` match per ADR-005 §1 single-discriminator.
-    //   2. To iterate `TypedArrayData::*` arms with per-element
-    //      `NativeKind` for equality comparison and result-buffer
-    //      retention. Per-arm kinds are `I64 => Int64`, `F64 =>
-    //      Float64`, `String => NativeKind::String`, …; `HeapValue(_)`
-    //      and `Matrix` cannot be uniformly kinded — see §8 surface
-    //      trigger.
-    //   3. To equality-compare elements across heterogeneous kinds.
-    //      The legacy body used `ValueWordExt::vw_equals` (a deleted
-    //      ValueWord method §2.7.7 #7); the kinded replacement
-    //      requires per-`NativeKind` equality dispatch (numeric ==,
-    //      string-arc deep-eq, heap-pointer identity) which itself
-    //      depends on kinded args.
-    //   4. To retain elements into the result buffer. The legacy body
-    //      used `shape_value::vw_clone(bits)` (forbidden §2.7.7 #8 —
-    //      replaced by `clone_with_kind(bits, kind)` which needs a
-    //      kinded slot). And `vmarray_from_vec` materialized the
-    //      result as a generic `HeapValue::Array(Arc<Vec<ValueWord>>)`
-    //      — that "generic VW array" arm is itself a Phase-2c reentry
-    //      surface (see `array_operations.rs` close).
-    //
-    // Bool-defaulting any of the above is forbidden (§2.7.7 #9). The
-    // correct refusal shape is the surface below.
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "union — SURFACE: MethodFnV2 ABI lacks parallel NativeKind track \
-         (ADR-006 §2.7.7 / §2.7.8 follow-up; same gap as D-array-joins \
-         close 2fe4a6b). Cannot interpret arg kinds, iterate element \
-         kinds, equality-compare across kinds, or retain into a kinded \
-         result buffer (replaces `vw_clone` / `vmarray_from_vec` — both \
-         forbidden post-§2.7.7). Phase-2c follow-up: extend MethodFnV2 \
-         to `args: &mut [(u64, NativeKind)]` (or equivalent parallel \
-         track) analogous to the stack/cell-store §2.7.7/§2.7.8 \
-         invariants."
+        "handle_union_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }
@@ -95,19 +59,11 @@ pub(crate) fn handle_union_v2(
 /// args: [array, other_array]
 pub(crate) fn handle_intersect_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: same gap as `handle_union_v2` — kind-blind args, kind-
-    // blind element iteration, kind-blind equality compare, kind-blind
-    // retain into result. (The legacy body used `vw_equals` for cross-
-    // array membership testing and `vw_clone` to retain shares.)
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "intersect — SURFACE: MethodFnV2 ABI lacks parallel NativeKind \
-         track (ADR-006 §2.7.7 / §2.7.8 follow-up). Same gap as union \
-         (kind-blind args, vw_equals/vw_clone replacements need kinded \
-         slots). Phase-2c follow-up: extend MethodFnV2 with parallel \
-         kind track."
+        "handle_intersect_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }
@@ -117,18 +73,11 @@ pub(crate) fn handle_intersect_v2(
 /// args: [array, other_array]
 pub(crate) fn handle_except_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: same gap as `handle_union_v2` — kind-blind args, kind-
-    // blind element iteration, kind-blind equality compare, kind-blind
-    // retain into result.
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "except — SURFACE: MethodFnV2 ABI lacks parallel NativeKind \
-         track (ADR-006 §2.7.7 / §2.7.8 follow-up). Same gap as union \
-         (kind-blind args, vw_equals/vw_clone replacements need kinded \
-         slots). Phase-2c follow-up: extend MethodFnV2 with parallel \
-         kind track."
+        "handle_except_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }
@@ -138,18 +87,11 @@ pub(crate) fn handle_except_v2(
 /// args: [array]
 pub(crate) fn handle_unique_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: same gap as `handle_union_v2` — kind-blind receiver,
-    // kind-blind element iteration, kind-blind equality compare, kind-
-    // blind retain into result. (Single-array variant; no `other`.)
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "unique — SURFACE: MethodFnV2 ABI lacks parallel NativeKind \
-         track (ADR-006 §2.7.7 / §2.7.8 follow-up). Cannot dispatch on \
-         receiver array kind, iterate element kinds, equality-compare \
-         across kinds, or retain into a kinded result buffer. Phase-2c \
-         follow-up: extend MethodFnV2 with parallel kind track."
+        "handle_unique_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }
@@ -159,16 +101,11 @@ pub(crate) fn handle_unique_v2(
 /// args: [array]
 pub(crate) fn handle_distinct_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: same gap as `handle_unique_v2` (the legacy body
-    // delegated to it). Surface the same ABI gap directly here — the
-    // kind track Phase-2c follow-up unblocks both.
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "distinct — SURFACE: MethodFnV2 ABI lacks parallel NativeKind \
-         track (ADR-006 §2.7.7 / §2.7.8 follow-up). Same gap as unique. \
-         Phase-2c follow-up: extend MethodFnV2 with parallel kind track."
+        "handle_distinct_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }
@@ -178,39 +115,11 @@ pub(crate) fn handle_distinct_v2(
 /// args: [array, key_fn]
 pub(crate) fn handle_distinct_by_v2(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    // SURFACE: the MethodFnV2 ABI's `args: &mut [u64]` is kind-blind,
-    // and this handler additionally needs:
-    //
-    //   1. To distinguish args[0] (array receiver) from args[1]
-    //      (closure / fn-id) by kind — `Ptr(HeapKind::TypedArray)` vs.
-    //      a callable kind. The legacy body relied on `ValueWord`
-    //      probing (forbidden §2.7.7 #7).
-    //   2. To call back into `op_call_value` with kinded (callee, arg,
-    //      arg_count) slots for the key function — args[1] is kind-
-    //      blind in the current ABI.
-    //   3. To equality-compare returned keys across heterogeneous
-    //      kinds (the key function may return any type). Legacy body
-    //      used `vw_equals` (forbidden); kinded replacement needs a
-    //      per-`NativeKind` equality dispatch.
-    //   4. To either retain the source element into the result buffer
-    //      (`vw_clone` — forbidden §2.7.7 #8) or release the
-    //      duplicate-key call-return ref (`vw_drop` — forbidden
-    //      §2.7.7 #8). Both replaced by `clone_with_kind` /
-    //      `drop_with_kind` which require kinded slots.
-    //
-    // Bool-defaulting any of the above is forbidden (§2.7.7 #9).
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "distinctBy — SURFACE: MethodFnV2 ABI lacks parallel NativeKind \
-         track (ADR-006 §2.7.7 / §2.7.8 follow-up). Cannot distinguish \
-         array receiver from key-fn arg, call back through op_call_value \
-         with kinded slots, equality-compare returned keys, or run the \
-         retain (`vw_clone`) / release (`vw_drop`) discipline (both \
-         replaced by `clone_with_kind` / `drop_with_kind` which require \
-         kinded slots). Phase-2c follow-up: extend MethodFnV2 with \
-         parallel kind track."
+        "handle_distinct_by_v2 — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
             .to_string(),
     ))
 }

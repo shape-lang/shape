@@ -11,16 +11,17 @@
 //! pushes the result as
 //! `NativeKind::Ptr(HeapKind::TableView)` (IndexedTable variant).
 
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
+use shape_runtime::context::ExecutionContext;
 
 use crate::executor::VirtualMachine;
 
 /// `dt.index_by(col)` — produce an IndexedTable view keyed by `col`.
 pub(crate) fn handle_index_by(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "datatable.index_by — SURFACE: phase-2c body migration. Receiver kind \
          = NativeKind::Ptr(HeapKind::DataTable); body re-shape requires \
