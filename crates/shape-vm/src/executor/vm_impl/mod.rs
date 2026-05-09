@@ -14,4 +14,4 @@ mod modules;
 mod output;
 mod program;
 mod schemas;
-mod stack;
+pub(crate) mod stack;

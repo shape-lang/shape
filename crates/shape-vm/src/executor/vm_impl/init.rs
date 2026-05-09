@@ -1,5 +1,5 @@
 use super::super::*;
-use shape_value::ValueWordExt;
+use shape_value::NativeKind;
 
 impl VirtualMachine {
     pub fn new(config: VMConfig) -> Self {
@@ -23,7 +23,12 @@ impl VirtualMachine {
             config,
             program,
             ip: 0,
-            stack: vec![ValueWord::none().into_raw_bits(); crate::constants::DEFAULT_STACK_CAPACITY],
+            // ADR-006 §2.7.7 / Q9: typed VM stack is `Vec<u64>` data plus
+            // parallel `Vec<NativeKind>` kind track. Slots above `sp` are
+            // pre-allocated dead space; their kind is `Bool` by convention
+            // (Drop is a no-op for Bool, so dead bits never leak refcount).
+            stack: vec![0u64; crate::constants::DEFAULT_STACK_CAPACITY],
+            kinds: vec![NativeKind::Bool; crate::constants::DEFAULT_STACK_CAPACITY],
             sp: 0,
             module_bindings: Vec::new(),
             shared_module_bindings: std::collections::HashSet::new(),

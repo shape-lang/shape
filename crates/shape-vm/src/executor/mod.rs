@@ -222,11 +222,20 @@ pub struct VirtualMachine {
 
     /// Unified value stack (pre-allocated, raw u64: 8 bytes per slot).
     /// Locals live in register windows on this stack.
-    /// Each slot stores the raw bit pattern of a `ValueWord` (which is
-    /// `#[repr(transparent)]` over `u64`).  Ownership of any embedded
-    /// Arc refcounts is managed manually via `push_raw_u64`/`pop_raw_u64`/
-    /// `stack_read_raw`/`stack_write_raw` helpers.
-    stack: Vec<u64>,
+    /// Each slot stores the raw bit pattern of a typed value, interpreted
+    /// according to the parallel `kinds` track. Ownership of any embedded
+    /// Arc refcounts is managed manually via `push_kinded`/`pop_kinded`/
+    /// `read_owned_kinded`/`stack_write_kinded` helpers (ADR-006 §2.7.7).
+    pub(crate) stack: Vec<u64>,
+
+    /// Parallel kind track (ADR-006 §2.7.7 / Q9).
+    ///
+    /// `kinds[i]` is the `NativeKind` interpretation of `stack[i]`. Index
+    /// invariant: `stack.len() == kinds.len()` at every API boundary.
+    /// WB2.4 retain-on-read uses this track for kind-aware clone/drop
+    /// dispatch (`clone_with_kind` / `drop_with_kind`) — no tag decode,
+    /// no `is_heap()` probe.
+    pub(crate) kinds: Vec<shape_value::NativeKind>,
 
     /// Stack pointer — logical top of the value stack.
     /// `stack[0..sp]` are live values; `stack[sp..]` is pre-allocated dead space.

@@ -25,80 +25,69 @@
 //! (`as_number_coerce`, etc.) on the carrier; coercion lives at
 //! `executor/builtins/kind_coerce.rs` (free helper at the body site).
 //!
-//! # `pop_builtin_args` runtime semantics (Wave 5b → architectural surface)
+//! # `pop_builtin_args` runtime semantics (Wave 6: kinded stack ABI)
 //!
-//! Wave 5b implements `pop_builtin_args` by popping the call's arg-count
-//! slot (always Int64-kinded, pushed as `PushConst(Number(n))` by the
-//! compiler), then popping each arg's raw u64 bits off the stack. The
-//! per-arg `NativeKind` is **not yet recoverable from the stack ABI** —
-//! the typed VM stack stores raw u64 with kinds threaded only through the
-//! producing opcode operand and (for locals) the `FrameDescriptor`. There
-//! is no per-stack-slot kind shadow. Wave 6 owns that work.
+//! Wave 6 (ADR-006 §2.7.7 / Q9) added a parallel `Vec<NativeKind>` track
+//! to the VM stack. `pop_builtin_args` now reads the per-arg `NativeKind`
+//! directly from the parallel track via `pop_kinded()`. Wave 5b's
+//! transitional `NativeKind::Bool` sentinel is removed — every arg's kind
+//! is the kind that the producing opcode emitted into the parallel track
+//! at push time.
 //!
-//! As a transitional shim, every popped arg is currently tagged with
-//! `NativeKind::Bool` (the §2.7 default sentinel — Drop is a no-op for
-//! Bool-kinded slots regardless of the underlying bits, so this is leak-
-//! free at the cost of being kind-blind). Builtin bodies will fail their
-//! kind discriminator at runtime when the bits are not actually Bool —
-//! making the architectural gap immediately visible. No silent corruption.
-//!
-//! When Wave 6 lands a kind-bearing stack ABI, this is the call site that
-//! gets the real `NativeKind` per arg from the stack metadata. See the
-//! audit's §C1/§D entries (`type_tracking.rs:286`, `vm_impl/stack.rs`).
+//! **Ownership transfer**: `pop_kinded()` moves one strong-count share
+//! (for heap-bearing kinds) out of the stack slot into the returned
+//! tuple. Wrapping it in a `KindedSlot` transfers that share to the
+//! carrier; `KindedSlot::Drop` retires the share when the args `Vec` is
+//! dropped at the end of the builtin call. **No `clone_with_kind`
+//! needed** here — that's only for `read_owned_kinded` (which keeps the
+//! slot live on the stack while handing a share out).
 
 use super::super::*;
-use shape_value::{KindedSlot, NativeKind};
+use shape_value::{KindedSlot, ValueSlot};
 
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a
-    /// `Vec<KindedSlot>`. The topmost stack slot is the arg count
-    /// (Int64-kinded, pushed by the compiler as a numeric `PushConst`).
+    /// `Vec<KindedSlot>` (ADR-006 §2.7.7 / Q9).
     ///
-    /// **Wave 5b semantic gap (surfaced as architectural concern)**: the
-    /// VM stack does not currently carry per-slot `NativeKind`. The
-    /// compiler emits typed pushes (e.g. `PushNativeInt64`,
-    /// `PushNativeF64`) but the kind is consumed by the producing
-    /// opcode and not retained on the stack itself. Until Wave 6 lands a
-    /// kind-bearing stack ABI, this method tags every popped arg with
-    /// `NativeKind::Bool` (§2.7 default sentinel — Drop / Clone is a
-    /// no-op for the Bool arm regardless of underlying bits).
+    /// The topmost stack slot is the arg count (pushed as a numeric
+    /// constant by the compiler). Each subsequent pop hands back the raw
+    /// u64 bits **plus** the `NativeKind` recorded by the producing opcode
+    /// in the parallel kinds track.
     ///
-    /// Builtin bodies will surface the gap by failing their kind
-    /// discriminator at runtime; the failure mode is a clean
-    /// `VMError::RuntimeError` (`"<name>() argument must be a number"`,
-    /// etc.) — never silent heap corruption.
+    /// **Ownership**: `pop_kinded()` transfers the slot's strong-count
+    /// share into the returned tuple; wrapping it in a `KindedSlot`
+    /// transfers ownership to the carrier. `KindedSlot::Drop` retires the
+    /// share when the returned `Vec` goes out of scope.
     pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<KindedSlot>, VMError> {
         // Top of stack: the arg count, pushed as a numeric constant by the
-        // compiler (`PushConst(Number(arg_count as f64))`). Some sites omit
-        // the count (zero-arg builtins like `Snapshot`) — we cannot
-        // distinguish here, so we pop the count when the topmost slot
-        // looks numeric; otherwise treat as zero. Wave 6 will bake the
-        // count into the BuiltinCall operand.
-        //
-        // Today the count is always present: the compiler in
-        // `compiler/expressions/function_calls.rs:1151-1158` only emits the
-        // PushConst(arg_count) when `builtin_requires_arg_count(builtin)`
-        // returns true, but for the math/array/utility scope of Wave 5b it
-        // does. We rely on that contract.
-        let count_bits = self.pop_raw_u64()?;
-        // The count was pushed via `PushConst(Number(n as f64))` —
-        // reinterpret the raw bits as f64 and cast.
+        // compiler (`PushConst(Number(arg_count as f64))`). The count slot
+        // is inline-scalar (Float64-kinded), so dropping its share is a
+        // no-op — but we still go through `pop_kinded` for invariant
+        // discipline.
+        let (count_bits, _count_kind) = self.pop_kinded()?;
         let count = f64::from_bits(count_bits) as usize;
 
         let mut args: Vec<KindedSlot> = Vec::with_capacity(count);
         for _ in 0..count {
-            let bits = self.pop_raw_u64()?;
-            // Wave 6 architectural surface: stack slots do not carry
-            // NativeKind metadata. Tag with the §2.7 default (Bool, no
-            // Drop side-effects) and let the body surface the kind
-            // mismatch via its own type-error path.
-            args.push(KindedSlot::new(
-                shape_value::ValueSlot::from_raw(bits),
-                NativeKind::Bool,
-            ));
+            let (bits, kind) = self.pop_kinded()?;
+            // The pop transferred the slot's share to us; wrap it in a
+            // KindedSlot which will Drop-retire the share when the
+            // builtin call's arg vec is dropped.
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
         }
         args.reverse();
         Ok(args)
+    }
+
+    /// Push a `KindedSlot` result back onto the stack. The carrier's
+    /// share transfers into the slot; we `mem::forget` the carrier so its
+    /// `Drop` does not retire the share that the slot now owns.
+    #[inline]
+    pub(crate) fn push_kinded_slot(&mut self, slot: KindedSlot) -> Result<(), VMError> {
+        let bits = slot.slot().raw();
+        let kind = slot.kind();
+        std::mem::forget(slot);
+        self.push_kinded(bits, kind)
     }
 
     // ========================================================================
@@ -120,210 +109,176 @@ impl VirtualMachine {
                 BuiltinFunction::Abs => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_abs(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Sqrt => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_sqrt(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Ln => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_ln(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Pow => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_pow(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Exp => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_exp(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Log => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_log(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Floor => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_floor(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Ceil => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_ceil(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Round => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_round(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Sin => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_sin(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Cos => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_cos(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Tan => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_tan(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Asin => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_asin(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Acos => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_acos(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Atan => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_atan(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Min => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_min(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Max => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_max(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::StdDev => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_stddev(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Sign => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_sign(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Gcd => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_gcd(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Lcm => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_lcm(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Hypot => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_hypot(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Clamp => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_clamp(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::IsNaN => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_is_nan(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::IsFinite => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::math::builtin_is_finite(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
 
                 // ── Wave 5b: array builtins ───────────────────────────────
                 BuiltinFunction::Push => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_push(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Pop => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_pop(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::First => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_first(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Last => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_last(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Zip => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_zip(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Filled => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_filled(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Range => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_range(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Slice => {
                     let args = self.pop_builtin_args()?;
                     let r = super::super::builtins::array_ops::builtin_slice(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
 
                 // ── Wave 5b: utility builtins ─────────────────────────────
                 BuiltinFunction::ObjectRest => {
                     let args = self.pop_builtin_args()?;
                     let r = self.builtin_object_rest(&args)?;
-                    self.push_raw_u64(r.slot().raw())?;
-                    std::mem::forget(r);
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Snapshot => {
                     // Snapshot suspends execution; never returns a value.

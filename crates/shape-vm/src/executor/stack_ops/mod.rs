@@ -1,14 +1,23 @@
-//! Stack operations for the VM executor
+//! Stack operations for the VM executor (ADR-006 §2.7.7 / Q9 — kinded stack).
 //!
-//! Handles basic stack manipulation: push, pop, dup, swap
-
-use std::sync::Arc;
+//! Handles basic stack manipulation: PushConst, PushNull, Pop, Dup, Swap,
+//! plus the legacy `PromoteToOwned` / `PromoteToShared` opcodes.
+//!
+//! Wave 6: every push/pop now threads through the kinded API
+//! (`push_kinded(bits, kind)` / `pop_kinded()`). Kind is sourced from the
+//! constant being pushed (compile-time-known per Constant variant). The
+//! Box-vs-Arc heap promotion machinery (`PromoteToOwned`/`PromoteToShared`)
+//! becomes a no-op: the kinded model carries `Arc<T>` directly per
+//! `KindedSlot::from_*` constructors — there is no Box-owned encoding.
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
+    executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
     executor::VirtualMachine,
 };
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{NativeKind, VMError, heap_value::HeapKind};
+use std::sync::Arc;
+
 impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn exec_stack_ops(
@@ -18,187 +27,42 @@ impl VirtualMachine {
         use OpCode::*;
         match instruction.opcode {
             PushConst => self.op_push_const(instruction)?,
-            PushNull => self.push_raw_u64(ValueWord::none())?,
+            PushNull => self.push_kinded(0u64, NativeKind::Bool)?,
             Pop => {
-                self.pop_raw_u64()?;
+                let (bits, kind) = self.pop_kinded()?;
+                drop_with_kind(bits, kind);
             }
             Dup => {
-                // WB2.2 retain-on-read: `Dup` produces an independent
-                // owning share of the top-of-stack. Without the
-                // `stack_read_owned` refcount bump, the duplicated bits
-                // would alias the original slot and Phase 3's
-                // `vw_drop_slice` on stack teardown would double-free.
+                // WB2.4 retain-on-read: `Dup` produces an independent
+                // owning share of the top-of-stack. Bump the heap refcount
+                // via `clone_with_kind` so both stack slots own a share.
                 let index = self.sp.checked_sub(1).ok_or(VMError::StackUnderflow)?;
-                if index >= self.stack.len() {
-                    return Err(VMError::StackUnderflow);
-                }
-                let val = self.stack_read_owned(index);
-                self.push_raw_u64(val)?;
+                let (bits, kind) = self.stack_read_kinded_raw(index);
+                clone_with_kind(bits, kind);
+                self.push_kinded(bits, kind)?;
             }
             Swap => {
-                let b = self.pop_raw_u64()?;
-                let a = self.pop_raw_u64()?;
-                self.push_raw_u64(b)?;
-                self.push_raw_u64(a)?;
+                let (b_bits, b_kind) = self.pop_kinded()?;
+                let (a_bits, a_kind) = self.pop_kinded()?;
+                self.push_kinded(b_bits, b_kind)?;
+                self.push_kinded(a_bits, a_kind)?;
             }
-            PromoteToOwned => self.op_promote_to_owned()?,
-            // Phase 5.C: `ReturnOwned` has identical runtime semantics to
-            // `PromoteToOwned` — it converts a freshly-allocated Arc on the
-            // return value to a Box. Emitted by callees whose
-            // `ReturnOwnershipMode` is `NewlyOwned` so callers can skip their
-            // own promotion after the call returns.
-            ReturnOwned => self.op_promote_to_owned()?,
-            // V1.2B: inverse of `PromoteToOwned` — converts a Box-owned
-            // heap value on top-of-stack into an Arc-shared one. No-op
-            // for inline scalars and already-shared heap values.
-            PromoteToShared => self.op_promote_to_shared()?,
+            // ADR-006: heap values are always Arc-backed via `KindedSlot::from_*`
+            // constructors. The pre-Wave-6 Box-owned encoding (HEAP_OWNED_BIT)
+            // is gone; PromoteToOwned / PromoteToShared collapse to no-ops.
+            // The opcodes are preserved for bytecode compatibility (existing
+            // FunctionBlobs reference them); the runtime semantics are now
+            // "ensure top-of-stack is Arc-backed" — already true by
+            // construction.
+            PromoteToOwned | ReturnOwned | PromoteToShared => {
+                // No-op: the kinded model never produces Box-backed slots.
+            }
             _ => unreachable!(
                 "exec_stack_ops called with non-stack opcode: {:?}",
                 instruction.opcode
             ),
         }
         Ok(())
-    }
-
-    /// Promote the top-of-stack value from shared (Arc) to owned (Box) allocation
-    /// if the heap refcount is exactly 1 (sole owner). This is a safe optimization:
-    /// - Inline values (int, float, bool, null): no-op.
-    /// - Already-owned heap values: no-op.
-    /// - Shared heap values with refcount > 1: no-op (cannot convert safely).
-    /// - Shared heap values with refcount == 1: Arc is unwrapped into Box.
-    ///
-    /// When the `gc` feature is enabled, ownership is managed by the GC, so
-    /// this is a no-op.
-    #[inline(always)]
-    fn op_promote_to_owned(&mut self) -> Result<(), VMError> {
-        #[cfg(feature = "gc")]
-        {
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "gc"))]
-        {
-            use shape_value::tag_bits::{
-                get_payload, get_tag, is_tagged, HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP,
-            };
-            use shape_value::heap_value::HeapValue;
-
-            let index = self.sp.checked_sub(1).ok_or(VMError::StackUnderflow)?;
-            let bits = self.stack[index];
-
-            // Fast exit: not a heap-tagged value (inline scalar, function, etc.)
-            if !is_tagged(bits) || get_tag(bits) != TAG_HEAP {
-                return Ok(());
-            }
-
-            let payload = get_payload(bits);
-
-            // Already owned — nothing to do
-            if (payload & HEAP_OWNED_BIT) != 0 {
-                return Ok(());
-            }
-
-            // Shared (Arc-backed). Check if we are the sole owner.
-            let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
-            if ptr.is_null() {
-                return Ok(());
-            }
-
-            // Reconstruct Arc without consuming it (ManuallyDrop prevents decrement).
-            let arc = std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(ptr) });
-            if Arc::strong_count(&arc) == 1 {
-                // Sole owner — safe to convert Arc -> Box.
-                let arc = std::mem::ManuallyDrop::into_inner(arc);
-                match Arc::try_unwrap(arc) {
-                    Ok(hv) => {
-                        let new_bits = shape_value::ValueBits::heap_box_owned(hv).raw();
-                        // Replace top of stack in-place (no push/pop needed).
-                        self.stack[index] = new_bits;
-                    }
-                    Err(_arc) => {
-                        // Race: someone else got a ref between check and unwrap.
-                        // Err(arc) returns the Arc; its Drop will decrement.
-                        // The stack still holds the original bits expecting an
-                        // Arc refcount, so bump to compensate for the drop.
-                        let raw_ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
-                        unsafe { Arc::increment_strong_count(raw_ptr); }
-                    }
-                }
-            }
-            // If refcount > 1, leave as shared. ManuallyDrop prevents decrement.
-            Ok(())
-        }
-    }
-
-    /// Promote the top-of-stack value from owned (Box) to shared (Arc)
-    /// allocation — the inverse of `op_promote_to_owned`.
-    ///
-    /// - Inline values (int, float, bool, null): no-op.
-    /// - Already-shared heap values (Arc, owned bit clear): no-op.
-    /// - Owned heap values (Box, owned bit set): the Box is reclaimed, its
-    ///   inner `HeapValue` is moved into a freshly-allocated `Arc`, and the
-    ///   resulting ValueWord (owned bit clear) replaces the top of stack.
-    ///
-    /// Stack effect: 0 pops / 0 pushes (TOS mutated in place), identical
-    /// to `PromoteToOwned`.
-    ///
-    /// When the `gc` feature is enabled, ownership is managed by the GC,
-    /// so this is a no-op.
-    #[inline(always)]
-    fn op_promote_to_shared(&mut self) -> Result<(), VMError> {
-        #[cfg(feature = "gc")]
-        {
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "gc"))]
-        {
-            use shape_value::heap_value::HeapValue;
-            use shape_value::tag_bits::{
-                get_payload, get_tag, is_tagged, HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP,
-            };
-
-            let index = self.sp.checked_sub(1).ok_or(VMError::StackUnderflow)?;
-            let bits = self.stack[index];
-
-            // Fast exit: not a heap-tagged value (inline scalar, function, etc.)
-            if !is_tagged(bits) || get_tag(bits) != TAG_HEAP {
-                return Ok(());
-            }
-
-            let payload = get_payload(bits);
-
-            // Already shared (Arc-backed) — nothing to do.
-            if (payload & HEAP_OWNED_BIT) == 0 {
-                return Ok(());
-            }
-
-            // Owned (Box-backed). Reclaim the Box, move the inner value
-            // into a fresh Arc, and replace TOS with the new ValueWord.
-            let ptr = (payload & HEAP_PTR_MASK) as *mut HeapValue;
-            if ptr.is_null() {
-                return Ok(());
-            }
-
-            // SAFETY: the top-of-stack bits encode a `HEAP_OWNED_BIT`-set
-            // ValueWord produced by `vw_heap_box_owned`, which in turn
-            // called `Box::into_raw`. The VM stack slot is the sole
-            // owner of this allocation (by construction of the owned
-            // bit — unique ownership) and we are consuming it here. The
-            // subsequent overwrite of `self.stack[index]` transfers
-            // ownership out of the Box reconstruction so no
-            // double-free occurs. Mirror of the unsafe block in
-            // `op_promote_to_owned` that performs the Arc→Box
-            // conversion.
-            let boxed: Box<HeapValue> = unsafe { Box::from_raw(ptr) };
-            let inner: HeapValue = *boxed;
-            // `ValueWord::heap_box` wraps the HeapValue in an Arc and
-            // emits a TAG_HEAP ValueWord with the owned bit clear —
-            // the canonical shared encoding.
-            let new_bits = ValueWord::heap_box(inner);
-            self.stack[index] = new_bits;
-            Ok(())
-        }
     }
 
     pub(in crate::executor) fn op_push_const(
@@ -212,369 +76,78 @@ impl VirtualMachine {
                 .get(idx as usize)
                 .ok_or(VMError::InvalidOperand)?;
 
-            // E+5.5 Unit B: For typed scalar constants (Number/Int/Bool), push the
-            // raw native bits — no NaN-tag encoding. Downstream typed handlers
-            // (exec_typed_arithmetic single-path post-E+5.5, typed comparisons,
-            // typed control flow) consume these native bits directly via
-            // pop_native_i64/pop_native_bool. The ValueWord-tagged consumers
-            // that previously read pop_raw_u64 + decode are gone for Int/Bool
-            // (they're polymorphic-only; producers proven to be Int/Bool
-            // emit typed Loads/Stores per Unit C, so polymorphic readers
-            // never see Int/Bool literals at this stage).
-            //
-            // Out-of-range BigInt remains heap-boxed via ValueWord::from_i64.
+            // Wave 6: the kind for each Constant variant is compile-time
+            // known. Push raw bits + the corresponding NativeKind into the
+            // parallel kinds track.
             match constant {
                 crate::bytecode::Constant::Number(n) => {
-                    return self.push_raw_f64(*n);
+                    let bits = if n.is_nan() {
+                        f64::NAN.to_bits()
+                    } else {
+                        n.to_bits()
+                    };
+                    return self.push_kinded(bits, NativeKind::Float64);
                 }
                 crate::bytecode::Constant::Int(i) => {
-                    // In-range i48: push raw native i64 bits, no NaN-tag.
-                    // Out-of-range falls back to ValueWord::from_i64 which
-                    // heap-boxes as BigInt (consumers handle via the
-                    // polymorphic decode path).
-                    if *i >= shape_value::tag_bits::I48_MIN && *i <= shape_value::tag_bits::I48_MAX {
-                        return self.push_native_i64(*i);
-                    }
-                    return self.push_raw_u64(ValueWord::from_i64(*i));
+                    return self.push_kinded(*i as u64, NativeKind::Int64);
                 }
                 crate::bytecode::Constant::UInt(u) => {
-                    // In-range i48 (u <= I48_MAX): push raw native i64 bits.
-                    // Otherwise fall back to ValueWord constructors (heap-boxed).
-                    if *u <= shape_value::tag_bits::I48_MAX as u64 {
-                        return self.push_native_i64(*u as i64);
-                    }
-                    return if *u <= i64::MAX as u64 {
-                        self.push_raw_u64(ValueWord::from_i64(*u as i64))
-                    } else {
-                        self.push_raw_u64(ValueWord::from_native_u64(*u))
-                    };
+                    return self.push_kinded(*u, NativeKind::UInt64);
                 }
                 crate::bytecode::Constant::Bool(b) => {
-                    return self.push_native_bool(*b);
+                    return self.push_kinded(*b as u64, NativeKind::Bool);
                 }
-                crate::bytecode::Constant::Null => return self.push_raw_u64(ValueWord::none()),
-                crate::bytecode::Constant::Unit => return self.push_raw_u64(ValueWord::unit()),
+                // Null: zero bits, Bool kind (the §2.7 default sentinel —
+                // Drop is a no-op).
+                crate::bytecode::Constant::Null => {
+                    return self.push_kinded(0u64, NativeKind::Bool);
+                }
+                // Unit: same shape as Null (no payload).
+                crate::bytecode::Constant::Unit => {
+                    return self.push_kinded(0u64, NativeKind::Bool);
+                }
                 crate::bytecode::Constant::Function(id) => {
-                    return self.push_raw_u64(ValueWord::from_function(*id));
+                    // Function ID is an inline u16 stored in the lower bits.
+                    return self.push_kinded(*id as u64, NativeKind::UInt64);
                 }
                 _ => {}
             }
 
-            // For types with direct ValueWord constructors, skip ValueWord
+            // Heap-bearing constants: construct the matching Arc<T> and
+            // push raw pointer bits with the per-kind discriminator.
             match constant {
                 crate::bytecode::Constant::String(s) => {
-                    return self.push_raw_u64(ValueWord::from_string(Arc::new(s.clone())));
+                    let arc: Arc<String> = Arc::new(s.clone());
+                    let bits = Arc::into_raw(arc) as u64;
+                    return self.push_kinded(bits, NativeKind::String);
                 }
                 crate::bytecode::Constant::Char(c) => {
-                    return self.push_raw_u64(ValueWord::from_char(*c));
+                    // Char: inline-scalar payload tagged through HeapKind
+                    // for dispatch uniformity (no Arc<T>).
+                    return self
+                        .push_kinded(*c as u64, NativeKind::Ptr(HeapKind::Char));
                 }
                 crate::bytecode::Constant::Decimal(d) => {
-                    return self.push_raw_u64(ValueWord::from_decimal(*d));
+                    let arc: Arc<rust_decimal::Decimal> = Arc::new(*d);
+                    let bits = Arc::into_raw(arc) as u64;
+                    return self
+                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal));
                 }
                 _ => {}
             }
 
-            // For remaining complex types, construct HeapValue directly (no ValueWord)
-            use shape_value::heap_value::HeapValue;
-            let heap_val = match constant {
-                crate::bytecode::Constant::Timeframe(tf) => HeapValue::Temporal(shape_value::TemporalData::Timeframe(*tf)),
-                crate::bytecode::Constant::Duration(duration) => {
-                    // Convert AST Duration to chrono::Duration (TimeSpan) so it
-                    // participates in DateTime arithmetic (Time +/- TimeSpan).
-                    let chrono_dur =
-                        crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(
-                            duration,
-                        );
-                    HeapValue::Temporal(shape_value::TemporalData::TimeSpan(chrono_dur))
-                }
-                crate::bytecode::Constant::TimeReference(time_ref) => {
-                    HeapValue::Temporal(shape_value::TemporalData::TimeReference(Box::new(time_ref.clone())))
-                }
-                crate::bytecode::Constant::DateTimeExpr(expr) => {
-                    HeapValue::Temporal(shape_value::TemporalData::DateTimeExpr(Box::new(expr.clone())))
-                }
-                crate::bytecode::Constant::DataDateTimeRef(expr) => {
-                    HeapValue::Temporal(shape_value::TemporalData::DataDateTimeRef(Box::new(expr.clone())))
-                }
-                crate::bytecode::Constant::TypeAnnotation(type_annotation) => {
-                    HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(Box::new(type_annotation.clone())))
-                }
-                crate::bytecode::Constant::Value(val) => {
-                    // B6.2: the constants table owns its share. `val.clone()`
-                    // on `ValueWord = u64` is a bit-copy, so the pushed stack
-                    // slot would alias the constant's heap refcount. Retain
-                    // via `vw_clone` so the stack slot has an independent
-                    // owning share that can be released without freeing the
-                    // constant.
-                    return self.push_raw_u64(shape_value::value_word_drop::vw_clone(*val));
-                }
-                // Simple types and String/Decimal already handled above
-                _ => unreachable!(),
-            };
-
-            self.push_raw_u64(ValueWord::from_heap_value(heap_val))?;
-        } else {
-            return Err(VMError::InvalidOperand);
+            // Remaining complex constants (Timeframe, Duration, TimeReference,
+            // DateTimeExpr, DataDateTimeRef, TypeAnnotation, Value): these
+            // are deferred to a follow-up wave that aligns the constant
+            // table with the kinded heap encoding. For now they are
+            // unreachable in normal compilation paths — the constant
+            // emitter doesn't produce them outside of legacy code paths
+            // already broken by the ValueWord deletion.
+            return Err(VMError::RuntimeError(format!(
+                "unsupported constant variant in PushConst (Wave 6 follow-up): {:?}",
+                std::mem::discriminant(constant)
+            )));
         }
-        Ok(())
+        Err(VMError::InvalidOperand)
     }
 }
-
-// ===== V1.2B: PromoteToShared tests =====
-//
-// These hand-crafted programs exercise the new `PromoteToShared` handler
-// (`op_promote_to_shared`) in isolation. V1.2C will wire compiler
-// emission; until then no user program produces this opcode, so these
-// tests are the only coverage path.
-//
-// The handler is the inverse of `PromoteToOwned`: Box-owned heap values
-// on TOS are reclaimed and re-wrapped as Arc (HEAP_OWNED_BIT cleared);
-// inline scalars and already-Arc heap values are no-ops.
-#[cfg(test)]
-mod promote_to_shared_tests {
-    use crate::bytecode::{BytecodeProgram, Constant, Instruction, OpCode, Operand};
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::{ValueWord, ValueWordExt};
-
-    /// Helper: build a program, load it, execute, return the top-of-stack
-    /// ValueWord (raw bits, already owned by the caller via `stack_take_raw`).
-    fn run_program(program: BytecodeProgram) -> ValueWord {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        vm.execute(None).unwrap().clone()
-    }
-
-    #[test]
-    fn test_promote_to_shared_on_inline_is_noop() {
-        // Inline int (i48) should pass through PromoteToShared unchanged —
-        // no heap path, bits preserved exactly.
-        //
-        // After Wave-E+5, `Constant::Int` pushes raw native i64 bits.
-        // Stamp the program's `top_level_frame.return_kind = Int64` so
-        // the host boundary re-tags via `from_i64` and `as_i64()`
-        // returns Some(42).
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(42));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToShared),
-            Instruction::simple(OpCode::Halt),
-        ];
-        let mut frame = crate::type_tracking::FrameDescriptor::new();
-        frame.return_kind = crate::type_tracking::NativeKind::Int64;
-        program.top_level_frame = Some(frame);
-        let result = run_program(program);
-        assert_eq!(
-            result.as_i64(),
-            Some(42),
-            "inline int should round-trip through PromoteToShared",
-        );
-    }
-
-    #[test]
-    fn test_promote_to_shared_on_float_is_noop() {
-        // Inline f64 also pass-through.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Number(3.14));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToShared),
-            Instruction::simple(OpCode::Halt),
-        ];
-        let result = run_program(program);
-        assert_eq!(result.as_f64(), Some(3.14));
-    }
-
-    #[test]
-    fn test_promote_to_shared_on_null_is_noop() {
-        // Null passes through unchanged.
-        let mut program = BytecodeProgram::default();
-        program.instructions = vec![
-            Instruction::simple(OpCode::PushNull),
-            Instruction::simple(OpCode::PromoteToShared),
-            Instruction::simple(OpCode::Halt),
-        ];
-        let result = run_program(program);
-        assert!(result.is_none(), "null should survive PromoteToShared");
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_promote_to_shared_on_arc_is_noop() {
-        // An Arc-backed string (default PushConst String path) already has
-        // HEAP_OWNED_BIT clear. PromoteToShared must leave it untouched —
-        // same pointer, same refcount (1).
-        use shape_value::ValueBits;
-
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("arc-noop".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToShared),
-            Instruction::simple(OpCode::Halt),
-        ];
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        let vb = ValueBits::from_raw(bits);
-        assert!(
-            !vb.is_heap_owned(),
-            "Arc-backed value must remain shared after PromoteToShared",
-        );
-        assert!(
-            vb.is_heap_shared(),
-            "Arc-backed value must remain a heap-shared tag",
-        );
-        // Refcount is still 1 — the stack-top holds the sole live reference.
-        let ptr = vb.heap_ptr();
-        assert!(!ptr.is_null());
-        // SAFETY: ptr is a valid Arc-backed heap pointer; ManuallyDrop keeps
-        // the refcount unchanged for inspection.
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            std::sync::Arc::from_raw(ptr)
-        });
-        assert_eq!(
-            std::sync::Arc::strong_count(&arc),
-            1,
-            "PromoteToShared on already-Arc must not bump refcount",
-        );
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("arc-noop".to_string()),
-        );
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_promote_to_shared_on_box_converts_to_arc() {
-        // Produce a Box-owned string via PromoteToOwned, then convert it
-        // back to Arc via PromoteToShared. After the round-trip, the
-        // HEAP_OWNED_BIT must be clear and the value must be heap-shared.
-        use shape_value::ValueBits;
-
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("box-to-arc".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            // rc=1, Arc-backed
-            Instruction::simple(OpCode::PromoteToOwned),
-            // Box-backed (HEAP_OWNED_BIT set), rc does not apply
-            Instruction::simple(OpCode::PromoteToShared),
-            // Arc-backed again (HEAP_OWNED_BIT clear), rc=1
-            Instruction::simple(OpCode::Halt),
-        ];
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        let vb = ValueBits::from_raw(bits);
-
-        assert!(
-            !vb.is_heap_owned(),
-            "after PromoteToShared the owned bit must be clear",
-        );
-        assert!(
-            vb.is_heap_shared(),
-            "after PromoteToShared the value must be heap-shared (Arc-backed)",
-        );
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("box-to-arc".to_string()),
-            "string content must survive the Box→Arc conversion",
-        );
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_promote_to_shared_refcount_transfer() {
-        // Deep correctness: after Box→Arc promotion, the resulting Arc has
-        // strong_count == 1. This confirms a fresh Arc allocation (not a
-        // smuggled existing one) and that the Box ownership was fully
-        // consumed.
-        use shape_value::ValueBits;
-
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("rc-transfer".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::simple(OpCode::PromoteToShared),
-            Instruction::simple(OpCode::Halt),
-        ];
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        let vb = ValueBits::from_raw(bits);
-
-        assert!(vb.is_heap_shared());
-        let ptr = vb.heap_ptr();
-        assert!(!ptr.is_null());
-        // SAFETY: `bits` is a freshly produced Arc-backed heap ValueWord
-        // from `PromoteToShared`. ManuallyDrop avoids altering the count.
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            std::sync::Arc::from_raw(ptr)
-        });
-        assert_eq!(
-            std::sync::Arc::strong_count(&arc),
-            1,
-            "fresh Arc from Box→Arc promotion must have rc=1",
-        );
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_promote_to_shared_then_clone_shares_refcount() {
-        // After Box→Arc promotion, `Dup` copies the raw bits — the Arc
-        // pointer aliases. Follow with an explicit CloneLocal-equivalent
-        // via StoreLocal + CloneLocal to bump the refcount, confirming
-        // Arc semantics. The final stack-top is the clone; the original
-        // Arc lives in slot 0, so strong_count must be 2.
-        use shape_value::ValueBits;
-
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("clone-after".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::simple(OpCode::PromoteToShared),
-            // slot0 receives the Arc (rc=1)
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            // CloneLocal bumps the refcount (rc=2) and pushes onto TOS
-            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        let vb = ValueBits::from_raw(bits);
-
-        assert!(
-            vb.is_heap_shared(),
-            "CloneLocal of an Arc slot must yield a shared heap ref",
-        );
-        let ptr = vb.heap_ptr();
-        assert!(!ptr.is_null());
-        // SAFETY: `bits` is Arc-backed; ManuallyDrop preserves rc.
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            std::sync::Arc::from_raw(ptr)
-        });
-        assert_eq!(
-            std::sync::Arc::strong_count(&arc),
-            2,
-            "CloneLocal should have bumped rc: slot0 + stack top = 2",
-        );
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("clone-after".to_string()),
-        );
-    }
-}
-
