@@ -898,7 +898,7 @@ impl VirtualMachine {
         // SAFETY: see common invariants on the section header.
         // `read_owned_mutable_i64` performs an aligned 8-byte load.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i64(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::Int64)
     }
 
     fn op_load_owned_mutable_capture_u64(
@@ -917,7 +917,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u64(cell_ptr) };
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::UInt64)
     }
 
     fn op_load_owned_mutable_capture_f64(
@@ -936,7 +936,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_f64(cell_ptr) };
-        self.push_raw_u64(value.to_bits())
+        self.push_kinded(value.to_bits(), shape_value::NativeKind::Float64)
     }
 
     fn op_load_owned_mutable_capture_i32(
@@ -956,7 +956,7 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. Sign-extend i32 to i64
         // for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i32(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int32)
     }
 
     fn op_load_owned_mutable_capture_u32(
@@ -975,7 +975,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Zero-extend u32 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u32(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt32)
     }
 
     fn op_load_owned_mutable_capture_i16(
@@ -994,7 +994,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Sign-extend i16 to i64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i16(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int16)
     }
 
     fn op_load_owned_mutable_capture_u16(
@@ -1013,7 +1013,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Zero-extend u16 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u16(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt16)
     }
 
     fn op_load_owned_mutable_capture_i8(
@@ -1032,7 +1032,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Sign-extend i8 to i64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i8(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int8)
     }
 
     fn op_load_owned_mutable_capture_u8(
@@ -1051,7 +1051,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Zero-extend u8 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u8(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt8)
     }
 
     fn op_load_owned_mutable_capture_bool(
@@ -1069,10 +1069,9 @@ impl VirtualMachine {
             ));
         }
         // SAFETY: section header invariants apply. Push the bool as a 0/1
-        // u64 — matches D.2's typed-bool convention; Wave E will rewire to
-        // `push_tagged_bool` once typed-bool stack helpers are unified.
+        // u64 with NativeKind::Bool — matches D.2's typed-bool convention.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_bool(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::Bool)
     }
 
     fn op_load_owned_mutable_capture_ptr(
@@ -1090,14 +1089,26 @@ impl VirtualMachine {
             ));
         }
         // SAFETY: section header invariants apply. The 8-byte payload is
-        // a ValueWord bit pattern carrying a NaN-boxed Arc/Box pointer.
-        // The helper does NOT clone/retain — refcount semantics are the
-        // caller's responsibility. Wave E will pair the Load with
-        // `vw_clone` / `vw_drop` at the IR level (matches the
-        // c-stdlib-msgpack pattern from commit afb1651, mirroring
-        // `op_load_shared_capture_ptr` in D.2).
-        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
-        self.push_raw_u64(value)
+        // a raw heap-pointer bit pattern (Arc/Box). The helper does NOT
+        // clone/retain — refcount semantics are the caller's
+        // responsibility. The IR pairs the Load with the matching retain
+        // before consumption (mirrors `op_load_shared_capture_ptr` in D.2).
+        //
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: the owned-mutable-capture
+        // cell encoding (`closure_raw::read_owned_mutable_ptr -> u64`)
+        // does NOT carry per-cell `NativeKind`. Sourcing the kind here
+        // requires either (a) extending the cell layout to store kind
+        // alongside the payload, or (b) reading the closure layout's
+        // `capture_storage_kind` table — both live in `closure_raw.rs` /
+        // closure layout machinery, which is out of cluster B's territory
+        // per playbook §5. Until that architectural fix lands, this Load
+        // remains broken. Cluster B does not introduce a Bool-default
+        // §2.7.7 forbidden-shape transitional shim here.
+        let _value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
+        Err(VMError::NotImplemented(
+            "LoadOwnedMutableCapturePtr requires kinded cell encoding (ADR-006 §2.7.7 SURFACE)"
+                .into(),
+        ))
     }
 
     fn op_store_owned_mutable_capture_i64(
@@ -1107,7 +1118,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i64;
         if cell_ptr.is_null() {
@@ -1128,7 +1140,7 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()?;
+        let (new_value, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u64;
         if cell_ptr.is_null() {
@@ -1149,7 +1161,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = f64::from_bits(src_bits);
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut f64;
         if cell_ptr.is_null() {
@@ -1172,7 +1185,8 @@ impl VirtualMachine {
         };
         // Pop the 8-byte slot and truncate to i32 (low 32 bits) — matches
         // the typed-opcode truncation convention in `op_store_local_typed`.
-        let new_value = self.pop_raw_u64()? as i32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i32;
         if cell_ptr.is_null() {
@@ -1193,7 +1207,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u32;
         if cell_ptr.is_null() {
@@ -1214,7 +1229,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i16;
         if cell_ptr.is_null() {
@@ -1235,7 +1251,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u16;
         if cell_ptr.is_null() {
@@ -1256,7 +1273,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i8;
         if cell_ptr.is_null() {
@@ -1277,7 +1295,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u8;
         if cell_ptr.is_null() {
@@ -1300,7 +1319,8 @@ impl VirtualMachine {
         };
         // Treat any nonzero bit pattern as true — mirrors D.2's
         // `op_store_shared_capture_bool` convention.
-        let new_value = self.pop_raw_u64()? != 0;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits != 0;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut bool;
         if cell_ptr.is_null() {
@@ -1321,7 +1341,14 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: see the matching Load
+        // handler. The owned-mutable-capture cell encoding does not carry
+        // per-cell `NativeKind`. The Store side accepts the new bits but
+        // discards the source kind — the IR's pairing with retain/release
+        // assumes the cell holds the kind information separately. Until
+        // the cell layout is extended, the source kind has nowhere
+        // semantic to land.
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u64;
         if cell_ptr.is_null() {
@@ -1479,7 +1506,7 @@ impl VirtualMachine {
         // performs an aligned 8-byte load, releases, and returns. We
         // must NOT take the lock externally.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i64(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::Int64)
     }
 
     fn op_load_shared_capture_u64(
@@ -1499,7 +1526,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u64(cell_ptr) };
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::UInt64)
     }
 
     fn op_load_shared_capture_f64(
@@ -1519,7 +1546,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_f64(cell_ptr) };
-        self.push_raw_u64(value.to_bits())
+        self.push_kinded(value.to_bits(), shape_value::NativeKind::Float64)
     }
 
     fn op_load_shared_capture_i32(
@@ -1542,7 +1569,7 @@ impl VirtualMachine {
         // 8-byte payload; we sign-extend to i64 here to fit the
         // 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i32(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int32)
     }
 
     fn op_load_shared_capture_u32(
@@ -1563,7 +1590,7 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. Zero-extend the u32
         // to u64 for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u32(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt32)
     }
 
     fn op_load_shared_capture_i16(
@@ -1584,7 +1611,7 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. Sign-extend i16 to
         // i64 for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i16(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int16)
     }
 
     fn op_load_shared_capture_u16(
@@ -1604,7 +1631,7 @@ impl VirtualMachine {
         }
         // SAFETY: section header invariants apply. Zero-extend.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u16(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt16)
     }
 
     fn op_load_shared_capture_i8(
@@ -1625,7 +1652,7 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. Sign-extend i8 to
         // i64.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i8(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int8)
     }
 
     fn op_load_shared_capture_u8(
@@ -1646,7 +1673,7 @@ impl VirtualMachine {
         // SAFETY: section header invariants apply. Zero-extend u8 to
         // u64.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u8(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt8)
     }
 
     fn op_load_shared_capture_bool(
@@ -1665,14 +1692,11 @@ impl VirtualMachine {
             ));
         }
         // SAFETY: section header invariants apply. The helper reads the
-        // low byte of the payload (0 ⇒ false; non-zero ⇒ true). We
-        // store the resulting bool on the stack as a 0 or 1 in the
-        // 8-byte slot via `push_raw_u64` to keep the slot's bit pattern
-        // unambiguously typed for the typed-Bool reader (Wave E /
-        // future JIT lowering will rewire to `push_tagged_bool` once
-        // typed-bool stack helpers are unified).
+        // low byte of the payload (0 ⇒ false; non-zero ⇒ true). Push
+        // 0 or 1 with NativeKind::Bool — the parallel kind track records
+        // the bool interpretation directly.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_bool(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::Bool)
     }
 
     fn op_load_shared_capture_ptr(
@@ -1691,13 +1715,21 @@ impl VirtualMachine {
             ));
         }
         // SAFETY: section header invariants apply. The 8-byte payload
-        // is a ValueWord bit pattern carrying a NaN-boxed Arc/Box
-        // pointer. The helper does NOT clone/retain — refcount
-        // semantics are the caller's responsibility. Wave E will pair
-        // the Load with `vw_clone` / `vw_drop` at the IR level
-        // (matching the c-stdlib-msgpack pattern from commit afb1651).
-        let value = unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr) };
-        self.push_raw_u64(value)
+        // is a raw heap-pointer bit pattern (Arc/Box). The helper does
+        // NOT clone/retain — refcount semantics are the caller's
+        // responsibility. The IR pairs the Load with the matching
+        // retain (matching the c-stdlib-msgpack pattern from commit
+        // afb1651).
+        //
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: same kind-sourcing gap
+        // as `op_load_owned_mutable_capture_ptr`. The shared-cell
+        // payload encoding does not carry per-cell `NativeKind`. Until
+        // the cell layout is extended (closure_raw.rs — out of cluster
+        // B's territory), this Load remains broken.
+        let _value = unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr) };
+        Err(VMError::NotImplemented(
+            "LoadSharedCapturePtr requires kinded cell encoding (ADR-006 §2.7.7 SURFACE)".into(),
+        ))
     }
 
     fn op_store_shared_capture_i64(
@@ -1708,7 +1740,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1731,7 +1764,7 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()?;
+        let (new_value, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1753,7 +1786,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = f64::from_bits(src_bits);
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1775,9 +1809,10 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop as raw u64; truncate to i32 (the low 4 bytes carry the
-        // signed value, matching the JIT's `i32` ABI).
-        let new_value = self.pop_raw_u64()? as i64 as i32;
+        // Pop the kinded slot; truncate to i32 (the low 4 bytes carry
+        // the signed value, matching the JIT's `i32` ABI).
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1800,7 +1835,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1822,7 +1858,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64 as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1844,7 +1881,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1866,7 +1904,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64 as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1888,7 +1927,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1910,9 +1950,10 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop the 8-byte slot; treat any nonzero bit pattern as true to
+        // Pop the kinded slot; treat any nonzero bit pattern as true to
         // mirror `read_shared_bool`'s "any non-zero byte" semantics.
-        let new_value = self.pop_raw_u64()? != 0;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits != 0;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1934,7 +1975,9 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: see the matching Load
+        // handler for the cell-encoding gap.
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -2581,14 +2624,14 @@ impl VirtualMachine {
                 slot,
                 self.stack.len()
             );
-            let bits = self.stack[slot];
 
-            // Track A.1C.3: SharedCell wrapper retired. Plain move
-            // semantics — zero the source slot and push the bits. The
-            // compiler never emits `LoadLocalMove` on
-            // `AllocSharedLocal`-promoted slots.
-            self.stack[slot] = Self::NONE_BITS;
-            self.push_raw_u64(bits)?;
+            // ADR-006 §2.7.7 / playbook §2: take ownership of the slot
+            // (zero out + return its kind), then push the move onto the
+            // stack with the same kind. `stack_take_kinded` is the
+            // post-§2.7.7 replacement for the deleted shim that did
+            // `let bits = self.stack[slot]; self.stack[slot] = NONE_BITS`.
+            let (bits, kind) = self.stack_take_kinded(slot);
+            self.push_kinded(bits, kind)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -2611,12 +2654,17 @@ impl VirtualMachine {
                 slot,
                 self.stack.len()
             );
-            let bits = self.stack[slot];
 
-            // Track A.1C.3: SharedCell wrapper retired. Plain clone —
-            // bump refcount for heap values.
-            let cloned = raw_helpers::clone_raw_bits(bits);
-            self.push_raw_u64(cloned)?;
+            // ADR-006 §2.7.7 / playbook §3 retain-on-read: bump the heap
+            // refcount via `read_owned_kinded` (the carrier we discard
+            // would have done it; here we go through `stack_read_kinded_raw`
+            // + `clone_with_kind` to keep the bits + kind on the stack
+            // with an independent share). Replaces the deleted
+            // `raw_helpers::clone_raw_bits(bits)` call which used
+            // forbidden tag-decode internally.
+            let (bits, kind) = self.stack_read_kinded_raw(slot);
+            crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+            self.push_kinded(bits, kind)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -2817,10 +2865,11 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // SAFETY: compiler proved the slot's kind is I64 — the bits were
-        // written by a matching-Kind StoreLocalI64. Read raw 8 bytes.
+        // ADR-006 §2.7.7 / playbook §2: opcode-suffix supplies the kind.
+        // Compiler proved the slot's kind is I64 — read raw 8 bytes and
+        // push with NativeKind::Int64 in the parallel kind track.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Int64)
     }
 
     fn op_load_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2836,7 +2885,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::UInt64)
     }
 
     fn op_load_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2852,7 +2901,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Float64)
     }
 
     fn op_load_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2870,7 +2919,7 @@ impl VirtualMachine {
         // Read low 4 bytes as i32, sign-extend to i64 for the 8-byte stack slot.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i32;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int32)
     }
 
     fn op_load_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2888,7 +2937,7 @@ impl VirtualMachine {
         // Read low 4 bytes as u32, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u32;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt32)
     }
 
     fn op_load_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2906,7 +2955,7 @@ impl VirtualMachine {
         // Read low 2 bytes as i16, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i16;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int16)
     }
 
     fn op_load_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2924,7 +2973,7 @@ impl VirtualMachine {
         // Read low 2 bytes as u16, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u16;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt16)
     }
 
     fn op_load_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2942,7 +2991,7 @@ impl VirtualMachine {
         // Read low byte as i8, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i8;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int8)
     }
 
     fn op_load_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2960,7 +3009,7 @@ impl VirtualMachine {
         // Read low byte as u8, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u8;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt8)
     }
 
     fn op_load_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2978,7 +3027,7 @@ impl VirtualMachine {
         // The slot was written by a paired StoreLocalBool that canonicalized
         // to 0 or 1 in the low byte. Pass the raw bits through unchanged.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Bool)
     }
 
     fn op_load_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2995,27 +3044,37 @@ impl VirtualMachine {
         );
         // Raw 8-byte read. Refcount semantics are the IR's responsibility
         // — the handler does NOT clone/retain. The IR pairs LoadLocalPtr
-        // with `vw_clone` (matches the c-stdlib-msgpack pattern in commit
-        // afb1651, mirroring `op_load_owned_mutable_capture_ptr`).
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        // with the matching retain/release before/after.
+        //
+        // ADR-006 §2.7.7 / playbook §2: kind for LoadLocalPtr comes from
+        // FrameDescriptor.slots[idx] — the parallel kind track on the slot
+        // already reflects what the producing typed Store wrote.
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        self.push_kinded(bits, kind)
     }
 
     fn op_store_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §2: pop_kinded yields (bits, kind).
+        // Compiler proved the source kind is I64; we discard the carrier
+        // kind (typed opcode is post-proof) and write with the opcode-
+        // suffix-determined kind into the parallel track.
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
         // SAFETY: compiler proved the slot's kind is I64. No SharedCell
         // wrap, no refcount on the old bits — scalar i64 has no
         // ownership.
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::Int64);
         Ok(())
     }
 
@@ -3023,14 +3082,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::UInt64);
         Ok(())
     }
 
@@ -3038,14 +3100,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::Float64);
         Ok(())
     }
 
@@ -3054,14 +3119,18 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to i32 (low 4 bytes), sign-extend back to i64 for storage.
-        let new_value = self.pop_raw_u64()? as i32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int32);
         Ok(())
     }
 
@@ -3070,14 +3139,18 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to u32 (low 4 bytes), zero-extend back to u64 for storage.
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt32);
         Ok(())
     }
 
@@ -3085,14 +3158,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int16);
         Ok(())
     }
 
@@ -3100,14 +3177,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt16);
         Ok(())
     }
 
@@ -3115,14 +3196,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int8);
         Ok(())
     }
 
@@ -3130,14 +3215,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt8);
         Ok(())
     }
 
@@ -3147,14 +3236,18 @@ impl VirtualMachine {
         };
         // Any nonzero pop ⇒ true (matches D.1's StoreOwnedMutableCaptureBool
         // convention). Canonicalize to 0 or 1 for storage.
-        let new_value = (self.pop_raw_u64()? != 0) as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = (src_bits != 0) as u64;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value;
+        self.stack_write_kinded(slot, new_value, shape_value::NativeKind::Bool);
         Ok(())
     }
 
@@ -3162,19 +3255,27 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §2: pop_kinded carries the kind from
+        // the producing opcode. For Ptr, the kind on the source is the
+        // concrete `NativeKind::Ptr(HeapKind::*)` (or `NativeKind::String`)
+        // value the producing typed opcode emitted; preserve it into the
+        // local slot's parallel kind track.
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        // SAFETY: caller's IR has paired this store with a vw_drop earlier
-        // (or this is the first write to a fresh slot). The handler does
-        // NOT release the previous payload nor retain the new one —
-        // refcount semantics are the IR's responsibility. Matches D.1 /
-        // D.2 Ptr semantics.
-        self.stack[slot] = new_bits;
+        // SAFETY: caller's IR has paired this store with the matching
+        // retain/release earlier (or this is the first write to a fresh
+        // slot). The handler does NOT release the previous payload nor
+        // retain the new one — refcount semantics are the IR's
+        // responsibility. Matches D.1 / D.2 Ptr semantics.
+        self.stack_write_kinded(slot, new_bits, src_kind);
         Ok(())
     }
 
@@ -3570,11 +3671,12 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
-        self.push_raw_u64(bits)
+        // ADR-006 §2.7.7 / playbook §2: opcode-suffix supplies the kind.
+        self.push_kinded(bits, shape_value::NativeKind::Int64)
     }
 
     fn op_load_module_binding_u64(
@@ -3586,11 +3688,11 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::UInt64)
     }
 
     fn op_load_module_binding_f64(
@@ -3602,11 +3704,11 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Float64)
     }
 
     fn op_load_module_binding_i32(
@@ -3618,14 +3720,14 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Sign-extend low 4 bytes to i64 — matches Wave D's
         // `op_load_owned_mutable_capture_i32` width-extension convention.
         let value = bits as i32 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::Int32)
     }
 
     fn op_load_module_binding_u32(
@@ -3637,13 +3739,13 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Zero-extend low 4 bytes.
         let value = bits as u32 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::UInt32)
     }
 
     fn op_load_module_binding_i16(
@@ -3655,13 +3757,13 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Sign-extend low 2 bytes to i64.
         let value = bits as i16 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::Int16)
     }
 
     fn op_load_module_binding_u16(
@@ -3673,13 +3775,13 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Zero-extend low 2 bytes.
         let value = bits as u16 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::UInt16)
     }
 
     fn op_load_module_binding_i8(
@@ -3691,13 +3793,13 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Sign-extend low byte to i64.
         let value = bits as i8 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::Int8)
     }
 
     fn op_load_module_binding_u8(
@@ -3709,13 +3811,13 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Zero-extend low byte.
         let value = bits as u8 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::UInt8)
     }
 
     fn op_load_module_binding_bool(
@@ -3727,33 +3829,31 @@ impl VirtualMachine {
         };
         let index = idx as usize;
         let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
+            self.module_bindings[index]
         } else {
             0u64
         };
         // Push 0/1 — any non-zero low byte ⇒ true. Mirrors Wave D's
         // bool stack convention.
         let value = ((bits as u8) != 0) as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, shape_value::NativeKind::Bool)
     }
 
     fn op_load_module_binding_ptr(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+        let Some(Operand::ModuleBinding(_idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // The 8-byte payload is a ValueWord bit pattern carrying a
-        // NaN-boxed Arc/Box pointer. The handler does NOT clone/retain —
-        // refcount semantics are the caller's (Wave E+4 IR) responsibility.
-        self.push_raw_u64(bits)
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: module-binding storage is
+        // `Vec<u64>` (no parallel kind track for bindings). The Ptr load
+        // requires the binding's kind, which is not currently encoded.
+        // Same surface as `op_load_owned_mutable_capture_ptr` — until
+        // bindings carry kind alongside data, this Load remains broken.
+        Err(VMError::NotImplemented(
+            "LoadModuleBindingPtr requires kinded binding storage (ADR-006 §2.7.7 SURFACE)".into(),
+        ))
     }
 
     fn op_store_module_binding_i64(
@@ -3763,7 +3863,7 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
+        let (value, _src_kind) = self.pop_kinded()?;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3771,7 +3871,8 @@ impl VirtualMachine {
         record_heap_write();
         // Direct slot write — typed contract guarantees prior value is
         // either NONE_BITS (initial) or a raw native value from a
-        // previous typed Store. No `vw_drop` of the prior value.
+        // previous typed Store. No `drop_with_kind` of the prior value
+        // (binding storage doesn't carry kind for typed scalars).
         self.module_bindings[index] = value;
         Ok(())
     }
@@ -3783,7 +3884,7 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
+        let (value, _src_kind) = self.pop_kinded()?;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3800,7 +3901,7 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
+        let (value, _src_kind) = self.pop_kinded()?;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3818,7 +3919,8 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to i32, sign-extend back to i64 for the 8-byte slot.
-        let value = self.pop_raw_u64()? as i32 as i64 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i32 as i64 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3836,7 +3938,8 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to u32, zero-extend.
-        let value = self.pop_raw_u64()? as u32 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u32 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3853,7 +3956,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as i16 as i64 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i16 as i64 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3870,7 +3974,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as u16 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u16 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3887,7 +3992,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as i8 as i64 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i8 as i64 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3904,7 +4010,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as u8 as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u8 as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3922,7 +4029,8 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Any non-zero bit pattern ⇒ true.
-        let value = (self.pop_raw_u64()? != 0) as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = (src_bits != 0) as u64;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
@@ -3939,17 +4047,15 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §8 SURFACE: see Load handler. Source
+        // kind discarded (binding storage is kind-erased). The IR pairs
+        // the Store with retain/release.
+        let (value, _src_kind) = self.pop_kinded()?;
         let index = idx as usize;
         while self.module_bindings.len() <= index {
             self.module_bindings.push(Self::NONE_BITS);
         }
         record_heap_write();
-        // The 8-byte payload is a ValueWord bit pattern carrying a
-        // NaN-boxed Arc/Box pointer. The handler does NOT release the
-        // previous payload nor retain the new one — refcount semantics
-        // are the caller's (Wave E+4 IR) responsibility, mirroring Wave
-        // D's `op_store_owned_mutable_capture_ptr`.
         self.module_bindings[index] = value;
         Ok(())
     }
