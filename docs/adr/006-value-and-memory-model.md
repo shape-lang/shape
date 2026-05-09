@@ -727,6 +727,143 @@ arithmetic, comparison, logical, loops, call_convention}/mod.rs`,
    lockstep — `mir_compiler` generates the `kinds.push(NativeKind::*)`
    alongside the existing `data.push(bits)`.
 
+#### 2.7.8 Cell-storage kind-awareness — parallel `Vec<NativeKind>` extended to cells (Q10 ruling)
+
+Phase 1.B-vm Wave 6.5 substep-2 cluster B (commits 28de706..727143e
+landed at supervisor merge `62513e3`) surfaced that the §2.7.7
+parallel-kind-track invariant stops at the stack boundary.
+Cell-bearing storage structs that hold `Vec<u64>`-shaped raw slots —
+closure cell layout (`closure_raw::read_owned_mutable_ptr`),
+shared-cell payload, module-binding storage, and the
+`CallFrame.closure_heap_bits: Option<u64>` field at
+`executor/mod.rs:188` — carry **no parallel `NativeKind`** alongside
+the heap pointer. `Load*Ptr` handlers cannot reconstruct the kind
+locally, and `vw_drop(bits)` (forbidden #8 per §2.7.7) cannot be
+rewritten as `drop_with_kind(bits, kind)` without an extension.
+
+The agent correctly refused to introduce a `NativeKind::Bool`-default
+fallback (§2.7.7 #9 — the W-series rationalization). Cluster B
+partial-closed (110 of 278 mandatory sites migrated; -123 errors) and
+surfaced the gap as architectural.
+
+**Decision (Q10 ruling):** the §2.7.7 parallel-`Vec<NativeKind>`
+invariant **extends to every cell-storage struct** that holds raw
+heap-pointer bits in the runtime/VM tier. Each `Vec<u64>`-like cell
+store grows a parallel `Vec<NativeKind>`; `Option<u64>` heap-bit
+fields gain an `Option<NativeKind>` companion. `clone_with_kind` /
+`drop_with_kind` are reused — same dispatch tables as §2.7.7.
+
+Concretely, the targets are (non-exhaustive — extend per discovered
+cell-bearing struct):
+
+```rust
+// crates/shape-vm/src/executor/closure_raw.rs — closure cell layout
+pub struct ClosureCell {
+    pub bits: Vec<u64>,          // EXISTING — raw payload
+    pub kinds: Vec<NativeKind>,  // NEW — per-cell kind, lockstep with bits
+}
+
+// shared-cell payload (Arc<...> wrapper currently bits-only)
+pub struct SharedCell {
+    bits: AtomicU64,             // EXISTING
+    kind: NativeKind,            // NEW — set at construction, read at drop
+}
+
+// module-binding storage (Vec<u64> form)
+pub struct ModuleBindingStorage {
+    bits: Vec<u64>,              // EXISTING
+    kinds: Vec<NativeKind>,      // NEW — lockstep with bits
+}
+
+// CallFrame.closure_heap_bits (Option<u64> form)
+pub struct CallFrame {
+    // ...
+    pub closure_heap_bits: Option<u64>,        // EXISTING
+    pub closure_heap_kind: Option<NativeKind>, // NEW — lockstep with closure_heap_bits
+}
+```
+
+**Index invariant:** for `Vec<u64>` + `Vec<NativeKind>` companion
+pairs, `bits.len() == kinds.len()` at every observable boundary
+(method entry/exit, opcode boundaries). For `Option<u64>` +
+`Option<NativeKind>` companion pairs, both are `Some` or both are
+`None` at every observable boundary; mixed states are a bug.
+
+**Drop discipline.** Every release path (cell-array truncate,
+shared-cell unique-drop, CallFrame teardown) calls
+`drop_with_kind(bits[i], kinds[i])` — never bare `vw_drop` (forbidden
+#8) or "drop only if heap-shaped" probes (forbidden #7). Read paths
+into runtime-tier `KindedSlot` carriers bump the heap refcount via
+`clone_with_kind(bits[i], kinds[i])` per WB2.4.
+
+**Forbidden shapes this rules out (mirror of §2.7.7's stack-side list,
+applied to cell storage):**
+
+- Cell store as `Vec<KindedSlot>` — same §2.7.5 rule as for the stack:
+  `KindedSlot` is a runtime-tier carrier, not the storage-tier shape.
+  Cells store raw `u64` + parallel `NativeKind`; runtime-tier consumers
+  can construct a `KindedSlot` at the read boundary.
+- 16-byte cell slots (`Vec<{ bits: u64, kind: NativeKind }>` packed) —
+  same §2.1 8-byte slot invariant; cell stores stay 8-byte raw payload
+  with a separate kind track.
+- Tag bits packed in the `u64` — deleted ValueWord pattern.
+- `Vec<Option<NativeKind>>` for the kind track of a `Vec<u64>` cell
+  store — cell contents are post-proof per the same §2.7.5.1 rule:
+  every cell write carries a known kind by construction. (The
+  `Option<NativeKind>` companion to an `Option<u64>` field is a
+  *single-slot* presence indicator paired 1:1 with the bits Option;
+  the two are populated and cleared together. Different shape from
+  "we don't know yet" wrappers.)
+- `NativeKind::Unknown` / `NativeKind::Pending` / `NativeKind::Dynamic`
+  in the kind track — all deleted; per-cell kinds are always concrete.
+- **Transitional Bool-default fallbacks** — same §2.7.7 #9 rule. Refuse
+  on sight; surface to supervisor instead. The `NotImplemented(SURFACE)`
+  pattern cluster B used for `Load*Ptr` handlers is the correct
+  refusal shape — it surfaces the gap as a compile error rather than
+  silently leaking shares.
+- Cell store carrying its kind via a parallel `Vec<u8>` tag-byte that
+  decodes to a custom enum — same defection-attractor as the deleted
+  ValueWord tag-decode pattern, just at a different layer.
+
+**Performance characteristics** (mirror of §2.7.7's stack-side
+analysis):
+
+- Cell store push/pop: 1 word + 1 byte. Sequential cache lines.
+  Frames are short-lived; closures are typically single-digit cells.
+- Memory overhead: 1 byte per cell (vs. 8 bytes data) = +12.5% per
+  cell, ≤16 bytes per typical closure — negligible.
+- WB2.4 clone/drop: dispatch on `kind` (1 byte cmpxchg target),
+  call matching `Arc::increment_strong_count::<T>` / `decrement`. Same
+  helpers as the stack — no new dispatch surface.
+
+**Cross-check on debug builds:** for closure cells whose binding source
+is a typed local, the cell's `kind` should match the local's
+`FrameDescriptor.slots[binding_idx]`. A `debug_assert_eq!` at the
+closure-creation site catches kind drift during development.
+
+**Migration scope (Wave 6.5 cluster B-round-2 territory):**
+
+1. Extend `closure_raw::ClosureCell` (or current closure-layout struct)
+   with `kinds: Vec<NativeKind>` — every constructor + push/pop
+   signature accepts/returns `(bits, kind)`.
+2. Extend `SharedCell` with `kind: NativeKind` — single-slot, set at
+   construction.
+3. Extend module-binding storage with `kinds: Vec<NativeKind>`.
+4. Extend `CallFrame.closure_heap_bits: Option<u64>` (executor/mod.rs:188)
+   with companion `closure_heap_kind: Option<NativeKind>`. The teardown
+   path replaces forbidden `vw_drop(bits)` with `drop_with_kind(bits, kind)`.
+5. Migrate `Load*Ptr` / `Store*Ptr` handlers in cluster B's
+   `variables/mod.rs` to thread the kind through. Cluster B-round-2
+   closes the remaining 168 mandatory shim sites once §2.7.8 lands.
+6. JIT codegen (Wave 10) emits the parallel kind writes at every cell
+   construction site — same lockstep discipline as the stack-side
+   §2.7.7 codegen.
+
+**Out-of-scope this ruling:** Snapshot/restore serialization of cell
+stores. Per §2.7.4, snapshot rebuild is Phase 2c. The Phase-1.B-vm
+work updates in-memory cell layouts; the persisted/wire shapes get
+their parallel-kind extension at Phase 2c entry.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
@@ -1313,6 +1450,57 @@ legacy ValueWord caller in arithmetic/comparison/loops/call_convention
 Wave 6 close gate now includes a grep-fail: zero `push_raw_u64` /
 `pop_raw_u64` / `push_native_i64` / `stack_read_owned` /
 `stack_peek_raw` callers in the codebase.
+
+### Q10 — Cell-storage kind-awareness (Phase 1.B-vm Wave 6.5 cluster B surface)
+
+**Decision:** the §2.7.7 parallel-`Vec<NativeKind>` invariant
+**extends to every cell-storage struct** that holds raw heap-pointer
+bits in the runtime/VM tier. Each `Vec<u64>`-like cell store grows a
+parallel `Vec<NativeKind>`; `Option<u64>` heap-bit fields gain an
+`Option<NativeKind>` companion. Targets: closure cell layout
+(`closure_raw::ClosureCell`), shared-cell payload (`SharedCell`),
+module-binding storage, and `CallFrame.closure_heap_bits` at
+`executor/mod.rs:188`. `clone_with_kind` / `drop_with_kind` reused
+verbatim. Spec lives at §2.7.8.
+
+**Rationale:** Phase 1.B-vm Wave 6.5 substep-2 cluster B partial-close
+(commits 28de706..727143e merged at supervisor `62513e3`) surfaced the
+gap. Three options considered:
+
+- **Option A (Bool-default fallback for `Load*Ptr` handlers)** —
+  rejected: this is the §2.7.7 #9 W-series rationalization the cluster
+  B agent correctly refused. "Drop is a no-op for Bool" is the same
+  borrowed-slot-with-call-pattern-invariants defection-attractor.
+
+- **Option B (Phase-2c deferral via `todo!()` stubs)** — rejected for
+  closure cells / module bindings: these are core hot-path runtime
+  surfaces, not snapshot/restore wire formats. Deferral would block
+  every `Load*Ptr` handler indefinitely.
+
+- **Option C (parallel `Vec<NativeKind>` extended to cells)** —
+  accepted. Generalizes the §2.7.7 stack-side pattern to the
+  cell-storage tier. No new dispatch surface (reuses
+  `clone_with_kind` / `drop_with_kind`), no defection-attractor
+  variant introduced, mechanical to verify (lockstep
+  `bits.len() == kinds.len()` invariant).
+
+**Performance characteristics:** mirror of §2.7.7. Per-cell push/pop
++1 byte; +12.5% memory overhead per cell. WB2.4 clone/drop reuses the
+same dispatch as the stack side. Closures are typically single-digit
+cells, frames are short-lived — cumulative overhead is negligible.
+
+**Status:** Binding for Phase 1.B-vm Wave 6.5 cluster B-round-2
+onward. Cluster B-round-2 closes the remaining 168 mandatory shim
+sites in `variables/mod.rs` / `loops/mod.rs` / `control_flow/mod.rs`
+/ `call_convention.rs` once §2.7.8 lands. Snapshot/restore wire
+extension is Phase 2c per §2.7.4 (out of scope here).
+
+**Anti-pattern call-out:** the cluster B agent's correct response to
+the gap was `NotImplemented(SURFACE)` returns from `Load*Ptr`
+handlers — a compile-error surface that escalates to supervisor,
+*not* a runtime fallback that silently leaks shares. This is the
+canonical surface-and-stop pattern under §2.7.7's prohibition; future
+cluster agents who hit a kind-source gap should mirror it.
 
 ### Q8 — Carrier API bound for `KindedSlot` accessors/constructors
 
