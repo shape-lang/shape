@@ -391,6 +391,16 @@ impl Drop for SharedCell {
                     HeapKind::TaskGroup => {
                         Arc::decrement_strong_count(bits as *const TaskGroupData);
                     }
+                    // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                    // amendment): FilterExpr cells own one
+                    // `Arc::into_raw(Arc<FilterNode>)` strong-count share.
+                    // Pre-amendment the FilterExpr branch reused
+                    // `HeapKind::NativeView` as its kind label and dispatched
+                    // here as `Arc<NativeViewData>` — wrong-type retain/release
+                    // (Wave-α D-raw-helpers `a27c0e4` surfaced the gap).
+                    HeapKind::FilterExpr => {
+                        Arc::decrement_strong_count(bits as *const crate::value::FilterNode);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
                     HeapKind::Char => {}

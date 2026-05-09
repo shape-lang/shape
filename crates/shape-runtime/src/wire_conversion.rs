@@ -225,6 +225,10 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             // serialization is the deferred Phase 2c marshal rebuild.
             WireValue::String("<hashmap:phase-2c>".to_string())
         }
+        // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment):
+        // FilterExpr trees are transient query-DSL values; they don't
+        // cross the wire boundary today. Surface as an opaque tag.
+        HeapValue::FilterExpr(_) => WireValue::String("<filter_expr>".to_string()),
     }
 }
 

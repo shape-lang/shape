@@ -77,6 +77,18 @@ macro_rules! define_heap_types {
             NativeView,    // 15
             Char,          // 16
             HashMap,       // 17  (Stage C P1(b), 2026-05-07)
+            // Pure-discriminator variant — no corresponding `HeapValue` arm
+            // (FilterExpr payloads live as `Arc<FilterNode>` directly in slot
+            // bits, never wrapped in `HeapValue`). Added to fix the
+            // type-confusion soundness gap surfaced by Wave-α D-raw-helpers
+            // (commit `a27c0e4`): the filter-expression branch of
+            // `executor/logical/mod.rs` previously reused
+            // `HeapKind::NativeView` to label `Arc<FilterNode>` payloads,
+            // and the runtime `clone_with_kind` / `drop_with_kind` tables
+            // dispatched the same label as `Arc<NativeViewData>` —
+            // wrong-type retain/release. ADR-006 §2.3 / §2.7.6 / Q8
+            // amendment (Wave-γ G-heap-filter-expr).
+            FilterExpr,    // 18  (Wave-γ G-heap-filter-expr, 2026-05-09)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -186,6 +198,20 @@ macro_rules! define_heap_types {
             /// `$crate::heap_value::HashMapData` for the storage shape.
             /// Stage C P1(b), 2026-05-07.
             HashMap(std::sync::Arc<$crate::heap_value::HashMapData>),
+            // ===== Wave-γ G-heap-filter-expr (2026-05-09) =====
+            /// Filter-expression tree (`Arc<FilterNode>`) used by the query
+            /// DSL's `And` / `Or` / `Not` opcodes (`executor/logical/mod.rs`).
+            /// In current code FilterExpr payloads are emitted directly to
+            /// the kinded stack as `Arc::into_raw(Arc<FilterNode>) as u64`
+            /// with kind `NativeKind::Ptr(HeapKind::FilterExpr)` and never
+            /// wrapped in `HeapValue`. The arm exists to preserve the
+            /// ADR-005 §1 invariant that every `HeapKind` discriminator has
+            /// a `HeapValue` arm of the same shape — kind() / is_truthy() /
+            /// type_name() / drop_with_kind() / clone_with_kind() must
+            /// dispatch a `HeapKind::FilterExpr` slot as `Arc<FilterNode>`,
+            /// not `Arc<NativeViewData>` (the pre-Wave-γ type-confusion gap
+            /// surfaced by Wave-α D-raw-helpers, commit `a27c0e4`).
+            FilterExpr(std::sync::Arc<$crate::value::FilterNode>),
         }
 
         impl HeapValue {
@@ -211,6 +237,7 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(..) => HeapKind::Temporal,
                     HeapValue::TableView(..) => HeapKind::TableView,
                     HeapValue::HashMap(..) => HeapKind::HashMap,
+                    HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                 }
             }
 
@@ -236,6 +263,8 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(td) => td.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
                     HeapValue::HashMap(d) => !d.is_empty(),
+                    // Filter-expression trees are always truthy when present.
+                    HeapValue::FilterExpr(_) => true,
                 }
             }
 
@@ -267,6 +296,7 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(td) => td.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
                     HeapValue::HashMap(_) => "hashmap",
+                    HeapValue::FilterExpr(_) => "filter_expr",
                 }
             }
         }

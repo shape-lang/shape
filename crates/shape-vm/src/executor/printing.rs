@@ -276,6 +276,14 @@ impl<'a> ValueFormatter<'a> {
                      dispatch_native_interop_builtin)"
                 );
             }
+            HeapKind::FilterExpr => {
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                // amendment): FilterExpr trees are a transient query-DSL
+                // value; they don't have a user-facing print form. Render
+                // as an opaque tag for diagnostics.
+                let _ = bits;
+                "<filter_expr>".to_string()
+            }
         }
     }
 

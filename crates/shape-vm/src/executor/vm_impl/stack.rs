@@ -26,7 +26,7 @@
 
 use super::super::*;
 use shape_value::{
-    KindedSlot, NativeKind, ValueSlot,
+    FilterNode, KindedSlot, NativeKind, ValueSlot,
     heap_value::{
         HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
         TemporalData, TypedArrayData, TypedObjectStorage,
@@ -106,6 +106,20 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::TaskGroup => {
                     Arc::increment_strong_count(bits as *const TaskGroupData);
+                }
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / §2.7.7
+                // / Q8 amendment): the filter-expr branch of
+                // `executor/logical/mod.rs` pushes
+                // `Arc::into_raw(Arc<FilterNode>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::FilterExpr)`. This arm
+                // dispatches the retain-on-read share as the matching
+                // `Arc<FilterNode>`, fixing the type-confusion soundness
+                // gap surfaced by Wave-α D-raw-helpers (commit `a27c0e4`):
+                // pre-amendment the same pointer was labeled
+                // `HeapKind::NativeView` and retained as
+                // `Arc<NativeViewData>`.
+                HeapKind::FilterExpr => {
+                    Arc::increment_strong_count(bits as *const FilterNode);
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
@@ -212,6 +226,17 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::TaskGroup => {
                     Arc::decrement_strong_count(bits as *const TaskGroupData);
+                }
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / §2.7.7
+                // / Q8 amendment): mirror of the `clone_with_kind`
+                // FilterExpr arm. Retires one `Arc<FilterNode>`
+                // strong-count share. The pre-amendment `NativeView`
+                // mislabel would have routed the decrement to
+                // `Arc::decrement_strong_count::<NativeViewData>` — a
+                // wrong-type drop with whatever destructor matches that
+                // layout, undefined behavior at the share retire site.
+                HeapKind::FilterExpr => {
+                    Arc::decrement_strong_count(bits as *const FilterNode);
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}
