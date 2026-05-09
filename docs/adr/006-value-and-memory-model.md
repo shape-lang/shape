@@ -669,6 +669,22 @@ no `as_heap_ref()` hop**.
 - `Vec<NativeKind>` track holding `NativeKind::Unknown` /
   `NativeKind::Dynamic` placeholders — both deleted; per-stack-position
   kinds are always concrete.
+- **Transitional shims preserving deleted ValueWord-shape names**
+  (`push_raw_u64`, `pop_raw_u64`, `push_native_i64`,
+  `stack_read_owned`, `stack_peek_raw`, etc.) **backed by kinded
+  primitives with `NativeKind::Bool` default**. The shim's
+  apparent "leak-freeness" is an accident of `Bool`'s no-op
+  Drop/Clone, not WB2.4 retain-on-read — semantically these are
+  **"borrowed slot" with call-pattern invariants**, exactly the
+  W-series bug class (heap pointer pushed via shim → no Arc
+  increment → relies on source binding outliving stack push, a
+  fragile call-pattern invariant the type system can't verify).
+  **Migrate every caller to the kinded API in-wave; do not
+  preserve legacy names as a transitional layer.** "Just keep
+  the shim until Wave N" is the rationalization CLAUDE.md
+  "Renames to refuse on sight" applies to verbatim. If a wave
+  cannot complete its scope without shims, surface the cascade
+  cost; do not introduce them.
 
 **Performance characteristics:**
 
@@ -1286,6 +1302,17 @@ frame).
 transitional sentinel in `pop_builtin_args` is removed by Wave 6.
 Heap-bearing builtins (`len(array)`, `string_concat`, etc.) become
 runtime-correct after Wave 6 lands.
+
+**Anti-pattern call-out (post-Wave-6.0 supervisor ruling 2026-05-09):**
+the transitional-shim layer (legacy push/pop names backed by Bool
+default) introduced by Wave 6.0 (`d782401`) was rejected as a
+W-series-shape defection-attractor. The pattern is now explicitly
+forbidden in §2.7.7. Wave 6.5 deletes the shims and migrates every
+legacy ValueWord caller in arithmetic/comparison/loops/call_convention
+/raw_helpers/control_flow to the kinded API as part of the wave.
+Wave 6 close gate now includes a grep-fail: zero `push_raw_u64` /
+`pop_raw_u64` / `push_native_i64` / `stack_read_owned` /
+`stack_peek_raw` callers in the codebase.
 
 ### Q8 — Carrier API bound for `KindedSlot` accessors/constructors
 
