@@ -40,9 +40,6 @@ impl BytecodeCompiler {
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
             last_expr_numeric_type: None,
-            // `None` while not yet stamped — per ADR-006 §2.7.5.1
-            // compile-time analysis state holds "not yet known" via
-            // `Option`, never via a `NativeKind::Unknown` placeholder.
             top_level_program_return_kind: None,
             current_expr_result_mode: ExprResultMode::Value,
             last_expr_reference_result: ExprReferenceResult::default(),

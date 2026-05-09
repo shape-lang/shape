@@ -65,10 +65,10 @@ impl VirtualMachine {
     /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
     pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
-        // `FrameDescriptor.return_kind` is itself `Option<NativeKind>`
-        // — `None` until the compiler stamps it. Flatten the nested
-        // option here so the host boundary sees a single
-        // `Option<NativeKind>` answer.
+        // `FrameDescriptor.return_kind` is `Option<NativeKind>` (single-slot
+        // §2.7.8 / Q10 cell-storage shape — `None` ≡ "kind not stamped").
+        // Flatten via `?` so callers see `None` for either "no frame
+        // descriptor" or "frame present but no proven return kind".
         self.program.top_level_frame.as_ref()?.return_kind
     }
 

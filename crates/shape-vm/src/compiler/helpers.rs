@@ -1623,8 +1623,14 @@ impl BytecodeCompiler {
         let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
             return None;
         };
+        // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
+        // `Option<StorageHint>` ("not yet proven" carried in the Option).
+        // Match through `Some(..)` and forward only the proven primitive
+        // kinds; `None` (or any non-primitive proven kind) falls through.
         match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
+                Some(kind)
+            }
             _ => None,
         }
     }
@@ -1637,18 +1643,23 @@ impl BytecodeCompiler {
         // slot is still in scope (the typical case for typed-fn bodies
         // and top-level lets), this returns the proven kind populated at
         // emit time.
+        //
+        // Post-§2.7.5.1: `get_local_storage_hint` returns
+        // `Option<StorageHint>` ("not yet proven" lives in the Option).
+        // The `Some(...)` arm gates on a proven primitive; `None` (or any
+        // non-primitive) falls through to the recovery path below.
         let hint = self.type_tracker.get_local_storage_hint(*idx);
         if matches!(
             hint,
-            StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
+            Some(StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)
         ) {
-            return Some(hint);
+            return hint;
         }
         // Fallback: when this `LoadLocalTrusted` was emitted inside a
         // `compile_expr_block` whose outer scope has already been popped
         // by the time `infer_top_level_return_kind` runs (the type
         // tracker scopes track-and-discard alongside `locals`), the slot
-        // lookup returns Unknown. The producer-flip contract for
+        // lookup returns `None`. The producer-flip contract for
         // `LoadLocalTrusted` is "push the slot's raw bits" — and the
         // proof that the bits ARE native-kinded came from the typed
         // `StoreLocal<Kind>` emitted earlier in the same block. The
@@ -1664,8 +1675,11 @@ impl BytecodeCompiler {
             });
         }
         if let Some(info) = &self.last_expr_type_info {
+            // `info.storage_hint: Option<StorageHint>` post-§2.7.5.1 —
+            // match through `Some(..)` and forward only the proven
+            // primitive kinds.
             return match info.storage_hint {
-                kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => {
+                Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
                     Some(kind)
                 }
                 _ => None,
@@ -1714,8 +1728,13 @@ impl BytecodeCompiler {
         let Some(Operand::ModuleBinding(idx)) = &instr.operand else {
             return None;
         };
+        // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
+        // `Option<StorageHint>`. Match through `Some(..)` and forward
+        // only the proven primitive kinds.
         match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool) => Some(kind),
+            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
+                Some(kind)
+            }
             _ => None,
         }
     }
@@ -2205,12 +2224,19 @@ impl BytecodeCompiler {
         let Some(func) = self.program.functions.get(func_idx) else {
             return;
         };
-        let hints: Vec<StorageHint> = (0..func.locals_count)
+        // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
+        // `Option<StorageHint>`. The wire-format `function_local_storage_hints`
+        // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
+        // must have a proven kind by FunctionBlob construction time. We
+        // collect via `collect::<Option<Vec<_>>>()`, which short-circuits to
+        // `None` if ANY slot is unproven. When all are proven, we stamp the
+        // descriptor and the legacy hints vec; otherwise we leave both empty
+        // (the legacy "all-Unknown" path) so downstream readers fall back to
+        // polymorphic emission.
+        let proven_hints: Option<Vec<StorageHint>> = (0..func.locals_count)
             .map(|slot| self.type_tracker.get_local_storage_hint(slot))
             .collect();
 
-        // Populate FrameDescriptor on the function for trusted opcode verification.
-        let has_any_known = hints.iter().any(|h| *h != StorageHint::Unknown);
         let instr_len = self.program.instructions.len();
         let code_end = if func.body_length > 0 {
             (func.entry_point + func.body_length).min(instr_len)
@@ -2224,11 +2250,22 @@ impl BytecodeCompiler {
         } else {
             false
         };
-        if has_any_known || has_trusted {
-            self.program.functions[func_idx].frame_descriptor = Some(
-                crate::type_tracking::FrameDescriptor::from_slots(hints.clone()),
-            );
-        }
+
+        // Populate FrameDescriptor only when every slot's kind is proven —
+        // §2.7.5.1 forbids `NativeKind::Unknown` placeholders in the wire
+        // format. If any slot is unproven, leave the descriptor unset and
+        // fall through to the legacy polymorphic path.
+        let hints: Vec<StorageHint> = match proven_hints {
+            Some(h) => {
+                if !h.is_empty() || has_trusted {
+                    self.program.functions[func_idx].frame_descriptor = Some(
+                        crate::type_tracking::FrameDescriptor::from_slots(h.clone()),
+                    );
+                }
+                h
+            }
+            None => Vec::new(),
+        };
 
         if self.program.function_local_storage_hints.len() <= func_idx {
             self.program
@@ -2271,20 +2308,22 @@ impl BytecodeCompiler {
     ///
     /// Today supports the common case: `Item::Expression(Expr::FunctionCall)`
     /// with a name resolvable via `function_defs[name].return_type` (a
-    /// `TypeAnnotation::Basic` for primitive types). Returns `Unknown` for
+    /// `TypeAnnotation::Basic` for primitive types). Returns `None` for
     /// other shapes (the caller falls back to passthrough at the host
-    /// boundary, preserving pre-E+4 semantics).
+    /// boundary, preserving pre-E+4 semantics) — per ADR-006 §2.7.5.1
+    /// the deleted `StorageHint::Unknown` sentinel is replaced by
+    /// `Option<StorageHint>` at the compiler-tier intermediate state.
     pub(super) fn infer_top_level_return_kind_from_item(
         &self,
         item: &shape_ast::ast::Item,
-    ) -> StorageHint {
+    ) -> Option<StorageHint> {
         use shape_ast::ast::{Expr, Item, Statement};
 
         // Extract the trailing expression of a top-level item, if any.
         let expr: &Expr = match item {
             Item::Expression(expr, _) => expr,
             Item::Statement(Statement::Expression(expr, _), _) => expr,
-            _ => return StorageHint::Unknown,
+            _ => return None,
         };
 
         // Walk into a call-shape: function-call / qualified-namespace-call
@@ -2298,7 +2337,7 @@ impl BytecodeCompiler {
         // picks up the typed-return kind directly when the callee uses
         // `ReturnValue<Kind>` opcodes uniformly.
         if let Expr::MethodCall { .. } = expr {
-            return self.last_emitted_native_kind().unwrap_or(StorageHint::Unknown);
+            return self.last_emitted_native_kind();
         }
 
         // Wave E+5.5 cluster R5: top-level match expressions where every
@@ -2334,7 +2373,7 @@ impl BytecodeCompiler {
                 owned_qualified = format!("{}::{}", namespace, function);
                 owned_qualified.as_str()
             }
-            _ => return StorageHint::Unknown,
+            _ => return None,
         };
 
         // Resolve callee return annotation. Try regular function defs
@@ -2349,9 +2388,7 @@ impl BytecodeCompiler {
                     .get(call_name)
                     .and_then(|def| def.return_type.as_ref())
             });
-        let Some(ann) = return_ann else {
-            return StorageHint::Unknown;
-        };
+        let ann = return_ann?;
 
         // Map primitive type-annotation names to `NativeKind` (handles
         // both `Basic("bool")` and `Reference("Bool")`-style entries).
@@ -2360,10 +2397,7 @@ impl BytecodeCompiler {
         // surfaces the right `NativeKind` on the parallel-kind track at
         // the host boundary (per ADR-006 §2.7.7 — the deleted
         // `synthesize_value_word_from_raw` decoder is gone).
-        let name = match ann.as_type_name_str() {
-            Some(n) => n,
-            None => return StorageHint::Unknown,
-        };
+        let name = ann.as_type_name_str()?;
         let inferred = primitive_type_name_to_storage_hint(name)
             .or_else(|| {
                 self.type_aliases
@@ -2382,12 +2416,7 @@ impl BytecodeCompiler {
                 } else {
                     None
                 }
-            })
-            .unwrap_or(StorageHint::Unknown);
-
-        if inferred == StorageHint::Unknown {
-            return StorageHint::Unknown;
-        }
+            })?;
 
         // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
         // Top-level `name()` calls compile to polymorphic `Call*` opcodes
@@ -2395,10 +2424,8 @@ impl BytecodeCompiler {
         // (read off the parallel-kind track at the call site per
         // ADR-006 §2.7.7); `last_emitted_native_kind` returns `None` for
         // these, which correctly steers the program return kind to
-        // `Unknown` rather than overriding the call-site declaration.
-        let Some(native_kind) = self.last_emitted_native_kind() else {
-            return StorageHint::Unknown;
-        };
+        // `None` rather than overriding the call-site declaration.
+        let native_kind = self.last_emitted_native_kind()?;
 
         if matches!(
             inferred,
@@ -2412,13 +2439,13 @@ impl BytecodeCompiler {
                 | StorageHint::UInt64
         ) && native_kind == StorageHint::Int64
         {
-            return inferred;
+            return Some(inferred);
         }
 
         if native_kind == inferred {
-            inferred
+            Some(inferred)
         } else {
-            StorageHint::Unknown
+            None
         }
     }
 
@@ -2437,7 +2464,7 @@ impl BytecodeCompiler {
     /// whose producer declared a different `NativeKind`.
     fn match_arms_uniform_literal_kind(
         match_expr: &shape_ast::ast::expr_helpers::MatchExpr,
-    ) -> StorageHint {
+    ) -> Option<StorageHint> {
         use shape_ast::ast::{Expr, literals::Literal};
 
         let mut uniform: Option<StorageHint> = None;
@@ -2474,23 +2501,25 @@ impl BytecodeCompiler {
                 // Anything else (method call, function call, binary
                 // arithmetic, identifier, …) is rejected: we can't
                 // statically prove uniform stack discipline across
-                // arms, so return Unknown to keep passthrough.
-                _ => return StorageHint::Unknown,
+                // arms, so return None to keep passthrough — per
+                // ADR-006 §2.7.5.1, "kind not yet proven" is `None`.
+                _ => return None,
             };
             match uniform {
                 None => uniform = Some(kind),
                 Some(prev) if prev == kind => {}
-                _ => return StorageHint::Unknown,
+                _ => return None,
             }
         }
-        uniform.unwrap_or(StorageHint::Unknown)
+        uniform
     }
 
-    pub(super) fn infer_top_level_return_kind(&self) -> StorageHint {
+    pub(super) fn infer_top_level_return_kind(&self) -> Option<StorageHint> {
         // Inferred kind from compile-time numeric / type-info tracking.
         // This is the *intended* program return kind. We must still verify
         // the producer-side stack discipline matches before declaring it
-        // (see `last_emitted_native_kind` and the gating below).
+        // (see `last_emitted_native_kind` and the gating below). Per
+        // ADR-006 §2.7.5.1, "kind not yet proven" is carried as `None`.
         let inferred: StorageHint = self
             .last_expr_numeric_type
             .and_then(|nt| match nt {
@@ -2509,23 +2538,17 @@ impl BytecodeCompiler {
                     })
                 }
                 // Decimal isn't a `NativeKind` variant — fall through to
-                // Unknown so synthesis stays in passthrough.
+                // None so synthesis stays in passthrough.
                 crate::type_tracking::NumericType::Decimal => None,
             })
             .or_else(|| {
-                self.last_expr_type_info.as_ref().and_then(|info| {
-                    if info.storage_hint != StorageHint::Unknown {
-                        Some(info.storage_hint)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(StorageHint::Unknown);
-
-        if inferred == StorageHint::Unknown {
-            return StorageHint::Unknown;
-        }
+                // Post-§2.7.5.1: `info.storage_hint` is itself
+                // `Option<StorageHint>`, so `.and_then(|info| info.storage_hint)`
+                // collapses both Option layers.
+                self.last_expr_type_info
+                    .as_ref()
+                    .and_then(|info| info.storage_hint)
+            })?;
 
         // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
         //
@@ -2542,12 +2565,9 @@ impl BytecodeCompiler {
         //
         // We only declare the kind when the LAST emitted opcode is on the
         // known raw-native producer list. Otherwise we fall through to
-        // `Unknown` so the host boundary reads the producer-declared kind
+        // `None` so the host boundary reads the producer-declared kind
         // off the parallel-kind track unchanged.
-        let native_kind = match self.last_emitted_native_kind() {
-            Some(kind) => kind,
-            None => return StorageHint::Unknown,
-        };
+        let native_kind = self.last_emitted_native_kind()?;
 
         // Width-aware check: if the inferred kind is a sub-i64 width
         // (Int8/U8/…/U32) and the producer is `Int64` (the catch-all for
@@ -2566,21 +2586,28 @@ impl BytecodeCompiler {
                 | StorageHint::UInt64
         ) && native_kind == StorageHint::Int64
         {
-            return inferred;
+            return Some(inferred);
         }
 
         if native_kind == inferred {
-            inferred
+            Some(inferred)
         } else {
-            StorageHint::Unknown
+            None
         }
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.
     pub(super) fn populate_program_storage_hints(&mut self) {
-        let top_hints: Vec<StorageHint> = (0..self.next_local)
+        // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
+        // `Option<StorageHint>`. The wire-format `top_level_local_storage_hints`
+        // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
+        // must have a proven kind by FunctionBlob construction time. We
+        // collect via `collect::<Option<Vec<_>>>()`, which short-circuits
+        // to `None` if ANY slot is unproven.
+        let top_hints_proven: Option<Vec<StorageHint>> = (0..self.next_local)
             .map(|slot| self.type_tracker.get_local_storage_hint(slot))
             .collect();
+        let top_hints: Vec<StorageHint> = top_hints_proven.clone().unwrap_or_default();
         self.program.top_level_local_storage_hints = top_hints.clone();
 
         // Build top-level FrameDescriptor so JIT can use per-slot type info.
@@ -2597,30 +2624,40 @@ impl BytecodeCompiler {
         // programs (Int/Bool/Float64 ending in arithmetic, comparisons,
         // or typed-load) round-trip cleanly through `vm.execute()`
         // post-Unit-A/B native arithmetic flip.
-        let return_kind = if self.top_level_program_return_kind != StorageHint::Unknown {
-            self.top_level_program_return_kind
-        } else {
-            self.infer_top_level_return_kind()
-        };
-        let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
+        //
+        // Per ADR-006 §2.7.5.1, "kind not yet stamped" is `None`.
+        let return_kind: Option<StorageHint> = self
+            .top_level_program_return_kind
+            .or_else(|| self.infer_top_level_return_kind());
         let has_trusted = self
             .program
             .instructions
             .iter()
             .any(|i| i.opcode.is_trusted());
-        let has_typed_return = return_kind != StorageHint::Unknown;
+        let has_any_known = top_hints_proven.is_some() && !top_hints.is_empty();
+        let has_typed_return = return_kind.is_some();
         if has_any_known || has_trusted || has_typed_return {
-            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(top_hints);
+            // §2.7.5.1: FrameDescriptor.slots is wire-format `Vec<NativeKind>`
+            // (no Option). When the per-slot kinds aren't all proven, fall
+            // back to an empty slot vec — the descriptor is still useful
+            // for return_kind alone, and the legacy hints vec also stays
+            // empty in that case.
+            let slots = top_hints_proven.unwrap_or_default();
+            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
 
-        let mut module_binding_hints = vec![StorageHint::Unknown; self.module_bindings.len()];
-        for &idx in self.module_bindings.values() {
-            if let Some(slot) = module_binding_hints.get_mut(idx as usize) {
-                *slot = self.type_tracker.get_module_binding_storage_hint(idx);
-            }
-        }
+        // Per ADR-006 §2.7.5.1, the wire-format
+        // `module_binding_storage_hints: Vec<NativeKind>` requires every
+        // slot proven by FunctionBlob construction. Short-circuit via
+        // `collect::<Option<Vec<_>>>()` — if any binding's kind is
+        // unproven, leave the wire vec empty (the legacy "all-Unknown"
+        // path) so downstream readers route to polymorphic emission.
+        let module_binding_hints: Vec<StorageHint> = (0..self.module_bindings.len() as u16)
+            .map(|idx| self.type_tracker.get_module_binding_storage_hint(idx))
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
         self.program.module_binding_storage_hints = module_binding_hints;
 
         if self.program.function_local_storage_hints.len() < self.program.functions.len() {
@@ -3966,12 +4003,19 @@ impl BytecodeCompiler {
     /// Used to separate Box-promoted heap values from zero-cost inline
     /// values both for `DropLocal` emission at scope exit and for
     /// `CloneLocal` emission on reads.
+    ///
+    /// Per ADR-006 §2.7.5.1, `info.storage_hint` is itself
+    /// `Option<StorageHint>`; an absent hint (slot's kind not yet
+    /// proven) is treated as "not inline-scalar" — the same conservative
+    /// answer the deleted `StorageHint::Unknown` sentinel produced.
     pub(super) fn slot_has_inline_scalar_hint(&self, local_idx: u16) -> bool {
-        let hint = self
+        let Some(hint) = self
             .type_tracker
             .get_local_type(local_idx)
-            .map(|info| info.storage_hint)
-            .unwrap_or(StorageHint::Unknown);
+            .and_then(|info| info.storage_hint)
+        else {
+            return false;
+        };
         hint.is_numeric_family() || matches!(hint, StorageHint::Bool)
     }
 
@@ -4378,9 +4422,16 @@ pub(crate) fn storage_hint_to_field_kind(
         | StorageHint::NullableInt64
         | StorageHint::NullableUInt64
         | StorageHint::NullableIntSize
-        | StorageHint::NullableUIntSize
-        | StorageHint::Dynamic
-        | StorageHint::Unknown => return None,
+        | StorageHint::NullableUIntSize => return None,
+        // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
+        // deleted; the post-bulldozer compiler-tier "kind not yet
+        // proven" state is `Option<StorageHint>` carried at the call
+        // site, never an enum sentinel.
+        //
+        // `Ptr(HeapKind)` is heap-bearing; like `String` it routes via
+        // the legacy LoadLocal/StoreLocal path that does refcount
+        // accounting until per-Ptr typed ops audit lands.
+        StorageHint::Ptr(_) => return None,
     })
 }
 
@@ -4451,8 +4502,15 @@ pub(crate) mod typed_emit_metrics {
             StorageHint::NullableUIntSize => "nullable_usize",
             StorageHint::Bool => "bool",
             StorageHint::String => "string",
-            StorageHint::Dynamic => "dynamic",
-            StorageHint::Unknown => "unknown",
+            // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
+            // deleted; the compiler-tier "kind not yet proven" state is
+            // `Option<StorageHint>` and the joint-counter call sites
+            // route the `None` case through `storage_hint_label_opt` /
+            // explicit `"none"` label so we never have to map an
+            // enum sentinel here. `Ptr(HeapKind)` is the surviving
+            // heap-bearing variant; one stable label per heap arm
+            // would balloon this map, so collapse all `Ptr(_)` to "ptr".
+            StorageHint::Ptr(_) => "ptr",
         }
     }
 

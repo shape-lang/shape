@@ -1283,11 +1283,11 @@ impl BytecodeCompiler {
             // `top_level_frame.return_kind` for the host-boundary
             // ValueWord synthesis.
             if is_last && self.errors.is_empty() {
-                // Per ADR-006 §2.7.5.1 compile-time analysis state holds
-                // "not yet known" via `Option`, never via a deleted
-                // `NativeKind::Unknown` placeholder. Both inference
-                // helpers in `helpers.rs` return `Option<StorageHint>`
-                // post Z-compiler-option-cascade.
+                // Per ADR-006 §2.7.5.1, `infer_top_level_return_kind` /
+                // `infer_top_level_return_kind_from_item` carry "kind not
+                // yet proven" as `Option::None` — `.or_else(...)` falls
+                // back to the AST-driven path when the state-driven one
+                // produced no kind.
                 let kind = self
                     .infer_top_level_return_kind()
                     .or_else(|| self.infer_top_level_return_kind_from_item(item));
