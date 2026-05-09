@@ -862,23 +862,53 @@ impl Drop for TypedObjectStorage {
                                 bits as *const crate::value::FilterNode,
                             );
                         }
-                        // Closure / Future / Char / NativeScalar: these
-                        // HeapKind discriminators do not have an Arc<T>
-                        // slot payload (closure uses OwnedClosureBlock with
-                        // its own refcount; the others are inline scalars).
-                        // A heap_mask bit set with one of these is a
-                        // construction-side bug — never produced by the
-                        // current caller surface.
-                        HeapKind::Closure
-                        | HeapKind::Future
-                        | HeapKind::Char
-                        | HeapKind::NativeScalar => {
+                        // Round 2.5b W7-closure-retain-parallel (ADR-006
+                        // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
+                        // Round 2.5 close `5fa4b19`): when a TypedObject
+                        // field of kind `NativeKind::Ptr(HeapKind::Closure)`
+                        // is dropped along with the storage, slot bits are
+                        // `Arc::into_raw(Arc<HeapValue>)` pointing to a
+                        // `HeapValue::ClosureRaw(OwnedClosureBlock)` arm.
+                        // Round 2 close (`06cdfce`) committed to this
+                        // slot-bits shape via `slot.as_heap_value()`.
+                        // Same dispatch shape as the FilterExpr §2.7.9
+                        // amendment.
+                        HeapKind::Closure => {
+                            std::sync::Arc::decrement_strong_count(bits as *const HeapValue);
+                        }
+                        // `Ptr(HeapKind::Future)` carries the future-id u64
+                        // directly in `bits` (inline scalar — no `Arc<T>`
+                        // payload). See `async_ops/mod.rs` §"Wave 6.5 /
+                        // E-async migration" docstring.
+                        HeapKind::Future => {}
+                        // `HeapKind::Char` carries codepoint bits inline.
+                        // A heap_mask bit set on a Char field is a
+                        // construction-side bug per the original soundness
+                        // contract: Char is not an `Arc<T>`-payload kind,
+                        // so the field should never have been classified
+                        // as heap.
+                        HeapKind::Char => {
                             debug_assert!(
                                 false,
                                 "TypedObjectStorage::drop: heap_mask bit {} set with \
-                                 non-Arc-payload kind {:?} (schema_id={}); \
+                                 inline-scalar kind Char (schema_id={}); \
                                  construction-side soundness violation",
-                                i, hk, self.schema_id
+                                i, self.schema_id
+                            );
+                        }
+                        // `HeapKind::NativeScalar` kinded carrier pending
+                        // phase-2c kinded redesign (ADR-006 §2.7.4). When
+                        // it lands, this arm wires its release per the
+                        // chosen share carrier. Until then, a non-zero
+                        // pointer with this kind is a construction-side
+                        // bug — no Bool-default fallback (forbidden #9).
+                        HeapKind::NativeScalar => {
+                            debug_assert!(
+                                false,
+                                "TypedObjectStorage::drop: NativeScalar kinded carrier \
+                                 pending phase-2c kinded redesign (ADR-006 §2.7.4); \
+                                 schema_id={}, bit {}",
+                                self.schema_id, i
                             );
                         }
                     },

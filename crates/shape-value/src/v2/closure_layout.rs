@@ -39,7 +39,7 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
+    HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
     TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
@@ -404,17 +404,44 @@ impl Drop for SharedCell {
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
                     HeapKind::Char => {}
-                    // Closure / Future / NativeScalar: these HeapKind
-                    // discriminators do not have an `Arc<T>` slot payload
-                    // routed through this path. A `SharedCell` constructed
-                    // with one of these kinds and a non-zero pointer is a
-                    // construction-side bug; debug-assert and silently
-                    // no-op in release rather than guess at the bits.
-                    HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                    // Round 2.5b W7-closure-retain-parallel (ADR-006
+                    // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
+                    // Round 2.5 close `5fa4b19`): a `SharedCell` whose
+                    // single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::Closure)` carries
+                    // `Arc::into_raw(Arc<HeapValue>) as u64` pointing
+                    // to a `HeapValue::ClosureRaw(OwnedClosureBlock)`
+                    // arm — the share carrier at the slot tier is the
+                    // outer `Arc<HeapValue>`. Round 2 close (`06cdfce`)
+                    // committed to this slot-bits shape via
+                    // `callee.slot.as_heap_value()` →
+                    // `HeapValue::ClosureRaw(block)`. Same dispatch
+                    // shape as the `HeapKind::FilterExpr` §2.7.9
+                    // amendment (one variant, one matching `Arc<T>`
+                    // retire at the slot tier).
+                    HeapKind::Closure => {
+                        Arc::decrement_strong_count(bits as *const HeapValue);
+                    }
+                    // `Ptr(HeapKind::Future)` carries the future-id u64
+                    // directly in `bits` (inline scalar — no `Arc<T>`
+                    // payload). See `async_ops/mod.rs` §"Wave 6.5 /
+                    // E-async migration" docstring. Same shape as
+                    // `HeapKind::Char`.
+                    HeapKind::Future => {}
+                    // `HeapKind::NativeScalar` has no kinded `Arc<T>`
+                    // carrier yet — the redesign is the phase-2c
+                    // surface tracked in ADR-006 §2.7.4. When the
+                    // kinded NativeScalar carrier lands, this arm
+                    // wires its release per the chosen share carrier
+                    // (per the playbook's surface-and-stop discipline
+                    // — no Bool-default fallback). Until then, a
+                    // non-zero pointer with this kind is a
+                    // construction-side bug.
+                    HeapKind::NativeScalar => {
                         debug_assert!(
                             false,
-                            "SharedCell::drop: non-zero bits with non-Arc-payload kind {:?}",
-                            hk
+                            "SharedCell::drop: NativeScalar kinded carrier pending \
+                             phase-2c kinded redesign (ADR-006 §2.7.4)"
                         );
                     }
                 },
