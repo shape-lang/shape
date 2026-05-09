@@ -31,4 +31,4 @@
 0	dynamic-fallback retained	rejected rename
 0	\btag[- ]decode[- ](bridge|probe|helper|hop|translator|adapter)\b	rejected rename family — defection-attractor framing of deleted tag_bits dispatch
 0	\b(decoder|decode)[- ]bridge\b	rejected rename family — decoder bridge framing
-2	\b(synthesis|tag)[- ]bridge\b	rejected rename family — synthesis bridge framing
+0	\b(synthesis|tag)[- ]bridge\b	rejected rename family — synthesis bridge framing
