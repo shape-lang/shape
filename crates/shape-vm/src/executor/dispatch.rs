@@ -65,7 +65,11 @@ impl VirtualMachine {
     /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
     pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
-        Some(self.program.top_level_frame.as_ref()?.return_kind)
+        // `FrameDescriptor.return_kind` is `Option<NativeKind>` (single-slot
+        // §2.7.8 / Q10 cell-storage shape — `None` ≡ "kind not stamped").
+        // Flatten via `?` so callers see `None` for either "no frame
+        // descriptor" or "frame present but no proven return kind".
+        self.program.top_level_frame.as_ref()?.return_kind
     }
 
     /// Execute the loaded program, returning either a completed value or suspension info.

@@ -400,10 +400,13 @@ impl BytecodeCompiler {
                             // `None`, fall back to the polymorphic
                             // `StoreLocal` (mirrors helpers_binding.rs
                             // emit_load_local_owned migration).
+                            // `info.storage_hint` is itself
+                            // `Option<StorageHint>`, so `.and_then`
+                            // collapses both Option layers into one.
                             let hint = self
                                 .type_tracker
                                 .get_local_type(local_idx)
-                                .map(|info| info.storage_hint);
+                                .and_then(|info| info.storage_hint);
                             match hint {
                                 Some(h) => self.emit_store_local_for_hint(local_idx, h),
                                 None => {

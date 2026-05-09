@@ -623,7 +623,12 @@ pub struct BytecodeCompiler {
     /// `top_level_frame.return_kind` so the host boundary reads the kind
     /// off the parallel-kind track (per ADR-006 §2.7.7 — the deleted
     /// ValueWord-tagged synthesis is gone).
-    pub(crate) top_level_program_return_kind: crate::type_tracking::StorageHint,
+    ///
+    /// Per ADR-006 §2.7.5.1 (compiler-tier intermediate state policy),
+    /// "kind not yet stamped" is carried as `Option<StorageHint>` —
+    /// `None` is the post-bulldozer replacement for the deleted
+    /// `StorageHint::Unknown` sentinel.
+    pub(crate) top_level_program_return_kind: Option<crate::type_tracking::StorageHint>,
 
     /// Result mode for the expression currently being compiled.
     pub(crate) current_expr_result_mode: ExprResultMode,

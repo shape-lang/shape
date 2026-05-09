@@ -280,10 +280,12 @@ impl BytecodeCompiler {
         // Per ADR-006 §2.7.5.1 (compiler-tier intermediate state policy),
         // "kind not yet known" is carried as `Option<StorageHint>` locally
         // — there is no `StorageHint::Unknown` sentinel.
+        // `info.storage_hint` is itself `Option<StorageHint>`, so
+        // `.and_then` collapses both Option layers into one.
         let hint = self
             .type_tracker
             .get_local_type(slot)
-            .map(|info| info.storage_hint);
+            .and_then(|info| info.storage_hint);
         match hint {
             Some(h) => self.emit_load_local_for_hint(slot, h),
             None => {
@@ -422,12 +424,12 @@ impl BytecodeCompiler {
         if let Some(hint) = self.last_expr_numeric_type_to_storage_hint() {
             return Some(hint);
         }
-        // `info.storage_hint` is itself a `StorageHint` today; when the
-        // sibling `type_tracking.rs` migration lands and the field becomes
-        // `Option<StorageHint>`, this wrap will collapse naturally.
+        // Post-§2.7.5.1: `info.storage_hint` is itself `Option<StorageHint>`,
+        // so `.and_then` collapses the nesting — `None` propagates "kind not
+        // yet known" through both layers.
         self.last_expr_type_info
             .as_ref()
-            .map(|info| info.storage_hint)
+            .and_then(|info| info.storage_hint)
     }
 
     /// Priority order used by `infer_top_level_return_kind`. Returns
@@ -456,13 +458,12 @@ impl BytecodeCompiler {
                 crate::type_tracking::NumericType::Decimal => {}
             }
         }
-        // `info.storage_hint` is currently a `StorageHint`. The sibling
-        // type_tracking.rs migration (per ADR-006 §2.7.5.1) makes the
-        // VariableTypeInfo field `Option<StorageHint>`; until that lands,
-        // we wrap the field directly.
+        // Post-§2.7.5.1: `info.storage_hint` is itself `Option<StorageHint>`.
+        // `.and_then` collapses the nesting — `None` propagates "kind not yet
+        // known" through both layers.
         self.last_expr_type_info
             .as_ref()
-            .map(|info| info.storage_hint)
+            .and_then(|info| info.storage_hint)
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
