@@ -200,8 +200,14 @@ impl BytecodeExecutor {
             let mut ctx = runtime.persistent_context_mut();
 
             if first_run {
-                if let Some(ref val) = initial_value {
-                    let _ = vm.push_raw_u64(val.clone());
+                if let Some(ref _val) = initial_value {
+                    todo!(
+                        "phase-2c — see ADR-006 §2.7.4: run_vm_loop \
+                         initial_push needs the kinded host-boundary \
+                         carrier (NativeKind sourced from the persisted \
+                         binding's storage hint) before pushing onto the \
+                         VM stack"
+                    );
                 }
                 first_run = false;
             }
@@ -261,20 +267,15 @@ impl BytecodeExecutor {
 
                         let hash_str_nb =
                             ValueWord::from_string(Arc::new(snapshot_hash.hex().to_string()));
-                        let hash_nb = vm
-                            .create_typed_enum_nb("Snapshot", "Hash", vec![hash_str_nb.clone()])
-                            .unwrap_or_else(|| {
-                                let hash_nb = ValueWord::from_string(Arc::new(
-                                    snapshot_hash.hex().to_string(),
-                                ));
-                                ValueWord::from_enum(EnumValue {
-                                    enum_name: "Snapshot".to_string(),
-                                    variant: "Hash".to_string(),
-                                    payload: EnumPayload::Tuple(vec![hash_nb]),
-                                })
-                            });
-                        let _ = vm.push_raw_u64(hash_nb);
-                        continue;
+                        let _ = (hash_str_nb, snapshot_hash);
+                        todo!(
+                            "phase-2c — see ADR-006 §2.7.4: snapshot \
+                             resume marker push needs the kinded enum \
+                             constructor + push_kinded(bits, \
+                             NativeKind::Ptr(HeapKind::TypedObject)). \
+                             Legacy ValueWord-shape `create_typed_enum_nb` \
+                             return + raw-bits stack push are deleted."
+                        );
                     }
 
                     break ValueWord::none();
@@ -1218,10 +1219,16 @@ checkpointed(41)
         let bytecode: BytecodeProgram = store.get_struct(&bytecode_hash).expect("bytecode");
 
         let mut vm = VirtualMachine::from_snapshot(bytecode, &vm_snapshot, &store).expect("vm");
-        let resumed = vm
-            .create_typed_enum_nb("Snapshot", "Resumed", vec![])
-            .expect("typed resumed marker");
-        vm.push_raw_u64(resumed).expect("push marker");
+        // Phase-1b-vm: direct-VM resume marker push depends on the
+        // legacy ValueWord-shape `create_typed_enum_nb` return + the
+        // deleted raw-bits stack push. Phase-2c snapshot rebuild (per
+        // ADR-006 §2.7.4) restores this path with kinded carriers.
+        let _ = &mut vm;
+        todo!(
+            "phase-2c — see ADR-006 §2.7.4: snapshot resume direct-VM \
+             marker push needs kinded enum constructor + push_kinded(\
+             bits, NativeKind::Ptr(HeapKind::TypedObject))"
+        );
 
         let result = vm.execute_with_suspend(None).expect("vm execute");
         let value = match result {

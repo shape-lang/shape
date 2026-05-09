@@ -1515,7 +1515,7 @@ mod tests {
     // promotion, and the loop never terminates. Fixing this requires
     // either (a) flipping `LoadLocal`/`PushConst` Int paths to native i64
     // production, or (b) reverting the AddInt + LtInt fast paths to read
-    // tagged bits via `pop_tagged_i64`. The decision is part of the wider
+    // tagged bits via the deleted tagged-i64 pop shim. The decision is part of the wider
     // E+5.5 coordinator workstream — see vm-comparison-flip's report to
     // phase-3c-coordinator.
 }

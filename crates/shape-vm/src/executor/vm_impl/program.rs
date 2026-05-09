@@ -1,5 +1,4 @@
 use super::super::*;
-use shape_value::ValueWordExt;
 
 impl VirtualMachine {
     /// Load a program into the VM
@@ -438,10 +437,21 @@ impl VirtualMachine {
 
     /// Reset VM state
     /// Get a snapshot of all module binding values.
+    ///
+    /// Phase-1b-vm: the legacy `ValueWord` carrier was deleted along
+    /// with the borrow-only module-binding read shim. The kinded
+    /// equivalent (`Vec<KindedSlot>` walked through a parallel-kind
+    /// track per ADR-006 §2.7.8 / Q10) is owned by the cell-storage
+    /// rebuild and the Phase-2c snapshot revival (§2.7.4). The host
+    /// surface stays here as a `todo!()` placeholder so callers fail
+    /// loudly instead of being silently passed an empty vec.
     pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
-        (0..self.module_bindings.len())
-            .map(|i| self.binding_read_raw(i))
-            .collect()
+        todo!(
+            "phase-2c — see ADR-006 §2.7.4: module_bindings_snapshot \
+             needs a kinded carrier (Vec<KindedSlot>) walked through \
+             the parallel-kind track for module_bindings (§2.7.8 / \
+             Q10). The legacy ValueWord-shape return is deleted."
+        );
     }
 
     /// Reset VM execution state for trampoline use.
@@ -452,9 +462,12 @@ impl VirtualMachine {
         // WB2.6 Phase 3: release each live slot's owning share before
         // clearing to NONE_BITS. The retain-on-read contract (WB2.1–WB2.5)
         // guarantees no caller aliases these slots without its own retain.
-        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
+        // Kind-aware drop walks the parallel `kinds` track in lockstep
+        // with `stack` (ADR-006 §2.7.7).
         for i in 0..self.sp {
+            super::stack::drop_with_kind(self.stack[i], self.kinds[i]);
             self.stack[i] = Self::NONE_BITS;
+            self.kinds[i] = shape_value::NativeKind::Bool;
         }
         self.sp = 0;
         self.ip = 0;
@@ -472,9 +485,12 @@ impl VirtualMachine {
     pub fn reset(&mut self) {
         self.ip = self.program_entry_ip;
         // WB2.6 Phase 3: release each live slot's owning share.
-        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
+        // Kind-aware drop walks the parallel `kinds` track in lockstep
+        // with `stack` (ADR-006 §2.7.7).
         for i in 0..self.sp {
+            super::stack::drop_with_kind(self.stack[i], self.kinds[i]);
             self.stack[i] = Self::NONE_BITS;
+            self.kinds[i] = shape_value::NativeKind::Bool;
         }
         // Advance sp past top-level locals so expression evaluation
         // doesn't overlap with local variable storage in register windows.
@@ -495,9 +511,12 @@ impl VirtualMachine {
     pub fn reset_stack(&mut self) {
         self.ip = self.program_entry_ip;
         // WB2.6 Phase 3: release each live slot's owning share.
-        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
+        // Kind-aware drop walks the parallel `kinds` track in lockstep
+        // with `stack` (ADR-006 §2.7.7).
         for i in 0..self.sp {
+            super::stack::drop_with_kind(self.stack[i], self.kinds[i]);
             self.stack[i] = Self::NONE_BITS;
+            self.kinds[i] = shape_value::NativeKind::Bool;
         }
         let tl = self.program.top_level_locals_count as usize;
         self.sp = tl;
@@ -516,9 +535,12 @@ impl VirtualMachine {
     pub fn reset_minimal(&mut self) {
         self.ip = self.program_entry_ip;
         // WB2.6 Phase 3: release each live slot's owning share.
-        shape_value::value_word_drop::vw_drop_slice(&self.stack[..self.sp]);
+        // Kind-aware drop walks the parallel `kinds` track in lockstep
+        // with `stack` (ADR-006 §2.7.7).
         for i in 0..self.sp {
+            super::stack::drop_with_kind(self.stack[i], self.kinds[i]);
             self.stack[i] = Self::NONE_BITS;
+            self.kinds[i] = shape_value::NativeKind::Bool;
         }
         let tl = self.program.top_level_locals_count as usize;
         self.sp = tl;
@@ -528,12 +550,20 @@ impl VirtualMachine {
         self.last_uncaught_exception = None;
     }
 
-    /// Push a value onto the stack (public, for testing and host integration)
-    pub fn push_value(&mut self, value: ValueWord) {
-        if self.sp >= self.stack.len() {
-            self.stack.resize_with(self.sp * 2 + 1, || Self::NONE_BITS);
-        }
-        self.stack_write_raw(self.sp, value);
-        self.sp += 1;
+    /// Push a value onto the stack (public, for testing and host integration).
+    ///
+    /// Phase-1b-vm: the legacy `ValueWord` carrier was deleted; the
+    /// kinded replacement is `push_kinded(bits, kind)` directly on the
+    /// VM. Host-integration / test helpers that still build values via
+    /// the legacy carrier need a Phase-2c host-API rebuild (see
+    /// ADR-006 §2.7.4 — output-adapter cluster). The legacy signature
+    /// is preserved as a `todo!()` placeholder so callers fail loudly
+    /// rather than silently dropping the value.
+    pub fn push_value(&mut self, _value: ValueWord) {
+        todo!(
+            "phase-2c — see ADR-006 §2.7.4: push_value(ValueWord) is a \
+             legacy host-boundary helper; the kinded surface uses \
+             push_kinded(bits, kind) sourced from the producer."
+        );
     }
 }

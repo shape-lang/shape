@@ -141,8 +141,9 @@ impl BytecodeCompiler {
                 // `shared_closure_captures` at closure-construction
                 // time). Each typed opcode acquires the cell's mutex,
                 // reads the matching native payload via
-                // `read_shared_<kind>`, and pushes raw native bytes via
-                // `push_raw_u64`. Falls back to the legacy
+                // `read_shared_<kind>`, and pushes raw native bytes onto
+                // the kinded VM stack via `push_kinded(bits, kind)`.
+                // Falls back to the legacy
                 // `LoadSharedCapture` (0x134) for unresolved capture
                 // types — Wave G removes the legacy opcode after every
                 // resolved emit path is type-aware.
@@ -164,9 +165,10 @@ impl BytecodeCompiler {
             // `concrete_type_for_expr → ConcreteType::to_field_kind`.
             // Each typed opcode reads the matching native cell
             // (`*mut i64` / `*mut f64` / `*mut bool` / `*mut u64` for
-            // Ptr) and pushes raw native bytes onto the stack via
-            // `push_raw_u64` (sub-i64 ints sign- or zero-extended into
-            // the i64 path). Dynamic / unresolved capture types fall
+            // Ptr) and pushes raw native bytes onto the kinded VM stack
+            // via `push_kinded(bits, kind)` (sub-i64 ints sign- or
+            // zero-extended into the i64 path). Dynamic / unresolved
+            // capture types fall
             // back to the legacy `LoadOwnedMutableCapture` (0x132),
             // which handles the runtime dispatch on
             // `layout.capture_inner_kind(idx)` and re-encodes to a

@@ -361,8 +361,9 @@ impl VirtualMachine {
                 BuiltinFunction::TypeOf => {
                     todo!(
                         "phase-1b-vm wave 5c — TypeOf body migration pending \
-                         (uses self.pop_raw_u64 internally; needs kind \
-                         carrier rebuild)"
+                         (legacy body popped via the deleted raw-bits stack \
+                         shim; needs kinded-carrier rebuild — see ADR-006 \
+                         §2.7.6)"
                     );
                 }
 

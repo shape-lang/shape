@@ -360,7 +360,7 @@ impl VirtualMachine {
 
     /// Read the raw bits + kind at `idx` as a borrow (no refcount change).
     /// The caller MUST NOT drop the returned bits — the slot still owns
-    /// the share. Symmetric to the pre-Wave-6 `stack_read_raw`.
+    /// the share. Symmetric to the pre-Wave-6 borrow-only stack read shim.
     #[inline(always)]
     pub(crate) fn stack_read_kinded_raw(&self, idx: usize) -> (u64, NativeKind) {
         (self.stack[idx], self.kinds[idx])
@@ -454,14 +454,13 @@ impl VirtualMachine {
 
     // ────────────────────────────────────────────────────────────────────
     // ADR-006 §2.7.7 Wave 6.5 (commit `a3fbe7f`+1): the Wave 6.0
-    // transitional shim layer (`push_raw_u64`, `pop_raw_u64`,
-    // `push_native_i64`, `stack_read_owned`, `stack_peek_raw`, ...) has
-    // been DELETED. The shims dressed up Bool-default kinded primitives
-    // as legacy ValueWord-shape names; per ADR-006 §2.7.7 "Forbidden
-    // shapes" the pattern is the W-series "borrowed slot with
-    // call-pattern invariants" defection-attractor. Every caller must
-    // source kind locally and call `push_kinded(bits, kind)` /
-    // `pop_kinded() -> (bits, kind)` directly.
+    // transitional shim layer has been DELETED. The shims dressed up
+    // Bool-default kinded primitives as legacy ValueWord-shape names;
+    // per ADR-006 §2.7.7 "Forbidden shapes" the pattern is the W-series
+    // "borrowed slot with call-pattern invariants" defection-attractor.
+    // Every caller must source kind locally and call
+    // `push_kinded(bits, kind)` / `pop_kinded() -> (bits, kind)`
+    // directly.
     //
     // The sentinel constant for the zero/Bool slot is kept as a public
     // re-export so callers that need a "dead slot" placeholder can name
@@ -480,11 +479,11 @@ impl VirtualMachine {
     /// bits + kind. The closure must NOT retain the bits past its
     /// return — the slot still owns the underlying share.
     ///
-    /// Replaces the deleted `stack_peek_raw` shim (which handed out raw
-    /// bits without the kind, fitting the W-series "borrowed slot with
-    /// call-pattern invariants" defection-attractor). Post-Wave-6.5,
-    /// every peek site receives kind alongside bits so downstream
-    /// dispatch can match on kind without re-probing.
+    /// Replaces the deleted Wave-6.0 borrow-only peek shim (which handed
+    /// out raw bits without the kind, fitting the W-series "borrowed
+    /// slot with call-pattern invariants" defection-attractor).
+    /// Post-Wave-6.5, every peek site receives kind alongside bits so
+    /// downstream dispatch can match on kind without re-probing.
     #[inline(always)]
     pub(crate) fn stack_peek_kinded<F, R>(&self, idx: usize, f: F) -> R
     where

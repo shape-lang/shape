@@ -34,22 +34,21 @@ impl VirtualMachine {
     }
 
     /// Set a module_binding variable by name using ValueWord directly.
-    pub(crate) fn set_module_binding_by_name_nb(&mut self, name: &str, value: ValueWord) {
-        if let Some(idx) = self
-            .program
-            .module_binding_names
-            .iter()
-            .position(|n| n == name)
-        {
-            if idx < self.module_bindings.len() {
-                // BARRIER: heap write site — overwrites module binding by name
-                self.binding_write_raw(idx, value);
-            } else {
-                self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
-                // BARRIER: heap write site — overwrites module binding by name (after resize)
-                self.binding_write_raw(idx, value);
-            }
-        }
+    ///
+    /// Phase-1b-vm: the underlying module-binding raw-write shim was
+    /// deleted when the VM stack carrier flipped to the kinded API
+    /// (ADR-006 §2.7.7). Module-binding storage will gain its own
+    /// parallel-kind track (§2.7.8 / Q10 — owned by sub-cluster
+    /// `B8-shared-cell` / `B6-variables-loadptr`); until that lands,
+    /// host-tier mutators that take a legacy `ValueWord` value cannot
+    /// be implemented without re-introducing a tag-decode hop. Defer to
+    /// the Phase-2c host-API rebuild per ADR-006 §2.7.4.
+    pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: ValueWord) {
+        todo!(
+            "phase-2c — see ADR-006 §2.7.4: set_module_binding_by_name_nb \
+             needs a kinded host-binding API (parallel-kind track for \
+             module_bindings landing with §2.7.8 / Q10)"
+        );
     }
 
     /// Get the line number of the last error (for LSP integration)
