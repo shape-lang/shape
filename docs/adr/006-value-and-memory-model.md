@@ -605,6 +605,112 @@ strict-typing rules — the alternative (Option 2: per-kind body
 variants) pushes the same dispatch into the central wrapper and
 costs the same total work.
 
+#### 2.7.7 Stack ABI kind-awareness — parallel `Vec<NativeKind>` (Q9 ruling)
+
+Phase 1.B-vm Wave 5b (commit `fa2bafc`) surfaced that `pop_builtin_args`
+cannot recover per-arg `NativeKind` from the typed VM stack: the
+compiler emits typed pushes (`PushNativeInt64`, `PushNativeF64`,
+etc.) and the kind is consumed by the producing opcode and
+discarded. `FrameDescriptor.slots` tracks per-LOCAL kind, not
+per-stack-position kind, so the existing infrastructure doesn't
+close the gap.
+
+**Decision (Q9 ruling):** the VM stack ABI extends to carry a
+**parallel `Vec<NativeKind>` track** alongside the existing
+`Vec<u64>` data:
+
+```rust
+pub struct VmStack {
+    data: Vec<u64>,           // 8-byte raw slots (existing, unchanged)
+    kinds: Vec<NativeKind>,   // parallel kind track (NEW — 1 byte per slot)
+}
+```
+
+Every push records the kind in lockstep with the bits; every pop
+reads both. Index invariant: `data.len() == kinds.len()` at every
+opcode boundary.
+
+**WB2.4 retain-on-read discipline** uses the parallel track for
+kind-aware clone/drop dispatch:
+
+```rust
+impl VmStack {
+    fn push(&mut self, bits: u64, kind: NativeKind) { ... }
+    fn pop(&mut self) -> (u64, NativeKind) { ... }
+    fn read_owned(&self, idx: usize) -> KindedSlot {
+        // For retain-on-read sites that hand a share to a runtime-tier carrier
+        let bits = self.data[idx];
+        let kind = self.kinds[idx];
+        clone_with_kind(bits, kind);  // increment Arc strong-count if heap
+        KindedSlot::new(ValueSlot::from_raw(bits), kind)
+    }
+}
+```
+
+The `clone_with_kind(bits, kind)` and `drop_with_kind(bits, kind)`
+helpers replace the deleted `vw_clone` / `vw_drop` (which did
+tag-decode internally). Post-Wave-6, the kind is locally available
+at every retain/release site — **no tag decode, no `is_heap()` probe,
+no `as_heap_ref()` hop**.
+
+**Forbidden shapes this rules out:**
+
+- `Vec<KindedSlot>` for the stack — § 2.7.5 explicitly forbids
+  `KindedSlot` in the typed VM↔JIT slot ABI.
+- 16-byte stack slots (e.g. `Vec<TypedSlot>` where `TypedSlot = {
+  bits: u64, kind: NativeKind }`) — would conflict with §2.1's
+  8-byte slot invariant and double the stack memory.
+- Tag bits packed into the u64 — would re-introduce the deleted
+  ValueWord tag-decode pattern (CLAUDE.md "Forbidden code").
+- Stack-side kind track typed as `Vec<Option<NativeKind>>` — same
+  defection-attractor as §2.7.5.1's wire-format rule. Stack
+  contents are post-proof; every pushed slot has a known kind by
+  construction (the producing opcode emitted it).
+- `Vec<NativeKind>` track holding `NativeKind::Unknown` /
+  `NativeKind::Dynamic` placeholders — both deleted; per-stack-position
+  kinds are always concrete.
+
+**Performance characteristics:**
+
+- Push: 1 word write to `data` + 1 byte write to `kinds`. Sequential
+  cache lines.
+- Pop: 1 word read + 1 byte read. Same.
+- WB2.4 clone/drop: dispatch on `kind` (1 byte cmpxchg target),
+  call matching `Arc::increment_strong_count::<T>` / `decrement`.
+  **Strictly faster than the deleted `vw_clone(bits)` which did
+  tag-decode then dispatch.**
+- Memory overhead: 1 byte per stack slot (vs. 8 bytes data) =
+  +12.5% stack memory. For typical frame sizes (≤256 slots), this
+  is ≤256 bytes per frame — negligible.
+- Cache line behavior: `data` and `kinds` are separate allocations.
+  Hot opcode dispatch reads `data[idx]` and `kinds[idx]` together —
+  branch predictor + prefetch handles the parallel access well.
+
+**Cross-check on debug builds:** the parallel track's per-position
+kind should match `FrameDescriptor.slots[corresponding_local]` for
+locals, and the producing opcode's emitted kind for stack-temporary
+positions. A `debug_assert_eq!` at every push/pop catches kind drift
+during development; in release builds the assertions compile out.
+
+**Migration scope:** Wave 6's territory per the audit
+(`docs/cluster-audits/phase-1b-vm-valueword-callers.md` §D1, §D4):
+`vm_impl/stack.rs` (94 refs), `bytecode/opcode_defs.rs` (39 refs),
+`executor/objects/raw_helpers.rs`, all `executor/{stack_ops,
+arithmetic, comparison, logical, loops, call_convention}/mod.rs`,
+`executor/control_flow/mod.rs`. The migration:
+
+1. Extend `VmStack` with `kinds: Vec<NativeKind>` field +
+   push/pop signature changes.
+2. Replace `vw_clone(bits)` / `vw_drop(bits)` call sites with
+   `clone_with_kind(bits, kind)` / `drop_with_kind(bits, kind)` —
+   kind from the local context (FrameDescriptor or stack track).
+3. `pop_builtin_args` (Wave 5b's `NativeKind::Bool` transitional
+   sentinel) reads the parallel-track kind directly. Transitional
+   tagging removed.
+4. JIT codegen (Wave 10) emits both data and kind writes in
+   lockstep — `mir_compiler` generates the `kinds.push(NativeKind::*)`
+   alongside the existing `data.push(bits)`.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
@@ -1053,9 +1159,10 @@ Following ADR-005's convention:
 
 Answers below were reached during the ADR-006 review on 2026-05-08
 (Q1-Q6), the Phase 1.B carrier-shape decision on 2026-05-08 (Q7),
-and the Phase 1.B-vm Wave 5 carrier-API-bound decision on 2026-05-08
-(Q8). Q5 remains predicted-pending-audit; the rest are decisions
-binding for Phase 1 onward.
+the Phase 1.B-vm Wave 5 carrier-API-bound decision on 2026-05-08
+(Q8), and the Phase 1.B-vm Wave 6 stack-kind-track decision on
+2026-05-09 (Q9). Q5 remains predicted-pending-audit; the rest are
+decisions binding for Phase 1 onward.
 
 ### Q1 — `var` × `B0014 NonSendableAcrossTaskBoundary` coordination
 
@@ -1137,6 +1244,48 @@ shared structure.
 
 **Status:** Phase 4 audit (~2 weeks) is the actual decision-maker. This
 is a prediction.
+
+### Q9 — Stack ABI kind-awareness (Phase 1.B-vm Wave 6 surface)
+
+**Decision:** the VM stack ABI extends with a **parallel
+`Vec<NativeKind>` track** alongside the existing `Vec<u64>` data
+slots. Per-stack-position kind is stored explicitly; WB2.4
+retain-on-read uses the parallel track for kind-aware clone/drop
+dispatch (`clone_with_kind` / `drop_with_kind`). Spec lives at §2.7.7.
+
+**Rationale:** Phase 1.B-vm Wave 5b surfaced the gap —
+`pop_builtin_args` cannot recover per-arg `NativeKind` from the
+typed VM stack because the compiler emits typed pushes and the
+kind is consumed by the producing opcode. Three options were
+considered:
+
+- **Option A (kind from `FrameDescriptor.slots`)** — rejected:
+  `FrameDescriptor` is per-LOCAL, not per-stack-position. Doesn't
+  fit the actual data flow.
+
+- **Option C (opcode operands carry kind, e.g. `Call(builtin_id,
+  arity, packed_arg_kinds)`)** — rejected: works for
+  fixed-signature builtins but doesn't generalize to variadic
+  (`println(...)`, `format(...)`) or higher-order calls
+  (`fn.apply(args)`).
+
+- **Option B (parallel `Vec<NativeKind>` stack track)** —
+  accepted. Generalizes the FrameDescriptor pattern (slots →
+  kinds parallel) at the stack level. Eliminates tag-decode hops
+  entirely — kind is locally available at every retain/release.
+
+**Performance characteristics:** push/pop overhead is +1 byte per
+slot (negligible). WB2.4 clone/drop is **strictly faster** than the
+deleted `vw_clone(bits)` (which did tag-decode then dispatch).
+Cache-line behavior: `data` and `kinds` are separate allocations
+but accessed in lockstep — prefetch/branch-predictor handles well.
+Memory overhead: +12.5% stack memory (e.g. ≤256 bytes per typical
+frame).
+
+**Status:** Binding for Wave 6 onward. Wave 5b's `NativeKind::Bool`
+transitional sentinel in `pop_builtin_args` is removed by Wave 6.
+Heap-bearing builtins (`len(array)`, `string_concat`, etc.) become
+runtime-correct after Wave 6 lands.
 
 ### Q8 — Carrier API bound for `KindedSlot` accessors/constructors
 
