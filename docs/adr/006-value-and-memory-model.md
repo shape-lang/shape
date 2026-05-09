@@ -1548,6 +1548,34 @@ ABI in-flight value-call suspension shape gets its own follow-up
 if/when async value-calls land in the snapshot subset. Same
 out-of-scope clause as §2.7.10.
 
+**§2.7.11 Migration scope refinement (post-W7-audit, 2026-05-09):**
+The `executor/call_convention.rs` surface is **12 entry-points**,
+not 5 as the original migration scope text enumerated: the public
+entry-points (`execute_function_by_name`, `execute_function_by_id`,
+`execute_closure`, `execute_function_fast`,
+`execute_function_with_named_args`, `resume`, `execute_with_async`,
+`call_value_immediate_nb`, `jit_trampoline_call_closure`), the
+internal frame-setup helpers (`call_function_with_nb_args`,
+`call_closure_with_nb_args_keepalive`, `call_function_from_stack`),
+and the deleted `_raw` family (`call_value_immediate_raw`,
+`call_function_with_raw_args`, `call_closure_with_raw_args`)
+which carried a hybrid `&[(u64, NativeKind)]` pair-slice form
+pre-§2.7.11. **The `&[(u64, NativeKind)]` pair-slice form is
+rejected on §2.7.6/Q8 carrier-API-bound grounds** at the runtime
+tier and the three `_raw` entry-points migrate to either
+`&[KindedSlot]` or are deleted as redundant with the kinded
+entry-points. The JIT-trampoline FFI consumer
+(`jit_trampoline_call_closure`) keeps the pair-slice shape because
+the §2.7.5 cross-crate stable boundary needs raw u64 + parallel
+kind; consumers translate from `&[KindedSlot]` to `&[u64]` at the
+FFI boundary, single direction. This refinement keeps §2.7.11/Q12
+architecturally consistent: one carrier shape (`KindedSlot`) at
+the runtime tier, one parallel-pair shape (raw u64 + parallel
+`NativeKind`) at the storage/FFI tier (stack, cells, JIT
+trampoline), no third hybrid. The W7 playbook
+(`docs/cluster-audits/wave-7-cc1-playbook.md`) carries this
+refinement as binding for all 6 sub-clusters.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
