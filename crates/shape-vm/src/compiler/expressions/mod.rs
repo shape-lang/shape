@@ -2,7 +2,6 @@
 //!
 //! This module contains the main expression compilation logic, organized by expression type.
 
-use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 
@@ -1066,30 +1065,18 @@ impl BytecodeCompiler {
             } => {
                 // Check if this is a Type::comptime_field access (looks like enum syntax)
                 if matches!(payload, shape_ast::ast::EnumConstructorPayload::Unit) {
-                    if let Some(comptime_value) = self
+                    if self
                         .comptime_fields
                         .get(enum_name.as_str())
                         .and_then(|m| m.get(variant))
-                        .cloned()
+                        .is_some()
                     {
-                        let const_idx =
-                            if let Some(i) = comptime_value.as_i64() {
-                                self.program.add_constant(Constant::Int(i))
-                            } else if let Some(n) = comptime_value.as_number_coerce() {
-                                self.program.add_constant(Constant::Number(n))
-                            } else if let Some(b) = comptime_value.as_bool() {
-                                self.program.add_constant(Constant::Bool(b))
-                            } else if let Some(s) = comptime_value.as_str() {
-                                self.program
-                                    .add_constant(Constant::String(s.to_string()))
-                            } else {
-                                self.program.add_constant(Constant::Null)
-                            };
-                        self.emit(Instruction::new(
-                            OpCode::PushConst,
-                            Some(Operand::Const(const_idx)),
-                        ));
-                        return Ok(());
+                        // Comptime field extraction reads a stored carrier
+                        // value and projects to a `Constant`. The kinded
+                        // carrier shape lands in phase-2c (ADR-006 §2.4);
+                        // until then we surface rather than route through
+                        // the deleted ValueWord accessors.
+                        todo!("phase-2c — see ADR-006 §2.4");
                     }
                 }
                 self.compile_expr_enum_constructor(enum_name, variant, payload)

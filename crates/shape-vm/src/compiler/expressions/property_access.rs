@@ -9,7 +9,6 @@ use shape_runtime::type_schema::FieldType;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use shape_value::v2::struct_layout::FieldKind;
-use shape_value::ValueWordExt;
 
 use super::super::BytecodeCompiler;
 
@@ -190,30 +189,16 @@ impl BytecodeCompiler {
         // The type name is not a variable, so we resolve the comptime field directly
         // without compiling the object expression.
         if let Expr::Identifier(type_name, _) = object {
-            if let Some(comptime_value) = self
+            if self
                 .comptime_fields
                 .get(type_name.as_str())
                 .and_then(|m| m.get(property))
-                .cloned()
+                .is_some()
             {
-                let const_idx = if let Some(i) = comptime_value.as_i64() {
-                    self.program.add_constant(Constant::Int(i))
-                } else if let Some(n) = comptime_value.as_number_coerce() {
-                    self.program.add_constant(Constant::Number(n))
-                } else if let Some(b) = comptime_value.as_bool() {
-                    self.program.add_constant(Constant::Bool(b))
-                } else if let Some(s) = comptime_value.as_str() {
-                    self.program.add_constant(Constant::String(s.to_string()))
-                } else {
-                    self.program.add_constant(Constant::Null)
-                };
-                self.emit(Instruction::new(
-                    OpCode::PushConst,
-                    Some(Operand::Const(const_idx)),
-                ));
-                self.last_expr_schema = None;
-                self.last_expr_type_info = None;
-                return Ok(());
+                // Projecting a stored comptime field carrier to a
+                // `Constant` lands in phase-2c (ADR-006 §2.4); the
+                // ValueWord-shaped accessor it used is deleted.
+                todo!("phase-2c — see ADR-006 §2.4");
             }
         }
 
@@ -333,28 +318,12 @@ impl BytecodeCompiler {
                     .and_then(|m| m.get(property))
                     .cloned();
 
-                if let Some(value) = comptime_value {
-                    // Pop the object — we don't need it for a comptime field
-                    self.emit(Instruction::simple(OpCode::Pop));
-                    // Push the constant value directly from ValueWord
-                    let const_idx = if let Some(i) = value.as_i64() {
-                        self.program.add_constant(Constant::Int(i))
-                    } else if let Some(n) = value.as_number_coerce() {
-                        self.program.add_constant(Constant::Number(n))
-                    } else if let Some(b) = value.as_bool() {
-                        self.program.add_constant(Constant::Bool(b))
-                    } else if let Some(s) = value.as_str() {
-                        self.program.add_constant(Constant::String(s.to_string()))
-                    } else {
-                        self.program.add_constant(Constant::Null)
-                    };
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(const_idx)),
-                    ));
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    return Ok(());
+                if comptime_value.is_some() {
+                    // Comptime field projection from a stored carrier
+                    // value to a `Constant` lands in phase-2c
+                    // (ADR-006 §2.4); the ValueWord-shaped accessor it
+                    // used is deleted.
+                    todo!("phase-2c — see ADR-006 §2.4");
                 }
             }
         }
