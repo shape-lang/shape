@@ -33,27 +33,20 @@ impl VirtualMachine {
         }
     }
 
-    /// Set a module_binding variable by name using ValueWord directly.
+    /// Set a module_binding variable by name.
     ///
     /// Phase-1b-vm: the storage-tier parallel-kind track for module
     /// bindings has landed (`module_binding_kinds` companion vec, ADR-
     /// 006 §2.7.8 / Q10) and `module_binding_write_kinded` is the
     /// kinded implementation backbone for any future host-API mutator.
-    /// This particular method, however, still has a deleted-carrier
-    /// `ValueWord` parameter type — the kind cannot be sourced from a
-    /// `ValueWord` (the carrier itself is deleted, CLAUDE.md
-    /// "Forbidden Patterns"), so re-lighting requires the host-API
-    /// signature flip to a kinded shape (e.g. `(name, KindedSlot)` or
-    /// `(name, bits, NativeKind)`). That signature flip is
-    /// host-boundary work, scheduled with the Phase-2c host-API
-    /// rebuild per ADR-006 §2.7.4.
-    pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: ValueWord) {
+    /// The signature is now kinded per ADR-006 §2.7 / Q7 — the
+    /// `KindedSlot` carrier is the boundary shape.
+    pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: KindedSlot) {
         todo!(
             "phase-2c — see ADR-006 §2.7.4: set_module_binding_by_name_nb \
-             still takes a `ValueWord` (deleted carrier); flip the host- \
-             API signature to a kinded shape, then dispatch through \
-             `module_binding_write_kinded` (§2.7.8 parallel track is \
-             live)"
+             dispatch through `module_binding_write_kinded` (§2.7.8 \
+             parallel track is live); host-API caller wiring lands in \
+             the Phase-2c host rebuild"
         );
     }
 
@@ -68,7 +61,9 @@ impl VirtualMachine {
     }
 
     /// Capture an uncaught exception payload for host-side rendering.
-    pub(crate) fn set_last_uncaught_exception(&mut self, value: ValueWord) {
+    ///
+    /// Per ADR-006 §2.7 / Q7 the boundary carrier is `KindedSlot`.
+    pub(crate) fn set_last_uncaught_exception(&mut self, value: KindedSlot) {
         self.last_uncaught_exception = Some(value);
     }
 
@@ -78,7 +73,7 @@ impl VirtualMachine {
     }
 
     /// Take the last uncaught exception payload if present.
-    pub fn take_last_uncaught_exception(&mut self) -> Option<ValueWord> {
+    pub fn take_last_uncaught_exception(&mut self) -> Option<KindedSlot> {
         self.last_uncaught_exception.take()
     }
 }

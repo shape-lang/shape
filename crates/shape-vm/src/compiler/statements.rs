@@ -4181,29 +4181,20 @@ impl BytecodeCompiler {
                 {
                     if let shape_ast::ast::TypeAnnotation::Basic(type_name) = type_ann {
                         if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
+                            // Const-fold path is dormant per ADR-006 §2.4
+                            // — `ConstFoldValue` is an uninhabited
+                            // placeholder until the phase-2c carrier
+                            // shape lands. `eval_const_expr_to_nanboxed`
+                            // returns `Option<ConstFoldValue>` whose
+                            // `Some` arm is statically unreachable;
+                            // matching on the empty enum here keeps the
+                            // caller compile-clean while preserving the
+                            // surface for the phase-2c rebuild.
+                            let _ = (w, type_name);
                             if let Some(const_val) =
                                 crate::compiler::expressions::function_calls::eval_const_expr_to_nanboxed(init_expr)
                             {
-                                let in_range = if let Some(i) = const_val.as_i64() {
-                                    w.in_range_i64(i)
-                                } else if let Some(f) = const_val.as_f64() {
-                                    // Float → int truncation check
-                                    let i = f as i64;
-                                    (i as f64 == f) && w.in_range_i64(i)
-                                } else {
-                                    true // non-numeric, let runtime handle it
-                                };
-                                if !in_range {
-                                    return Err(shape_ast::error::ShapeError::SemanticError {
-                                        message: format!(
-                                            "value does not fit in `{}` (range {}..={})",
-                                            type_name,
-                                            w.min_value(),
-                                            w.max_value()
-                                        ),
-                                        location: Some(self.span_to_source_location(shape_ast::ast::Spanned::span(init_expr))),
-                                    });
-                                }
+                                match const_val {}
                             }
                         }
                     }

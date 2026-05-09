@@ -1283,12 +1283,14 @@ impl BytecodeCompiler {
             // `top_level_frame.return_kind` for the host-boundary
             // ValueWord synthesis.
             if is_last && self.errors.is_empty() {
-                let kind_from_state = self.infer_top_level_return_kind();
-                let kind = if kind_from_state != crate::type_tracking::StorageHint::Unknown {
-                    kind_from_state
-                } else {
-                    self.infer_top_level_return_kind_from_item(item)
-                };
+                // Per ADR-006 §2.7.5.1 compile-time analysis state holds
+                // "not yet known" via `Option`, never via a deleted
+                // `NativeKind::Unknown` placeholder. Both inference
+                // helpers in `helpers.rs` return `Option<StorageHint>`
+                // post Z-compiler-option-cascade.
+                let kind = self
+                    .infer_top_level_return_kind()
+                    .or_else(|| self.infer_top_level_return_kind_from_item(item));
                 self.top_level_program_return_kind = kind;
             }
             self.release_unused_module_reference_borrows_for_remaining_items(
