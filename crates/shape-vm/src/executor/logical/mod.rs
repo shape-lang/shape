@@ -73,16 +73,16 @@ impl VirtualMachine {
                 let (a_bits, a_kind) = self.pop_kinded()?;
                 if kind_is_heap(a_kind) || kind_is_heap(b_kind) {
                     if let (Some(left), Some(right)) = (
-                        raw_helpers::extract_filter_expr(a_bits),
-                        raw_helpers::extract_filter_expr(b_bits),
+                        raw_helpers::extract_filter_expr(a_bits, a_kind),
+                        raw_helpers::extract_filter_expr(b_bits, b_kind),
                     ) {
+                        let combined = Arc::new(FilterNode::And(
+                            Box::new(left.clone()),
+                            Box::new(right.clone()),
+                        ));
                         // Filter-expr operands consumed; release shares.
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
-                        let combined = Arc::new(FilterNode::And(
-                            Box::new(left.as_ref().clone()),
-                            Box::new(right.as_ref().clone()),
-                        ));
                         let raw = Arc::into_raw(combined) as u64;
                         self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
                     } else {
@@ -101,15 +101,15 @@ impl VirtualMachine {
                 let (a_bits, a_kind) = self.pop_kinded()?;
                 if kind_is_heap(a_kind) || kind_is_heap(b_kind) {
                     if let (Some(left), Some(right)) = (
-                        raw_helpers::extract_filter_expr(a_bits),
-                        raw_helpers::extract_filter_expr(b_bits),
+                        raw_helpers::extract_filter_expr(a_bits, a_kind),
+                        raw_helpers::extract_filter_expr(b_bits, b_kind),
                     ) {
+                        let combined = Arc::new(FilterNode::Or(
+                            Box::new(left.clone()),
+                            Box::new(right.clone()),
+                        ));
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
-                        let combined = Arc::new(FilterNode::Or(
-                            Box::new(left.as_ref().clone()),
-                            Box::new(right.as_ref().clone()),
-                        ));
                         let raw = Arc::into_raw(combined) as u64;
                         self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
                     } else {
@@ -126,9 +126,9 @@ impl VirtualMachine {
             Not => {
                 let (bits, kind) = self.pop_kinded()?;
                 if kind_is_heap(kind) {
-                    if let Some(node) = raw_helpers::extract_filter_expr(bits) {
+                    if let Some(node) = raw_helpers::extract_filter_expr(bits, kind) {
+                        let combined = Arc::new(FilterNode::Not(Box::new(node.clone())));
                         drop_with_kind(bits, kind);
-                        let combined = Arc::new(FilterNode::Not(Box::new(node.as_ref().clone())));
                         let raw = Arc::into_raw(combined) as u64;
                         self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
                     } else {
