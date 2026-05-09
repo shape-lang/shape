@@ -59,8 +59,10 @@ pub use feature_matrix::{FeatureCategory, FeatureTest};
 pub use memory::{GCConfig, GCResult, GarbageCollector, ObjectId};
 pub use type_tracking::{FrameDescriptor, NativeKind, StorageHint, TypeTracker, VariableTypeInfo};
 
-// Re-export ValueWord and related types from shape-value
-pub use shape_value::{ErrorLocation, LocatedVMError, Upvalue, VMContext, VMError};
+// Re-export error/context types from shape-value
+// (Upvalue/VMContext deleted per ADR-006 §2.7.8 — closure capture is now
+// kind-extended raw bits via ClosureCell, not a wrapper enum.)
+pub use shape_value::{ErrorLocation, LocatedVMError, VMError};
 
 #[cfg(test)]
 pub(crate) mod test_utils;

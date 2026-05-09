@@ -145,13 +145,14 @@ pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Verif
             };
 
             // Check that the descriptor is populated. Per ADR-006 §2.7.5.1,
-            // `FrameDescriptor.slots: Vec<NativeKind>` is post-proof — the
-            // deleted `NativeKind::Unknown` variant cannot appear at this
-            // layer; an empty / all-unknown descriptor (sourced from
-            // `FrameDescriptor::is_all_unknown` which other-territory
-            // type_tracking.rs still computes) means the compiler skipped
-            // proof for this trusted op.
-            if fd.is_empty() || fd.is_all_unknown() {
+            // `FrameDescriptor.slots: Vec<NativeKind>` is post-proof —
+            // every present slot has a proven `NativeKind` by construction
+            // (the deleted `NativeKind::Unknown` placeholder cannot appear
+            // here; per CLAUDE.md "Renames to refuse on sight" any
+            // `is_all_unknown` / `Unspecialized` predicate is a defection-
+            // attractor at this wire-format layer). An empty descriptor
+            // for a trusted op means the compiler skipped proof.
+            if fd.is_empty() {
                 errors.push(VerifyError::UnknownSlotKind {
                     function_name: func.name.clone(),
                     opcode: instruction.opcode,

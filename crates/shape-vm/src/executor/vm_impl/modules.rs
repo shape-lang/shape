@@ -1,4 +1,8 @@
 use super::super::*;
+// `VMError` is intentionally left out of the executor/mod.rs star-import
+// (see executor/mod.rs:126 comment); name it locally for the
+// `invoke_module_fn_id_stub` surface.
+use shape_value::VMError;
 
 impl VirtualMachine {
     /// Register a built-in stdlib module into the VM's module registry.

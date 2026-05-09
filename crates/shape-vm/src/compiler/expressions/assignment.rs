@@ -403,7 +403,7 @@ impl BytecodeCompiler {
                             let hint = self
                                 .type_tracker
                                 .get_local_type(local_idx)
-                                .map(|info| info.storage_hint);
+                                .and_then(|info| info.storage_hint);
                             match hint {
                                 Some(h) => self.emit_store_local_for_hint(local_idx, h),
                                 None => {

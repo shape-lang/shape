@@ -76,10 +76,13 @@ impl BytecodeCompiler {
             .type_tracker
             .get_local_type(scrutinee_local)
             .and_then(|info| info.schema_id);
-        let scrutinee_numeric_type = self
-            .type_tracker
-            .get_local_type(scrutinee_local)
-            .and_then(|info| Self::storage_hint_to_numeric_type(info.storage_hint));
+        let scrutinee_numeric_type =
+            self.type_tracker
+                .get_local_type(scrutinee_local)
+                .and_then(|info| {
+                    info.storage_hint
+                        .and_then(Self::storage_hint_to_numeric_type)
+                });
         let scrutinee_type_info = self.type_tracker.get_local_type(scrutinee_local).cloned();
 
         for arm in &match_expr.arms {
