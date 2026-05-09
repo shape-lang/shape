@@ -436,16 +436,22 @@ impl VirtualMachine {
                     }
                 }
 
-                let typed_nb = ValueWord::from_heap_value(HeapValue::TypedObject {
-                    schema_id: schema_id as u64,
-                    slots: slots.into_boxed_slice(),
-                    heap_mask,
-                });
+                let _ = (slots, heap_mask, schema_id);
                 if idx >= self.module_bindings.len() {
                     self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
                 }
-                // BARRIER: heap write site — overwrites module binding during typed object initialization
-                self.binding_write_raw(idx, typed_nb);
+                // Phase-1b-vm: assembling the TypedObject module binding
+                // and writing it through the deleted module-binding raw-
+                // write shim both depend on the legacy ValueWord
+                // carrier. The kinded equivalent (Arc<TypedObjectStorage>
+                // + parallel-kind track) lands with §2.7.8 / Q10's
+                // module-binding cell-storage rebuild and the Phase-2c
+                // host-API revival per ADR-006 §2.7.4.
+                todo!(
+                    "phase-2c — see ADR-006 §2.7.4: populate_module_objects \
+                     module-binding write needs the kinded module-binding \
+                     storage path (§2.7.8 / Q10)"
+                );
             }
         }
     }
