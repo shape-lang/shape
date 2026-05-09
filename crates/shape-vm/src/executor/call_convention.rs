@@ -91,108 +91,194 @@ use super::{CallFrame, VirtualMachine};
 impl VirtualMachine {
     /// Execute a named function with arguments, returning its result.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced deleted `ValueWord` carriers + the deleted
-    /// `call_function_with_nb_args` ABI. Cluster B-round-2 rebuild lands
-    /// the kinded `(bits, kind)` slice ABI on this entry point together
-    /// with the `closure_raw::ClosureCell` parallel-`Vec<NativeKind>`
-    /// extension.
+    /// **W7-cv-method (Round 3 close).** Resolves `name` to `func_id` via
+    /// the program function table and routes to
+    /// [`execute_function_by_id`] per W7 playbook §4.
     pub fn execute_function_by_name(
         &mut self,
-        _name: &str,
-        _args: Vec<KindedSlot>,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        name: &str,
+        args: Vec<KindedSlot>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_function_by_name kinded-ABI rebuild pending"
-        )
+        let func_id = self
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == name)
+            .ok_or_else(|| VMError::RuntimeError(format!("Function '{}' not found", name)))?
+            as u16;
+        self.execute_function_by_id(func_id, args, ctx)
     }
 
     /// Execute a function by its ID with positional arguments.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Same
-    /// kind-threaded ABI rebuild as `execute_function_by_name`.
+    /// **W7-cv-method (Round 3 close).** Captures `saved_depth` before
+    /// frame setup, routes through [`call_function_with_nb_args`], drives
+    /// the callee to completion via
+    /// [`execute_until_call_depth`](Self::execute_until_call_depth), and
+    /// pops the result via the kinded API (W7 playbook §4 + §2.7.10 / Q11
+    /// dispatch shape).
+    ///
+    /// **Ownership.** Each `KindedSlot` in `args` holds a strong-count
+    /// share. `call_function_with_nb_args` transfers shares into local
+    /// slots via `stack_write_kinded`; we then `mem::forget` the source
+    /// vec to release the per-slot carriers without dropping the shares
+    /// — same pattern as the §2.7.10 `op_call_method` dispatch shell.
     pub fn execute_function_by_id(
         &mut self,
-        _func_id: u16,
-        _args: Vec<KindedSlot>,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        func_id: u16,
+        args: Vec<KindedSlot>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_function_by_id kinded-ABI rebuild pending"
-        )
+        let saved_call_depth = self.call_stack.len();
+        self.call_function_with_nb_args(func_id, &args)?;
+        // Shares transferred into the new frame's locals; release the
+        // source-side carriers without dropping the shares.
+        std::mem::forget(args);
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, kind) = self.pop_kinded()?;
+        Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
     /// Execute a closure with its captured upvalues and arguments.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced deleted `Upvalue` (replaced by §2.7.8 kind-extended
-    /// `closure_raw::ClosureCell`). Cluster B-round-2 routes this through
-    /// the kinded cell layout.
+    /// **W7-cv-method (Round 3 close).** The pre-§2.7.8 `_upvalue_bits:
+    /// Vec<u64>` parameter — the deleted-ABI raw-bits shape — is replaced
+    /// by `closure_block: &OwnedClosureBlock`. Captures flow from the
+    /// block's parallel-kind track via `read_capture_kinded` inside
+    /// [`call_closure_with_nb_args_keepalive`], not from a side-channel
+    /// payload (W7 playbook §4 + ADR-006 §2.7.8 / Q10).
+    ///
+    /// The keep-alive companion fields carry the closure-self share so
+    /// `op_return` / `op_return_value` release it via `drop_with_kind`
+    /// on frame teardown — same B9 lockstep pattern as
+    /// `call_value_immediate_nb`'s closure arm.
     pub fn execute_closure(
         &mut self,
-        _function_id: u16,
-        _upvalue_bits: Vec<u64>,
-        _args: Vec<KindedSlot>,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        closure_block: &OwnedClosureBlock,
+        args: Vec<KindedSlot>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_closure kinded-cell rebuild pending"
-        )
+        // SAFETY: `closure_block` is a live borrow into a TypedClosureHeader
+        // block allocated by `alloc_typed_closure`; its `as_ptr()` points
+        // to a valid header per the construction invariant.
+        let function_id = unsafe { typed_closure_function_id(closure_block.as_ptr()) };
+
+        let saved_call_depth = self.call_stack.len();
+        // No keep-alive carrier — the synthetic dispatch path: the block
+        // lifetime is guaranteed by the borrow held across this call,
+        // so `closure_heap_bits` / `closure_heap_kind` are both `None`
+        // (B9 lockstep `Some(..)` ↔ `Some(..)`).
+        self.call_closure_with_nb_args_keepalive(function_id, closure_block, &args, None, None)?;
+        std::mem::forget(args);
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, kind) = self.pop_kinded()?;
+        Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
     /// Fast function execution for hot loops (backtesting).
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Same
-    /// kind-threaded rebuild as `execute_function_by_id`.
+    /// **W7-cv-method (Round 3 close).** Pre-computed `func_id`, no name
+    /// lookup, no args (callers that need args route through
+    /// `execute_function_by_id`). Same `saved_depth` pattern as the
+    /// other public entry-points.
     pub fn execute_function_fast(
         &mut self,
-        _func_id: u16,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        func_id: u16,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_function_fast kinded-ABI rebuild pending"
-        )
+        let saved_call_depth = self.call_stack.len();
+        self.call_function_with_nb_args(func_id, &[])?;
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, kind) = self.pop_kinded()?;
+        Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
     /// Execute a function with named arguments.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Same
-    /// kind-threaded rebuild as `execute_function_by_id`. Named-arg
-    /// mapping logic is value-tier-independent and migrates trivially
-    /// once the kinded ABI lands.
+    /// **W7-cv-method (Round 3 close).** Maps `&[(String, KindedSlot)]`
+    /// to a positional `Vec<KindedSlot>` via `descriptor.param_names`
+    /// lookup, then routes through [`execute_function_by_id`] per W7
+    /// playbook §4. Missing positional slots are sentinel-filled with
+    /// `(NONE_BITS, NativeKind::Bool)` per W6.5 §2 Null/Unit row —
+    /// Drop/Clone-no-op so the pre-population is leak-free.
+    ///
+    /// **Ownership.** The caller's named-args carry one share per slot;
+    /// `clone_with_kind` is NOT used (we re-home the slot's bits by
+    /// reading the slot directly). After mapping, the positional vec
+    /// owns the same shares; they transfer into the new frame via the
+    /// `execute_function_by_id` `mem::forget` discipline.
     pub fn execute_function_with_named_args(
         &mut self,
-        _func_id: u16,
-        _named_args: &[(String, KindedSlot)],
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        func_id: u16,
+        named_args: &[(String, KindedSlot)],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             execute_function_with_named_args kinded-ABI rebuild pending"
-        )
+        let (arity, param_names) = {
+            let function = self
+                .program
+                .functions
+                .get(func_id as usize)
+                .ok_or(VMError::InvalidCall)?;
+            (function.arity as usize, function.param_names.clone())
+        };
+
+        // Sentinel-fill positional slots with Null/Unit row (W6.5 §2):
+        // NONE_BITS + NativeKind::Bool is Drop/Clone-no-op, so the
+        // pre-fill is leak-free until the named-arg loop overwrites
+        // each present slot below.
+        let mut args: Vec<KindedSlot> = (0..arity)
+            .map(|_| KindedSlot::new(ValueSlot::none(), NativeKind::Bool))
+            .collect();
+
+        for (name, value) in named_args {
+            if let Some(idx) = param_names.iter().position(|p| p == name) {
+                if idx < args.len() {
+                    // The caller owns the named-args slice's shares (they
+                    // pass `&[(String, KindedSlot)]` by borrow). Bump the
+                    // refcount once via `clone_with_kind` so the
+                    // positional vec owns an independent share that
+                    // transfers cleanly into the new frame; the caller's
+                    // outer slot stays live for them to drop. Sentinel
+                    // pair released by `KindedSlot::Drop` on the
+                    // `args[idx] = ...` write below — Drop-no-op for
+                    // (NONE_BITS, Bool).
+                    super::vm_impl::stack::clone_with_kind(value.slot.raw(), value.kind);
+                    args[idx] = KindedSlot::new(
+                        ValueSlot::from_raw(value.slot.raw()),
+                        value.kind,
+                    );
+                }
+            }
+        }
+
+        self.execute_function_by_id(func_id, args, ctx)
     }
 
     /// Resume execution after a suspension.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced the deleted unkinded-push shim (CLAUDE.md "Forbidden
-    /// Patterns" surface — replaced by `push_kinded(bits, kind)` per
-    /// playbook §2). The post-§2.7.7 replacement sources kind from the
-    /// resume-point's expected return-slot kind via the suspended
-    /// `FrameDescriptor.return_kind`.
+    /// **§2.7.4 Phase-2c — stays `todo!()`.** The suspension shape
+    /// requires snapshot-tier work: the resume body's pre-§2.7.7 form
+    /// pushed `value` onto the stack and re-entered the suspendable
+    /// dispatch loop, but the snapshot/restore family
+    /// (`apply_pending_resume` / `apply_pending_frame_resume` in
+    /// `executor/resume.rs`) is itself §2.7.4 deferred — its bodies
+    /// return `VMError::NotImplemented(PHASE_2C_SNAPSHOT_SURFACE)`. Until
+    /// the snapshot rebuild lands a kind-threaded
+    /// `slot_to_serializable` / `serializable_to_slot` pair plus the
+    /// §2.7.8 cell-storage parallel-kind tracks for `module_bindings`
+    /// and frame-resume payloads, this entry-point cannot be wired —
+    /// surface-and-stop trigger per W7 playbook §8 (snapshot-tier
+    /// resume).
     pub fn resume(
         &mut self,
         _value: KindedSlot,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<super::ExecutionResult, VMError> {
         todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             resume kinded-ABI rebuild pending"
+            "phase-2c — see ADR-006 §2.7.4 / §2.7.11 out-of-scope: \
+             resume() depends on snapshot-tier rebuild (executor/resume.rs \
+             apply_pending_resume / apply_pending_frame_resume)"
         )
     }
 
@@ -806,24 +892,125 @@ impl VirtualMachine {
     /// raw upvalue bits and raw args, returning the result as raw `u64`
     /// bits.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced deleted `Upvalue::new(vw_clone(b))` per capture
-    /// (forbidden #8). JIT-side post-§2.7.8 trampoline lands a
-    /// `&[(u64, NativeKind)]` upvalue slice plus an `&[(u64,
-    /// NativeKind)]` args slice; the kinded `closure_raw::ClosureCell`
-    /// is constructed directly from the slice without a stop through
-    /// the deleted `Upvalue` enum.
+    /// **W7-cv-method (Round 3 close).** This is the **only** `_raw`
+    /// survivor in `call_convention.rs` per ADR-006 §2.7.11
+    /// migration-scope refinement: it is the §2.7.5 cross-crate
+    /// stable-FFI consumer where the parallel-pair shape (raw `u64`
+    /// data + `NativeKind`) is canonical. Consumers translate
+    /// `&[KindedSlot]` → raw `u64` at the FFI boundary; this function
+    /// is the inverse hop on the runtime side.
+    ///
+    /// Body wraps `args` as a transient `&[KindedSlot]` slice (no Arc
+    /// bump — the JIT pre-incremented each share before crossing the
+    /// boundary), constructs a fresh `OwnedClosureBlock` from
+    /// `upvalue_bits` per the existing closure-construction convention
+    /// (allocate → write each capture's bits at its layout offset →
+    /// `OwnedClosureBlock::from_raw`), routes through
+    /// [`call_closure_with_nb_args_keepalive`], drives the callee, pops
+    /// the result via `pop_kinded`, and returns the bits as raw `u64`
+    /// (the kind is discarded — the JIT caller knows the static return
+    /// kind from the callee signature).
+    ///
+    /// **Ownership.** Each `(bits, kind)` in `upvalue_bits` carries a
+    /// pre-incremented share. We transfer those shares into the new
+    /// closure block via `write_capture_typed` (which stores the bit
+    /// pattern without bumping the refcount). The `OwnedClosureBlock`
+    /// then owns the captures' shares — its `Drop` walks the layout's
+    /// capture masks and releases them. Same for `args`: the JIT
+    /// pre-incremented; we hand each transient `KindedSlot` over by
+    /// move (no clone), and `call_closure_with_nb_args_keepalive`
+    /// transfers the shares into the new frame via `stack_write_kinded`.
+    /// We `mem::forget` the transient args vec so its `Drop` does not
+    /// double-free.
     pub fn jit_trampoline_call_closure(
         &mut self,
-        _func_id: u16,
-        _upvalue_bits: &[(u64, NativeKind)],
-        _args: &[(u64, NativeKind)],
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        func_id: u16,
+        upvalue_bits: &[(u64, NativeKind)],
+        args: &[(u64, NativeKind)],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             jit_trampoline_call_closure kinded-cell rebuild pending"
-        )
+        use shape_value::v2::closure_raw::{alloc_typed_closure, write_capture_raw_u64};
+        use std::sync::Arc;
+
+        // Source the closure layout from the program's per-function
+        // side-table (`closure_function_layouts[func_id]`). A `None`
+        // entry means the function is not a closure — the JIT-side
+        // `dispatch_call_via_trampoline_vm` should have routed bare
+        // function callees through `call_value_immediate_nb` instead;
+        // landing here with `None` is a JIT codegen bug. Surface as a
+        // RuntimeError per W7 playbook §8.
+        let layout_arc: Arc<shape_value::v2::closure_layout::ClosureLayout> = self
+            .program
+            .closure_function_layouts
+            .get(func_id as usize)
+            .and_then(|opt| opt.clone())
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "jit_trampoline_call_closure: no ClosureLayout for func_id {} \
+                     (program.closure_function_layouts entry is None — JIT codegen bug)",
+                    func_id
+                ))
+            })?;
+
+        debug_assert_eq!(
+            upvalue_bits.len(),
+            layout_arc.capture_count(),
+            "jit_trampoline_call_closure: upvalue_bits.len() {} != layout.capture_count() {}",
+            upvalue_bits.len(),
+            layout_arc.capture_count()
+        );
+
+        // Allocate a fresh closure block and write each capture's bits
+        // at its layout offset. The JIT pre-incremented each heap-typed
+        // share before crossing the FFI boundary — `write_capture_raw_u64`
+        // stores the bit pattern without bumping the refcount, so the
+        // shares transfer cleanly into the new block. The block's Drop
+        // (via `release_typed_closure` triggered by `OwnedClosureBlock`)
+        // releases each capture's share via the layout's heap/owned/
+        // shared capture masks.
+        //
+        // SAFETY: `alloc_typed_closure` returns a freshly-zeroed block
+        // sized for `layout_arc.total_heap_size()`; refcount is 1.
+        // `write_capture_raw_u64` writes the 8-byte capture slot at
+        // `layout.heap_capture_offset(i)` which is in-bounds for every
+        // `i < capture_count()`. The `type_id = 0` placeholder matches
+        // what the trampoline-side construction had pre-§2.7.11 (the
+        // typed-closure machinery does not key dispatch on `type_id`
+        // for trampoline-bound closures).
+        let block = unsafe {
+            let ptr = alloc_typed_closure(func_id, 0, &layout_arc);
+            for (i, (bits, _kind)) in upvalue_bits.iter().enumerate() {
+                write_capture_raw_u64(ptr, &layout_arc, i, *bits);
+            }
+            OwnedClosureBlock::from_raw(ptr, layout_arc)
+        };
+
+        // Wrap args as a transient `&[KindedSlot]` slice. No Arc bump:
+        // the JIT pre-incremented each share before crossing the FFI
+        // boundary; the transient KindedSlots own those shares now,
+        // and `call_closure_with_nb_args_keepalive` transfers them into
+        // the new frame's locals via `stack_write_kinded`. We
+        // `mem::forget` the vec at the end so its `Drop` does not
+        // double-free.
+        let kinded_args: Vec<KindedSlot> = args
+            .iter()
+            .map(|(bits, kind)| KindedSlot::new(ValueSlot::from_raw(*bits), *kind))
+            .collect();
+
+        let saved_call_depth = self.call_stack.len();
+        // No keep-alive carrier: the closure block lives for the
+        // duration of this call via the local `block` binding (its
+        // `Drop` at end-of-function releases it — but only after
+        // `execute_until_call_depth` has returned, by which point the
+        // callee's frame has been popped). B9 lockstep: both `None`.
+        self.call_closure_with_nb_args_keepalive(func_id, &block, &kinded_args, None, None)?;
+        std::mem::forget(kinded_args);
+
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, _kind) = self.pop_kinded()?;
+        // Return raw bits. The kind is discarded — the JIT caller
+        // knows the static return kind from the callee signature.
+        Ok(bits)
     }
 
     /// Fast-path frame setup: args are already on the value stack at
