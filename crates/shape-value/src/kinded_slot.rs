@@ -46,6 +46,7 @@ use crate::heap_value::{
 };
 use crate::native_kind::NativeKind;
 use crate::slot::ValueSlot;
+use crate::value::FilterNode;
 use std::sync::Arc;
 
 /// Caller-side runtime-value carrier: a `ValueSlot` paired with the
@@ -333,6 +334,15 @@ impl Drop for KindedSlot {
                     HeapKind::TaskGroup => {
                         Arc::decrement_strong_count(bits as *const TaskGroupData);
                     }
+                    // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                    // amendment): FilterExpr-kinded `KindedSlot`s own one
+                    // `Arc::into_raw(Arc<FilterNode>)` strong-count share.
+                    // The pre-amendment `HeapKind::NativeView` mislabel
+                    // would have dispatched the share as
+                    // `Arc<NativeViewData>` — wrong-type retire.
+                    HeapKind::FilterExpr => {
+                        Arc::decrement_strong_count(bits as *const FilterNode);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -449,6 +459,13 @@ impl Clone for KindedSlot {
                     }
                     HeapKind::TaskGroup => {
                         Arc::increment_strong_count(bits as *const TaskGroupData);
+                    }
+                    // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                    // amendment): FilterExpr-kinded clone bumps the
+                    // `Arc<FilterNode>` strong-count exactly once. Mirrors
+                    // the Drop arm above.
+                    HeapKind::FilterExpr => {
+                        Arc::increment_strong_count(bits as *const FilterNode);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).

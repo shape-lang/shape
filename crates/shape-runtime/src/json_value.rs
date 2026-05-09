@@ -144,6 +144,11 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
             "NativeScalar serialization policy not yet decided (N7 architectural-choice deferral; Ptr inner kind is hostile to JSON)"
                 .into(),
         ),
+        // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment): a
+        // FilterExpr tree is a transient query-DSL value; it has no JSON
+        // representation. Reject in the same shape as the other non-data
+        // variants.
+        HeapValue::FilterExpr(_) => Err("cannot serialize: FilterExpr".into()),
     }
 }
 

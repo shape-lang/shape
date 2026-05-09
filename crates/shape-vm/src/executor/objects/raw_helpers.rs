@@ -17,12 +17,22 @@
 //! `raw_helpers::` within their own sub-cluster's territory using
 //! `slot.as_heap_value()` + `HeapValue::*` match (Q8
 //! single-discriminator).
+//!
+//! ## Wave-γ G-heap-filter-expr (2026-05-09)
+//!
+//! The kind discriminator for FilterExpr Arcs has migrated from
+//! `HeapKind::NativeView` (label collision with real
+//! `Arc<NativeViewData>` payloads — type-confusion at the
+//! `clone_with_kind` / `drop_with_kind` dispatch tables) to the dedicated
+//! `HeapKind::FilterExpr` variant. ADR-006 §2.3 / §2.7.6 / Q8 amendment
+//! gates the new variant; `extract_filter_expr` now matches the new
+//! label.
 
 use shape_value::{FilterNode, NativeKind, heap_value::HeapKind};
 
 /// Borrow the `FilterNode` an And/Or/Not body emitted onto the kinded
 /// stack as `Arc::into_raw(Arc<FilterNode>) as u64` with kind
-/// `NativeKind::Ptr(HeapKind::NativeView)`.
+/// `NativeKind::Ptr(HeapKind::FilterExpr)`.
 ///
 /// Returns `None` for any other kind (the caller falls back to plain bool
 /// truthiness in that case) or for the null-pointer sentinel.
@@ -43,24 +53,12 @@ use shape_value::{FilterNode, NativeKind, heap_value::HeapKind};
 ///
 /// This mirrors the discipline of every other `from_<heap-kind>` /
 /// `as_<heap-kind>` helper in `KindedSlot` / `ValueSlot`.
-///
-/// **Architectural note (surfaced, not fixed):** the kind label
-/// `NativeKind::Ptr(HeapKind::NativeView)` is the playbook §10 mandate for
-/// this branch, but `HeapKind::NativeView` is also the canonical home for
-/// real `Arc<NativeViewData>` payloads (see
-/// `vm_impl/stack.rs::clone_with_kind` / `drop_with_kind`). That makes the
-/// FilterExpr arm an off-label re-use of a heap-kind slot — the
-/// per-FilterExpr Arc is type-confused with `Arc<NativeViewData>` at the
-/// retain/release dispatch tables. Wave-α D-raw-helpers preserves the
-/// existing label per playbook §10; the soundness fix is a separate
-/// surface (likely needs a new `HeapKind::FilterExpr` variant + ADR-006
-/// amendment, gated by §2.7.6 cardinality bound).
 #[inline]
 pub fn extract_filter_expr(bits: u64, kind: NativeKind) -> Option<&'static FilterNode> {
     if bits == 0 {
         return None;
     }
-    if kind != NativeKind::Ptr(HeapKind::NativeView) {
+    if kind != NativeKind::Ptr(HeapKind::FilterExpr) {
         return None;
     }
     // SAFETY: `bits` is the `Arc::into_raw(Arc<FilterNode>) as u64` payload

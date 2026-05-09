@@ -435,6 +435,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Closure) => "closure",
         NativeKind::Ptr(HeapKind::Future) => "future",
         NativeKind::Ptr(HeapKind::NativeScalar) => "native_scalar",
+        // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment): the
+        // FilterExpr discriminator labels query-DSL Arc<FilterNode>
+        // payloads emitted by `executor/logical/mod.rs`.
+        NativeKind::Ptr(HeapKind::FilterExpr) => "filter_expr",
     }
 }
 

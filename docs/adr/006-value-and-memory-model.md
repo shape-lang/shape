@@ -220,6 +220,16 @@ HeapValue tag.
 `TypedObjectStorage` is a new struct holding `{schema_id, slots,
 heap_mask}` — the fields previously inline in `HeapValue::TypedObject`.
 
+**HeapKind variant set is gated by Q8 cardinality.** Adding a new
+`HeapKind` variant requires an ADR amendment per §2.7.6 (Q8
+"Adding a method outside the bound requires either: (a) Adding a
+`NativeKind` variant to `shape-value` ..."). Wave-γ G-heap-filter-expr
+(§2.7.9, 2026-05-09) added `HeapKind::FilterExpr` (ordinal 18) to fix
+a label-collision soundness gap surfaced by Wave-α D-raw-helpers
+(commit `a27c0e4`); see §2.7.9 for the full justification + the
+mechanical-lockstep dispatch-table updates that fan out from the
+addition.
+
 ### 2.4 ValueSlot per-FieldType constructors
 
 ```rust
@@ -573,10 +583,11 @@ for the complete list):
   (would need to overcome ADR-005 §1).
 
 **Mechanical effect:** at maximum, `KindedSlot` carries ~25
-constructors and ~5-10 scalar accessors (NativeKind has ~25 variants
-total, ~7 are scalar; ~18 are `Ptr(HeapKind::*)` which get
-constructor-only). Total carrier surface is ~150 LoC, bounded by the
-type system's enum cardinality, not by user demand.
+constructors and ~5-10 scalar accessors (NativeKind has ~26 variants
+total post-Wave-γ, ~7 are scalar; ~19 are `Ptr(HeapKind::*)` which get
+constructor-only — see §2.7.9 for the Wave-γ `FilterExpr` addition).
+Total carrier surface is ~150 LoC, bounded by the type system's enum
+cardinality, not by user demand.
 
 **Code-review rule:** "Does this proposed accessor pair 1:1 with a
 `NativeKind` variant, with no parallel discrimination on `HeapKind`?
@@ -863,6 +874,126 @@ closure-creation site catches kind drift during development.
 stores. Per §2.7.4, snapshot rebuild is Phase 2c. The Phase-1.B-vm
 work updates in-memory cell layouts; the persisted/wire shapes get
 their parallel-kind extension at Phase 2c entry.
+
+#### 2.7.9 `HeapKind::FilterExpr` — Q8 cardinality amendment (Wave-γ G-heap-filter-expr, 2026-05-09)
+
+Phase 1.B-vm Wave-α D-raw-helpers (commit `a27c0e4`, supervisor merge
+`5a738f1`) surfaced a label-collision soundness gap in the
+filter-expression branch of `executor/logical/mod.rs`:
+
+> `executor/logical/mod.rs` (And/Or/Not heap path) pushes
+> `Arc::into_raw(Arc<FilterNode>) as u64` onto the kinded stack with
+> the kind label `NativeKind::Ptr(HeapKind::NativeView)` because no
+> `HeapKind::FilterExpr` variant exists. The `clone_with_kind` /
+> `drop_with_kind` dispatch tables in `vm_impl/stack.rs` (and the
+> §2.7.8 cell-storage mirrors `KindedSlot::{drop,clone}`,
+> `TypedObjectStorage::drop`, `SharedCell::drop`) interpret
+> `HeapKind::NativeView` as `Arc<NativeViewData>`. When the runtime
+> retains or releases a FilterExpr-bearing slot, the dispatch fires
+> `Arc::increment/decrement_strong_count::<NativeViewData>` against an
+> `Arc<FilterNode>` pointer — wrong-type retain/release at every
+> retain/drop site.
+
+This is genuinely undefined behavior, not an aesthetic concern: the two
+types have different layouts (`FilterNode` is an enum with Box pointers;
+`NativeViewData` is a struct with an integer pointer + layout
+metadata), so the wrong destructor walks the wrong fields.
+
+**Decision (Q8 cardinality amendment):** add a new HeapKind variant
+`FilterExpr` (ordinal 18, immediately after `HashMap`'s ordinal 17 per
+§2.3's append-only ordering convention). The amendment is gated by the
+§2.7.6 / Q8 cardinality bound's "Adding a method outside the bound
+requires either: (a) Adding a `NativeKind` variant to `shape-value`
+(gated by ADR-006 / Q-ruling — same gate as ADR-005 §1
+single-discriminator additions), OR (b) An ADR amendment justifying the
+parallel discrimination" — option (a) applied via this section.
+
+**Why a new variant rather than off-label re-use of `NativeView`:** the
+two payload types (`Arc<FilterNode>` vs `Arc<NativeViewData>`) require
+different destructors. Per §2.7.7 / §2.7.8, the `clone_with_kind` /
+`drop_with_kind` dispatch tables are the **single source of truth** for
+typed-Arc retain/release. A label that selects the wrong destructor is
+not a "kind error" the type system can recover from — it's UB. The
+discriminator must match the payload 1:1 at the dispatch table.
+
+**Why no parallel `HeapValue::FilterExpr` enrichment is required by
+ADR-005 §1 single-discriminator:** ADR-005 §1 says HeapValue is the
+single discriminator for **heap-resident values** *that flow through
+`HeapValue` materialization*. FilterExpr payloads do **not**: they are
+emitted to the kinded stack via `Arc::into_raw(Arc<FilterNode>)` and
+consumed via `Arc::from_raw(...)` directly on the slot bits, never
+wrapped in `Box<HeapValue>` or accessed via `slot.as_heap_value()`.
+Adding `HeapValue::FilterExpr(Arc<FilterNode>)` is provided to preserve
+the symmetry property "every `HeapKind` variant has a `HeapValue` arm
+of the same shape" (matching `HeapValue::ClosureRaw`/`Future`/
+`NativeScalar`/`Char`'s discriminator-only role) — but **calling
+`slot.as_heap_value()` on a FilterExpr-labeled slot is undefined
+behavior** (the slot bits are an `Arc::into_raw::<FilterNode>` pointer,
+not a `*const HeapValue`). Heap dispatch on FilterExpr-kinded slots
+goes through the kind label, not through `as_heap_value()`.
+
+**Mechanical lockstep updates (the new variant fans out to 6 dispatch
+sites — every Q8/Q10 retain/release table):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::FilterExpr`
+   ordinal 18 + `HeapValue::FilterExpr(Arc<FilterNode>)` arm +
+   `kind()` / `is_truthy()` / `type_name()` / `Clone` / `Display`
+   updates.
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm to
+   `Arc::increment/decrement_strong_count::<FilterNode>`.
+3. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arm.
+4. `crates/shape-value/src/heap_value.rs` — `TypedObjectStorage::drop`
+   §2.7.8 mirror.
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror.
+6. `crates/shape-vm/src/executor/logical/mod.rs` — push sites use
+   `NativeKind::Ptr(HeapKind::FilterExpr)` instead of `NativeView`.
+7. `crates/shape-vm/src/executor/objects/raw_helpers.rs` —
+   `extract_filter_expr` matches the new label.
+
+Plus knock-on exhaustive-match additions in `printing.rs`,
+`comparison/mod.rs`, `arithmetic/mod.rs`, `objects/typed_access.rs`
+(kind→type-name maps); `wire_conversion.rs`, `json_value.rs`
+(HeapValue serialization rejection arms — FilterExpr does not cross the
+wire boundary). All knock-on sites are mechanical Q8 mirrors of the
+same dispatch-table discipline, not new dispatch surfaces.
+
+**Cardinality cost:** `HeapKind` grows from 18 variants to 19; the
+§2.7.6 Q8 bound (~25 constructors / ~5-10 scalar accessors max on
+`KindedSlot`) is unchanged because FilterExpr does not need a new
+constructor or accessor — the existing `Ptr(HeapKind::*)` constructor
+generic shape applies. Total dispatch surface grows by one arm per
+table, no new dispatch tables.
+
+**Forbidden alternatives this rules out:**
+
+- "Just keep using `NativeView` as a stand-in label." This is the
+  pre-amendment shape; the wrong-type retain/release was the gap
+  Wave-α surfaced. Refused: dispatch tables must match payloads 1:1.
+- "Make `extract_filter_expr` peek at the bits to disambiguate
+  FilterNode from NativeViewData." This is exactly the
+  `(decode|tag) (bridge|probe|helper|hop|translator|adapter)` family
+  defection (CLAUDE.md "Renames to refuse on sight") — re-introducing
+  bit-pattern probing as a substitute for a kind discriminator.
+  Refused on sight.
+- "Add a single `HeapKind::Other` arm and walk a side-table to
+  disambiguate." Same defection at a different layer — Q8
+  cardinality says one variant per dispatch shape, not a generic
+  bucket plus side-table dispatch.
+- "Box `FilterNode` inside `HeapValue::NativeView` so the existing
+  dispatch works." Forbidden by ADR-005 §1 (HeapValue is the single
+  discriminator) and ADR-006 §2.3 (typed-Arc payloads, no
+  Box<HeapValue> wrapping in new code).
+
+**Out-of-scope this amendment:** routing FilterExpr through `HeapValue`
+materialization. The new `HeapValue::FilterExpr` arm exists for
+HeapKind↔HeapValue symmetry only; no caller materializes a
+`Box<HeapValue::FilterExpr>` or expects `slot.as_heap_value()` to
+return one. If a future caller needs HeapValue materialization of
+FilterExpr, the work is a separate ADR amendment with the same
+single-discriminator analysis applied to the materialization path.
 
 ## 3. Lifetime, ownership, and storage planning
 

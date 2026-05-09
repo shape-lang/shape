@@ -6,6 +6,18 @@
 //! kind track via `pop_kinded()`. Filter-expression dispatch (heap path
 //! used by query DSL) discriminates on `NativeKind::Ptr(HeapKind::*)`
 //! rather than the deleted `is_heap()` probe.
+//!
+//! Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8 amendment,
+//! 2026-05-09): the filter-expression branch now labels its
+//! `Arc::into_raw(Arc<FilterNode>) as u64` payloads as
+//! `NativeKind::Ptr(HeapKind::FilterExpr)`. The earlier label
+//! `HeapKind::NativeView` collided with `Arc<NativeViewData>` payloads at
+//! the `clone_with_kind` / `drop_with_kind` dispatch tables, causing
+//! wrong-type retain/release on every And/Or/Not result. Wave-α
+//! D-raw-helpers (commit `a27c0e4`) surfaced the gap; Wave-γ
+//! G-heap-filter-expr fixes it by adding `HeapKind::FilterExpr` and
+//! mirroring the dispatch arm in every `Q8`/Q10 cell-storage and
+//! stack-track table.
 
 use crate::executor::objects::raw_helpers;
 use crate::{
@@ -84,7 +96,7 @@ impl VirtualMachine {
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
                         let raw = Arc::into_raw(combined) as u64;
-                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
+                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::FilterExpr))?;
                     } else {
                         let r = kinded_truthy(a_bits, a_kind) && kinded_truthy(b_bits, b_kind);
                         drop_with_kind(a_bits, a_kind);
@@ -111,7 +123,7 @@ impl VirtualMachine {
                         drop_with_kind(a_bits, a_kind);
                         drop_with_kind(b_bits, b_kind);
                         let raw = Arc::into_raw(combined) as u64;
-                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
+                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::FilterExpr))?;
                     } else {
                         let r = kinded_truthy(a_bits, a_kind) || kinded_truthy(b_bits, b_kind);
                         drop_with_kind(a_bits, a_kind);
@@ -130,7 +142,7 @@ impl VirtualMachine {
                         let combined = Arc::new(FilterNode::Not(Box::new(node.clone())));
                         drop_with_kind(bits, kind);
                         let raw = Arc::into_raw(combined) as u64;
-                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::NativeView))?;
+                        self.push_kinded(raw, NativeKind::Ptr(HeapKind::FilterExpr))?;
                     } else {
                         let r = !kinded_truthy(bits, kind);
                         drop_with_kind(bits, kind);
