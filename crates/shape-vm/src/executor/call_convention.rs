@@ -40,19 +40,21 @@
 //! sub-clusters (W7-cv-static, W7-cv-async, W7-cv-method, W7-op-call-value)
 //! land in Rounds 2 / 3.
 //!
-//! # `_raw` pair-slice family — marked for deletion (W7-cv-polymorphic)
+//! # `_raw` pair-slice family — deleted (W7-cv-polymorphic, Round 3)
 //!
-//! [`call_function_with_raw_args`] and [`call_closure_with_raw_args`] carry
-//! the `&[(u64, NativeKind)]` pair-slice form pre-§2.7.11. ADR-006 §2.7.11
-//! migration-scope refinement (post-W7 audit, 2026-05-09) rejects this
-//! shape on §2.7.6 / Q8 carrier-API-bound grounds at the runtime tier.
-//! W7-cv-polymorphic (Round 3) deletes them; their bodies stay `todo!()`
-//! here so the public surface remains compilable until the deletion
-//! cascade lands. [`call_value_immediate_raw`] follows the same fate.
-//! `jit_trampoline_call_closure` is the only `_raw` survivor — it is the
-//! §2.7.5 cross-crate stable FFI consumer where the parallel-pair shape
-//! is canonical (consumers translate `&[KindedSlot]` → raw u64 at the
-//! FFI boundary, single direction).
+//! `call_value_immediate_raw`, `call_function_with_raw_args`, and
+//! `call_closure_with_raw_args` carried the `&[(u64, NativeKind)]`
+//! pair-slice form pre-§2.7.11. ADR-006 §2.7.11 migration-scope
+//! refinement (post-W7 audit, 2026-05-09) rejected this shape on §2.7.6
+//! / Q8 carrier-API-bound grounds at the runtime tier, and
+//! W7-cv-polymorphic (Round 3) deleted all three entry-points — their
+//! callers route through `call_value_immediate_nb` /
+//! `call_function_with_nb_args` / `call_closure_with_nb_args_keepalive`
+//! over `&[KindedSlot]` instead. `jit_trampoline_call_closure` is the
+//! only `_raw` survivor — it is the §2.7.5 cross-crate stable FFI
+//! consumer where the parallel-pair shape is canonical (consumers
+//! translate `&[KindedSlot]` → raw u64 at the FFI boundary, single
+//! direction).
 //!
 //! # Forbidden patterns (W7 playbook §6 — refused on sight)
 //!
@@ -599,76 +601,6 @@ impl VirtualMachine {
         todo!(
             "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
              jit_trampoline_call_closure kinded-cell rebuild pending"
-        )
-    }
-
-    // ─── `_raw` pair-slice family — marked for deletion by W7-cv-polymorphic ─
-    //
-    // ADR-006 §2.7.11 migration-scope refinement (post-W7-audit,
-    // 2026-05-09) rejects the `&[(u64, NativeKind)]` pair-slice form on
-    // §2.7.6 / Q8 carrier-API-bound grounds at the runtime tier. The
-    // three entry-points below are scheduled for deletion by
-    // W7-cv-polymorphic in Round 3 of the W7 fan-out — replaced
-    // architecturally by `call_function_with_nb_args` /
-    // `call_closure_with_nb_args_keepalive` /
-    // `call_value_immediate_nb` over `&[KindedSlot]`.
-    //
-    // Their bodies stay `todo!()` here so the public surface remains
-    // compilable until W7-cv-polymorphic lands the deletion cascade.
-    // Callers inside `crates/shape-vm/` (if any) remain broken at the
-    // surface until that round; JIT-side callers in `crates/shape-jit/`
-    // are W10 territory and translate `&[KindedSlot]` → raw u64 at the
-    // §2.7.5 stable-FFI boundary directly (`jit_trampoline_call_closure`
-    // is the surviving raw u64 entry-point for that boundary).
-
-    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
-    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
-    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
-    /// 2026-05-09). Replaced by [`call_value_immediate_nb`] over
-    /// `&[KindedSlot]`.
-    pub fn call_value_immediate_raw(
-        &mut self,
-        _callee_bits: u64,
-        _callee_kind: NativeKind,
-        _args: &[(u64, NativeKind)],
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<u64, VMError> {
-        todo!(
-            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
-             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_value_immediate_nb`"
-        )
-    }
-
-    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
-    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
-    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
-    /// 2026-05-09). Replaced by [`call_function_with_nb_args`] over
-    /// `&[KindedSlot]`.
-    pub(crate) fn call_function_with_raw_args(
-        &mut self,
-        _func_id: u16,
-        _args: &[(u64, NativeKind)],
-    ) -> Result<(), VMError> {
-        todo!(
-            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
-             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_function_with_nb_args`"
-        )
-    }
-
-    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
-    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
-    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
-    /// 2026-05-09). Replaced by [`call_closure_with_nb_args_keepalive`]
-    /// over `&[KindedSlot]` + `&OwnedClosureBlock`.
-    pub(crate) fn call_closure_with_raw_args(
-        &mut self,
-        _func_id: u16,
-        _upvalue_bits: &[(u64, NativeKind)],
-        _args: &[(u64, NativeKind)],
-    ) -> Result<(), VMError> {
-        todo!(
-            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
-             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_closure_with_nb_args_keepalive`"
         )
     }
 
