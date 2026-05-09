@@ -1,27 +1,20 @@
 //! VM executor handlers for typed string opcodes.
 //!
-//! These handlers operate on `StringObj` pointers stored as
-//! `vw_from_native_ptr()` (heap-boxed `NativeScalar::Ptr`).
+//! These handlers operate on `StringObj` raw pointers (`*const StringObj`),
+//! which are NativeScalar-shaped — non-Arc, the StringObj manages its own
+//! lifetime. The pointer bits are pushed/popped through the kinded API as
+//! `NativeKind::UInt64` (inline scalar — Drop is a no-op, no refcount).
+//!
+//! ADR-006 §2.7.7 / Wave 6.5 cluster C: kinded API. These opcodes
+//! (`NewStringV2`, `StringLenV2`, `StringConcatV2`, `StringEqV2`) are
+//! currently dead at the compiler level (no emitter). The handlers
+//! preserve their semantics for future re-emission.
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_value::heap_value::NativeScalar;
-use shape_value::native::string_obj::StringObj;
-use shape_value::{VMError, ValueWord, ValueWordExt, vw_from_native_ptr};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::{NativeKind, VMError};
 
 use super::super::VirtualMachine;
-
-/// Extract a raw pointer (usize) from a ValueWord that was created with
-/// `vw_from_native_ptr()`. Falls back to `raw_bits()` if the value
-/// is not a NativeScalar::Ptr.
-#[inline(always)]
-fn extract_ptr(vw: &ValueWord) -> usize {
-    if let Some(NativeScalar::Ptr(p)) = vw.as_native_scalar() {
-        p
-    } else {
-        // Fallback: treat raw bits as a pointer (for values stored differently).
-        vw.raw_bits() as usize
-    }
-}
 
 impl VirtualMachine {
     /// Execute a typed string opcode.
@@ -49,44 +42,46 @@ impl VirtualMachine {
                     .cloned()
                     .unwrap_or_default();
                 let ptr = StringObj::new(&s);
-                self.push_raw_u64(vw_from_native_ptr(ptr as usize))?;
+                // StringObj raw pointer encoded as u64. NativeScalar shape —
+                // not Arc-backed. UInt64 kind selects the no-op Drop arm.
+                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
                 Ok(())
             }
 
             // ── String length ──────────────────────────────────────────
 
             OpCode::StringLenV2 => {
-                let str_vw = self.pop_raw_u64()?;
-                let str_ptr = extract_ptr(&str_vw) as *const StringObj;
+                let (str_bits, _str_kind) = self.pop_kinded()?;
+                let str_ptr = str_bits as usize as *const StringObj;
                 // Safety: str_ptr was created by NewStringV2 or string FFI.
                 let len = unsafe { StringObj::len(str_ptr) };
-                self.push_tagged_i64(len as i64)?;
+                self.push_kinded(len as u64, NativeKind::Int64)?;
                 Ok(())
             }
 
             // ── String concatenation ───────────────────────────────────
 
             OpCode::StringConcatV2 => {
-                let b_vw = self.pop_raw_u64()?;
-                let a_vw = self.pop_raw_u64()?;
-                let a_ptr = extract_ptr(&a_vw) as *const StringObj;
-                let b_ptr = extract_ptr(&b_vw) as *const StringObj;
+                let (b_bits, _b_kind) = self.pop_kinded()?;
+                let (a_bits, _a_kind) = self.pop_kinded()?;
+                let a_ptr = a_bits as usize as *const StringObj;
+                let b_ptr = b_bits as usize as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let result = unsafe { StringObj::concat(a_ptr, b_ptr) };
-                self.push_raw_u64(vw_from_native_ptr(result as usize))?;
+                self.push_kinded(result as usize as u64, NativeKind::UInt64)?;
                 Ok(())
             }
 
             // ── String equality ────────────────────────────────────────
 
             OpCode::StringEqV2 => {
-                let b_vw = self.pop_raw_u64()?;
-                let a_vw = self.pop_raw_u64()?;
-                let a_ptr = extract_ptr(&a_vw) as *const StringObj;
-                let b_ptr = extract_ptr(&b_vw) as *const StringObj;
+                let (b_bits, _b_kind) = self.pop_kinded()?;
+                let (a_bits, _a_kind) = self.pop_kinded()?;
+                let a_ptr = a_bits as usize as *const StringObj;
+                let b_ptr = b_bits as usize as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let eq = unsafe { StringObj::eq(a_ptr, b_ptr) };
-                self.push_tagged_bool(eq)?;
+                self.push_kinded(eq as u64, NativeKind::Bool)?;
                 Ok(())
             }
 
