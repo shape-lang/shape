@@ -100,7 +100,7 @@ forbidden by §2.7.7). If the kind isn't sourcable locally, the opcode itself is
 **Forbidden source-of-kind shapes:**
 
 - Decoding kind from the high bits of `bits` (`(bits >> 48) & 0xFF` etc.) — this is the deleted
-  ValueWord tag-decode pattern.
+  tag_bits dispatch.
 - Probing the heap object via `bits as *const HeapValue` and reading its discriminant — that's a
   parallel discriminator violation of ADR-005 §1.
 - "Use `NativeKind::Bool` as a default and trust the Drop is a no-op." This is the W-series
@@ -230,7 +230,7 @@ Refuse on sight, all 5 clusters:
 | 4 | Tag bits packed in the `u64` | Deleted ValueWord pattern |
 | 5 | `Vec<Option<NativeKind>>` for the kind track | §2.7.7 / §2.7.5.1 — stack contents are post-proof |
 | 6 | `NativeKind::Unknown`, `NativeKind::Pending`, `NativeKind::Dynamic` | All deleted; CLAUDE.md "Renames to refuse on sight" |
-| 7 | `is_heap()`, `as_heap_ref()`, `tag_bits::*`, `synthesize_value_word_from_raw` | Forbidden tag-decode hops |
+| 7 | `is_heap()`, `as_heap_ref()`, `tag_bits::*`, `synthesize_value_word_from_raw` | Forbidden tag_bits dispatch (deleted) |
 | 8 | `vw_clone(bits)`, `vw_drop(bits)` | Replaced by `clone_with_kind(bits, kind)` / `drop_with_kind(bits, kind)` |
 | 9 | "Default to Bool kind because Drop is a no-op" | The W-series rationalization §2.7.7 names verbatim |
 | 10 | New per-heap-variant accessors on `KindedSlot` (`as_typed_array`, `as_decimal`, …) | Q8 — heap dispatch goes through `slot.as_heap_value()` + `HeapValue` match |
