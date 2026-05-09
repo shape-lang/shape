@@ -2,10 +2,28 @@
 //!
 //! Captures VM state snapshots at configurable intervals during execution,
 //! allowing forward and backward navigation through execution history.
+//!
+//! ## Wave 6.5 R-async-time migration (ADR-006 §2.7.7 / §2.7.8)
+//!
+//! Pre-bulldozer the snapshot stored `Vec<ValueWord>` for `stack_snapshot`
+//! and `module_bindings`, with a manual `Clone` that walked each element
+//! through the deleted `value_word_drop::vw_clone` and a `Drop` that ran
+//! `vw_drop_slice`. `ValueWord` is deleted (CLAUDE.md "Forbidden Patterns")
+//! and the §2.7.7 stack ABI carries data in a `Vec<u64>` data track plus
+//! a parallel `Vec<NativeKind>` kinds track. The snapshot tracks adopt the
+//! same lockstep shape: `*_data: Vec<u64>` plus `*_kinds: Vec<NativeKind>`,
+//! with `clone_with_kind` / `drop_with_kind` (replacing `vw_clone` /
+//! `vw_drop_slice`) handling refcount discipline.
+//!
+//! Index invariant — for every snapshot, `stack_data.len() == stack_kinds.len()`
+//! and `module_bindings_data.len() == module_bindings_kinds.len()`. The
+//! `Clone` and `Drop` impls walk both tracks in lockstep per ADR-006 §2.7.7.
 
 use shape_runtime::snapshot::SnapshotStore;
-use shape_value::ValueWord;
+use shape_value::NativeKind;
 use std::collections::VecDeque;
+
+use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 
 /// When to capture VM snapshots.
 #[derive(Debug, Clone)]
@@ -28,11 +46,12 @@ impl Default for CaptureMode {
 
 /// A snapshot of VM state at a point in time.
 ///
-/// **WB2.5 retain-on-read.** `stack_snapshot` / `module_bindings`
-/// hold owning shares of the live VM slots at capture time. The
-/// manual `Clone` bumps each element's refcount via `vw_clone`;
-/// `Drop` releases via `vw_drop_slice` so replaying / evicting a
-/// snapshot is refcount-neutral.
+/// **WB2.5 retain-on-read.** `stack_data` / `module_bindings_data` carry
+/// raw 8-byte slot bits; `stack_kinds` / `module_bindings_kinds` carry the
+/// parallel-track `NativeKind` interpretation per slot (ADR-006 §2.7.7).
+/// The manual `Clone` bumps each element's refcount via `clone_with_kind`,
+/// keyed on the parallel-track kind; `Drop` releases via `drop_with_kind`
+/// so replaying / evicting a snapshot is refcount-neutral.
 #[derive(Debug)]
 pub struct VmSnapshot {
     /// Monotonically increasing snapshot index.
@@ -49,17 +68,47 @@ pub struct VmSnapshot {
     pub function_name: Option<String>,
     /// Instruction count at time of capture.
     pub instruction_count: u64,
-    /// Copy of the stack up to sp.
-    pub stack_snapshot: Vec<ValueWord>,
-    /// Module bindings snapshot.
-    pub module_bindings: Vec<ValueWord>,
+    /// Raw 8-byte slot bits for the live stack at capture time
+    /// (post-§2.7.7 lockstep with `stack_kinds`).
+    pub stack_data: Vec<u64>,
+    /// Parallel `NativeKind` track for `stack_data`.
+    /// Invariant: `stack_data.len() == stack_kinds.len()`.
+    pub stack_kinds: Vec<NativeKind>,
+    /// Raw 8-byte slot bits for module bindings at capture time
+    /// (post-§2.7.7 lockstep with `module_bindings_kinds`).
+    pub module_bindings_data: Vec<u64>,
+    /// Parallel `NativeKind` track for `module_bindings_data`.
+    /// Invariant: `module_bindings_data.len() == module_bindings_kinds.len()`.
+    pub module_bindings_kinds: Vec<NativeKind>,
     /// Capture reason for display/debugging.
     pub reason: CaptureReason,
 }
 
 impl Clone for VmSnapshot {
     fn clone(&self) -> Self {
-        use shape_value::value_word_drop::vw_clone;
+        debug_assert_eq!(
+            self.stack_data.len(),
+            self.stack_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant: stack_data and stack_kinds must agree"
+        );
+        debug_assert_eq!(
+            self.module_bindings_data.len(),
+            self.module_bindings_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant: module_bindings_data and module_bindings_kinds must agree"
+        );
+        // Bump the strong-count for every heap-bearing element on both
+        // tracks before producing the new vectors. `clone_with_kind` is the
+        // post-§2.7.7 replacement for the deleted `vw_clone(bits)`.
+        for (&bits, &kind) in self.stack_data.iter().zip(self.stack_kinds.iter()) {
+            clone_with_kind(bits, kind);
+        }
+        for (&bits, &kind) in self
+            .module_bindings_data
+            .iter()
+            .zip(self.module_bindings_kinds.iter())
+        {
+            clone_with_kind(bits, kind);
+        }
         VmSnapshot {
             index: self.index,
             ip: self.ip,
@@ -68,8 +117,10 @@ impl Clone for VmSnapshot {
             function_id: self.function_id,
             function_name: self.function_name.clone(),
             instruction_count: self.instruction_count,
-            stack_snapshot: self.stack_snapshot.iter().map(|&b| vw_clone(b)).collect(),
-            module_bindings: self.module_bindings.iter().map(|&b| vw_clone(b)).collect(),
+            stack_data: self.stack_data.clone(),
+            stack_kinds: self.stack_kinds.clone(),
+            module_bindings_data: self.module_bindings_data.clone(),
+            module_bindings_kinds: self.module_bindings_kinds.clone(),
             reason: self.reason.clone(),
         }
     }
@@ -77,9 +128,28 @@ impl Clone for VmSnapshot {
 
 impl Drop for VmSnapshot {
     fn drop(&mut self) {
-        use shape_value::value_word_drop::vw_drop_slice;
-        vw_drop_slice(&self.stack_snapshot);
-        vw_drop_slice(&self.module_bindings);
+        // Release every owned share on both tracks. The post-§2.7.7
+        // replacement for the deleted `vw_drop_slice(slice)`.
+        debug_assert_eq!(
+            self.stack_data.len(),
+            self.stack_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant violated at Drop"
+        );
+        debug_assert_eq!(
+            self.module_bindings_data.len(),
+            self.module_bindings_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant violated at Drop"
+        );
+        for (&bits, &kind) in self.stack_data.iter().zip(self.stack_kinds.iter()) {
+            drop_with_kind(bits, kind);
+        }
+        for (&bits, &kind) in self
+            .module_bindings_data
+            .iter()
+            .zip(self.module_bindings_kinds.iter())
+        {
+            drop_with_kind(bits, kind);
+        }
     }
 }
 
@@ -216,6 +286,13 @@ impl TimeTravel {
     ///
     /// This method wraps the runtime snapshot type used by `dispatch.rs`.
     /// The snapshot is stored in the ring buffer alongside metadata.
+    ///
+    /// **Phase-2c data capture pending — ADR-006 §2.7.4.** The runtime-side
+    /// `VmSnapshot` type is itself §2.7.4-deferred (its body is `todo!`),
+    /// so we record only the metadata (ip, instruction_count, call_depth)
+    /// and leave the post-§2.7.7 stack / module-binding tracks empty. When
+    /// the Phase-2c snapshot rebuild lands, the parallel kinds tracks will
+    /// be threaded through here.
     pub fn record(
         &mut self,
         _snapshot: shape_runtime::snapshot::VmSnapshot,
@@ -231,8 +308,10 @@ impl TimeTravel {
             function_id: None,
             function_name: None,
             instruction_count,
-            stack_snapshot: vec![],
-            module_bindings: vec![],
+            stack_data: Vec::new(),
+            stack_kinds: Vec::new(),
+            module_bindings_data: Vec::new(),
+            module_bindings_kinds: Vec::new(),
             reason: CaptureReason::Manual,
         };
         self.capture(internal);
@@ -270,9 +349,16 @@ impl TimeTravel {
 
     /// Build a snapshot from raw VM state.
     ///
-    /// WB2.5 retain-on-read: `stack` and `module_bindings` are views
-    /// over live VM slots. Each captured element is `vw_clone`d so the
-    /// snapshot owns an independent share per heap-tagged value.
+    /// WB2.5 retain-on-read: the slices are views over live VM slots
+    /// (the `Vec<u64>` data track + `Vec<NativeKind>` kinds track per
+    /// ADR-006 §2.7.7). Each captured element is `clone_with_kind`'d so
+    /// the snapshot owns an independent share per heap-bearing slot.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts the lockstep invariant `stack_data.len() ==
+    /// stack_kinds.len()` and `module_bindings_data.len() ==
+    /// module_bindings_kinds.len()`.
     pub fn build_snapshot(
         &self,
         ip: usize,
@@ -281,16 +367,36 @@ impl TimeTravel {
         function_id: Option<u16>,
         function_name: Option<String>,
         instruction_count: u64,
-        stack: &[ValueWord],
-        module_bindings: &[ValueWord],
+        stack_data: &[u64],
+        stack_kinds: &[NativeKind],
+        module_bindings_data: &[u64],
+        module_bindings_kinds: &[NativeKind],
         reason: CaptureReason,
     ) -> VmSnapshot {
-        use shape_value::value_word_drop::vw_clone;
-        let live = sp.min(stack.len());
-        let stack_snapshot: Vec<ValueWord> =
-            stack[..live].iter().map(|&b| vw_clone(b)).collect();
-        let module_bindings: Vec<ValueWord> =
-            module_bindings.iter().map(|&b| vw_clone(b)).collect();
+        debug_assert_eq!(
+            stack_data.len(),
+            stack_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant: stack_data and stack_kinds must agree at build_snapshot"
+        );
+        debug_assert_eq!(
+            module_bindings_data.len(),
+            module_bindings_kinds.len(),
+            "ADR-006 §2.7.7 lockstep invariant: module_bindings tracks must agree at build_snapshot"
+        );
+        let live = sp.min(stack_data.len());
+        let stack_data_owned: Vec<u64> = stack_data[..live].to_vec();
+        let stack_kinds_owned: Vec<NativeKind> = stack_kinds[..live].to_vec();
+        for (&bits, &kind) in stack_data_owned.iter().zip(stack_kinds_owned.iter()) {
+            clone_with_kind(bits, kind);
+        }
+        let module_bindings_data_owned: Vec<u64> = module_bindings_data.to_vec();
+        let module_bindings_kinds_owned: Vec<NativeKind> = module_bindings_kinds.to_vec();
+        for (&bits, &kind) in module_bindings_data_owned
+            .iter()
+            .zip(module_bindings_kinds_owned.iter())
+        {
+            clone_with_kind(bits, kind);
+        }
         VmSnapshot {
             index: self.next_index,
             ip,
@@ -299,8 +405,10 @@ impl TimeTravel {
             function_id,
             function_name,
             instruction_count,
-            stack_snapshot,
-            module_bindings,
+            stack_data: stack_data_owned,
+            stack_kinds: stack_kinds_owned,
+            module_bindings_data: module_bindings_data_owned,
+            module_bindings_kinds: module_bindings_kinds_owned,
             reason,
         }
     }
@@ -385,8 +493,10 @@ mod tests {
             function_id: None,
             function_name: None,
             instruction_count: 0,
-            stack_snapshot: vec![],
-            module_bindings: vec![],
+            stack_data: vec![],
+            stack_kinds: vec![],
+            module_bindings_data: vec![],
+            module_bindings_kinds: vec![],
             reason,
         }
     }
@@ -484,8 +594,10 @@ mod tests {
                 function_id: None,
                 function_name: None,
                 instruction_count: i,
-                stack_snapshot: vec![],
-                module_bindings: vec![],
+                stack_data: vec![],
+                stack_kinds: vec![],
+                module_bindings_data: vec![],
+                module_bindings_kinds: vec![],
                 reason: CaptureReason::Manual,
             });
         }
@@ -511,8 +623,10 @@ mod tests {
                 function_id: None,
                 function_name: None,
                 instruction_count: 0,
-                stack_snapshot: vec![],
-                module_bindings: vec![],
+                stack_data: vec![],
+                stack_kinds: vec![],
+                module_bindings_data: vec![],
+                module_bindings_kinds: vec![],
                 reason: CaptureReason::Manual,
             });
         }
@@ -551,8 +665,10 @@ mod tests {
             function_id: None,
             function_name: None,
             instruction_count: 0,
-            stack_snapshot: vec![],
-            module_bindings: vec![],
+            stack_data: vec![],
+            stack_kinds: vec![],
+            module_bindings_data: vec![],
+            module_bindings_kinds: vec![],
             reason: CaptureReason::Manual,
         });
 
