@@ -12,13 +12,13 @@
 
 25	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
-2	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
+1	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
 5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
 0	\bexec_comparison_dynamic_fallback\b	dynamic comparison fallback handler
 0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
 0	\brebox_native_bits\b	W-series typed->tagged rebox helper
 12	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
-16	\bcapture_as_value\b	closure capture decode bridge
+12	\bcapture_as_value\b	closure capture deletion progress
 17	\b(nan_box|NanBox|NanTag)\b	NanBox residuals
 0	\bSlotKind::(Dynamic|Unknown)\b	deleted SlotKind variants
 0	ValueBits shim	rejected rename
