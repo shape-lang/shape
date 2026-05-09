@@ -37,7 +37,7 @@
 //! in this file returns `VMError::NotImplemented(...)` until that
 //! workstream lands. The opcode handlers stay wired into the dispatch
 //! shell so any program that hits one fails loudly; no silent fallback,
-//! no Bool-default kind, no forbidden tag-decode probe.
+//! no Bool-default kind, no forbidden the deleted tag_bits dispatch.
 
 use crate::{
     bytecode::{Instruction, OpCode},
@@ -87,7 +87,7 @@ impl VirtualMachine {
     ///
     /// SURFACE: the legacy body popped a method-name `ValueWord` and
     /// arg-count `ValueWord`, used `raw_helpers::extract_trait_object`
-    /// (forbidden tag-decode probe through `extract_heap_ref` and the
+    /// (forbidden the deleted tag_bits dispatch through `extract_heap_ref` and the
     /// `tag_bits` module) to recover the inner value + vtable, and
     /// dispatched through `ValueWord::from_function` / `from_heap_value`
     /// / `call_value_immediate_nb(&ValueWord, &[ValueWord], …)`. With
@@ -108,7 +108,7 @@ impl VirtualMachine {
     /// Sync drop: look up `TypeName::drop`.
     ///
     /// SURFACE: the legacy body popped a `ValueWord`, called
-    /// `raw_helpers::extract_io_handle` (forbidden tag-decode probe) to
+    /// `raw_helpers::extract_io_handle` (forbidden the deleted tag_bits dispatch) to
     /// short-circuit on `HeapValue::IoHandle`, formatted a
     /// `TypeName::drop` function name from `ValueWord::type_name()` and
     /// dispatched via `ValueWord::from_function` +
@@ -125,7 +125,7 @@ impl VirtualMachine {
             "SURFACE: DropCall — `TypeName::drop` lookup depends on deleted \
              `ValueWord::type_name` / `ValueWord::from_function` / \
              `call_value_immediate_nb(&ValueWord, &[ValueWord], …)` plus \
-             `raw_helpers::extract_io_handle` (forbidden tag-decode probe). \
+             `raw_helpers::extract_io_handle` (forbidden the deleted tag_bits dispatch). \
              Receiver kind for the dispatched drop fn cannot be sourced \
              from the current opcode shape (playbook §10 D-trait-obj). \
              Phase-2c trait-object reentry + Drop-trait kinded dispatch."
@@ -142,7 +142,7 @@ impl VirtualMachine {
         Err(VMError::NotImplemented(
             "SURFACE: DropCallAsync — same kinded-API gap as DropCall \
              (deleted `ValueWord::type_name` / `from_function` / \
-             `call_value_immediate_nb` ABI + forbidden tag-decode probe in \
+             `call_value_immediate_nb` ABI + forbidden the deleted tag_bits dispatch in \
              `raw_helpers::extract_io_handle`). Receiver kind for the \
              dispatched drop_async fn cannot be sourced from the current \
              opcode shape (playbook §10 D-trait-obj). Phase-2c \

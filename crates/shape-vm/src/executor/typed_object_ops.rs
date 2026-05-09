@@ -195,7 +195,7 @@ impl TypedObjectOps for super::VirtualMachine {
         };
 
         // Pop receiver via kinded API. The §2.7.7 invariant: bits + kind
-        // come together — no transitional-shim pop, no tag-decode probe.
+        // come together — no transitional-shim pop, no the deleted tag_bits dispatch.
         let (recv_bits, recv_kind) = self.pop_kinded()?;
 
         // Validate receiver kind. Non-TypedObject receivers fall back to the
