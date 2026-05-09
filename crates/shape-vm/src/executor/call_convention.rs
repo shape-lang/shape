@@ -1,104 +1,87 @@
 //! Function and closure call convention, execution wrappers, and async resolution.
 //!
-//! # Wave-β B12 disposition (cluster B-round-2)
+//! # Wave 7 — value-call ABI rebuild (foundation sub-cluster: W7-frame-setup)
 //!
-//! Cluster B prior partial-close (commits 28de706..727143e at supervisor
-//! merge `62513e3`) migrated 3 of 7 mandatory shim sites here onto the
-//! kinded API. The remaining 4 sites — `call_value_immediate_nb`'s
-//! TAG_HEAP closure-dispatch arm, the `resolve_spawned_task` host-closure
-//! arm, the `call_value_immediate_raw` raw-bits closure arm, and the
-//! `call_function_with_raw_args` / `call_closure_with_raw_args` raw-arg
-//! frame-setup pair — were architecturally entangled with deleted
-//! symbols:
+//! ADR-006 §2.7.11 / Q12 lifts the parallel-kind invariant of §2.7.7 (stack)
+//! and §2.7.8 (cells) across the call-frame boundary: every dispatch
+//! entry-point in this module carries kinds on `KindedSlot` carriers
+//! (callee + args + return). The W7 playbook
+//! (`docs/cluster-audits/wave-7-cc1-playbook.md`) carves the migration
+//! into 6 sub-clusters — see playbook §3 / §5 for the ordering.
 //!
-//! - `shape_value::ValueWord` (the deleted runtime value carrier).
-//! - `shape_value::ValueWordExt` (deleted accessor trait).
-//! - `shape_value::Upvalue` (deleted closure-capture wrapper; the
-//!   replacement layout per ADR-006 §2.7.8 / Q10 is the kind-extended
-//!   `closure_raw::ClosureCell`).
-//! - `shape_value::value_word_drop::vw_drop` / `vw_clone` (forbidden
-//!   per CLAUDE.md "Forbidden Patterns" #8 — superseded by
-//!   `clone_with_kind(bits, kind)` / `drop_with_kind(bits, kind)` per
-//!   playbook §3).
-//! - `shape_value::tag_bits::{is_tagged, get_tag, get_payload,
-//!   TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN}` (forbidden per CLAUDE.md
-//!   "Forbidden Patterns" #7 — the deleted tag_bits dispatch).
-//! - `super::objects::raw_helpers::{extract_closure_info,
-//!   try_call_host_closure, clone_raw_bits}` (deleted by D-raw-helpers;
-//!   the surviving `raw_helpers` surface is `extract_filter_expr` only).
-//! - `ValueWord::as_heap_ref()` (forbidden per CLAUDE.md "Forbidden
-//!   Patterns" #7 — the deleted `as_heap_ref` heap-side dispatch
-//!   pattern; replacement goes through `slot.as_heap_value()` +
-//!   `HeapValue::*` match per Q8).
+//! W7-frame-setup (this sub-cluster, Round 1) owns the three internal
+//! frame-setup helpers:
 //!
-//! Per playbook §7 REVISED #4 ("if a call site cannot be migrated
-//! cleanly, the correct shape is `NotImplemented(SURFACE)` /
-//! `todo!(\"phase-2c — see ADR-006 §2.7.4\")` / surface-and-stop, never
-//! a forbidden-pattern workaround"), every body in this module that
-//! referenced any of those symbols panics via `todo!()` until cluster
-//! B-round-2 lands the kinded call-convention rebuild. The B9
-//! `CallFrame.closure_heap_kind: Option<NativeKind>` lockstep companion
-//! threading from commit `52c799f` is preserved structurally on the
-//! frame-construction sites that survived migration.
+//! 1. [`call_function_with_nb_args`] — non-closure frame setup from a
+//!    `&[KindedSlot]` arg slice. Each arg flows into the new frame's
+//!    locals via `stack_write_kinded` per playbook 6.5 §3 (caller owns
+//!    shares; the dispatch shell `mem::forget`s its arg vec after this
+//!    function returns to transfer the share).
+//! 2. [`call_closure_with_nb_args_keepalive`] — closure frame setup,
+//!    threading capture kinds via `OwnedClosureBlock::read_capture_kinded`
+//!    (§2.7.8 / Q10) and the B9 lockstep companion fields
+//!    `closure_heap_bits` + `closure_heap_kind` on `CallFrame`. The
+//!    pre-§2.7.8 `_upvalue_bits: Vec<u64>` parameter is replaced by
+//!    `closure_block: &OwnedClosureBlock` — capture data flows from the
+//!    cell-storage parallel-kind track, not from a side-channel
+//!    raw-bits payload.
+//! 3. [`call_function_from_stack`] — fast-path frame setup where the
+//!    args are already on the value stack from the producing
+//!    `Push…`/`LoadLocal…` opcodes. Pops `arg_count` slots via
+//!    `pop_kinded` and writes each into its new local slot via
+//!    `stack_write_kinded`. Sentinel-fills omitted-arg locals with
+//!    `(0u64, NativeKind::Bool)` per playbook 6.5 §2 Null/Unit row.
 //!
-//! Cited surfaces (each `todo!()` site):
+//! The remaining entry-points in this module — `execute_function_by_name`
+//! / `_by_id` / `execute_closure` / `execute_function_fast` /
+//! `execute_function_with_named_args` / `resume` / `execute_with_async` /
+//! `resolve_spawned_task` / `call_value_immediate_nb` /
+//! `jit_trampoline_call_closure` — stay `todo!()` until their respective
+//! sub-clusters (W7-cv-static, W7-cv-async, W7-cv-method, W7-op-call-value)
+//! land in Rounds 2 / 3.
 //!
-//! 1. `execute_function_by_name` / `_by_id` / `execute_closure` /
-//!    `execute_function_fast` / `execute_function_with_named_args` —
-//!    the public VM entry-point ABI takes deleted `ValueWord` /
-//!    `Upvalue` parameters; the kind-threaded replacement (`(bits,
-//!    kind)` slices, kinded upvalue cells per §2.7.8) is part of the
-//!    cluster B-round-2 rebuild that lands together with the
-//!    `closure_raw::ClosureCell` `kinds: Vec<NativeKind>` extension and
-//!    the consumer migration in `remote.rs` / `compiler_tests.rs` /
-//!    JIT-trampoline FFI.
-//! 2. `resume` / `execute_with_async` / `resolve_spawned_task` —
-//!    same dependency. `resolve_spawned_task` additionally walks
-//!    `task_scheduler::TaskStatus` (deleted `ValueWord` carrier) and
-//!    invokes `Upvalue::new(vw_clone(...))` per share, both deleted.
-//! 3. `call_function_with_nb_args` / `call_closure_with_nb_args` /
-//!    `call_closure_with_nb_args_keepalive` — frame-setup helpers
-//!    over deleted `&[ValueWord]` / `Vec<Upvalue>`; the post-§2.7.8
-//!    shape takes `(bits, kind)` slices, threads
-//!    `closure_heap_bits` + `closure_heap_kind` lockstep on the pushed
-//!    `CallFrame` (B9 landed; the field now exists), and writes each
-//!    arg via `stack_write_kinded(idx, bits, kind)`.
-//! 4. `call_value_immediate_nb` / `call_value_immediate_raw` —
-//!    polymorphic-callee dispatch entry points. The deleted
-//!    `tag_bits::*` dispatch is replaced by a kind-typed dispatch
-//!    on `NativeKind::Ptr(HeapKind::Closure)` /
-//!    `NativeKind::Function` once the cluster B-round-2 callee-bits
-//!    threading lands. The HEAP-arm closure handle path goes through
-//!    `slot.as_heap_value()` + `HeapValue::ClosureRaw` per ADR-005 §1
-//!    single-discriminator; the host-closure arm goes through
-//!    `HeapValue::HostClosure` symmetrically.
-//! 5. `jit_trampoline_call_closure` — JIT FFI consumer; same
-//!    dependency on the deleted `Upvalue` / `vw_clone` pair. The
-//!    post-§2.7.8 trampoline reads `(bits, kind)` slices for each
-//!    capture and constructs the kinded closure cell directly.
-//! 6. `call_function_with_raw_args` / `call_closure_with_raw_args` —
-//!    raw-bits frame setup; depended on the deleted
-//!    `raw_helpers::clone_raw_bits` (which itself ran the forbidden
-//!    tag_bits dispatch internally). Replacement: thread `&[(u64,
-//!    NativeKind)]` slices and call `clone_with_kind(bits, kind)` per
-//!    arg + `stack_write_kinded`.
-//! 7. `call_function_from_stack` — fast-path frame setup; depended on
-//!    the deleted unkinded slot-write shim (deleted post-§2.7.7) and
-//!    on the function table's `param_kinds` for source-of-kind sourcing per playbook
-//!    §2 (function-call return / param kinds). The frame-pushed
-//!    `closure_heap_kind: None` lockstep is preserved here so the
-//!    teardown discipline already-landed in B9 round through the
-//!    kinded `drop_with_kind` path on this construction site too.
+//! # `_raw` pair-slice family — marked for deletion (W7-cv-polymorphic)
 //!
-//! No forbidden patterns are introduced by the stubs: every body is
-//! either the §2.7.8 lockstep-companion frame construction (no shim
-//! refs), or `todo!()`. The B9 lockstep invariant
+//! [`call_function_with_raw_args`] and [`call_closure_with_raw_args`] carry
+//! the `&[(u64, NativeKind)]` pair-slice form pre-§2.7.11. ADR-006 §2.7.11
+//! migration-scope refinement (post-W7 audit, 2026-05-09) rejects this
+//! shape on §2.7.6 / Q8 carrier-API-bound grounds at the runtime tier.
+//! W7-cv-polymorphic (Round 3) deletes them; their bodies stay `todo!()`
+//! here so the public surface remains compilable until the deletion
+//! cascade lands. [`call_value_immediate_raw`] follows the same fate.
+//! `jit_trampoline_call_closure` is the only `_raw` survivor — it is the
+//! §2.7.5 cross-crate stable FFI consumer where the parallel-pair shape
+//! is canonical (consumers translate `&[KindedSlot]` → raw u64 at the
+//! FFI boundary, single direction).
+//!
+//! # Forbidden patterns (W7 playbook §6 — refused on sight)
+//!
+//! - `Vec<KindedSlot>` by-move parameter (#12 — caller owns shares;
+//!   by-move desynchronizes drop accounting). Borrow-only `&[..]`.
+//! - `&[(u64, NativeKind)]` pair-slice as a runtime-tier dispatch ABI
+//!   (#13 — §2.7.6 / Q8 carrier-API-bound; pair-slice rejected at
+//!   runtime tier, allowed only at the §2.7.5 stable-FFI boundary —
+//!   `jit_trampoline_call_closure` is the sole survivor).
+//! - Bool-default fallback for unresolved-kind capture at frame setup
+//!   (#16 — §2.7.8 #4; correct response is surface-and-stop, panic
+//!   from `read_capture_kinded` is diagnostic, not fallback).
+//! - Re-introducing `_upvalue_bits: Vec<u64>` parameter — the deleted
+//!   pre-§2.7.8 ABI shape; replacement is `&OwnedClosureBlock`.
+//! - Renaming the deleted kind-blind value-call ABI by hypothetical
+//!   role per CLAUDE.md "Renames to refuse on sight" (#18) — describe
+//!   deleted code by name (the pre-§2.7.11 raw-u64 entry-points) or
+//!   by deletion-fate (the kind-blind value-call ABI), never via the
+//!   bridge/probe/helper/hop/translator/adapter/shim framing the
+//!   2026-05-09 broadening enumerates.
+//!
+//! The B9 lockstep invariant
 //! (`closure_heap_bits.is_some() == closure_heap_kind.is_some()`) is
-//! preserved on every surviving frame-push site.
+//! enforced via `debug_assert_eq!` at every frame-construction site.
 
+use shape_value::v2::closure_raw::OwnedClosureBlock;
 use shape_value::{KindedSlot, NativeKind, VMError};
 
-use super::VirtualMachine;
+use super::{CallFrame, VirtualMachine};
 
 impl VirtualMachine {
     /// Execute a named function with arguments, returning its result.
@@ -240,68 +223,136 @@ impl VirtualMachine {
         )
     }
 
-    /// Module function call: takes a `&[KindedSlot]` arg slice (ADR-006
-    /// §2.7.10 / Q11 caller-side carrier) and threads each slot's
-    /// `(bits, kind)` onto the kind-tracked stack via
-    /// `stack_write_kinded(idx, bits, kind)`.
+    /// Non-closure frame setup from a `&[KindedSlot]` arg slice
+    /// (ADR-006 §2.7.10 / Q11 caller-side carrier; W7 playbook §4).
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced deleted `vw_clone` retain-on-read + the deleted
-    /// unkinded stack-slot read/write/take shims (all CLAUDE.md
-    /// "Forbidden Patterns" — the post-§2.7.7 replacements are
-    /// `clone_with_kind` + `stack_write_kinded` + `stack_take_kinded`
-    /// per playbook §3).
-    /// The frame-construction tail (B9 lockstep companion
-    /// `closure_heap_bits: None` / `closure_heap_kind: None`) is the
-    /// shape that survives the rebuild — preserved verbatim once the
-    /// kind-threaded arg-write loop lands.
+    /// Pushes a fresh `CallFrame` for `func_id` and threads each arg's
+    /// `(bits, kind)` into the new frame's locals via
+    /// `stack_write_kinded`. The B9 lockstep companion fields
+    /// `closure_heap_bits` / `closure_heap_kind` are both `None` —
+    /// non-closure calls own no closure-self share.
+    ///
+    /// **Ownership.** The caller (the `op_call_value` dispatch shell or
+    /// a public entry-point such as `execute_function_by_id`) owns one
+    /// strong-count share per arg slot. This function transfers each
+    /// share into the new frame's local slot via `stack_write_kinded`
+    /// (which drops the prior occupant — a sentinel after the
+    /// `resize_with` below — and installs the new bits). The dispatch
+    /// shell calls `mem::forget` on its arg vec after this function
+    /// returns to release the source-side carriers without dropping
+    /// the shares. Same pattern as the §2.7.10 `op_call_method`
+    /// dispatch shell.
     pub(crate) fn call_function_with_nb_args(
         &mut self,
-        _func_id: u16,
-        _args: &[KindedSlot],
+        func_id: u16,
+        args: &[KindedSlot],
     ) -> Result<(), VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_function_with_nb_args kinded-ABI rebuild pending"
-        )
+        let (locals_count, entry_point) = {
+            let func = self
+                .program
+                .functions
+                .get(func_id as usize)
+                .ok_or(VMError::InvalidCall)?;
+            (func.locals_count as usize, func.entry_point)
+        };
+        let blob_hash = self.blob_hash_for_function(func_id);
+
+        let base_pointer = self.sp;
+        let needed = base_pointer + locals_count;
+        if needed > self.stack.len() {
+            // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel
+            // kind track grow together. Sentinel pair `(NONE_BITS,
+            // NativeKind::Bool)` is Drop/Clone-no-op so the freshly
+            // resized window is leak-free until each slot is written
+            // by the arg-thread loop / left as the omitted-arg
+            // sentinel (W6.5 §2 Null/Unit row).
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+            self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
+        }
+
+        let return_ip = self.ip;
+        self.call_stack.push(CallFrame {
+            return_ip,
+            base_pointer,
+            locals_count,
+            function_id: Some(func_id),
+            upvalues: None,
+            blob_hash,
+            closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep companion to
+            // `closure_heap_bits`. Non-closure call → both `None`.
+            closure_heap_kind: None,
+        });
+
+        // Walk args and thread each into the new frame's local at
+        // `base_pointer + i`. Per W7 playbook §4 / W6.5 §3, the
+        // `stack_write_kinded` write transfers the share into the
+        // local slot (drops the sentinel from the resize above —
+        // a no-op).
+        for (i, slot) in args.iter().enumerate() {
+            self.stack_write_kinded(base_pointer + i, slot.slot.raw(), slot.kind);
+        }
+
+        self.sp = base_pointer + locals_count;
+        self.ip = entry_point;
+        Ok(())
     }
 
-    /// Host closure call: takes a `Vec<u64>` raw-bits upvalue payload
-    /// (matching `CallFrame.upvalues: Option<Vec<u64>>`, with the
-    /// parallel `NativeKind` track sourced from `ClosureLayout::
-    /// capture_native_kinds` per §2.7.8 / Q10) and a `&[KindedSlot]`
-    /// arg slice per §2.7.10 / Q11.
+    /// Closure frame setup with no closure-self keep-alive (synthetic
+    /// dispatch where the block lifetime is guaranteed externally — e.g.
+    /// `execute_closure` from the public VM entry-point family). Thin
+    /// forwarder over [`call_closure_with_nb_args_keepalive`] with
+    /// `(None, None)` for the B9 lockstep companion fields.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Thin
-    /// wrapper over `call_closure_with_nb_args_keepalive` with `(None,
-    /// None)` lockstep — preserved as a stub so the public signature
-    /// stays bound for callers in `remote.rs` / JIT FFI.
+    /// The `_upvalue_bits: Vec<u64>` parameter is the deleted pre-§2.7.8
+    /// ABI shape — the kinded replacement takes a borrowed
+    /// `OwnedClosureBlock` per ADR-006 §2.7.8 / Q10 (the cell-storage
+    /// parallel-kind track is the canonical capture-kind source).
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
-        _func_id: u16,
-        _upvalue_bits: Vec<u64>,
-        _args: &[KindedSlot],
+        func_id: u16,
+        closure_block: &OwnedClosureBlock,
+        args: &[KindedSlot],
     ) -> Result<(), VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_closure_with_nb_args kinded-cell rebuild pending"
-        )
+        self.call_closure_with_nb_args_keepalive(func_id, closure_block, args, None, None)
     }
 
-    /// WB2.3 variant of [`call_closure_with_nb_args`] that takes an
-    /// optional keep-alive `closure_heap_bits` plus its lockstep
-    /// `closure_heap_kind` companion (ADR-006 §2.7.8 / Q10).
+    /// Closure frame setup from a borrowed `OwnedClosureBlock` plus an
+    /// `&[KindedSlot]` arg slice (ADR-006 §2.7.8 / Q10 cell-storage
+    /// parallel-kind invariant; §2.7.10 / Q11 dispatch-slice carrier;
+    /// §2.7.11 / Q12 value-call ABI; W7 playbook §4).
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** B9's
-    /// lockstep-companion threading shape is documented here so the
-    /// rebuild lands the kinded path with the
-    /// `debug_assert_eq!(closure_heap_bits.is_some(),
-    /// closure_heap_kind.is_some())` invariant preserved.
+    /// Captures flow via `OwnedClosureBlock::read_capture_kinded(idx)`
+    /// — the kind comes directly from the closure layout's
+    /// `capture_native_kinds` track, threaded into the new frame's
+    /// reserved capture-locals via `stack_write_kinded`. Args follow
+    /// the captures, occupying `[base_pointer + capture_count ..
+    /// base_pointer + capture_count + args.len()]`.
+    ///
+    /// The B9 lockstep companion fields `closure_heap_bits` /
+    /// `closure_heap_kind` carry the closure-self share (`Some` for
+    /// closure dispatch through `op_call_value` / `op_call_closure`;
+    /// `None` for synthetic / trampoline-style construction where the
+    /// block lifetime is guaranteed externally). The
+    /// `debug_assert_eq!` below enforces both fields are `Some`
+    /// together or `None` together at every observable boundary.
+    ///
+    /// **Ownership.** The caller owns one strong-count share per arg
+    /// slot and one share for `closure_heap_bits` (when `Some`); both
+    /// transfer into the new frame via `stack_write_kinded` and the
+    /// `CallFrame.closure_heap_bits` field respectively. Capture reads
+    /// via `read_capture_kinded` are raw-bit reads — the shares stay
+    /// owned by the `OwnedClosureBlock` (which the caller passes by
+    /// borrow); the closure_heap_bits keep-alive ensures the block
+    /// outlives the callee's pointer dereferences. Cell-storage
+    /// captures (`OwnedMutable` / `Shared`) load through the new
+    /// frame's `LoadOwnedClosureSelf` opcode using the kind from
+    /// `closure_heap_kind` — see §2.7.8 / Q10 for the cell read flow.
     pub(crate) fn call_closure_with_nb_args_keepalive(
         &mut self,
-        _func_id: u16,
-        _upvalue_bits: Vec<u64>,
-        _args: &[KindedSlot],
+        func_id: u16,
+        closure_block: &OwnedClosureBlock,
+        args: &[KindedSlot],
         closure_heap_bits: Option<u64>,
         closure_heap_kind: Option<NativeKind>,
     ) -> Result<(), VMError> {
@@ -311,25 +362,89 @@ impl VirtualMachine {
             "ADR-006 §2.7.8 / Q10: closure_heap_bits and closure_heap_kind \
              must be Some together or None together"
         );
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_closure_with_nb_args_keepalive kinded-cell rebuild pending"
-        )
+
+        let (locals_count, entry_point) = {
+            let func = self
+                .program
+                .functions
+                .get(func_id as usize)
+                .ok_or(VMError::InvalidCall)?;
+            (func.locals_count as usize, func.entry_point)
+        };
+        let blob_hash = self.blob_hash_for_function(func_id);
+
+        let layout = closure_block.layout();
+        let capture_count = layout.capture_count();
+
+        let base_pointer = self.sp;
+        let needed = base_pointer + locals_count;
+        if needed > self.stack.len() {
+            // ADR-006 §2.7.7 / §2.7.8 lockstep growth — see
+            // `call_function_with_nb_args` for the sentinel-pair
+            // rationale.
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+            self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
+        }
+
+        let return_ip = self.ip;
+        self.call_stack.push(CallFrame {
+            return_ip,
+            base_pointer,
+            locals_count,
+            function_id: Some(func_id),
+            upvalues: None,
+            blob_hash,
+            closure_heap_bits,
+            // ADR-006 §2.7.8 / Q10: lockstep companion to
+            // `closure_heap_bits`. The `debug_assert_eq!` above
+            // guarantees `Some(..)` ↔ `Some(..)`.
+            closure_heap_kind,
+        });
+
+        // Walk captures from the closure layout's parallel-kind track
+        // (ADR-006 §2.7.8 / Q10). `read_capture_kinded(idx)` returns
+        // `(bits, kind)` directly — the kind comes from
+        // `layout.capture_native_kinds[idx]`, set at closure
+        // construction by the producing `MakeClosure` opcode. No
+        // fabrication, no Bool-default fallback (§2.7.8 #4 forbidden);
+        // a misalignment between layout and stored bits is a
+        // construction-side bug that surfaces as a panic from
+        // `read_capture_kinded` itself (W7 playbook §8 surface-and-stop).
+        for capture_idx in 0..capture_count {
+            // SAFETY: the block was constructed by the producing
+            // `MakeClosure` opcode with `capture_count` initialised
+            // capture slots; the borrow from the dispatch shell holds
+            // the block live for the duration of this call.
+            let (bits, kind) = unsafe { closure_block.read_capture_kinded(capture_idx) };
+            self.stack_write_kinded(base_pointer + capture_idx, bits, kind);
+        }
+
+        // Walk args and thread each into the local slot following the
+        // captures.
+        let arg_base = base_pointer + capture_count;
+        for (i, slot) in args.iter().enumerate() {
+            self.stack_write_kinded(arg_base + i, slot.slot.raw(), slot.kind);
+        }
+
+        self.sp = base_pointer + locals_count;
+        self.ip = entry_point;
+        Ok(())
     }
 
     /// `call_value_immediate` (kinded carrier form): dispatches on the
-    /// callee's `KindedSlot.kind`. ADR-006 §2.7.10 / Q11 caller-side
+    /// callee's `KindedSlot.kind`. ADR-006 §2.7.11 / Q12 caller-side
     /// shape — both callee and args travel as `KindedSlot`.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced the deleted `tag_bits::{is_tagged, get_tag,
-    /// TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN}` dispatch (CLAUDE.md
-    /// "Forbidden Patterns" #7). Replacement: callee enters as
-    /// `(bits, kind)` from the caller; dispatch matches on `kind`
-    /// against `NativeKind::Function`, `NativeKind::ModuleFunction`,
-    /// `NativeKind::Ptr(HeapKind::Closure)`, with the host-closure
-    /// arm going through `slot.as_heap_value()` + `HeapValue::HostClosure`
-    /// per ADR-005 §1 single-discriminator.
+    /// **Owned by W7-cv-static (Round 2).** Per W7 playbook §4: matches
+    /// on `callee.kind` and routes — `Ptr(HeapKind::Closure)` recovers
+    /// the `OwnedClosureBlock` via `slot.as_heap_value()` +
+    /// `HeapValue::ClosureRaw` (single discriminator per ADR-005 §1)
+    /// and routes to `call_closure_with_nb_args_keepalive`; `UInt64`
+    /// callee bits are the function-id and route to
+    /// `call_function_with_nb_args`. Other kinds fall through to a
+    /// `TypeError`. The `HeapValue::HostClosure` variant referenced in
+    /// pre-Wave-7 docs has been deleted; only `ClosureRaw` survives in
+    /// the closure-dispatch path.
     pub fn call_value_immediate_nb(
         &mut self,
         _callee: &KindedSlot,
@@ -366,20 +481,30 @@ impl VirtualMachine {
         )
     }
 
-    // ─── Raw u64 call API (v2) ─────────────────────────────────────────────
+    // ─── `_raw` pair-slice family — marked for deletion by W7-cv-polymorphic ─
+    //
+    // ADR-006 §2.7.11 migration-scope refinement (post-W7-audit,
+    // 2026-05-09) rejects the `&[(u64, NativeKind)]` pair-slice form on
+    // §2.7.6 / Q8 carrier-API-bound grounds at the runtime tier. The
+    // three entry-points below are scheduled for deletion by
+    // W7-cv-polymorphic in Round 3 of the W7 fan-out — replaced
+    // architecturally by `call_function_with_nb_args` /
+    // `call_closure_with_nb_args_keepalive` /
+    // `call_value_immediate_nb` over `&[KindedSlot]`.
+    //
+    // Their bodies stay `todo!()` here so the public surface remains
+    // compilable until W7-cv-polymorphic lands the deletion cascade.
+    // Callers inside `crates/shape-vm/` (if any) remain broken at the
+    // surface until that round; JIT-side callers in `crates/shape-jit/`
+    // are W10 territory and translate `&[KindedSlot]` → raw u64 at the
+    // §2.7.5 stable-FFI boundary directly (`jit_trampoline_call_closure`
+    // is the surviving raw u64 entry-point for that boundary).
 
-    /// Raw-bits closure/function call: dispatches on callee kind.
-    ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced the deleted `tag_bits::*` dispatch (forbidden #7),
-    /// the deleted `raw_helpers::extract_closure_info` /
-    /// `try_call_host_closure` consumers (D-raw-helpers cluster
-    /// rewrote `raw_helpers` to expose `extract_filter_expr` only),
-    /// and the deleted `ValueWord::from_raw_bits` /
-    /// `ValueWord::into_raw_bits` raw-bits roundtrip. Post-§2.7.8
-    /// replacement signature accepts `(callee_bits, callee_kind,
-    /// args: &[(u64, NativeKind)])` and dispatches via kind match —
-    /// no tag decode, no raw-bits roundtrip.
+    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
+    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
+    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
+    /// 2026-05-09). Replaced by [`call_value_immediate_nb`] over
+    /// `&[KindedSlot]`.
     pub fn call_value_immediate_raw(
         &mut self,
         _callee_bits: u64,
@@ -388,39 +513,32 @@ impl VirtualMachine {
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_value_immediate_raw kind-threaded callee dispatch rebuild pending"
+            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
+             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_value_immediate_nb`"
         )
     }
 
-    /// Set up a function call frame from raw u64 args.
-    ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced the deleted `raw_helpers::clone_raw_bits` (forbidden
-    /// — D-raw-helpers cluster deleted; the function ran the
-    /// forbidden tag_bits dispatch internally). Replacement: take
-    /// `args: &[(u64, NativeKind)]` and call `clone_with_kind(bits,
-    /// kind)` + `stack_write_kinded(idx, bits, kind)` per arg, with
-    /// the B9 lockstep `closure_heap_bits: None` / `closure_heap_kind:
-    /// None` companion preserved on the pushed `CallFrame`.
+    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
+    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
+    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
+    /// 2026-05-09). Replaced by [`call_function_with_nb_args`] over
+    /// `&[KindedSlot]`.
     pub(crate) fn call_function_with_raw_args(
         &mut self,
         _func_id: u16,
         _args: &[(u64, NativeKind)],
     ) -> Result<(), VMError> {
         todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_function_with_raw_args kinded-arg rebuild pending"
+            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
+             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_function_with_nb_args`"
         )
     }
 
-    /// Set up a closure call frame from raw u64 args.
-    ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Same
-    /// kinded-arg rebuild as `call_function_with_raw_args`. The B9
-    /// lockstep `closure_heap_bits: None` / `closure_heap_kind: None`
-    /// companion is preserved (synthetic / trampoline-style
-    /// construction where block lifetime is guaranteed externally).
+    /// Marked for deletion by W7-cv-polymorphic Round 3 — pair-slice
+    /// form rejected on §2.7.6 / Q8 carrier-API-bound grounds at the
+    /// runtime tier (ADR-006 §2.7.11 migration-scope refinement,
+    /// 2026-05-09). Replaced by [`call_closure_with_nb_args_keepalive`]
+    /// over `&[KindedSlot]` + `&OwnedClosureBlock`.
     pub(crate) fn call_closure_with_raw_args(
         &mut self,
         _func_id: u16,
@@ -428,31 +546,88 @@ impl VirtualMachine {
         _args: &[(u64, NativeKind)],
     ) -> Result<(), VMError> {
         todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_closure_with_raw_args kinded-arg + kinded-cell rebuild pending"
+            "marked for deletion by W7-cv-polymorphic Round 3 — pair-slice form \
+             rejected on ADR-006 §2.7.6 / Q8 grounds; use `call_closure_with_nb_args_keepalive`"
         )
     }
 
-    /// Fast-path function call: reads `arg_count` arguments directly
-    /// from the value stack instead of collecting them into a temporary
-    /// `Vec`.
+    /// Fast-path frame setup: args are already on the value stack at
+    /// `[self.sp - arg_count .. self.sp]` from the producing push
+    /// opcodes (e.g. `LoadLocal*`, `PushConst`). The new frame's
+    /// `base_pointer` is exactly `self.sp - arg_count`, so those
+    /// slots — already carrying the right `(bits, kind)` pairs on the
+    /// parallel-kind track — become the new frame's locals 0..arg_count
+    /// in place, with no per-slot pop/write copy round-trip.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4 / §2.7.8.** Body
-    /// referenced the deleted unkinded-write shim on a `ValueWord::none()`
-    /// sentinel for filling omitted-arg slots (forbidden — replaced by
-    /// `stack_write_kinded(idx, 0u64, NativeKind::Bool)` per playbook
-    /// §2, sourced from the sentinel `NONE_BITS` convention at
-    /// `vm_impl/stack.rs`). The B9 lockstep `closure_heap_bits: None`
-    /// / `closure_heap_kind: None` companion is preserved on the
-    /// pushed `CallFrame`.
+    /// Per W7 playbook §4 / W6.5 §3, the share lives once: each arg's
+    /// strong-count share was installed into the slot by its producing
+    /// opcode and stays in the slot across the frame transition. No
+    /// `clone_with_kind`, no `drop_with_kind` — the slot is the share's
+    /// home throughout.
+    ///
+    /// Omitted-arg locals (when `arg_count < locals_count`) are
+    /// sentinel-filled with `(NONE_BITS, NativeKind::Bool)` per W6.5
+    /// §2 Null/Unit row — Drop/Clone are no-ops on this pair so the
+    /// pre-population is leak-free.
+    ///
+    /// The B9 lockstep companion fields `closure_heap_bits` /
+    /// `closure_heap_kind` are both `None` — non-closure call.
     pub(crate) fn call_function_from_stack(
         &mut self,
-        _func_id: u16,
-        _arg_count: usize,
+        func_id: u16,
+        arg_count: usize,
     ) -> Result<(), VMError> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.8 cluster B-round-2: \
-             call_function_from_stack kinded-fill rebuild pending"
-        )
+        let func = self
+            .program
+            .functions
+            .get(func_id as usize)
+            .ok_or(VMError::InvalidCall)?;
+        let locals_count = func.locals_count as usize;
+        let blob_hash = self.blob_hash_for_function(func_id);
+        let entry_point = func.entry_point;
+
+        if self.sp < arg_count {
+            return Err(VMError::StackUnderflow);
+        }
+
+        let base_pointer = self.sp - arg_count;
+        let needed = base_pointer + locals_count;
+        if needed > self.stack.len() {
+            // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel
+            // kind track grow together. Sentinel pair is `(NONE_BITS,
+            // NativeKind::Bool)` — Drop/Clone are no-ops on this pair
+            // so the pre-population window is leak-free.
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+            self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
+        }
+
+        let return_ip = self.ip;
+        self.call_stack.push(CallFrame {
+            return_ip,
+            base_pointer,
+            locals_count,
+            function_id: Some(func_id),
+            upvalues: None,
+            blob_hash,
+            closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // Non-closure fast path → both `None`.
+            closure_heap_kind: None,
+        });
+
+        // Sentinel-fill omitted-arg locals (W6.5 §2 Null/Unit row).
+        // Slots `[base_pointer .. base_pointer + arg_count]` already
+        // hold the pushed args; slots `[base_pointer + arg_count ..
+        // base_pointer + locals_count]` may carry stale shares from
+        // a prior frame's teardown. `stack_write_kinded` releases the
+        // prior occupant via `drop_with_kind` before installing the
+        // sentinel.
+        for i in arg_count..locals_count {
+            self.stack_write_kinded(base_pointer + i, Self::NONE_BITS, NativeKind::Bool);
+        }
+
+        self.sp = base_pointer + locals_count;
+        self.ip = entry_point;
+        Ok(())
     }
 }
