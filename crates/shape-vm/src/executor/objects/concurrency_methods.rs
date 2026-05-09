@@ -23,7 +23,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 (MethodFnV2) handlers — raw u64 ABI placeholder bodies
@@ -34,9 +34,9 @@ use shape_value::VMError;
 /// `mutex.lock()` — v2 ABI.
 pub fn v2_mutex_lock(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Mutex.lock(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -46,9 +46,9 @@ pub fn v2_mutex_lock(
 /// `mutex.try_lock()` — v2 ABI.
 pub fn v2_mutex_try_lock(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Mutex.try_lock(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -58,9 +58,9 @@ pub fn v2_mutex_try_lock(
 /// `mutex.set(value)` — v2 ABI.
 pub fn v2_mutex_set(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Mutex.set(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -72,9 +72,9 @@ pub fn v2_mutex_set(
 /// `atomic.load()` — v2 ABI.
 pub fn v2_atomic_load(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Atomic.load(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -84,9 +84,9 @@ pub fn v2_atomic_load(
 /// `atomic.store(value)` — v2 ABI.
 pub fn v2_atomic_store(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Atomic.store(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -96,9 +96,9 @@ pub fn v2_atomic_store(
 /// `atomic.fetch_add(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_add(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Atomic.fetch_add(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -108,9 +108,9 @@ pub fn v2_atomic_fetch_add(
 /// `atomic.fetch_sub(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_sub(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Atomic.fetch_sub(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -120,9 +120,9 @@ pub fn v2_atomic_fetch_sub(
 /// `atomic.compare_exchange(expected, new)` — v2 ABI.
 pub fn v2_atomic_compare_exchange(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Atomic.compare_exchange(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
@@ -138,9 +138,9 @@ pub fn v2_atomic_compare_exchange(
 /// (not `_vm`) once Phase 2c re-enables the body.
 pub fn v2_lazy_get(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Lazy.get(): closure-call dispatch + Concurrency typed-Arc redesign per ADR-006 §2.3 / §2.7.7"
             .to_string(),
@@ -150,9 +150,9 @@ pub fn v2_lazy_get(
 /// `lazy.is_initialized()` — v2 ABI.
 pub fn v2_lazy_is_initialized(
     _vm: &mut VirtualMachine,
-    _args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
+) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
         "phase-2c — Lazy.is_initialized(): Concurrency variant needs typed-Arc redesign per ADR-006 §2.3"
             .to_string(),
