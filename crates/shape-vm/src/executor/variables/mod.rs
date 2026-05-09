@@ -2817,10 +2817,11 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // SAFETY: compiler proved the slot's kind is I64 — the bits were
-        // written by a matching-Kind StoreLocalI64. Read raw 8 bytes.
+        // ADR-006 §2.7.7 / playbook §2: opcode-suffix supplies the kind.
+        // Compiler proved the slot's kind is I64 — read raw 8 bytes and
+        // push with NativeKind::Int64 in the parallel kind track.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Int64)
     }
 
     fn op_load_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2836,7 +2837,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::UInt64)
     }
 
     fn op_load_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2852,7 +2853,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Float64)
     }
 
     fn op_load_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2870,7 +2871,7 @@ impl VirtualMachine {
         // Read low 4 bytes as i32, sign-extend to i64 for the 8-byte stack slot.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i32;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int32)
     }
 
     fn op_load_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2888,7 +2889,7 @@ impl VirtualMachine {
         // Read low 4 bytes as u32, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u32;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt32)
     }
 
     fn op_load_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2906,7 +2907,7 @@ impl VirtualMachine {
         // Read low 2 bytes as i16, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i16;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int16)
     }
 
     fn op_load_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2924,7 +2925,7 @@ impl VirtualMachine {
         // Read low 2 bytes as u16, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u16;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt16)
     }
 
     fn op_load_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2942,7 +2943,7 @@ impl VirtualMachine {
         // Read low byte as i8, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i8;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, shape_value::NativeKind::Int8)
     }
 
     fn op_load_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2960,7 +2961,7 @@ impl VirtualMachine {
         // Read low byte as u8, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u8;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, shape_value::NativeKind::UInt8)
     }
 
     fn op_load_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2978,7 +2979,7 @@ impl VirtualMachine {
         // The slot was written by a paired StoreLocalBool that canonicalized
         // to 0 or 1 in the low byte. Pass the raw bits through unchanged.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, shape_value::NativeKind::Bool)
     }
 
     fn op_load_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2995,27 +2996,37 @@ impl VirtualMachine {
         );
         // Raw 8-byte read. Refcount semantics are the IR's responsibility
         // — the handler does NOT clone/retain. The IR pairs LoadLocalPtr
-        // with `vw_clone` (matches the c-stdlib-msgpack pattern in commit
-        // afb1651, mirroring `op_load_owned_mutable_capture_ptr`).
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        // with the matching retain/release before/after.
+        //
+        // ADR-006 §2.7.7 / playbook §2: kind for LoadLocalPtr comes from
+        // FrameDescriptor.slots[idx] — the parallel kind track on the slot
+        // already reflects what the producing typed Store wrote.
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        self.push_kinded(bits, kind)
     }
 
     fn op_store_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §2: pop_kinded yields (bits, kind).
+        // Compiler proved the source kind is I64; we discard the carrier
+        // kind (typed opcode is post-proof) and write with the opcode-
+        // suffix-determined kind into the parallel track.
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
         // SAFETY: compiler proved the slot's kind is I64. No SharedCell
         // wrap, no refcount on the old bits — scalar i64 has no
         // ownership.
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::Int64);
         Ok(())
     }
 
@@ -3023,14 +3034,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::UInt64);
         Ok(())
     }
 
@@ -3038,14 +3052,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, _src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_bits;
+        self.stack_write_kinded(slot, new_bits, shape_value::NativeKind::Float64);
         Ok(())
     }
 
@@ -3054,14 +3071,18 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to i32 (low 4 bytes), sign-extend back to i64 for storage.
-        let new_value = self.pop_raw_u64()? as i32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int32);
         Ok(())
     }
 
@@ -3070,14 +3091,18 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         // Truncate to u32 (low 4 bytes), zero-extend back to u64 for storage.
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt32);
         Ok(())
     }
 
@@ -3085,14 +3110,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int16);
         Ok(())
     }
 
@@ -3100,14 +3129,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt16);
         Ok(())
     }
 
@@ -3115,14 +3148,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        self.stack_write_kinded(slot, new_value as i64 as u64, shape_value::NativeKind::Int8);
         Ok(())
     }
 
@@ -3130,14 +3167,18 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        self.stack_write_kinded(slot, new_value as u64, shape_value::NativeKind::UInt8);
         Ok(())
     }
 
@@ -3147,14 +3188,18 @@ impl VirtualMachine {
         };
         // Any nonzero pop ⇒ true (matches D.1's StoreOwnedMutableCaptureBool
         // convention). Canonicalize to 0 or 1 for storage.
-        let new_value = (self.pop_raw_u64()? != 0) as u64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = (src_bits != 0) as u64;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        self.stack[slot] = new_value;
+        self.stack_write_kinded(slot, new_value, shape_value::NativeKind::Bool);
         Ok(())
     }
 
@@ -3162,19 +3207,27 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        // ADR-006 §2.7.7 / playbook §2: pop_kinded carries the kind from
+        // the producing opcode. For Ptr, the kind on the source is the
+        // concrete `NativeKind::Ptr(HeapKind::*)` (or `NativeKind::String`)
+        // value the producing typed opcode emitted; preserve it into the
+        // local slot's parallel kind track.
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
+        // Resize both data and kinds tracks together to preserve the
+        // §2.7.7 index invariant (stack.len() == kinds.len()).
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, shape_value::NativeKind::Bool);
         }
         record_heap_write();
-        // SAFETY: caller's IR has paired this store with a vw_drop earlier
-        // (or this is the first write to a fresh slot). The handler does
-        // NOT release the previous payload nor retain the new one —
-        // refcount semantics are the IR's responsibility. Matches D.1 /
-        // D.2 Ptr semantics.
-        self.stack[slot] = new_bits;
+        // SAFETY: caller's IR has paired this store with the matching
+        // retain/release earlier (or this is the first write to a fresh
+        // slot). The handler does NOT release the previous payload nor
+        // retain the new one — refcount semantics are the IR's
+        // responsibility. Matches D.1 / D.2 Ptr semantics.
+        self.stack_write_kinded(slot, new_bits, src_kind);
         Ok(())
     }
 
