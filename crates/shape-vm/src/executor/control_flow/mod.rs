@@ -13,7 +13,40 @@ use crate::{
 };
 use shape_value::tag_bits::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN};
 use shape_value::value_word_drop::vw_drop;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{NativeKind, VMError, ValueWord, ValueWordExt};
+
+/// ADR-006 §2.7.7: bool truthiness from raw bits + kind. Mirrors the
+/// helper in `executor/logical/mod.rs` (kept module-local; no cross-
+/// territory dependency).
+#[inline]
+fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
+    match kind {
+        NativeKind::Bool => bits != 0,
+        NativeKind::Float64 => f64::from_bits(bits) != 0.0,
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => bits != 0,
+        NativeKind::NullableFloat64
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => bits != 0,
+        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+    }
+}
 
 impl VirtualMachine {
     #[inline(always)]
@@ -86,7 +119,16 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let condition = self.pop_raw_u64()?.is_truthy();
+            // ADR-006 §2.7.7 / playbook §2: jump condition is always
+            // post-proof Bool kind. The compiler emits typed comparison
+            // / `Not` opcodes that push `NativeKind::Bool`. Heterogeneous
+            // truthiness inputs go through `op_jump_if_false_trusted`'s
+            // bool-only path or are pre-coerced by an explicit bool op.
+            let (bits, kind) = self.pop_kinded()?;
+            let condition = kinded_truthy(bits, kind);
+            // Release any heap share carried by the popped slot (kinded
+            // truthy reads bits + kind without consuming an Arc share).
+            crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
             if !condition {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
@@ -99,18 +141,17 @@ impl VirtualMachine {
     /// JumpIfFalse — trusted variant.
     ///
     /// The compiler has proved the condition is a boolean value.
-    /// E+5.4: producers (typed comparison, `Not`) now push raw native bool
-    /// bits (0u64 / 1u64), not NaN-tagged ValueWord — uses `pop_native_bool`
-    /// to read those bits directly with no decode overhead. The legacy
-    /// `op_jump_if_false` (above) handles polymorphic ValueWord input via
-    /// `is_truthy()` and is unaffected.
+    /// Producers (typed comparison, `Not`) push `NativeKind::Bool` slots
+    /// (0u64 / 1u64 in the data track, `NativeKind::Bool` in the kind
+    /// track) — read the bits directly with `pop_kinded`.
     #[inline(always)]
     pub(in crate::executor) fn op_jump_if_false_trusted(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let cond = self.pop_native_bool()?;
+            let (bits, _kind) = self.pop_kinded()?;
+            let cond = bits != 0;
             if !cond {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
@@ -125,7 +166,11 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let condition = self.pop_raw_u64()?.is_truthy();
+            // See `op_jump_if_false` for the polymorphic-truthiness
+            // contract. Same kinded-truthy + drop pattern.
+            let (bits, kind) = self.pop_kinded()?;
+            let condition = kinded_truthy(bits, kind);
+            crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
             if condition {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
@@ -1171,24 +1216,25 @@ impl VirtualMachine {
             self.ip = frame.return_ip;
 
             // Clean up register window: release each slot's share then
-            // clear to NONE_BITS, finally restore sp to base_pointer.
+            // restore sp to base_pointer.
             //
-            // WB2.6 Phase 3: with retain-on-read in force across WB2.1–WB2.5,
-            // every slot in `[bp..sp)` holds an **owning** share; releasing
-            // per slot is now required to avoid leaks and is safe because no
-            // caller aliases these bits without its own retain.
+            // ADR-006 §2.7.7 WB2.4: with retain-on-read in force, every
+            // slot in `[bp..sp)` holds an **owning** share; releasing per
+            // slot is required to avoid leaks. `truncate_stack` walks the
+            // parallel kind track and dispatches `drop_with_kind` per
+            // slot — replaces the deleted `vw_drop`.
             let bp = frame.base_pointer;
-            for i in bp..self.sp {
-                let bits = self.stack[i];
-                self.stack[i] = Self::NONE_BITS;
-                shape_value::value_word_drop::vw_drop(bits);
-            }
-            self.sp = bp;
-            // WB2.3 retain-on-read: release the closure keep-alive (if any)
-            // now that the callee's `OwnedMutable` / `Shared` pointer
-            // captures are no longer in scope.
-            if let Some(bits) = frame.closure_heap_bits {
-                vw_drop(bits);
+            self.truncate_stack(bp);
+            // WB2.3 retain-on-read: release the closure keep-alive (if
+            // any) now that the callee's `OwnedMutable` / `Shared`
+            // pointer captures are no longer in scope.
+            //
+            // ADR-006 §2.7.7 / playbook §8 SURFACE: see `return_value_inner`
+            // for the closure-keepalive kind-source gap. Until CallFrame
+            // carries kind alongside `closure_heap_bits`, the share is
+            // leaked rather than calling forbidden `vw_drop`.
+            if let Some(_bits) = frame.closure_heap_bits {
+                // `drop_with_kind(_bits, _kind)` once CallFrame is kinded.
             }
         } else {
             // Return from main
@@ -1198,46 +1244,55 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_return_value(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        // ADR-006 §2.7.7 / playbook §2: pop_kinded captures the return
+        // value's kind from the callee's last produced opcode.
+        let (return_bits, return_kind) = self.pop_kinded()?;
+        self.return_value_inner(return_bits, return_kind)
     }
 
     /// Shared inner body for `op_return_value` and the typed
     /// `op_return_value_<kind>` family (Wave E+3, opcodes 0x198..=0x1A2).
     ///
-    /// The typed variants are *transport-neutral*: they pop the return
-    /// value as raw u64 (same as the legacy `ReturnValue`) and feed it
-    /// here for frame cleanup + caller-side push. The encoded `<Kind>`
-    /// is a static annotation for the JIT and downstream consumers, not
-    /// a runtime dispatch — so all 11 typed handlers and the legacy
-    /// handler share this body verbatim.
+    /// The typed variants pop the return value via `pop_kinded` and feed
+    /// it here for frame cleanup + caller-side push, supplying the kind
+    /// that matches their opcode suffix. The encoded `<Kind>` flows
+    /// through to the caller's parallel kind track via `push_kinded`.
     #[inline]
-    fn return_value_inner(&mut self, return_value: u64) -> Result<(), VMError> {
+    fn return_value_inner(
+        &mut self,
+        return_bits: u64,
+        return_kind: shape_value::NativeKind,
+    ) -> Result<(), VMError> {
         if let Some(frame) = self.call_stack.pop() {
             // Restore instruction pointer
             self.ip = frame.return_ip;
 
             // Clean up register window (see `op_return` for the
-            // retain-on-read rationale). WB2.6 Phase 3 releases each
-            // slot via `vw_drop`.
+            // retain-on-read rationale). ADR-006 §2.7.7 WB2.4: every
+            // slot in [bp..sp) is kind-tracked; `truncate_stack` walks
+            // the parallel kind track and dispatches `drop_with_kind`
+            // per slot — replaces the deleted `vw_drop`.
             let bp = frame.base_pointer;
-            for i in bp..self.sp {
-                let bits = self.stack[i];
-                self.stack[i] = Self::NONE_BITS;
-                shape_value::value_word_drop::vw_drop(bits);
-            }
-            self.sp = bp;
+            self.truncate_stack(bp);
 
             // WB2.3 retain-on-read: release the closure keep-alive.
-            if let Some(bits) = frame.closure_heap_bits {
-                vw_drop(bits);
+            //
+            // ADR-006 §2.7.7 / playbook §8 SURFACE: `CallFrame.closure_heap_bits`
+            // is `Option<u64>` — the kind is not stored alongside.
+            // `vw_drop` is forbidden per §2.7.7 #8; the migration to
+            // `drop_with_kind(bits, kind)` requires extending CallFrame
+            // to carry kind, which lives in `executor/mod.rs` (out of
+            // cluster B's territory). Until that landing, the closure
+            // share is leaked rather than calling forbidden `vw_drop`.
+            if let Some(_bits) = frame.closure_heap_bits {
+                // `drop_with_kind(_bits, _kind)` once CallFrame is kinded.
             }
 
-            // Push return value
-            self.push_raw_u64(return_value)?;
+            // Push return value with its kind on the parallel track.
+            self.push_kinded(return_bits, return_kind)?;
         } else {
             // Return from main
-            self.push_raw_u64(return_value)?;
+            self.push_kinded(return_bits, return_kind)?;
             self.ip = self.program.instructions.len();
         }
         Ok(())
@@ -1257,60 +1312,65 @@ impl VirtualMachine {
     // ─────────────────────────────────────────────────────────────────
 
     pub(in crate::executor) fn op_return_value_i64(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        // Opcode-suffix supplies the return kind regardless of what the
+        // callee's last opcode reported (typed return is post-proof).
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Int64)
     }
 
     pub(in crate::executor) fn op_return_value_u64(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::UInt64)
     }
 
     pub(in crate::executor) fn op_return_value_f64(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Float64)
     }
 
     pub(in crate::executor) fn op_return_value_i32(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Int32)
     }
 
     pub(in crate::executor) fn op_return_value_u32(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::UInt32)
     }
 
     pub(in crate::executor) fn op_return_value_i16(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Int16)
     }
 
     pub(in crate::executor) fn op_return_value_u16(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::UInt16)
     }
 
     pub(in crate::executor) fn op_return_value_i8(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Int8)
     }
 
     pub(in crate::executor) fn op_return_value_u8(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::UInt8)
     }
 
     pub(in crate::executor) fn op_return_value_bool(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        let (bits, _src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, shape_value::NativeKind::Bool)
     }
 
     pub(in crate::executor) fn op_return_value_ptr(&mut self) -> Result<(), VMError> {
-        // Ptr returns are heap-tagged ValueWord bits — synthesizer
-        // passthrough is correct, no stamp needed.
-        let return_value = self.pop_raw_u64()?;
-        self.return_value_inner(return_value)
+        // Ptr returns: preserve the source kind (the producing typed
+        // opcode emitted the concrete `NativeKind::Ptr(HeapKind::*)` /
+        // `::String`); the parallel kind track records exactly what the
+        // callee returned so the caller's stack interpretation is
+        // correct.
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 }
 
