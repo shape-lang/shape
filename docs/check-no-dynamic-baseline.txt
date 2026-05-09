@@ -10,9 +10,9 @@
 #
 # Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
 
-26	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
+25	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
-5	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
+2	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
 5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
 0	\bexec_comparison_dynamic_fallback\b	dynamic comparison fallback handler
 0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
