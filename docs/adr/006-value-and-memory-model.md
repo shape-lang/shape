@@ -368,9 +368,9 @@ Phase 1.B's caller migration (per §12) targets:
   Coordinate with shape-vm/shape-jit/extensions migrations rather
   than unilaterally changing the trait-object signatures.
 
-The N9 cleanup hotspot (`type_schema/mod.rs:255-290` doing forbidden
-tag-decode hops via `value.as_heap_ref()` / `value.raw_bits()`) is
-in-scope for Phase 1.B and pre-flagged as needing audit-grounded
+The N9 cleanup hotspot (`type_schema/mod.rs:255-290` calling the
+deleted `value.as_heap_ref()` / `value.raw_bits()` tag_bits dispatch)
+is in-scope for Phase 1.B and pre-flagged as needing audit-grounded
 cleanup, not pure-mechanical.
 
 #### 2.7.4 API rebuild scope clarification
@@ -498,8 +498,8 @@ fallback path."), not a runtime "we don't know" marker.
 - `FrameDescriptor.slots: Vec<Option<NativeKind>>` — the `Option`
   wrap is a wire-format-visible defection-attractor, identical in
   shape to the deleted `SlotKind::Unknown` / `SlotKind::Dynamic`
-  variants and the W-series tag-decode hops. Don't migrate the
-  in-memory state into the wire format.
+  variants and the deleted W-series `tag_bits` dispatch sites. Don't
+  migrate the in-memory state into the wire format.
 - Adding `NativeKind::Unspecialized` / `NativeKind::Unknown` /
   `NativeKind::Pending` — same defection-attractor with a different
   spelling. CLAUDE.md "Renames to refuse on sight" applies in
@@ -600,10 +600,10 @@ fn builtin_abs(arg: &KindedSlot) -> Result<KindedSlot, VMError> {
 ```
 
 This is **runtime-tier dispatch on a carrier** at a builtin
-boundary, not a hot-path tag-decode. It does not violate the
-strict-typing rules — the alternative (Option 2: per-kind body
-variants) pushes the same dispatch into the central wrapper and
-costs the same total work.
+boundary, not a resurrection of the deleted hot-path `tag_bits`
+dispatch. It does not violate the strict-typing rules — the
+alternative (Option 2: per-kind body variants) pushes the same
+dispatch into the central wrapper and costs the same total work.
 
 #### 2.7.7 Stack ABI kind-awareness — parallel `Vec<NativeKind>` (Q9 ruling)
 
@@ -648,10 +648,10 @@ impl VmStack {
 ```
 
 The `clone_with_kind(bits, kind)` and `drop_with_kind(bits, kind)`
-helpers replace the deleted `vw_clone` / `vw_drop` (which did
-tag-decode internally). Post-Wave-6, the kind is locally available
-at every retain/release site — **no tag decode, no `is_heap()` probe,
-no `as_heap_ref()` hop**.
+helpers replace the deleted `vw_clone` / `vw_drop` (which dispatched
+on `tag_bits` internally). Post-Wave-6, the kind is locally available
+at every retain/release site — **the deleted `tag_bits` dispatch,
+`is_heap()`, and `as_heap_ref()` call sites do not return**.
 
 **Forbidden shapes this rules out:**
 
@@ -661,7 +661,7 @@ no `as_heap_ref()` hop**.
   bits: u64, kind: NativeKind }`) — would conflict with §2.1's
   8-byte slot invariant and double the stack memory.
 - Tag bits packed into the u64 — would re-introduce the deleted
-  ValueWord tag-decode pattern (CLAUDE.md "Forbidden code").
+  ValueWord `tag_bits` dispatch (CLAUDE.md "Forbidden code").
 - Stack-side kind track typed as `Vec<Option<NativeKind>>` — same
   defection-attractor as §2.7.5.1's wire-format rule. Stack
   contents are post-proof; every pushed slot has a known kind by
@@ -693,8 +693,8 @@ no `as_heap_ref()` hop**.
 - Pop: 1 word read + 1 byte read. Same.
 - WB2.4 clone/drop: dispatch on `kind` (1 byte cmpxchg target),
   call matching `Arc::increment_strong_count::<T>` / `decrement`.
-  **Strictly faster than the deleted `vw_clone(bits)` which did
-  tag-decode then dispatch.**
+  **Strictly faster than the deleted `vw_clone(bits)`, which
+  dispatched on `tag_bits` before performing the same Arc work.**
 - Memory overhead: 1 byte per stack slot (vs. 8 bytes data) =
   +12.5% stack memory. For typical frame sizes (≤256 slots), this
   is ≤256 bytes per frame — negligible.
@@ -823,7 +823,7 @@ applied to cell storage):**
   silently leaking shares.
 - Cell store carrying its kind via a parallel `Vec<u8>` tag-byte that
   decodes to a custom enum — same defection-attractor as the deleted
-  ValueWord tag-decode pattern, just at a different layer.
+  ValueWord `tag_bits` dispatch, just at a different layer.
 
 **Performance characteristics** (mirror of §2.7.7's stack-side
 analysis):
@@ -1424,12 +1424,14 @@ considered:
 
 - **Option B (parallel `Vec<NativeKind>` stack track)** —
   accepted. Generalizes the FrameDescriptor pattern (slots →
-  kinds parallel) at the stack level. Eliminates tag-decode hops
-  entirely — kind is locally available at every retain/release.
+  kinds parallel) at the stack level. Leaves no surface for the
+  deleted `tag_bits` dispatch sites — kind is locally available at
+  every retain/release.
 
 **Performance characteristics:** push/pop overhead is +1 byte per
 slot (negligible). WB2.4 clone/drop is **strictly faster** than the
-deleted `vw_clone(bits)` (which did tag-decode then dispatch).
+deleted `vw_clone(bits)` (which dispatched on `tag_bits` before
+performing the same Arc work).
 Cache-line behavior: `data` and `kinds` are separate allocations
 but accessed in lockstep — prefetch/branch-predictor handles well.
 Memory overhead: +12.5% stack memory (e.g. ≤256 bytes per typical
