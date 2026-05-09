@@ -4,51 +4,49 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::bytecode::{Instruction, OpCode};
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 use super::debugger_integration::DebuggerIntegration;
 use super::{DebugVMState, ExecutionResult, VirtualMachine, async_ops};
 
 impl VirtualMachine {
-    /// Execute the loaded program
+    /// Execute the loaded program.
     ///
     /// # Arguments
     /// * `ctx` - Optional ExecutionContext for trading operations (rows, indicators, etc.)
     ///
-    /// Returns a `ValueWord` representing the program's final value. Wave E+4
-    /// flips top-level emission to typed opcodes that push raw native bits
-    /// (no NaN-box tag) onto the stack. To keep the host boundary stable,
-    /// `execute()` synthesises a tagged `ValueWord` from those raw bits per
-    /// the program's declared top-level return kind (read from
-    /// `BytecodeProgram::top_level_frame.return_kind` when present and not
-    /// `Unknown`). When the kind is unknown — the legacy / pre-E+4
-    /// situation — the raw bits are interpreted directly as a tagged
-    /// `ValueWord` (passthrough), preserving the historical behaviour.
-    ///
-    /// Hosts that want raw bits should call [`Self::execute_raw`] instead
-    /// and synthesize a `ValueWord` themselves (see
-    /// `crate::test_utils::eval_with_kind` for an example).
+    /// Returns a [`KindedSlot`] — the canonical post-`ValueWord`
+    /// runtime-value carrier (ADR-006 §2.7 / Q7). The slot's
+    /// `NativeKind` is sourced from `BytecodeProgram::top_level_frame.
+    /// return_kind` when present (the compiler-proven kind), with the
+    /// raw u64 bits taken from the top of the value stack. Hosts
+    /// dispatch on `result.kind()` and use the per-variant
+    /// `KindedSlot::as_*` accessors per §2.7.6.
     pub fn execute(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<ValueWord, VMError> {
-        let bits = self.execute_raw(ctx)?;
-        let return_kind = self.program_top_level_return_kind();
-        Ok(synthesize_value_word_from_raw(bits, return_kind))
+    ) -> Result<KindedSlot, VMError> {
+        match self.execute_with_suspend(ctx)? {
+            ExecutionResult::Completed(slot) => Ok(slot),
+            ExecutionResult::Suspended { future_id, .. } => Err(VMError::Suspended {
+                future_id,
+                resume_ip: 0,
+            }),
+        }
     }
 
-    /// Execute the loaded program and return the raw u64 bits at the top of
-    /// stack. After Wave E+4 flips top-level emission, those bits may be
-    /// raw native values (e.g. `i64`, `f64::to_bits()`, `0u64`/`1u64` for
-    /// bool, raw heap pointer for ptr) rather than tagged `ValueWord` bits.
-    /// Use this when the host wants to control kind-hint synthesis itself,
-    /// or when interpreting the bits as a non-default kind.
+    /// Execute the loaded program and return the raw u64 bits at the top
+    /// of stack. Top-level emission pushes raw native values
+    /// (e.g. `i64`, `f64::to_bits()`, `0u64`/`1u64` for bool, raw heap
+    /// pointer for ptr); the kind is recovered from
+    /// `program_top_level_return_kind()`. Use this when the host wants
+    /// the raw bits without a `KindedSlot` wrapper.
     pub fn execute_raw(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         match self.execute_with_suspend(ctx)? {
-            ExecutionResult::Completed(value) => Ok(value.into_raw_bits()),
+            ExecutionResult::Completed(slot) => Ok(slot.raw()),
             ExecutionResult::Suspended { future_id, .. } => Err(VMError::Suspended {
                 future_id,
                 resume_ip: 0,
@@ -58,19 +56,16 @@ impl VirtualMachine {
 
     /// Read the program's declared top-level return kind, if present.
     ///
-    /// Returns `Some(kind)` when `top_level_frame.return_kind` is set to a
-    /// concrete `NativeKind` (i.e. the compiler proved a return type for the
-    /// top-level program). Returns `None` when no concrete kind is set —
-    /// after the strict-typing bulldozer, `None` should be reachable only
-    /// during Phase 2 reconstruction; once `prove_native_kind` is on, every
-    /// program has a proved return kind at compile time.
+    /// Returns `Some(kind)` when `top_level_frame.return_kind` is set —
+    /// after the strict-typing bulldozer the compiler proves a kind for
+    /// every program at compile time, so this should always be `Some`
+    /// for a well-formed `BytecodeProgram`. Returns `None` only when no
+    /// `top_level_frame` is attached (legacy programs, partial linker
+    /// state). The deleted `NativeKind::Unknown` sentinel is no longer
+    /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
-    pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::NativeKind> {
-        let kind = self.program.top_level_frame.as_ref()?.return_kind;
-        match kind {
-            crate::type_tracking::NativeKind::Unknown => None,
-            _ => Some(kind),
-        }
+    pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
+        Some(self.program.top_level_frame.as_ref()?.return_kind)
     }
 
     /// Execute the loaded program, returning either a completed value or suspension info.
@@ -245,8 +240,14 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    let error_nb = ValueWord::from_string(Arc::new(err.to_string()));
-                    self.handle_exception_nb(error_nb)?;
+                    // Construct the exception payload as an `Arc<String>`
+                    // pointer per ADR-006 §2.7 / Q7 carrier shape — the
+                    // raw bits are the `Arc::into_raw` pointer; the kind
+                    // is `NativeKind::String`. `handle_exception_nb`
+                    // takes ownership of the share.
+                    let error_arc = Arc::new(err.to_string());
+                    let error_bits = Arc::into_raw(error_arc) as u64;
+                    self.handle_exception_nb(error_bits, NativeKind::String)?;
                 } else {
                     // Enrich error with source location before returning
                     return Err(self.enrich_error_with_location(err, error_ip));
@@ -264,13 +265,17 @@ impl VirtualMachine {
             }
         }
 
-        // Return top of stack or none (only if sp is above top-level locals region)
+        // Return top of stack or sentinel `none` (only if sp is above
+        // top-level locals region). The slot transfers ownership: the
+        // returned `KindedSlot` owns the strong-count share previously
+        // held by the stack slot.
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         }))
     }
 
@@ -372,8 +377,12 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    let error_nb = ValueWord::from_string(Arc::new(err.to_string()));
-                    self.handle_exception_nb(error_nb)?;
+                    // Construct the exception payload as an `Arc<String>`
+                    // pointer (raw bits + `NativeKind::String`); ownership
+                    // transfers to `handle_exception_nb`.
+                    let error_arc = Arc::new(err.to_string());
+                    let error_bits = Arc::into_raw(error_arc) as u64;
+                    self.handle_exception_nb(error_bits, NativeKind::String)?;
                 } else {
                     return Err(self.enrich_error_with_location(err, ip));
                 }
@@ -392,9 +401,10 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         }))
     }
 
@@ -405,7 +415,7 @@ impl VirtualMachine {
     pub(crate) fn execute_fast(
         &mut self,
         mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         while self.ip < self.program.instructions.len() {
             // Get index first, then increment
             let ip = self.ip;
@@ -446,9 +456,10 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         })
     }
 

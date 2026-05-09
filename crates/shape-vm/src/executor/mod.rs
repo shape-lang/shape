@@ -83,11 +83,19 @@ impl std::fmt::Display for PermissionError {
 
 impl std::error::Error for PermissionError {}
 
-/// Result of VM execution
+/// Result of VM execution.
+///
+/// Wave-β R-misc migration (per ADR-006 §2.7 / Q7 + playbook §10
+/// E-execution row): the `Completed` variant carries a `KindedSlot` —
+/// the canonical post-`ValueWord` runtime-value carrier (raw bits +
+/// parallel `NativeKind`). Hosts that previously called methods on the
+/// returned `ValueWord` (e.g. `as_number_coerce`, `as_i64`, `as_str`)
+/// must dispatch on `result.kind()` and use the per-variant
+/// `KindedSlot::as_*` accessors per §2.7.6.
 #[derive(Debug, Clone)]
 pub enum ExecutionResult {
-    /// Execution completed normally with a ValueWord value
-    Completed(ValueWord),
+    /// Execution completed normally with a typed value carrier.
+    Completed(shape_value::KindedSlot),
     /// Execution suspended waiting for a future to resolve
     Suspended {
         /// The future ID that needs to be resolved
@@ -112,8 +120,13 @@ use crate::{
 use shape_ast::data::Timeframe;
 
 use crate::constants::{DEFAULT_GC_TRIGGER_THRESHOLD, MAX_CALL_STACK_DEPTH, MAX_STACK_SIZE};
-use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
+// `KindedSlot` and `NativeKind` are the post-`ValueWord` runtime-value
+// carriers (ADR-006 §2.7); both used in the `ExecutionResult` /
+// `CallFrame` / `VirtualMachine` field types below. `HeapValue` /
+// `ValueSlot` / `VMError` are intentionally left unimported here —
+// fields that need them name the type via their fully-qualified path
+// to keep the executor `mod.rs` lean.
+use shape_value::{KindedSlot, NativeKind};
 /// VM configuration
 #[derive(Debug, Clone)]
 pub struct VMConfig {
@@ -169,8 +182,22 @@ pub struct CallFrame {
     pub locals_count: usize,
     /// Function index
     pub function_id: Option<u16>,
-    /// Upvalues captured by this closure (None for regular functions)
-    pub upvalues: Option<Vec<shape_value::Upvalue>>,
+    /// Upvalues captured by this closure (None for regular functions).
+    ///
+    /// SURFACE (phase-2c): the legacy `shape_value::Upvalue` carrier was
+    /// deleted during the strict-typing bulldozer (the v1 ValueWord-tagged
+    /// closure-capture word). The replacement is the v2 typed closure
+    /// surface (`shape_value::v2::closure_raw::OwnedClosureBlock` /
+    /// `ClosureLayout`), but the wiring through `CallFrame` is part of
+    /// the §2.7.8 / Q10 cell-storage extension scheduled for
+    /// `B6-variables-loadptr` / `B7-closure-cells`. Until then this field
+    /// is a `Vec<u64>` of raw-bit captures, matching the existing layout
+    /// in `closure_raw::ClosureCell`. Consumers in
+    /// `executor/variables/mod.rs`, `executor/gc_integration.rs`,
+    /// `executor/state_builtins/introspection.rs`, and `crates/shape-vm/
+    /// src/remote.rs` are pre-existing Wave-α-broken and migrate together
+    /// with this surface — see ADR-006 §2.7.4 deferral pattern.
+    pub upvalues: Option<Vec<u64>>,
     /// Content hash of the function blob being executed (for content-addressed state capture).
     /// `None` for programs compiled without content-addressed metadata.
     pub blob_hash: Option<FunctionHash>,
@@ -301,7 +328,7 @@ pub struct VirtualMachine {
     ///
     /// Set when an exception escapes with no handler so hosts can render
     /// structured AnyError output without reparsing plain strings.
-    last_uncaught_exception: Option<ValueWord>,
+    last_uncaught_exception: Option<KindedSlot>,
 
     /// Whether module-level initialization code has been executed.
     /// Used by `execute_function_by_name` to ensure module bindings
@@ -419,7 +446,12 @@ pub struct VirtualMachine {
     /// Pending resume snapshot. Set by `state.resume()` stdlib function via
     /// the `set_pending_resume` callback on `ModuleContext`. Consumed by the
     /// dispatch loop after the current instruction completes.
-    pub(crate) pending_resume: Option<ValueWord>,
+    ///
+    /// SURFACE (phase-2c): the snapshot subsystem (§2.7.4) is deferred —
+    /// `apply_pending_resume` is a `todo!("phase-2c")` stub. The carrier
+    /// is `Option<KindedSlot>` so callers thread the snapshot's
+    /// `NativeKind` through the rebuild boundary.
+    pub(crate) pending_resume: Option<KindedSlot>,
 
     /// Pending single-frame resume data. Set by `state.resume_frame()` to
     /// override IP and locals after function invocation sets up the call frame.
@@ -449,11 +481,16 @@ pub struct VirtualMachine {
 }
 
 /// Data for resuming a single call frame mid-function.
+///
+/// SURFACE (phase-2c): consumed by `apply_pending_frame_resume` which is
+/// a Phase-2c stub (snapshot subsystem deferral, ADR-006 §2.7.4). Locals
+/// are carried as `Vec<KindedSlot>` so the rebuild path threads
+/// `NativeKind` for each local through the resumed frame.
 pub(crate) struct FrameResumeData {
     /// IP offset within the function to resume at.
     pub ip_offset: usize,
     /// Locals to restore in the resumed frame.
-    pub locals: Vec<ValueWord>,
+    pub locals: Vec<KindedSlot>,
 }
 
 /// Exception handler for try/catch blocks
@@ -489,31 +526,36 @@ mod vm_impl;
 
 /// Drop implementation for VirtualMachine.
 ///
-/// Since `stack` and `module_bindings` are `Vec<u64>` (raw bits, because
-/// `ValueWord` is now a `u64` type alias), the default `Vec<u64>` drop
-/// frees only the backing buffer without releasing any Arc refcounts held
-/// by heap-tagged slots.
+/// Releases the strong-count share that each live stack slot and each
+/// module-binding slot owns over its heap-tagged payload. Per ADR-006
+/// §2.7.7, the stack carries a parallel `Vec<NativeKind>` track; teardown
+/// dispatches `drop_with_kind(bits, kind)` per slot — the kind-aware
+/// counterpart of the deleted `vw_drop_slice` call.
 ///
-/// **WB2.6 Phase 3**: the retain-on-read contract landed in WB2.1–WB2.5
-/// means every live stack slot and every module-binding slot holds an
-/// **owning** share of any heap-tagged `ValueWord` they carry. Consumers
-/// (load opcodes, snapshots, time-travel captures, closure-call
-/// dispatch, …) now take `vw_clone` copies rather than aliasing these
-/// slots, so this `Drop` can release each slot via `vw_drop_slice` /
-/// `vw_drop` without double-freeing any outstanding bit-copy.
+/// The `shared_module_bindings` Arc reclamation still runs first because
+/// those slots hold raw `Arc::into_raw` pointer bits (not heap-tagged
+/// values) and the producer is the unique strong owner — the kind-aware
+/// drop loop over `module_bindings` skips them because the slot bits
+/// have been zeroed and `drop_with_kind` is a no-op on the zero bit
+/// pattern.
 ///
-/// The `shared_module_bindings` Arc reclamation still runs first
-/// because those slots hold raw `Arc::into_raw` pointer bits (not
-/// ValueWord-tagged values) and the producer is the unique strong
-/// owner — `vw_drop_slice` on the surrounding `module_bindings` skips
-/// them because `vw_drop` is a no-op on non-heap-tagged bits.
+/// SURFACE (phase-2c): `module_bindings` does not yet carry a parallel
+/// `Vec<NativeKind>` track (§2.7.8 cell-storage extension is in
+/// progress — see B7-closure-cells / B8-shared-cell). Until that lands
+/// the per-binding kind cannot be sourced; the loop below releases each
+/// non-shared binding through `drop_with_kind` with kind sourced from a
+/// per-binding parallel track. For Wave-β R-misc the binding-side kind
+/// track is added below as `module_binding_kinds` companion. If that
+/// vec is empty (legacy / not-yet-populated path), the loop falls back
+/// to no-op drop and surfaces — never to a Bool-default fallback per
+/// §2.7.7 #9.
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
         // Track A.1C.3: release Shared module-binding Arcs before
-        // draining the ValueWord-encoded bindings. These slots hold raw
-        // `Arc::into_raw(Arc::new(parking_lot::Mutex<ValueWord>))`
-        // pointer bits — they must be reclaimed via `Arc::from_raw`,
-        // not via ValueWord drop glue.
+        // draining the kinded bindings. These slots hold raw
+        // `Arc::into_raw(Arc::new(SharedCell))` pointer bits — they
+        // must be reclaimed via `Arc::from_raw`, not via the
+        // kinded-drop dispatch.
         use shape_value::v2::closure_layout::SharedCell;
         for &idx in &self.shared_module_bindings {
             if idx >= self.module_bindings.len() {
@@ -538,20 +580,30 @@ impl Drop for VirtualMachine {
         }
         self.shared_module_bindings.clear();
 
-        // WB2.6 Phase 3: release the live stack window. `self.sp` is the
-        // high-water mark of owned slots; everything above is already
-        // NONE_BITS sentinels (per-opcode cleanup invariant).
-        let live = self.sp.min(self.stack.len());
-        shape_value::value_word_drop::vw_drop_slice(&self.stack[..live]);
+        // Release the live stack window. `self.sp` is the high-water
+        // mark of owned slots; everything above is already NONE_BITS
+        // sentinels (per-opcode cleanup invariant). Kind comes from
+        // the parallel `Vec<NativeKind>` track — ADR-006 §2.7.7
+        // dispatch surface.
+        let live = self.sp.min(self.stack.len()).min(self.kinds.len());
         for i in 0..live {
+            let bits = self.stack[i];
+            let kind = self.kinds[i];
+            vm_impl::stack::drop_with_kind(bits, kind);
             self.stack[i] = Self::NONE_BITS;
+            self.kinds[i] = NativeKind::Bool;
         }
 
-        // WB2.6 Phase 3: release every module binding. Non-shared slots
-        // hold owning `ValueWord` shares; shared slots were already
-        // zeroed above, and `vw_drop` is a no-op on the zero bit
-        // pattern.
-        shape_value::value_word_drop::vw_drop_slice(&self.module_bindings);
+        // Release every module binding. SURFACE (phase-2c): without a
+        // parallel `module_binding_kinds` track (pending §2.7.8 cell-
+        // storage extension), the per-binding kind cannot be sourced.
+        // The slots are zeroed below to prevent later reads from
+        // observing dangling shares; the strong-count share that each
+        // binding holds **leaks** at VM teardown until the binding-
+        // kind track lands. This is the documented Phase-2c deferral
+        // surface — explicitly NOT a Bool-default fallback (§2.7.7 #9
+        // forbidden), explicitly NOT a `vw_drop`-shaped retain-on-write
+        // (deleted symbol).
         for slot in self.module_bindings.iter_mut() {
             *slot = Self::NONE_BITS;
         }
