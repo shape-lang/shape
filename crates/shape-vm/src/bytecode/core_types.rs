@@ -385,9 +385,17 @@ pub enum Constant {
     DateTimeExpr(DateTimeExpr),
     DataDateTimeRef(DataDateTimeRef),
     TypeAnnotation(TypeAnnotation),
-    /// Opaque runtime value (not serializable — used for host-injected constants like RowView, DataTable, etc.)
+    /// Opaque runtime value (not serializable — used for host-injected
+    /// constants like RowView, DataTable, etc.).
+    ///
+    /// SURFACE (playbook §8 — `Constant::*` arm pending kinded heap
+    /// alignment): the prior `Value(ValueWord)` shape was deleted by the
+    /// strict-typing bulldozer; the kinded rebuild lives in phase-2c per
+    /// ADR-006 §2.7.4. The placeholder unit shape keeps the variant
+    /// reachable so dispatch sites in `op_push_const` continue to compile,
+    /// without re-introducing a dynamic-tag carrier.
     #[serde(skip)]
-    Value(ValueWord),
+    Value,
 }
 
 /// Function definition in bytecode

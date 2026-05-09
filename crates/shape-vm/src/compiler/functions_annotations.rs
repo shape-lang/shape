@@ -8,7 +8,7 @@ use shape_ast::ast::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;
@@ -379,26 +379,19 @@ impl BytecodeCompiler {
             })
     }
 
-    // SURFACE (cross-cluster cascade — see playbook §8): the
-    // `target_value: ValueWord` and `const_bindings:
-    // &[(String, shape_value::ValueWord)]` parameters below mirror the
-    // ABI of `super::comptime::execute_comptime_with_annotation_handler`
-    // (non-territory `compiler/comptime.rs:481`) and the
-    // `BytecodeCompiler::specialization_const_bindings` field type
-    // (mod.rs surface above). Both reference the deleted
-    // `shape_value::ValueWord` carrier (ADR-006 §2.7.7 forbidden #4).
-    // Per playbook §8 this is surface-and-stop for supervisor
-    // coordination; the kinded replacement is `KindedSlot` (mirroring
-    // the `comptime_builtins::ComptimeDirective::SetParamValue { value:
-    // KindedSlot }` migration already landed in
-    // `compiler/comptime_builtins.rs:33`).
+    // ABI flipped to `KindedSlot` per ADR-006 §2.7.10 / Q11 to align
+    // with `super::comptime::execute_comptime_with_annotation_handler`
+    // (compiler/comptime.rs:486) and the kinded replacement noted in
+    // the prior SURFACE comment. The `comptime_builtins::ComptimeDirective::
+    // SetParamValue { value: KindedSlot }` migration in
+    // `compiler/comptime_builtins.rs:33` is the precedent.
     pub(super) fn execute_comptime_annotation_handler(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
-        target_value: ValueWord,
+        target_value: KindedSlot,
         annotation_def_param_names: &[String],
-        const_bindings: &[(String, shape_value::ValueWord)],
+        const_bindings: &[(String, KindedSlot)],
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1036,13 +1029,19 @@ impl BytecodeCompiler {
                     // cross-kind int-or-float coercion lives at the body
                     // site, NOT on the `KindedSlot` carrier (the deleted
                     // `as_number_coerce` was a §2.7.6/Q8 carrier-bound
-                    // violation). Use cluster A's `kind_coerce::coerce_to_f64`
-                    // body helper at the call site instead.
+                    // violation). The compiler crate cannot import
+                    // `executor::builtins::kind_coerce` (private module);
+                    // the body-site dispatch is inlined here per Q8.
+                    let coerce_to_f64 = |slot: &KindedSlot| -> Option<f64> {
+                        match slot.kind {
+                            shape_value::NativeKind::Int64 => slot.as_i64().map(|i| i as f64),
+                            shape_value::NativeKind::Float64 => slot.as_f64(),
+                            _ => None,
+                        }
+                    };
                     let default_expr = if let Some(i) = value.as_i64() {
                         Expr::Literal(Literal::Int(i), Span::DUMMY)
-                    } else if let Some(n) =
-                        crate::executor::builtins::kind_coerce::coerce_to_f64(&value)
-                    {
+                    } else if let Some(n) = coerce_to_f64(&value) {
                         Expr::Literal(Literal::Number(n), Span::DUMMY)
                     } else if let Some(b) = value.as_bool() {
                         Expr::Literal(Literal::Bool(b), Span::DUMMY)

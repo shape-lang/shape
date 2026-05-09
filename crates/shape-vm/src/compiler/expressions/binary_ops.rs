@@ -280,11 +280,12 @@ impl BytecodeCompiler {
                     return None;
                 }
                 let info = self.type_tracker.get_local_type(local_idx)?;
-                if info.storage_hint != crate::type_tracking::StorageHint::Unknown {
-                    Some(info.storage_hint)
-                } else {
-                    None
-                }
+                // Per ADR-006 §2.7.5.1, `NativeKind::Unknown` was deleted —
+                // the in-memory analysis state for "not yet known" is held
+                // as `Option` at the call site (here, `get_local_type`
+                // returning `None` carries that meaning). A present
+                // `info.storage_hint` is post-proof.
+                Some(info.storage_hint)
             }
             Expr::Literal(Literal::Int(_), _) => Some(crate::type_tracking::StorageHint::Int64),
             Expr::Literal(Literal::Number(_), _) => {

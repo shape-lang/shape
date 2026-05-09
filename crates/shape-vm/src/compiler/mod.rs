@@ -746,13 +746,13 @@ pub struct BytecodeCompiler {
     pub(crate) next_const_specialization_id: u64,
     /// Const-parameter bindings for specialized function symbols.
     /// These bindings are exposed to comptime handlers as typed module_bindings.
-    //
-    // SURFACE: see the cluster cascade comment on `comptime_fields`
-    // below — same out-of-territory cascade and same kinded replacement
-    // (`HashMap<String, Vec<(String, shape_value::KindedSlot)>>`) once
-    // supervisor coordinates the comptime migration.
+    /// Kinded carrier per ADR-006 §2.7 / Q7 (`KindedSlot`); the prior
+    /// `shape_value::ValueWord` shape was deleted by the strict-typing
+    /// bulldozer and the comptime ABI in
+    /// `compiler/comptime.rs:execute_comptime_with_annotation_handler`
+    /// already migrated to `(String, KindedSlot)` pairs.
     pub(crate) specialization_const_bindings:
-        HashMap<String, Vec<(String, shape_value::ValueWord)>>,
+        HashMap<String, Vec<(String, shape_value::KindedSlot)>>,
 
     /// Struct type definitions: type_name -> (field_names in order, definition span)
     pub(crate) struct_types: HashMap<String, (Vec<String>, shape_ast::ast::Span)>,
@@ -908,31 +908,20 @@ pub struct BytecodeCompiler {
     /// Extension registry for comptime execution
     pub(crate) extension_registry: Option<Arc<Vec<shape_runtime::module_exports::ModuleExports>>>,
 
-    // SURFACE (cross-cluster cascade — see playbook §8): the
-    // `comptime_fields` and `specialization_const_bindings` field types
-    // below reference the deleted `shape_value::ValueWord` /
-    // `shape_value::ValueMap` carriers (ADR-006 §2.7.7 forbidden #4).
-    // Migrating these field types cascades into non-territory call
-    // sites — `compiler/statements.rs` (~4 sites), `compiler/specialization.rs`
-    // (1 site), `compiler/functions.rs` (1 site),
-    // `compiler/compiler_impl_initialization.rs` (2 sites),
-    // `compiler/comptime.rs` (~6 sites with downstream fan-out into
-    // `comptime_executor`), plus the
-    // `execute_comptime_with_annotation_handler` ABI surface — all of
-    // which are out of `C-emission-misc` territory. Per playbook §8 this
-    // is surface-and-stop for supervisor coordination; the kinded
-    // replacement is `KindedSlot` for the per-binding payload and
-    // `HashMap<String, KindedSlot>` for the per-type field map (mirroring
-    // the `comptime_builtins::ComptimeDirective::SetParamValue { value:
-    // KindedSlot }` migration already landed). Tracked under playbook §10
-    // as part of the supervisor's compiler-side ValueWord migration that
-    // also unblocks Wave-β B12 deferrals.
     /// Comptime field values per type: type_name -> (field_name -> bake-time
     /// constant). These are type-level constants baked at compile time
     /// with zero runtime cost. Inner map releases heap-backed comptime
     /// values (strings via `Arc<String>`, etc.) when a type's entry is
     /// removed or the compiler is dropped.
-    pub(crate) comptime_fields: HashMap<String, shape_value::ValueMap>,
+    ///
+    /// Kinded carrier per ADR-006 §2.7 / Q7 (`KindedSlot`); the prior
+    /// `shape_value::ValueMap` shape was deleted by the strict-typing
+    /// bulldozer along with `ValueWord`. Mirrors the
+    /// `comptime_builtins::ComptimeDirective::SetParamValue { value:
+    /// KindedSlot }` migration already landed in
+    /// `compiler/comptime_builtins.rs`.
+    pub(crate) comptime_fields:
+        HashMap<String, HashMap<String, shape_value::KindedSlot>>,
     /// Type diagnostic mode for shared analyzer diagnostics.
     pub(crate) type_diagnostic_mode: TypeDiagnosticMode,
     /// Expression compilation diagnostic mode.

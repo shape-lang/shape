@@ -10,7 +10,6 @@
 //! - Sized integer (i32) ops require a FrameDescriptor with non-Unknown slots
 
 use super::{BytecodeProgram, OpCode, Operand};
-use crate::type_tracking::NativeKind;
 
 /// Errors produced by the bytecode verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,33 +144,20 @@ pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Verif
                 continue;
             };
 
-            // Check that the descriptor has at least some non-Unknown slots.
-            // For trusted arithmetic, we don't know which specific stack slots
-            // feed the operands (they come from the stack, not named locals),
-            // so we verify the frame descriptor itself is populated (non-empty
-            // and not all Unknown).
+            // Check that the descriptor is populated. Per ADR-006 §2.7.5.1,
+            // `FrameDescriptor.slots: Vec<NativeKind>` is post-proof — the
+            // deleted `NativeKind::Unknown` variant cannot appear at this
+            // layer; an empty / all-unknown descriptor (sourced from
+            // `FrameDescriptor::is_all_unknown` which other-territory
+            // type_tracking.rs still computes) means the compiler skipped
+            // proof for this trusted op.
             if fd.is_empty() || fd.is_all_unknown() {
-                // All slots unknown — the compiler shouldn't have emitted trusted ops
-                for (idx, slot) in fd.slots.iter().enumerate() {
-                    if *slot == NativeKind::Unknown {
-                        errors.push(VerifyError::UnknownSlotKind {
-                            function_name: func.name.clone(),
-                            opcode: instruction.opcode,
-                            instruction_offset: offset,
-                            slot_index: idx,
-                        });
-                        break; // one error per instruction is sufficient
-                    }
-                }
-                // If fd is empty, emit a generic error
-                if fd.is_empty() {
-                    errors.push(VerifyError::UnknownSlotKind {
-                        function_name: func.name.clone(),
-                        opcode: instruction.opcode,
-                        instruction_offset: offset,
-                        slot_index: 0,
-                    });
-                }
+                errors.push(VerifyError::UnknownSlotKind {
+                    function_name: func.name.clone(),
+                    opcode: instruction.opcode,
+                    instruction_offset: offset,
+                    slot_index: 0,
+                });
             }
         }
     }
@@ -276,7 +262,7 @@ pub fn verify_v2_typed_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Veri
 mod tests {
     use super::*;
     use crate::bytecode::{Function, Instruction, OpCode};
-    use crate::type_tracking::FrameDescriptor;
+    use crate::type_tracking::{FrameDescriptor, NativeKind};
 
     fn make_program(functions: Vec<Function>, instructions: Vec<Instruction>) -> BytecodeProgram {
         let mut prog = BytecodeProgram::new();
