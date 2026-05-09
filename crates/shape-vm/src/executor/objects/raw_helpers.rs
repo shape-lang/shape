@@ -6,7 +6,7 @@
 //! This module previously hosted a large family of `extract_*` helpers
 //! that decoded values from the deleted NaN-boxed dynamic representation.
 //! Per ADR-006 §2.7.6 / §2.7.7 every one of those helpers was a forbidden
-//! tag-decode hop on a parallel discriminator surface, so they were
+//! tag-tag-decode probe on a parallel discriminator surface, so they were
 //! deleted wholesale during Wave-α D-raw-helpers (P1 — unblocks
 //! B-round-2 — playbook §10). The single function kept is the FilterExpr
 //! extractor used by `logical::And/Or/Not`, rewritten to take

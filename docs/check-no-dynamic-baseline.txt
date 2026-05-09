@@ -10,14 +10,14 @@
 #
 # Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
 
-27	\bsynthesize_value_word_from_raw\b	W-series tag-decode bridge (synthesize)
+26	\bsynthesize_value_word_from_raw\b	W-series tag-decode bridge (synthesize)
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
 5	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
 5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
 0	\bexec_comparison_dynamic_fallback\b	dynamic comparison fallback handler
 0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
-14	\brebox_native_bits\b	W-series typed->tagged rebox helper
-16	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
+0	\brebox_native_bits\b	W-series typed->tagged rebox helper
+12	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
 16	\bcapture_as_value\b	closure capture decode bridge
 17	\b(nan_box|NanBox|NanTag)\b	NanBox residuals
 0	\bSlotKind::(Dynamic|Unknown)\b	deleted SlotKind variants

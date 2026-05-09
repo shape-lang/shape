@@ -41,7 +41,7 @@ impl VirtualMachine {
     /// parallel-kind track (§2.7.8 / Q10 — owned by sub-cluster
     /// `B8-shared-cell` / `B6-variables-loadptr`); until that lands,
     /// host-tier mutators that take a legacy `ValueWord` value cannot
-    /// be implemented without re-introducing a tag-decode hop. Defer to
+    /// be implemented without re-introducing a tag-tag-decode probe. Defer to
     /// the Phase-2c host-API rebuild per ADR-006 §2.7.4.
     pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: ValueWord) {
         todo!(

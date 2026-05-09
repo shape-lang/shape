@@ -32,7 +32,7 @@ impl VirtualMachine {
     ///
     /// Wave 5e backlog: the body of this handler historically popped a
     /// `HeapValue::Temporal(TemporalData::DateTimeExpr(...))` via
-    /// `pop_raw_u64` + `as_heap_ref` (forbidden tag-decode hop) and pushed
+    /// `pop_raw_u64` + `as_heap_ref` (forbidden tag-tag-decode probe) and pushed
     /// a `HeapValue::Temporal(TemporalData::DateTime(...))` via
     /// `ValueWord::from_time` (deleted). Migration to the kinded API on
     /// `NativeKind::Ptr(HeapKind::Temporal)` requires the §2.7.6 carrier

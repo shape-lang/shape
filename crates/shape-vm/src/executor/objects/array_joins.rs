@@ -11,7 +11,7 @@
 //! impossible without a kind-aware extension to the V2 ABI itself.
 //!
 //! Sourcing the kind locally would require either:
-//!   - decoding kind from the raw `u64` bits (forbidden tag-decode hop —
+//!   - decoding kind from the raw `u64` bits (forbidden tag-tag-decode probe —
 //!     §2.7.7 #4 / #7), or
 //!   - defaulting to `NativeKind::Bool` "because Drop is a no-op" (forbidden
 //!     §2.7.7 #9 — the W-series rationalization the playbook names
