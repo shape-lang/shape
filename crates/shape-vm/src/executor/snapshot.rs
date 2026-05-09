@@ -1,14 +1,27 @@
 //! VM snapshot and restore for suspending/resuming execution.
+//!
+//! # Phase-2c deferral (ADR-006 §2.7.4)
+//!
+//! `snapshot()` and `from_snapshot()` previously consumed the slot-(de)
+//! serialization helpers from `shape-runtime::snapshot` (and their `enum_*`
+//! / `print_result_*` adapters). Those helpers were deleted alongside the
+//! pre-bulldozer dynamic value carrier. The replacement — kind-threaded
+//! `slot_to_serializable(bits, kind, store)` and its inverse, mirroring the
+//! wire-conversion shape — is **deferred to a Phase 2c snapshot rebuild
+//! session per ADR-006 §2.7.4**. The deferral is binding: papering over the
+//! gap with a placeholder serializer or a hand-rolled byte format would
+//! silently corrupt persisted state, which §2.7.4 forbids verbatim. Instead,
+//! both methods panic loudly via `todo!()` so the broken capability surfaces
+//! rather than masquerading as a working roundtrip.
+//!
+//! `resolve_function_identity` is pure, value-tier-independent logic
+//! (operates only on `FunctionHash` / `Function` / IDs) and is kept
+//! intact. Its tests pass without exercising the snapshot pipeline.
 
 use std::collections::HashMap;
 
-use shape_runtime::snapshot::{
-    SerializableCallFrame, SerializableExceptionHandler, SerializableLoopContext, SnapshotStore,
-    VmSnapshot, nanboxed_to_serializable, serializable_to_nanboxed,
-};
-use shape_value::{Upvalue, VMError, ValueWord, ValueWordExt};
+use shape_value::VMError;
 
-use super::{CallFrame, ExceptionHandler, LoopContext, VMConfig, VirtualMachine};
 use crate::bytecode::{Function, FunctionHash};
 
 /// Resolve a function's runtime ID from content-addressed identity.
@@ -77,281 +90,45 @@ pub(crate) fn resolve_function_identity(
     ))
 }
 
-impl VirtualMachine {
+impl super::VirtualMachine {
     /// Create a serializable snapshot of VM state.
-    pub fn snapshot(&self, store: &SnapshotStore) -> Result<VmSnapshot, VMError> {
-        let mut stack = Vec::with_capacity(self.sp);
-        for i in 0..self.sp {
-            let nb = self.stack_read_raw(i);
-            stack.push(
-                nanboxed_to_serializable(&nb, store)
-                    .map_err(|e| VMError::RuntimeError(e.to_string()))?,
-            );
-        }
-        // Locals are now part of the unified stack; serialize empty vec for backward compat
-        let locals = Vec::new();
-        let mut module_bindings = Vec::with_capacity(self.module_bindings.len());
-        for i in 0..self.module_bindings.len() {
-            let nb = self.binding_read_raw(i);
-            module_bindings.push(
-                nanboxed_to_serializable(&nb, store)
-                    .map_err(|e| VMError::RuntimeError(e.to_string()))?,
-            );
-        }
-
-        let mut call_stack = Vec::with_capacity(self.call_stack.len());
-        for frame in self.call_stack.iter() {
-            let upvalues = match &frame.upvalues {
-                Some(values) => {
-                    let mut out = Vec::new();
-                    for up in values.iter() {
-                        let nb = up.get();
-                        out.push(
-                            nanboxed_to_serializable(&nb, store)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?,
-                        );
-                    }
-                    Some(out)
-                }
-                None => None,
-            };
-            // Compute content-addressed snapshot fields when blob_hash is available
-            let (blob_hash, local_ip) =
-                if let (Some(hash), Some(fid)) = (frame.blob_hash, frame.function_id) {
-                    let entry_point = self
-                        .function_entry_points
-                        .get(fid as usize)
-                        .copied()
-                        .unwrap_or(0);
-                    let lip = frame.return_ip.saturating_sub(entry_point);
-                    (Some(hash.0), Some(lip))
-                } else {
-                    (None, None)
-                };
-
-            call_stack.push(SerializableCallFrame {
-                return_ip: frame.return_ip,
-                locals_base: frame.base_pointer,
-                locals_count: frame.locals_count,
-                function_id: frame.function_id,
-                upvalues,
-                blob_hash,
-                local_ip,
-            });
-        }
-
-        let loop_stack = self
-            .loop_stack
-            .iter()
-            .map(|l| SerializableLoopContext {
-                start: l.start,
-                end: l.end,
-            })
-            .collect();
-        let exception_handlers = self
-            .exception_handlers
-            .iter()
-            .map(|h| SerializableExceptionHandler {
-                catch_ip: h.catch_ip,
-                stack_size: h.stack_size,
-                call_depth: h.call_depth,
-            })
-            .collect();
-
-        // Compute relocatable top-level IP from the current call frame.
-        // The top-level `ip` corresponds to the innermost frame's function.
-        let (ip_blob_hash, ip_local_offset, ip_function_id) =
-            if let Some(frame) = self.call_stack.last() {
-                let fid = frame.function_id;
-                let blob_hash = fid.and_then(|id| self.blob_hash_for_function(id));
-                let entry_point = fid
-                    .and_then(|id| self.function_entry_points.get(id as usize).copied())
-                    .unwrap_or(0);
-                let local_offset = self.ip.saturating_sub(entry_point);
-                (blob_hash.map(|h| h.0), Some(local_offset), fid)
-            } else {
-                (None, None, None)
-            };
-
-        Ok(VmSnapshot {
-            ip: self.ip,
-            stack,
-            locals,
-            module_bindings,
-            call_stack,
-            loop_stack,
-            timeframe_stack: self.timeframe_stack.clone(),
-            exception_handlers,
-            ip_blob_hash,
-            ip_local_offset,
-            ip_function_id,
-        })
+    ///
+    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The pre-bulldozer
+    /// implementation walked the unified stack and module bindings via
+    /// deleted Wave-6.5-substep-1 raw-bits readers and passed each result
+    /// to the now-deleted runtime-side slot-serialization helpers. The
+    /// post-§2.7.7 replacement reads `(bits, kind)` from the parallel kind
+    /// tracks and dispatches a kind-threaded
+    /// `slot_to_serializable(bits, kind, store)`. That helper is part of
+    /// the §2.7.4-deferred Phase-2c snapshot rebuild — its design must
+    /// account for `HeapKind` payload variants (TypedArray, TypedObject,
+    /// HashMap, Decimal, BigInt, ...) that each need their own serialized
+    /// shape, and for upvalue capture state that depends on §2.7.8
+    /// cell-storage kind-awareness. Until that lands, this method panics
+    /// rather than emitting a placeholder serialization that would silently
+    /// corrupt persisted state on round-trip.
+    pub fn snapshot(
+        &self,
+        _store: &shape_runtime::snapshot::SnapshotStore,
+    ) -> Result<shape_runtime::snapshot::VmSnapshot, VMError> {
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 
     /// Restore a VM from a snapshot and bytecode program.
+    ///
+    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** Symmetric to
+    /// `snapshot()`: the deleted runtime-side slot-deserialization helper
+    /// is replaced by a kind-threaded `serializable_to_slot(sv,
+    /// expected_kind, store) -> (u64, NativeKind)` that reconstructs the
+    /// parallel kind tracks from the persisted `SerializableVMValue`
+    /// discriminator. The design and consumer migration are Phase-2c scope
+    /// per ADR-006 §2.7.4. This method panics until the rebuild lands.
     pub fn from_snapshot(
-        program: crate::bytecode::BytecodeProgram,
-        snapshot: &VmSnapshot,
-        store: &SnapshotStore,
+        _program: crate::bytecode::BytecodeProgram,
+        _snapshot: &shape_runtime::snapshot::VmSnapshot,
+        _store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<Self, VMError> {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-
-        // Relocate the top-level IP using content-addressed identity when
-        // available. This handles the case where the program was recompiled
-        // and instruction positions changed.
-        vm.ip = if let (Some(hash_bytes), Some(local_offset)) =
-            (&snapshot.ip_blob_hash, snapshot.ip_local_offset)
-        {
-            let hash = FunctionHash(*hash_bytes);
-            // Look up the function by blob hash in the new program
-            let func_id = resolve_function_identity(
-                &vm.function_id_by_hash,
-                &vm.program.functions,
-                Some(hash),
-                snapshot.ip_function_id,
-                None,
-            )?;
-            let entry_point = vm
-                .function_entry_points
-                .get(func_id as usize)
-                .copied()
-                .unwrap_or(0);
-            entry_point + local_offset
-        } else if let Some(fid) = snapshot.ip_function_id {
-            // Fallback: use function_id to relocate (same program, stable IDs)
-            let entry_point = vm
-                .function_entry_points
-                .get(fid as usize)
-                .copied()
-                .unwrap_or(0);
-            let local_offset = snapshot.ip_local_offset.unwrap_or(0);
-            entry_point + local_offset
-        } else {
-            // Legacy snapshots without relocation info: use absolute IP
-            snapshot.ip
-        };
-
-        let restored_stack: Vec<ValueWord> = snapshot
-            .stack
-            .iter()
-            .map(|v| {
-                serializable_to_nanboxed(v, store).map_err(|e| VMError::RuntimeError(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let restored_sp = restored_stack.len();
-        // Pre-allocate and copy into the unified stack
-        vm.stack = vec![Self::NONE_BITS; restored_sp.max(crate::constants::DEFAULT_STACK_CAPACITY)];
-        for (i, nb) in restored_stack.into_iter().enumerate() {
-            vm.stack[i] = nb.into_raw_bits();
-        }
-        vm.sp = restored_sp;
-        // Locals snapshot is ignored — locals now live on the unified stack
-        vm.module_bindings = snapshot
-            .module_bindings
-            .iter()
-            .map(|v| {
-                serializable_to_nanboxed(v, store)
-                    .map(|vw| vw.into_raw_bits())
-                    .map_err(|e| VMError::RuntimeError(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        vm.call_stack = snapshot
-            .call_stack
-            .iter()
-            .map(|f| {
-                let upvalues = match &f.upvalues {
-                    Some(values) => {
-                        let mut out = Vec::new();
-                        for v in values.iter() {
-                            out.push(Upvalue::new(
-                                serializable_to_nanboxed(v, store)
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?,
-                            ));
-                        }
-                        Some(out)
-                    }
-                    None => None,
-                };
-                // Restore blob_hash from the snapshot frame. Use the shared
-                // hash-first resolution helper for strict validation.
-                let blob_hash = f.blob_hash.map(FunctionHash);
-                let resolved_function_id = if blob_hash.is_some() || f.function_id.is_some() {
-                    Some(resolve_function_identity(
-                        &vm.function_id_by_hash,
-                        &vm.program.functions,
-                        blob_hash,
-                        f.function_id,
-                        None,
-                    )?)
-                } else {
-                    None
-                };
-
-                let return_ip = if let (Some(hash), Some(local_ip), Some(fid)) =
-                    (&blob_hash, f.local_ip, resolved_function_id)
-                {
-                    // Validate the blob hash matches the loaded program
-                    let current_hash = vm.blob_hash_for_function(fid);
-                    if let Some(current) = current_hash
-                        && current != *hash
-                    {
-                        return Err(VMError::RuntimeError(format!(
-                            "Snapshot blob hash mismatch for function {}: \
-                             snapshot has {}, program has {}",
-                            fid, hash, current
-                        )));
-                    }
-                    // Reconstruct absolute IP from local_ip + entry_point
-                    let entry_point = vm
-                        .function_entry_points
-                        .get(fid as usize)
-                        .copied()
-                        .unwrap_or(0);
-                    local_ip + entry_point
-                } else {
-                    f.return_ip
-                };
-
-                Ok(CallFrame {
-                    return_ip,
-                    base_pointer: f.locals_base,
-                    locals_count: f.locals_count,
-                    function_id: resolved_function_id,
-                    upvalues,
-                    blob_hash,
-                    // Snapshot deserialization: upvalues are
-                    // reconstructed from serialized captures — the
-                    // originating closure HeapValue is not part of
-                    // the snapshot. Use `None`; OwnedMutable / Shared
-                    // pointer captures are not representable
-                    // post-snapshot anyway.
-                    closure_heap_bits: None,
-                })
-            })
-            .collect::<Result<Vec<_>, VMError>>()?;
-
-        vm.loop_stack = snapshot
-            .loop_stack
-            .iter()
-            .map(|l| LoopContext {
-                start: l.start,
-                end: l.end,
-            })
-            .collect();
-        vm.timeframe_stack = snapshot.timeframe_stack.clone();
-        vm.exception_handlers = snapshot
-            .exception_handlers
-            .iter()
-            .map(|h| ExceptionHandler {
-                catch_ip: h.catch_ip,
-                stack_size: h.stack_size,
-                call_depth: h.call_depth,
-            })
-            .collect();
-
-        Ok(vm)
+        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 }
 
@@ -509,6 +286,13 @@ mod tests {
     }
 
     // --- VmSnapshot IP relocation tests ---
+    //
+    // These tests exercise only the `VmSnapshot` data shape (field presence,
+    // serde defaults, JSON roundtrip) and never call into `snapshot()` /
+    // `from_snapshot()`. They pass even while the snapshot/restore pipeline
+    // itself is `todo!()`-deferred per ADR-006 §2.7.4.
+
+    use shape_runtime::snapshot::VmSnapshot;
 
     #[test]
     fn test_snapshot_ip_relocation_fields_present() {
