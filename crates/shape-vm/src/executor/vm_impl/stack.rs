@@ -26,7 +26,7 @@
 
 use super::super::*;
 use shape_value::{
-    FilterNode, KindedSlot, NativeKind, ValueSlot,
+    FilterNode, KindedSlot, NativeKind, VMError, ValueSlot,
     heap_value::{
         HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
         TemporalData, TypedArrayData, TypedObjectStorage,
