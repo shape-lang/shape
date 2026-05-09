@@ -128,6 +128,12 @@ impl super::VirtualMachine {
         _snapshot: &shape_runtime::snapshot::VmSnapshot,
         _store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<Self, VMError> {
+        // The snapshot/restore body is deferred to Phase 2c per ADR-006
+        // §2.7.4. B9-callframe-kind's CallFrame.closure_heap_kind: Option<NativeKind>
+        // companion (added in this same merge round) will be threaded
+        // through the rebuild path when Phase 2c lands; for now the entire
+        // body panics until the snapshot rebuild is reimplemented against
+        // the kinded VM state.
         todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
     }
 }

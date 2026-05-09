@@ -335,6 +335,8 @@ impl VirtualMachine {
                                     upvalues: None,
                                     blob_hash,
                                     closure_heap_bits: None,
+                                    // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+                                    closure_heap_kind: None,
                                 });
 
                                 self.deopt_with_info(info, &ctx_buf)?;
@@ -564,11 +566,21 @@ impl VirtualMachine {
                     if let Some(fv) = self.current_feedback_vector() {
                         fv.record_call(call_ip, function_id);
                     }
+                    // ADR-006 §2.7.8 / Q10: `closure_bits` is the raw
+                    // bits of a TAG_HEAP `ValueWord` pointing to a
+                    // `HeapValue::ClosureRaw` — kind is unambiguously
+                    // `NativeKind::Ptr(HeapKind::Closure)`. The
+                    // companion is supplied lockstep so the
+                    // frame-teardown path in `op_return` /
+                    // `op_return_value` can call
+                    // `drop_with_kind(bits, kind)` instead of the
+                    // forbidden `vw_drop(bits)`.
                     self.call_closure_with_nb_args_keepalive(
                         function_id,
                         upvalues,
                         &args_nb,
                         Some(closure_bits),
+                        Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Closure)),
                     )
                 } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
                     callee_nb.as_heap_ref()
@@ -671,11 +683,18 @@ impl VirtualMachine {
                     let closure_bits = self.stack[callee_idx];
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
+                    // ADR-006 §2.7.8 / Q10: `closure_bits` is the raw
+                    // bits of a TAG_HEAP `ValueWord` pointing to a
+                    // `HeapValue::ClosureRaw` — kind is unambiguously
+                    // `NativeKind::Ptr(HeapKind::Closure)`. Lockstep
+                    // companion supplied so frame-teardown can call
+                    // `drop_with_kind(bits, kind)`.
                     self.call_closure_with_nb_args_keepalive(
                         function_id,
                         upvalues,
                         &args_nb,
                         Some(closure_bits),
+                        Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Closure)),
                     )
                 // cold-path: as_heap_ref retained — HostClosure fallback (no typed extractor)
                 } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
@@ -1229,12 +1248,26 @@ impl VirtualMachine {
             // any) now that the callee's `OwnedMutable` / `Shared`
             // pointer captures are no longer in scope.
             //
-            // ADR-006 §2.7.7 / playbook §8 SURFACE: see `return_value_inner`
-            // for the closure-keepalive kind-source gap. Until CallFrame
-            // carries kind alongside `closure_heap_bits`, the share is
-            // leaked rather than calling forbidden `vw_drop`.
-            if let Some(_bits) = frame.closure_heap_bits {
-                // `drop_with_kind(_bits, _kind)` once CallFrame is kinded.
+            // ADR-006 §2.7.8 / Q10: `closure_heap_kind` is the lockstep
+            // companion to `closure_heap_bits` — both `Some` together
+            // or both `None` together at every observable boundary.
+            // The release path dispatches via `drop_with_kind(bits, kind)`
+            // — never bare `vw_drop` (forbidden §2.7.7 #8) and never a
+            // Bool-default fallback (forbidden §2.7.7 #9).
+            match (frame.closure_heap_bits, frame.closure_heap_kind) {
+                (Some(bits), Some(kind)) => {
+                    crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+                }
+                (None, None) => {}
+                (bits, kind) => {
+                    debug_assert!(
+                        false,
+                        "ADR-006 §2.7.8 / Q10: CallFrame.closure_heap_bits / closure_heap_kind \
+                         lockstep violated: bits={:?}, kind={:?}",
+                        bits.is_some(),
+                        kind.is_some(),
+                    );
+                }
             }
         } else {
             // Return from main
@@ -1277,15 +1310,26 @@ impl VirtualMachine {
 
             // WB2.3 retain-on-read: release the closure keep-alive.
             //
-            // ADR-006 §2.7.7 / playbook §8 SURFACE: `CallFrame.closure_heap_bits`
-            // is `Option<u64>` — the kind is not stored alongside.
-            // `vw_drop` is forbidden per §2.7.7 #8; the migration to
-            // `drop_with_kind(bits, kind)` requires extending CallFrame
-            // to carry kind, which lives in `executor/mod.rs` (out of
-            // cluster B's territory). Until that landing, the closure
-            // share is leaked rather than calling forbidden `vw_drop`.
-            if let Some(_bits) = frame.closure_heap_bits {
-                // `drop_with_kind(_bits, _kind)` once CallFrame is kinded.
+            // ADR-006 §2.7.8 / Q10: `closure_heap_kind` is the lockstep
+            // companion to `closure_heap_bits` — both `Some` together
+            // or both `None` together. Release dispatches via
+            // `drop_with_kind(bits, kind)` — never bare `vw_drop`
+            // (forbidden §2.7.7 #8), never a Bool-default fallback
+            // (forbidden §2.7.7 #9).
+            match (frame.closure_heap_bits, frame.closure_heap_kind) {
+                (Some(bits), Some(kind)) => {
+                    crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+                }
+                (None, None) => {}
+                (bits, kind) => {
+                    debug_assert!(
+                        false,
+                        "ADR-006 §2.7.8 / Q10: CallFrame.closure_heap_bits / closure_heap_kind \
+                         lockstep violated: bits={:?}, kind={:?}",
+                        bits.is_some(),
+                        kind.is_some(),
+                    );
+                }
             }
 
             // Push return value with its kind on the parallel track.
