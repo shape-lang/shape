@@ -1,256 +1,132 @@
 //! Method handlers for the Set collection type.
 //!
-//! Methods: add, has, delete, size, len, length, isEmpty, toArray,
-//! forEach, map, filter, union, intersection, difference
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//!
+//! `Set` is **not** a surviving `HeapKind` variant per ADR-006 §2.3 trim
+//! (`crates/shape-value/src/heap_variants.rs`); the heterogeneous-element
+//! `SetData` payload depended on the deleted `ValueWord` per-element
+//! representation. Re-introducing Set requires a typed-Arc replacement —
+//! either a monomorphized `TypedSet<T>` per element kind (mirroring
+//! `TypedArrayData`) or a kinded `Arc<HashSetData>` adjacent to the new
+//! `HashMapData` shape (Stage C P1(b), 2026-05-07). Either path is a
+//! Phase 2c Stage C item, not a Wave-β migration.
+//!
+//! The pre-Wave-6 implementation used the deleted `ValueWord::from_set`,
+//! `as_set_mut`, `raw_helpers::extract_set` (deleted in cluster
+//! D-raw-helpers), `value_word_drop::vw_drop` / `vw_clone`,
+//! `vmarray_from_vec`, plus the kindless MethodHandler ABI. Per playbook
+//! §4 #1 / #9 a Bool-default kinded shim is forbidden; per §7.4 the
+//! correct response is `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
-use shape_value::value_word_drop::vw_drop;
-use shape_value::{VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::VMError;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
-// ═══════════════════════════════════════════════════════════════════════════
+#[inline]
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — Set.{}(): Set is not a surviving HeapKind variant per \
+         ADR-006 §2.3 trim; needs typed-Arc replacement (TypedSet<T> or \
+         Arc<HashSetData> per Stage C model). MethodHandler ABI also needs \
+         kinded migration (cluster E-builtins-backlog, Wave 5b template).",
+        method
+    ))
+}
 
-use super::raw_helpers::extract_set;
-use std::mem::ManuallyDrop;
-
-/// Set.add(item) -> Set [v2]
-///
-/// Uses `as_set_mut()` for in-place mutation when the receiver has refcount 1.
-/// The dispatcher transfers ownership via `into_raw_bits()` and passes `&mut [u64]`,
-/// so `Arc::get_mut()` succeeds and `args[0]` is updated if `Arc::make_mut` reallocates.
 pub fn v2_add(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
-    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
-
-    // In-place fast path: mutate directly when we're the sole owner
-    if let Some(data) = receiver.as_set_mut() {
-        data.insert(item);
-        // Update args[0] — as_heap_mut may have reallocated via Arc::make_mut
-        args[0] = receiver.raw_bits();
-        // B6.2: the return aliases args[0]; retain so the caller owns
-        // a distinct refcount share. Without this, the dispatch-site
-        // arg release would free the Arc out from under the caller's
-        // consumer.
-        return Ok(shape_value::value_word_drop::vw_clone(receiver.raw_bits()));
-    }
-
-    // COW slow path: clone the set data
-    if let Some(set_data) = extract_set(args[0]) {
-        let mut new_data = set_data.clone();
-        new_data.insert(item);
-        // `SetData` has a custom Drop (Wave 4 WC.1), so move `items`
-        // out via `take_items()` before dropping `new_data`.
-        Ok(ValueWord::from_set(new_data.take_items()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("add", "Set"))
-    }
+    Err(surface("add"))
 }
 
-/// Set.has(item) -> bool [v2]
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let item = ManuallyDrop::new(ValueWord::from_raw_bits(args[1]));
-    if let Some(data) = extract_set(args[0]) {
-        Ok(ValueWord::from_bool(data.contains(&*item)).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("has", "Set"))
-    }
+    Err(surface("has"))
 }
 
-/// Set.delete(item) -> Set [v2] — in-place fast path + COW slow path
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
-    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
-
-    if let Some(data) = receiver.as_set_mut() {
-        data.remove(&item);
-        args[0] = receiver.raw_bits();
-        // B6.2: the return aliases args[0]; retain for caller ownership.
-        return Ok(shape_value::value_word_drop::vw_clone(receiver.raw_bits()));
-    }
-
-    if let Some(set_data) = extract_set(args[0]) {
-        let mut new_data = set_data.clone();
-        new_data.remove(&item);
-        Ok(ValueWord::from_set(new_data.take_items()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("delete", "Set"))
-    }
+    Err(surface("delete"))
 }
 
-/// Set.size() / Set.len() / Set.length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    if let Some(data) = extract_set(args[0]) {
-        Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("size", "Set"))
-    }
+    Err(surface("size"))
 }
 
-/// Set.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    if let Some(data) = extract_set(args[0]) {
-        Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("isEmpty", "Set"))
-    }
+    Err(surface("isEmpty"))
 }
 
-/// Set.toArray() -> array [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    if let Some(data) = extract_set(args[0]) {
-        let arr: Vec<ValueWord> = data.items.clone();
-        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("toArray", "Set"))
-    }
+    Err(surface("toArray"))
 }
 
-/// Set.union(other: Set) -> Set [v2]
 pub fn v2_union(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("union", "Set"))?;
-    let b = extract_set(args[1])
-        .ok_or_else(|| VMError::RuntimeError("Set.union requires a Set argument".to_string()))?;
-
-    let mut result = a.clone();
-    for item in &b.items {
-        result.insert(item.clone());
-    }
-    Ok(ValueWord::from_set(result.take_items()).into_raw_bits())
+    Err(surface("union"))
 }
 
-/// Set.intersection(other: Set) -> Set [v2]
 pub fn v2_intersection(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("intersection", "Set"))?;
-    let b = extract_set(args[1]).ok_or_else(|| {
-        VMError::RuntimeError("Set.intersection requires a Set argument".to_string())
-    })?;
-
-    let items: Vec<ValueWord> = a
-        .items
-        .iter()
-        .filter(|item| b.contains(item))
-        .cloned()
-        .collect();
-    Ok(ValueWord::from_set(items).into_raw_bits())
+    Err(surface("intersection"))
 }
 
-/// Set.difference(other: Set) -> Set [v2]
 pub fn v2_difference(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("difference", "Set"))?;
-    let b = extract_set(args[1]).ok_or_else(|| {
-        VMError::RuntimeError("Set.difference requires a Set argument".to_string())
-    })?;
-
-    let items: Vec<ValueWord> = a
-        .items
-        .iter()
-        .filter(|item| !b.contains(item))
-        .cloned()
-        .collect();
-    Ok(ValueWord::from_set(items).into_raw_bits())
+    Err(surface("difference"))
 }
 
-/// Set.forEach(fn(item)) -> unit [v2]
 pub fn v2_for_each(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
+    _vm: &mut VirtualMachine,
+    _args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    if let Some(data) = extract_set(args[0]) {
-        let items = data.items.clone();
-        for item in &items {
-            let result_bits = vm.call_value_immediate_raw(args[1], &[item.raw_bits()], ctx.as_deref_mut())?;
-            // FR.4: real release (was no-op drop of Copy u64).
-            vw_drop(result_bits);
-        }
-        Ok(ValueWord::unit().raw_bits())
-    } else {
-        Err(type_mismatch_error("forEach", "Set"))
-    }
+    Err(surface("forEach"))
 }
 
-/// Set.map(fn(item) -> new_item) -> Set [v2]
 pub fn v2_map(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
+    _vm: &mut VirtualMachine,
+    _args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    if let Some(data) = extract_set(args[0]) {
-        let items = data.items.clone();
-        let mut new_items = Vec::with_capacity(items.len());
-        for item in &items {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[item.raw_bits()], ctx.as_deref_mut())?;
-            new_items.push(ValueWord::from_raw_bits(result_bits));
-        }
-        Ok(ValueWord::from_set(new_items).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("map", "Set"))
-    }
+    Err(surface("map"))
 }
 
-/// Set.filter(fn(item) -> bool) -> Set [v2]
 pub fn v2_filter(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut ExecutionContext>,
+    _vm: &mut VirtualMachine,
+    _args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    use super::raw_helpers;
-
-    if let Some(data) = extract_set(args[0]) {
-        let items = data.items.clone();
-        let mut new_items = Vec::new();
-        for item in &items {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[item.raw_bits()], ctx.as_deref_mut())?;
-            if raw_helpers::is_truthy_raw(result_bits) {
-                new_items.push(item.clone());
-            }
-            // FR.4: real release (was no-op drop of Copy u64).
-            vw_drop(result_bits);
-        }
-        Ok(ValueWord::from_set(new_items).into_raw_bits())
-    } else {
-        Err(type_mismatch_error("filter", "Set"))
-    }
+    Err(surface("filter"))
 }
