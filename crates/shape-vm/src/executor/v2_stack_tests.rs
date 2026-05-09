@@ -8,32 +8,52 @@
 use crate::bytecode::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use crate::type_tracking::{FrameDescriptor, NativeKind};
-use shape_value::heap_value::{HeapValue, NativeScalar};
-use shape_value::{FunctionId, VMError, ValueWord, ValueWordExt};
+use shape_value::FunctionId;
+use shape_value::VMError;
 
-/// Helper: create a VM, load a program, execute, return the top-of-stack result.
+/// Helper: create a VM, load a program, execute, return the **raw u64 bits**
+/// at the top of stack (ADR-006 §2.7.7 — host-tier reads bits directly).
 ///
 /// After Wave-E+5 producer-flip, hand-built programs that push raw native
 /// bits (e.g. `Constant::Int(N)` -> raw `i64`, `Constant::Bool` -> raw bool)
-/// need a `top_level_frame.return_kind` declaration so the host boundary
-/// can synthesise a tagged `ValueWord` for `as_i64()` / `as_bool()` / etc.
-fn execute_program(program: BytecodeProgram) -> Result<ValueWord, VMError> {
+/// expose those bits at the top of stack. The host inspects bits directly
+/// against the program's declared `top_level_frame.return_kind`.
+fn execute_program(program: BytecodeProgram) -> Result<u64, VMError> {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
-    vm.execute(None).map(|v| v.clone())
+    vm.execute_raw(None)
 }
 
 /// Helper: like `execute_program`, but stamps the program's
-/// `top_level_frame.return_kind` so the host boundary decodes raw native
-/// bits as the requested kind.
+/// `top_level_frame.return_kind` for cross-checking the producing opcode's
+/// declared kind.
 fn execute_program_typed(
     mut program: BytecodeProgram,
     return_kind: NativeKind,
-) -> Result<ValueWord, VMError> {
+) -> Result<u64, VMError> {
     let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
     frame.return_kind = return_kind;
     program.top_level_frame = Some(frame);
     execute_program(program)
+}
+
+/// Decode raw u64 bits as `f64` (top-of-stack inspection helper).
+#[inline]
+fn bits_as_f64(bits: u64) -> f64 {
+    f64::from_bits(bits)
+}
+
+/// Decode raw u64 bits as `i64` (top-of-stack inspection helper).
+#[inline]
+fn bits_as_i64(bits: u64) -> i64 {
+    bits as i64
+}
+
+/// Decode raw u64 bits as `bool` (top-of-stack inspection helper). Per
+/// ADR-006 §2.7 the bool-kind slot stores 0u64 / 1u64.
+#[inline]
+fn bits_as_bool(bits: u64) -> bool {
+    bits != 0
 }
 
 // =========================================================================
@@ -50,9 +70,8 @@ fn v2_stack_raw_f64_push_pop_roundtrip() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
-    let f = result.as_f64().expect("expected f64");
-    assert_eq!(f.to_bits(), 3.14f64.to_bits(), "f64 bits must match exactly");
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits, 3.14f64.to_bits(), "f64 bits must match exactly");
 }
 
 #[test]
@@ -65,8 +84,8 @@ fn v2_stack_raw_f64_special_values() {
         constants: vec![Constant::Number(f64::INFINITY)],
         ..Default::default()
     };
-    let result = execute_program(program).unwrap();
-    assert_eq!(result.as_f64().unwrap(), f64::INFINITY);
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits_as_f64(bits), f64::INFINITY);
 
     // Negative zero
     let program = BytecodeProgram {
@@ -76,8 +95,8 @@ fn v2_stack_raw_f64_special_values() {
         constants: vec![Constant::Number(-0.0f64)],
         ..Default::default()
     };
-    let result = execute_program(program).unwrap();
-    let f = result.as_f64().unwrap();
+    let bits = execute_program(program).unwrap();
+    let f = bits_as_f64(bits);
     assert!(f.is_sign_negative() && f == 0.0, "negative zero must be preserved");
 }
 
@@ -95,8 +114,8 @@ fn v2_stack_raw_i64_push_pop_roundtrip() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), -42, "i64 value must round-trip exactly");
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), -42, "i64 value must round-trip exactly");
 }
 
 #[test]
@@ -108,8 +127,8 @@ fn v2_stack_raw_i64_zero() {
         constants: vec![Constant::Int(0)],
         ..Default::default()
     };
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 0);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 0);
 }
 
 #[test]
@@ -123,8 +142,8 @@ fn v2_stack_raw_i64_large_positive() {
         constants: vec![Constant::Int(val)],
         ..Default::default()
     };
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), val);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), val);
 }
 
 // =========================================================================
@@ -133,37 +152,18 @@ fn v2_stack_raw_i64_large_positive() {
 
 #[test]
 fn v2_stack_raw_i32_push_pop_roundtrip() {
-    // i32 values are stored as NativeScalar::I32 via heap boxing
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    let program = BytecodeProgram::default();
-    vm.load_program(program);
-
-    // Directly push a native i32 value
-    let val = ValueWord::from_native_i32(1000);
-    vm.push_raw_u64(val).unwrap();
-
-    let popped = vm.pop_raw_u64().unwrap();
-    let scalar = popped.as_native_scalar().expect("expected NativeScalar");
-    match scalar {
-        NativeScalar::I32(v) => assert_eq!(v, 1000, "i32 value must round-trip"),
-        other => panic!("expected I32, got {:?}", other),
-    }
+    // Phase-2c surface: `NativeScalar::I32` lived inside the deleted
+    // `ValueWord` heap-tag encoding. The kinded `clone_with_kind` /
+    // `drop_with_kind` dispatch tables (vm_impl/stack.rs) intentionally
+    // debug_assert!() against `HeapKind::NativeScalar` — there is no
+    // Arc<NativeScalar> kinded carrier yet. See ADR-006 §2.7.4.
+    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
 }
 
 #[test]
 fn v2_stack_raw_i32_negative() {
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(BytecodeProgram::default());
-
-    let val = ValueWord::from_native_i32(-999);
-    vm.push_raw_u64(val).unwrap();
-
-    let popped = vm.pop_raw_u64().unwrap();
-    let scalar = popped.as_native_scalar().expect("expected NativeScalar");
-    match scalar {
-        NativeScalar::I32(v) => assert_eq!(v, -999),
-        other => panic!("expected I32(-999), got {:?}", other),
-    }
+    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4.
+    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
 }
 
 // =========================================================================
@@ -180,8 +180,8 @@ fn v2_stack_raw_bool_push_pop_true() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits));
 }
 
 #[test]
@@ -194,8 +194,8 @@ fn v2_stack_raw_bool_push_pop_false() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), false);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(!bits_as_bool(bits));
 }
 
 // =========================================================================
@@ -204,35 +204,15 @@ fn v2_stack_raw_bool_push_pop_false() {
 
 #[test]
 fn v2_stack_raw_pointer_push_pop() {
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(BytecodeProgram::default());
-
-    let known_addr: usize = 0xDEAD_BEEF_CAFE;
-    let val = ValueWord::from_native_ptr(known_addr);
-    vm.push_raw_u64(val).unwrap();
-
-    let popped = vm.pop_raw_u64().unwrap();
-    let scalar = popped.as_native_scalar().expect("expected NativeScalar");
-    match scalar {
-        NativeScalar::Ptr(addr) => assert_eq!(addr, known_addr, "pointer address must round-trip"),
-        other => panic!("expected Ptr, got {:?}", other),
-    }
+    // Phase-2c surface: `NativeScalar::Ptr` lived inside the deleted
+    // `ValueWord` heap-tag encoding — see ADR-006 §2.7.4.
+    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
 }
 
 #[test]
 fn v2_stack_raw_pointer_null() {
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(BytecodeProgram::default());
-
-    let val = ValueWord::from_native_ptr(0);
-    vm.push_raw_u64(val).unwrap();
-
-    let popped = vm.pop_raw_u64().unwrap();
-    let scalar = popped.as_native_scalar().expect("expected NativeScalar");
-    match scalar {
-        NativeScalar::Ptr(addr) => assert_eq!(addr, 0, "null pointer must round-trip"),
-        other => panic!("expected Ptr(0), got {:?}", other),
-    }
+    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4.
+    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
 }
 
 // =========================================================================
@@ -244,20 +224,25 @@ fn v2_stack_mixed_types_push_pop_order() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    // Push f64, i64, bool in order
-    vm.push_raw_u64(ValueWord::from_f64(2.718)).unwrap();
-    vm.push_raw_u64(ValueWord::from_i64(42)).unwrap();
-    vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
+    // Push f64, i64, bool in order — kinded API records each kind in
+    // the parallel kinds track (ADR-006 §2.7.7).
+    vm.push_kinded(2.718f64.to_bits(), NativeKind::Float64).unwrap();
+    vm.push_kinded(42i64 as u64, NativeKind::Int64).unwrap();
+    vm.push_kinded(1u64, NativeKind::Bool).unwrap();
 
-    // Pop in reverse order: bool, i64, f64
-    let v_bool = vm.pop_raw_u64().unwrap();
-    let v_int = vm.pop_raw_u64().unwrap();
-    let v_float = vm.pop_raw_u64().unwrap();
+    // Pop in reverse order: bool, i64, f64. Kind track confirms each
+    // slot's interpretation.
+    let (b_bits, b_kind) = vm.pop_kinded().unwrap();
+    let (i_bits, i_kind) = vm.pop_kinded().unwrap();
+    let (f_bits, f_kind) = vm.pop_kinded().unwrap();
 
-    assert_eq!(v_bool.as_bool().unwrap(), true, "bool must be popped first");
-    assert_eq!(v_int.as_i64().unwrap(), 42, "i64 must be popped second");
+    assert_eq!(b_kind, NativeKind::Bool, "first pop must be Bool");
+    assert!(bits_as_bool(b_bits), "bool must be popped first");
+    assert_eq!(i_kind, NativeKind::Int64, "second pop must be Int64");
+    assert_eq!(bits_as_i64(i_bits), 42, "i64 must be popped second");
+    assert_eq!(f_kind, NativeKind::Float64, "third pop must be Float64");
     assert_eq!(
-        v_float.as_f64().unwrap().to_bits(),
+        f_bits,
         2.718f64.to_bits(),
         "f64 must be popped third"
     );
@@ -265,28 +250,12 @@ fn v2_stack_mixed_types_push_pop_order() {
 
 #[test]
 fn v2_stack_mixed_types_with_native_scalars() {
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(BytecodeProgram::default());
-
-    // Push a mix of inline and heap-boxed scalar values
-    vm.push_raw_u64(ValueWord::from_f64(1.5)).unwrap();
-    vm.push_raw_u64(ValueWord::from_native_i32(100)).unwrap();
-    vm.push_raw_u64(ValueWord::from_i64(-7)).unwrap();
-    vm.push_raw_u64(ValueWord::from_native_ptr(0xABCD)).unwrap();
-    vm.push_raw_u64(ValueWord::from_bool(false)).unwrap();
-
-    // Pop and verify in reverse
-    assert_eq!(vm.pop_raw_u64().unwrap().as_bool().unwrap(), false);
-    match vm.pop_raw_u64().unwrap().as_native_scalar().unwrap() {
-        NativeScalar::Ptr(addr) => assert_eq!(addr, 0xABCD),
-        other => panic!("expected Ptr, got {:?}", other),
-    }
-    assert_eq!(vm.pop_raw_u64().unwrap().as_i64().unwrap(), -7);
-    match vm.pop_raw_u64().unwrap().as_native_scalar().unwrap() {
-        NativeScalar::I32(v) => assert_eq!(v, 100),
-        other => panic!("expected I32, got {:?}", other),
-    }
-    assert_eq!(vm.pop_raw_u64().unwrap().as_f64().unwrap(), 1.5);
+    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4. The body
+    // mixed inline scalars (f64, i64, bool) with NativeScalar-boxed
+    // I32 / Ptr; the kinded carrier for `HeapKind::NativeScalar` is
+    // pending (clone_with_kind / drop_with_kind currently
+    // debug_assert!() against it).
+    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
 }
 
 // =========================================================================
@@ -306,8 +275,8 @@ fn v2_stack_typed_add_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 30, "AddInt must produce raw i64 result");
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 30, "AddInt must produce raw i64 result");
 }
 
 #[test]
@@ -323,8 +292,8 @@ fn v2_stack_typed_sub_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 63);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 63);
 }
 
 #[test]
@@ -340,8 +309,8 @@ fn v2_stack_typed_mul_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 42);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 42);
 }
 
 #[test]
@@ -357,8 +326,8 @@ fn v2_stack_typed_add_number() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
-    assert_eq!(result.as_f64().unwrap(), 4.0);
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits_as_f64(bits), 4.0);
 }
 
 #[test]
@@ -374,8 +343,8 @@ fn v2_stack_typed_mul_number() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
-    assert_eq!(result.as_f64().unwrap(), 12.0);
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits_as_f64(bits), 12.0);
 }
 
 // =========================================================================
@@ -395,8 +364,8 @@ fn v2_stack_typed_gt_number_true() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true, "GtNumber 5.0>3.0 must produce raw bool true");
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits), "GtNumber 5.0>3.0 must produce raw bool true");
 }
 
 #[test]
@@ -412,8 +381,8 @@ fn v2_stack_typed_gt_number_false() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), false);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(!bits_as_bool(bits));
 }
 
 #[test]
@@ -429,8 +398,8 @@ fn v2_stack_typed_gt_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits));
 }
 
 #[test]
@@ -446,8 +415,8 @@ fn v2_stack_typed_lt_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits));
 }
 
 #[test]
@@ -463,8 +432,8 @@ fn v2_stack_typed_eq_int() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits));
 }
 
 // =========================================================================
@@ -506,9 +475,9 @@ fn v2_stack_typed_field_load_f64() {
     ];
     program.constants = vec![Constant::Number(99.99)];
 
-    let result = execute_program(program).unwrap();
+    let bits = execute_program(program).unwrap();
     assert_eq!(
-        result.as_f64().unwrap(),
+        bits_as_f64(bits),
         99.99,
         "GetFieldTyped must extract f64 field value"
     );
@@ -545,8 +514,8 @@ fn v2_stack_typed_field_load_i64() {
     ];
     program.constants = vec![Constant::Int(12345)];
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 12345);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 12345);
 }
 
 #[test]
@@ -580,8 +549,8 @@ fn v2_stack_typed_field_load_bool() {
     ];
     program.constants = vec![Constant::Bool(true)];
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true);
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits));
 }
 
 #[test]
@@ -639,13 +608,14 @@ fn v2_stack_typed_field_load_multi_field() {
     ];
     program.constants = vec![Constant::Number(3.14), Constant::Int(7)];
 
-    let result = execute_program(program).unwrap();
+    let bits = execute_program(program).unwrap();
+    let got = bits_as_f64(bits);
     let expected = 3.14 + 7.0;
     assert!(
-        (result.as_f64().unwrap() - expected).abs() < 1e-10,
+        (got - expected).abs() < 1e-10,
         "expected {}, got {}",
         expected,
-        result.as_f64().unwrap()
+        got,
     );
 }
 
@@ -665,8 +635,8 @@ fn v2_stack_int_to_number_conversion() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
-    assert_eq!(result.as_f64().unwrap(), 42.0, "IntToNumber must convert i64 to f64");
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits_as_f64(bits), 42.0, "IntToNumber must convert i64 to f64");
 }
 
 #[test]
@@ -680,8 +650,8 @@ fn v2_stack_int_to_number_negative() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
-    assert_eq!(result.as_f64().unwrap(), -1000.0);
+    let bits = execute_program(program).unwrap();
+    assert_eq!(bits_as_f64(bits), -1000.0);
 }
 
 #[test]
@@ -696,9 +666,9 @@ fn v2_stack_number_to_int_conversion() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
     // NumberToInt truncates toward zero (Rust `as i64` semantics)
-    assert_eq!(result.as_i64().unwrap(), 7, "NumberToInt must truncate 7.9 to 7");
+    assert_eq!(bits_as_i64(bits), 7, "NumberToInt must truncate 7.9 to 7");
 }
 
 // =========================================================================
@@ -712,22 +682,24 @@ fn v2_stack_large_push_pop_1000() {
 
     let count = 1000usize;
 
-    // Push 1000 f64 values
+    // Push 1000 f64 values via the kinded API (ADR-006 §2.7.7).
     for i in 0..count {
-        vm.push_raw_u64(ValueWord::from_f64(i as f64 * 1.1)).unwrap();
+        let f = i as f64 * 1.1;
+        vm.push_kinded(f.to_bits(), NativeKind::Float64).unwrap();
     }
 
     // Pop all 1000 in reverse order and verify
     for i in (0..count).rev() {
-        let val = vm.pop_raw_u64().unwrap();
+        let (bits, kind) = vm.pop_kinded().unwrap();
+        assert_eq!(kind, NativeKind::Float64, "slot {} kind mismatch", i);
         let expected = i as f64 * 1.1;
         assert_eq!(
-            val.as_f64().unwrap().to_bits(),
+            bits,
             expected.to_bits(),
-            "stack slot {} mismatch: expected {}, got {:?}",
+            "stack slot {} mismatch: expected {}, got {}",
             i,
             expected,
-            val.as_f64()
+            bits_as_f64(bits),
         );
     }
 }
@@ -737,22 +709,25 @@ fn v2_stack_large_mixed_types_500() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    // Push alternating f64 and i64 values
+    // Push alternating f64 and i64 values via the kinded API
+    // (ADR-006 §2.7.7).
     for i in 0..500usize {
         if i % 2 == 0 {
-            vm.push_raw_u64(ValueWord::from_f64(i as f64)).unwrap();
+            vm.push_kinded((i as f64).to_bits(), NativeKind::Float64).unwrap();
         } else {
-            vm.push_raw_u64(ValueWord::from_i64(i as i64)).unwrap();
+            vm.push_kinded(i as u64, NativeKind::Int64).unwrap();
         }
     }
 
-    // Pop in reverse and verify types match
+    // Pop in reverse and verify kind track matches the producing kind.
     for i in (0..500usize).rev() {
-        let val = vm.pop_raw_u64().unwrap();
+        let (bits, kind) = vm.pop_kinded().unwrap();
         if i % 2 == 0 {
-            assert_eq!(val.as_f64().unwrap(), i as f64, "f64 mismatch at index {}", i);
+            assert_eq!(kind, NativeKind::Float64, "slot {} expected Float64", i);
+            assert_eq!(bits_as_f64(bits), i as f64, "f64 mismatch at index {}", i);
         } else {
-            assert_eq!(val.as_i64().unwrap(), i as i64, "i64 mismatch at index {}", i);
+            assert_eq!(kind, NativeKind::Int64, "slot {} expected Int64", i);
+            assert_eq!(bits_as_i64(bits), i as i64, "i64 mismatch at index {}", i);
         }
     }
 }
@@ -844,13 +819,14 @@ fn v2_stack_frame_with_typed_locals() {
         ..Default::default()
     };
 
-    let result = execute_program(program).unwrap();
+    let bits = execute_program(program).unwrap();
+    let got = bits_as_f64(bits);
     let expected = 3.14 + 42.0;
     assert!(
-        (result.as_f64().unwrap() - expected).abs() < 1e-10,
+        (got - expected).abs() < 1e-10,
         "function with typed locals: expected {}, got {}",
         expected,
-        result.as_f64().unwrap()
+        got,
     );
 }
 
@@ -930,9 +906,9 @@ fn v2_stack_frame_locals_isolation() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
     assert_eq!(
-        result.as_i64().unwrap(),
+        bits_as_i64(bits),
         999,
         "sentinel value must survive function call frame"
     );
@@ -947,7 +923,7 @@ fn v2_stack_underflow_on_empty() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    let err = vm.pop_raw_u64().unwrap_err();
+    let err = vm.pop_kinded().unwrap_err();
     assert!(
         matches!(err, VMError::StackUnderflow),
         "pop on empty stack must return StackUnderflow, got {:?}",
@@ -969,30 +945,33 @@ fn v2_stack_dup_preserves_type() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 84, "Dup + AddInt: 42 + 42 = 84");
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 84, "Dup + AddInt: 42 + 42 = 84");
 }
 
 #[test]
 fn v2_stack_swap_preserves_types() {
-    // Push i64 then f64, swap, verify order after pop
+    // Push i64 then f64, swap, verify order after pop. Kind track
+    // tracks each slot's type in lockstep (ADR-006 §2.7.7).
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    vm.push_raw_u64(ValueWord::from_i64(10)).unwrap();
-    vm.push_raw_u64(ValueWord::from_f64(2.5)).unwrap();
+    vm.push_kinded(10i64 as u64, NativeKind::Int64).unwrap();
+    vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64).unwrap();
 
-    // Manually swap
-    let b = vm.pop_raw_u64().unwrap(); // 2.5
-    let a = vm.pop_raw_u64().unwrap(); // 10
-    vm.push_raw_u64(b).unwrap();
-    vm.push_raw_u64(a).unwrap();
+    // Manually swap: pop both with kind, then push back in reversed order.
+    let (b_bits, b_kind) = vm.pop_kinded().unwrap(); // 2.5 / Float64
+    let (a_bits, a_kind) = vm.pop_kinded().unwrap(); // 10  / Int64
+    vm.push_kinded(b_bits, b_kind).unwrap();
+    vm.push_kinded(a_bits, a_kind).unwrap();
 
     // Now top should be i64(10), beneath is f64(2.5)
-    let top = vm.pop_raw_u64().unwrap();
-    assert_eq!(top.as_i64().unwrap(), 10);
-    let bottom = vm.pop_raw_u64().unwrap();
-    assert_eq!(bottom.as_f64().unwrap(), 2.5);
+    let (top_bits, top_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(top_kind, NativeKind::Int64);
+    assert_eq!(bits_as_i64(top_bits), 10);
+    let (bot_bits, bot_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(bot_kind, NativeKind::Float64);
+    assert_eq!(bits_as_f64(bot_bits), 2.5);
 }
 
 #[test]
@@ -1010,8 +989,8 @@ fn v2_stack_chained_typed_arithmetic() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Int64).unwrap();
-    assert_eq!(result.as_i64().unwrap(), 90);
+    let bits = execute_program_typed(program, NativeKind::Int64).unwrap();
+    assert_eq!(bits_as_i64(bits), 90);
 }
 
 #[test]
@@ -1039,6 +1018,6 @@ fn v2_stack_typed_comparison_chain() {
         ..Default::default()
     };
 
-    let result = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert_eq!(result.as_bool().unwrap(), true, "chain: (5>3) AND (1<2) must be true");
+    let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
+    assert!(bits_as_bool(bits), "chain: (5>3) AND (1<2) must be true");
 }
