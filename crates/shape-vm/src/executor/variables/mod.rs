@@ -2624,14 +2624,14 @@ impl VirtualMachine {
                 slot,
                 self.stack.len()
             );
-            let bits = self.stack[slot];
 
-            // Track A.1C.3: SharedCell wrapper retired. Plain move
-            // semantics — zero the source slot and push the bits. The
-            // compiler never emits `LoadLocalMove` on
-            // `AllocSharedLocal`-promoted slots.
-            self.stack[slot] = Self::NONE_BITS;
-            self.push_raw_u64(bits)?;
+            // ADR-006 §2.7.7 / playbook §2: take ownership of the slot
+            // (zero out + return its kind), then push the move onto the
+            // stack with the same kind. `stack_take_kinded` is the
+            // post-§2.7.7 replacement for the deleted shim that did
+            // `let bits = self.stack[slot]; self.stack[slot] = NONE_BITS`.
+            let (bits, kind) = self.stack_take_kinded(slot);
+            self.push_kinded(bits, kind)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -2654,12 +2654,17 @@ impl VirtualMachine {
                 slot,
                 self.stack.len()
             );
-            let bits = self.stack[slot];
 
-            // Track A.1C.3: SharedCell wrapper retired. Plain clone —
-            // bump refcount for heap values.
-            let cloned = raw_helpers::clone_raw_bits(bits);
-            self.push_raw_u64(cloned)?;
+            // ADR-006 §2.7.7 / playbook §3 retain-on-read: bump the heap
+            // refcount via `read_owned_kinded` (the carrier we discard
+            // would have done it; here we go through `stack_read_kinded_raw`
+            // + `clone_with_kind` to keep the bits + kind on the stack
+            // with an independent share). Replaces the deleted
+            // `raw_helpers::clone_raw_bits(bits)` call which used
+            // forbidden tag-decode internally.
+            let (bits, kind) = self.stack_read_kinded_raw(slot);
+            crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+            self.push_kinded(bits, kind)?;
         } else {
             return Err(VMError::InvalidOperand);
         }

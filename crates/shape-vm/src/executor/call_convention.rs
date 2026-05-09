@@ -521,7 +521,10 @@ impl VirtualMachine {
         }
 
         self.execute_until_call_depth(target_depth, ctx)?;
-        self.pop_raw_u64()
+        // ADR-006 §2.7.7: discard the return slot's kind (function-return
+        // u64 ABI). Callers that need the kind go through the kinded
+        // entry points, not these raw-u64 wrappers.
+        self.pop_kinded().map(|(bits, _kind)| bits)
     }
 
     /// Trampoline entry: call a closure by `func_id` with pre-extracted raw
@@ -559,7 +562,10 @@ impl VirtualMachine {
             .collect();
         self.call_closure_with_nb_args(func_id, upvalues, args)?;
         self.execute_until_call_depth(target_depth, ctx)?;
-        self.pop_raw_u64()
+        // ADR-006 §2.7.7: discard the return slot's kind (function-return
+        // u64 ABI). Callers that need the kind go through the kinded
+        // entry points, not these raw-u64 wrappers.
+        self.pop_kinded().map(|(bits, _kind)| bits)
     }
 
     // ─── Raw u64 call API (v2) ─────────────────────────────────────────────
@@ -619,7 +625,10 @@ impl VirtualMachine {
         }
 
         self.execute_until_call_depth(target_depth, ctx)?;
-        self.pop_raw_u64()
+        // ADR-006 §2.7.7: discard the return slot's kind (function-return
+        // u64 ABI). Callers that need the kind go through the kinded
+        // entry points, not these raw-u64 wrappers.
+        self.pop_kinded().map(|(bits, _kind)| bits)
     }
 
     /// Set up a function call frame from raw u64 args.
