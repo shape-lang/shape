@@ -38,8 +38,8 @@ use std::sync::Arc;
 /// The associated constant [`Self::NATIVE_KIND`] declares which kind
 /// the slot must have. The marshal-layer dispatcher guarantees the
 /// contract by reading `arg_kinds()` at registration and only invoking
-/// the body with matching slot bits — readers of `from_slot` therefore
-/// do not perform any tag-decode dispatch themselves.
+/// the body with matching slot bits — `from_slot` impls therefore do
+/// not invoke the deleted `tag_bits` dispatch.
 pub trait FromSlot: Sized {
     const NATIVE_KIND: NativeKind;
     /// SAFETY contract (enforced by the marshal-layer wrapper, not by
