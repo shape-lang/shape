@@ -28,8 +28,8 @@ use super::super::*;
 use shape_value::{
     FilterNode, KindedSlot, NativeKind, VMError, ValueSlot,
     heap_value::{
-        HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
-        TemporalData, TypedArrayData, TypedObjectStorage,
+        HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
+        TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -123,15 +123,49 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
-                // Closure / Future / NativeScalar: no `Arc<T>` slot
-                // payload routed through this path. A non-zero pointer
-                // here is a construction-side bug; debug-assert and
-                // silently no-op in release.
-                HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                // Round 2.5 W7-closure-retain (ADR-006 §2.7.11 / Q12,
+                // 2026-05-09): a `NativeKind::Ptr(HeapKind::Closure)`
+                // slot carries `Arc::into_raw(Arc<HeapValue>) as u64`
+                // pointing to a `HeapValue::ClosureRaw(OwnedClosureBlock)`
+                // arm — the share carrier at the slot tier is the outer
+                // `Arc<HeapValue>`, not the inner `OwnedClosureBlock`'s
+                // typed-closure-header refcount (which `OwnedClosureBlock`
+                // manages internally on its own `clone()` / `drop()`).
+                // Round 2 close (`06cdfce`) committed to this slot-bits
+                // shape via `callee.slot.as_heap_value()` →
+                // `HeapValue::ClosureRaw(block)` in `op_call_value`'s
+                // dispatch shell (`call_value_immediate_nb`); the
+                // §2.7.11 dispatch shell pops closure-bearing
+                // `KindedSlot` carriers whose `Drop` calls
+                // `drop_with_kind(bits, HeapKind::Closure)`, so this
+                // arm must retain/release at the matching `Arc<HeapValue>`
+                // shape. Same dispatch shape as the `HeapKind::FilterExpr`
+                // §2.7.9 amendment (one variant, one matching `Arc<T>`
+                // retain/release at the slot tier).
+                HeapKind::Closure => {
+                    Arc::increment_strong_count(bits as *const HeapValue);
+                }
+                // `Ptr(HeapKind::Future)` carries the future-id u64
+                // directly in `bits` (inline scalar — no heap state, no
+                // `Arc<T>` payload). See `async_ops/mod.rs` §"Wave 6.5
+                // / E-async migration" docstring and `printing.rs`
+                // `HeapKind::Future` arm. Same shape as `HeapKind::Char`.
+                HeapKind::Future => {}
+                // `HeapKind::NativeScalar` has no kinded `Arc<T>` carrier
+                // yet — the redesign is the phase-2c surface tracked in
+                // ADR-006 §2.7.4. The `v2_stack_tests.rs` round-trip
+                // tests for NativeScalar are `todo!()` for the same
+                // reason. When the kinded NativeScalar carrier lands,
+                // this arm wires its retain/release per the chosen
+                // share carrier (per the playbook's surface-and-stop
+                // discipline — no Bool-default fallback, no
+                // construction-side fabrication). Until then, a non-zero
+                // pointer with this kind is a construction-side bug.
+                HeapKind::NativeScalar => {
                     debug_assert!(
                         false,
-                        "clone_with_kind: non-zero bits with non-Arc-payload kind {:?}",
-                        hk
+                        "clone_with_kind: NativeScalar kinded carrier pending \
+                         phase-2c kinded redesign (ADR-006 §2.7.4)"
                     );
                 }
             },
@@ -240,11 +274,38 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}
-                HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                // Round 2.5 W7-closure-retain (ADR-006 §2.7.11 / Q12,
+                // 2026-05-09): mirror of the `clone_with_kind`
+                // `HeapKind::Closure` arm. Retires one `Arc<HeapValue>`
+                // strong-count share — the slot bits are
+                // `Arc::into_raw(Arc<HeapValue>)` pointing to a
+                // `HeapValue::ClosureRaw(OwnedClosureBlock)` arm. The
+                // outer `Arc<HeapValue>::Drop` runs at refcount=0; that
+                // in turn invokes the inner `HeapValue::ClosureRaw`'s
+                // field-drop, which runs `OwnedClosureBlock::Drop` and
+                // decrements the typed-closure-header refcount,
+                // releasing the captured cells per
+                // `release_typed_closure`. The §2.7.11 dispatch shell
+                // pops closure-bearing `KindedSlot` carriers whose
+                // `Drop` arrives here on every consumed call argument
+                // and on the callee itself.
+                HeapKind::Closure => {
+                    Arc::decrement_strong_count(bits as *const HeapValue);
+                }
+                // `Ptr(HeapKind::Future)` is inline future-id u64 — no
+                // refcount work. Mirror of the `clone_with_kind` arm.
+                HeapKind::Future => {}
+                // `HeapKind::NativeScalar` kinded carrier pending
+                // phase-2c kinded redesign (ADR-006 §2.7.4). When it
+                // lands, this arm wires its release per the chosen
+                // share carrier. Until then, a non-zero pointer with
+                // this kind is a construction-side bug — no
+                // Bool-default fallback (forbidden #9).
+                HeapKind::NativeScalar => {
                     debug_assert!(
                         false,
-                        "drop_with_kind: non-zero bits with non-Arc-payload kind {:?}",
-                        hk
+                        "drop_with_kind: NativeScalar kinded carrier pending \
+                         phase-2c kinded redesign (ADR-006 §2.7.4)"
                     );
                 }
             },
