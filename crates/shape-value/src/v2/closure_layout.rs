@@ -550,6 +550,30 @@ const _: () = {
 /// offset 0 = first byte after the header). Use [`ClosureLayout::heap_capture_offset`]
 /// or [`ClosureLayout::stack_capture_offset`] for absolute offsets from the
 /// corresponding closure base pointer.
+///
+/// # ADR-006 §2.7.8 / Q10 — per-capture `NativeKind` companion
+///
+/// `capture_native_kinds` extends the §2.7.7 stack-side parallel-`Vec<NativeKind>`
+/// invariant to closure cell storage. Each entry is the `NativeKind` interpretation
+/// of capture slot `i`'s 8-byte raw payload — set at construction (lockstep with
+/// `capture_types[i]` and `capture_kinds[i]`), read at access/teardown so that
+/// drop dispatch routes through `drop_with_kind(bits, kind)` (the canonical
+/// `KindedSlot::drop` table) instead of the deleted ValueWord-shape
+/// `vw_drop(bits)` (forbidden #8 per §2.7.7) or the also-deleted
+/// `Arc<HeapValue>` blanket decrement.
+///
+/// **Index invariant:** `capture_types.len() == capture_native_kinds.len() ==
+/// capture_kinds.len() == captures.len()` at every observable boundary.
+///
+/// **Storage location.** Per ADR-006 §2.7.8 / Q10, the kinds live in the layout
+/// descriptor (constant per `ClosureTypeId`), NOT in the per-instance raw
+/// closure block. The block's fixed-offset C-shaped byte buffer is unchanged —
+/// JIT FFI offsets (`SHARED_CELL_VALUE_OFFSET`, `HEAP_CLOSURE_HEADER_SIZE`,
+/// per-capture `heap_capture_offset(i)`) are preserved. The kind track is a
+/// pure side-table on the layout, identical in shape to the §2.7.8 ADR
+/// example for `ClosureCell { bits, kinds }` but specialised to the
+/// existing `OwnedClosureBlock` raw-byte form: bits live in the block at
+/// `layout.heap_capture_offset(i)`, kinds live in `layout.capture_native_kinds[i]`.
 #[derive(Debug, Clone)]
 pub struct ClosureLayout {
     /// The `ConcreteType` of each capture, in declaration order. Also the
@@ -561,6 +585,21 @@ pub struct ClosureLayout {
     /// `captures[i]` and determines which of the three mutually-exclusive
     /// masks below (if any) has bit `i` set.
     pub capture_kinds: Vec<CaptureKind>,
+    /// Per-capture `NativeKind` companion (ADR-006 §2.7.8 / Q10). Entry `i`
+    /// is the kind interpretation of capture slot `i`'s raw 8-byte payload
+    /// in the closure block. Lockstep with `capture_types` / `capture_kinds`
+    /// at every observable boundary. Read at access/teardown by drop glue
+    /// — the cell-store `drop_with_kind(bits, kind)` dispatch reads this
+    /// per-capture entry to route to the matching `Arc<T>::decrement` arm.
+    ///
+    /// The default constructor [`ClosureLayout::from_capture_types`] derives
+    /// this list from `capture_types` via [`native_kind_from_concrete_type`].
+    /// The explicit constructor
+    /// [`ClosureLayout::from_capture_types_with_native_kinds`] accepts a
+    /// caller-supplied list when the kind is finer-grained than what
+    /// `ConcreteType` can express (e.g. `NativeKind::Ptr(HeapKind::TypedArray)`
+    /// vs the generic `Ptr` field kind).
+    pub capture_native_kinds: Vec<NativeKind>,
     /// Bitmap: bit N = capture N is a heap-refcounted pointer (`Ptr`) held
     /// directly in the slot (i.e. `CaptureKind::Immutable` over a `Ptr`
     /// field kind). Used by Drop glue to call `release_raw_value_bits` on
@@ -580,6 +619,62 @@ pub struct ClosureLayout {
     pub captures_size: usize,
     /// Alignment of the captures area (always 8 in practice).
     pub captures_align: usize,
+}
+
+/// Map a `ConcreteType` to the matching `NativeKind` for closure-capture
+/// kind tracking (ADR-006 §2.7.8 / Q10).
+///
+/// This is the default derivation used by [`ClosureLayout::from_capture_types`].
+/// Callers that need a finer-grained kind (e.g. distinguishing
+/// `Ptr(HeapKind::TypedArray)` from `Ptr(HeapKind::TypedObject)` when both
+/// would map through `ConcreteType::Pointer(_)`) should use
+/// [`ClosureLayout::from_capture_types_with_native_kinds`] and pass the
+/// explicit per-capture kinds.
+///
+/// The mapping is total and post-proof per §2.7.5.1 — every `ConcreteType`
+/// resolves to a concrete `NativeKind`. There is NO `NativeKind::Unknown` /
+/// `Pending` / `Dynamic` fallback (those variants are deleted from the enum)
+/// and there is NO Bool-default fallback (forbidden #9 per §2.7.7).
+pub fn native_kind_from_concrete_type(ty: &ConcreteType) -> NativeKind {
+    match ty {
+        ConcreteType::F64 => NativeKind::Float64,
+        ConcreteType::I64 => NativeKind::Int64,
+        ConcreteType::I32 => NativeKind::Int32,
+        ConcreteType::I16 => NativeKind::Int16,
+        ConcreteType::I8 => NativeKind::Int8,
+        ConcreteType::U64 => NativeKind::UInt64,
+        ConcreteType::U32 => NativeKind::UInt32,
+        ConcreteType::U16 => NativeKind::UInt16,
+        ConcreteType::U8 => NativeKind::UInt8,
+        ConcreteType::Bool => NativeKind::Bool,
+        ConcreteType::String => NativeKind::String,
+        ConcreteType::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        ConcreteType::HashMap(_, _) => NativeKind::Ptr(HeapKind::HashMap),
+        ConcreteType::Struct(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        ConcreteType::Enum(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        ConcreteType::Closure(_) => NativeKind::Ptr(HeapKind::Closure),
+        ConcreteType::Function(_) => NativeKind::Ptr(HeapKind::Closure),
+        ConcreteType::Pointer(_) => NativeKind::Ptr(HeapKind::NativeView),
+        ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        ConcreteType::Decimal => NativeKind::Ptr(HeapKind::Decimal),
+        ConcreteType::BigInt => NativeKind::Ptr(HeapKind::BigInt),
+        ConcreteType::DateTime => NativeKind::Ptr(HeapKind::Temporal),
+        // `Option<T>` / `Result<T, E>` are heap-typed wrappers in the v2
+        // runtime; the Ptr-side payload is the underlying typed object.
+        ConcreteType::Option(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::TypedObject),
+        // `Void` captures are not a well-formed bytecode shape — a void
+        // value has no bits to capture. Reaching this arm signals a
+        // construction-side bug upstream. We refuse to map `Void` to a
+        // sentinel kind (a Bool-default fallback would be forbidden #9
+        // per §2.7.7) and panic instead so the construction-side
+        // discipline holds.
+        ConcreteType::Void => panic!(
+            "ClosureLayout: ConcreteType::Void is not a well-formed capture type \
+             (ADR-006 §2.7.8 / Q10 — kinds must be concrete at construction; \
+             no Bool-default fallback)"
+        ),
+    }
 }
 
 impl ClosureLayout {
@@ -608,13 +703,58 @@ impl ClosureLayout {
     ///
     /// - If `capture_types.len() != kinds.len()`.
     /// - If `capture_types.len() > 64` (mask-width limit).
+    /// - If any capture type is `ConcreteType::Void` (not a well-formed
+    ///   capture per §2.7.8 / Q10 — see [`native_kind_from_concrete_type`]).
+    ///
+    /// `capture_native_kinds` is derived from `capture_types` via
+    /// [`native_kind_from_concrete_type`]. Use
+    /// [`ClosureLayout::from_capture_types_with_native_kinds`] when the
+    /// caller has a finer-grained kind in hand (e.g. distinguishing
+    /// `Ptr(HeapKind::TypedArray)` vs `Ptr(HeapKind::TypedObject)` for two
+    /// `ConcreteType::Pointer(_)` captures).
     pub fn from_capture_types(capture_types: &[ConcreteType], kinds: &[CaptureKind]) -> Self {
+        let native_kinds: Vec<NativeKind> = capture_types
+            .iter()
+            .map(native_kind_from_concrete_type)
+            .collect();
+        Self::from_capture_types_with_native_kinds(capture_types, kinds, &native_kinds)
+    }
+
+    /// Build a layout from parallel lists of capture types, storage kinds,
+    /// and explicit per-capture `NativeKind`s (ADR-006 §2.7.8 / Q10).
+    ///
+    /// This is the explicit-kinds entry point. The default
+    /// [`ClosureLayout::from_capture_types`] derives the kinds via
+    /// [`native_kind_from_concrete_type`]; use this when the caller knows a
+    /// finer-grained kind (e.g. specific `HeapKind` discriminator for a
+    /// `ConcreteType::Pointer(_)` capture) or wants to pin the kind track
+    /// to an authoritative source (e.g. `FrameDescriptor.slots[binding_idx]`
+    /// per §2.7.8's debug cross-check).
+    ///
+    /// # Panics
+    ///
+    /// - If `capture_types.len() != kinds.len()` or
+    ///   `capture_types.len() != native_kinds.len()`.
+    /// - If `capture_types.len() > 64` (mask-width limit).
+    pub fn from_capture_types_with_native_kinds(
+        capture_types: &[ConcreteType],
+        kinds: &[CaptureKind],
+        native_kinds: &[NativeKind],
+    ) -> Self {
         assert_eq!(
             capture_types.len(),
             kinds.len(),
-            "from_capture_types: capture_types ({}) and kinds ({}) must have equal length",
+            "from_capture_types_with_native_kinds: capture_types ({}) and kinds ({}) must have equal length",
             capture_types.len(),
             kinds.len()
+        );
+        assert_eq!(
+            capture_types.len(),
+            native_kinds.len(),
+            "from_capture_types_with_native_kinds: capture_types ({}) and native_kinds ({}) must have equal length \
+             (ADR-006 §2.7.8 / Q10 — lockstep parallel-`Vec<NativeKind>` invariant)",
+            capture_types.len(),
+            native_kinds.len()
         );
         if capture_types.len() > 64 {
             panic!(
@@ -693,6 +833,12 @@ impl ClosureLayout {
             capture_types: capture_types.to_vec(),
             captures,
             capture_kinds: kinds.to_vec(),
+            // ADR-006 §2.7.8 / Q10: the per-capture `NativeKind` companion
+            // is stored in the layout descriptor (constant per
+            // `ClosureTypeId`), not in the per-instance raw closure block.
+            // Lockstep with `capture_types` / `capture_kinds` by the
+            // length-equality assertions above.
+            capture_native_kinds: native_kinds.to_vec(),
             heap_capture_mask: heap_mask,
             owned_mutable_capture_mask: owned_mutable_mask,
             shared_capture_mask: shared_mask,
@@ -791,6 +937,29 @@ impl ClosureLayout {
     #[inline]
     pub fn capture_storage_kind(&self, i: usize) -> CaptureKind {
         self.capture_kinds[i]
+    }
+
+    /// `NativeKind` of capture `i`'s raw 8-byte payload (ADR-006 §2.7.8 /
+    /// Q10). Used by drop glue to dispatch through `drop_with_kind(bits, kind)`
+    /// — the canonical `KindedSlot::Drop` table — rather than the deleted
+    /// `vw_drop` / `Arc<HeapValue>` blanket-decrement shapes.
+    ///
+    /// For `Immutable` captures the kind classifies the slot's payload
+    /// directly (e.g. `Float64` for an `f64` capture, `String` for an
+    /// `Arc<String>` capture, `Ptr(HeapKind::TypedArray)` for an
+    /// `Arc<TypedArrayData>` capture).
+    ///
+    /// For `OwnedMutable` and `Shared` captures the slot stores a raw
+    /// `*mut T` (Box) or `*const SharedCell` (Arc) cell pointer — the
+    /// kind classifies the **interior** payload of that cell (the same
+    /// shape `capture_inner_kind` returns at the FieldKind level, but
+    /// resolved to `NativeKind` for kind-aware drop dispatch). The
+    /// per-Arc / per-Box drop helper (`drop_owned_mutable_capture` /
+    /// `drop_shared_capture`) consumes this to release the inner share
+    /// before reclaiming the cell allocation itself.
+    #[inline]
+    pub fn capture_native_kind(&self, i: usize) -> NativeKind {
+        self.capture_native_kinds[i]
     }
 }
 
@@ -1219,5 +1388,189 @@ mod tests {
         let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
         assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
+    }
+
+    // ---- ADR-006 §2.7.8 / Q10 — capture_native_kinds tests ----
+
+    #[test]
+    fn capture_native_kinds_inline_scalars() {
+        // Inline-scalar `ConcreteType`s map to their matching inline
+        // `NativeKind` (lockstep with `capture_types`).
+        let layout = immutable_layout(&[
+            ConcreteType::F64,
+            ConcreteType::I64,
+            ConcreteType::I32,
+            ConcreteType::Bool,
+        ]);
+        assert_eq!(layout.capture_native_kinds.len(), 4);
+        assert_eq!(layout.capture_native_kind(0), NativeKind::Float64);
+        assert_eq!(layout.capture_native_kind(1), NativeKind::Int64);
+        assert_eq!(layout.capture_native_kind(2), NativeKind::Int32);
+        assert_eq!(layout.capture_native_kind(3), NativeKind::Bool);
+    }
+
+    #[test]
+    fn capture_native_kinds_string() {
+        // String captures map to NativeKind::String — the special-cased
+        // most-common heap shape per ADR-005 §2.
+        let layout = immutable_layout(&[ConcreteType::String]);
+        assert_eq!(layout.capture_native_kind(0), NativeKind::String);
+    }
+
+    #[test]
+    fn capture_native_kinds_typed_array() {
+        // Array<T> captures map to NativeKind::Ptr(HeapKind::TypedArray)
+        // (the underlying storage is `Arc<TypedArrayData>`).
+        let arr = ConcreteType::Array(Box::new(ConcreteType::F64));
+        let layout = immutable_layout(&[arr]);
+        assert_eq!(
+            layout.capture_native_kind(0),
+            NativeKind::Ptr(HeapKind::TypedArray)
+        );
+    }
+
+    #[test]
+    fn capture_native_kinds_struct() {
+        // Struct captures map to NativeKind::Ptr(HeapKind::TypedObject).
+        let s = ConcreteType::Struct(StructLayoutId(7));
+        let layout = immutable_layout(&[s]);
+        assert_eq!(
+            layout.capture_native_kind(0),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+    }
+
+    #[test]
+    fn capture_native_kinds_lockstep_with_capture_types() {
+        // The §2.7.8 / Q10 lockstep invariant: every constructed layout
+        // satisfies `capture_types.len() == capture_native_kinds.len() ==
+        // capture_kinds.len()`.
+        let layout = immutable_layout(&[
+            ConcreteType::F64,
+            ConcreteType::String,
+            ConcreteType::I32,
+        ]);
+        assert_eq!(
+            layout.capture_types.len(),
+            layout.capture_native_kinds.len()
+        );
+        assert_eq!(layout.capture_types.len(), layout.capture_kinds.len());
+        assert_eq!(layout.capture_types.len(), layout.captures.len());
+    }
+
+    #[test]
+    fn capture_native_kinds_from_explicit_constructor() {
+        // The explicit-kinds constructor lets the caller pin the kind
+        // track to a finer-grained source than ConcreteType can express
+        // (e.g. specifying HeapKind::HashMap for a generic Pointer).
+        let types = vec![ConcreteType::Pointer(Box::new(ConcreteType::Void))];
+        let kinds = vec![CaptureKind::Immutable];
+        let native_kinds = vec![NativeKind::Ptr(HeapKind::HashMap)];
+        let layout = ClosureLayout::from_capture_types_with_native_kinds(
+            &types,
+            &kinds,
+            &native_kinds,
+        );
+        assert_eq!(
+            layout.capture_native_kind(0),
+            NativeKind::Ptr(HeapKind::HashMap)
+        );
+        // Geometry from the underlying ConcreteType is unchanged — it's
+        // the kind track alone that the explicit constructor overrides.
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+    }
+
+    #[test]
+    #[should_panic(expected = "must have equal length")]
+    fn capture_native_kinds_explicit_constructor_length_mismatch_panics() {
+        // Passing mismatched-length slices violates the §2.7.8 / Q10
+        // lockstep invariant — the constructor MUST panic, not silently
+        // truncate or pad.
+        let types = vec![ConcreteType::F64, ConcreteType::I64];
+        let kinds = vec![CaptureKind::Immutable, CaptureKind::Immutable];
+        let native_kinds = vec![NativeKind::Float64]; // wrong length
+        let _ = ClosureLayout::from_capture_types_with_native_kinds(
+            &types,
+            &kinds,
+            &native_kinds,
+        );
+    }
+
+    #[test]
+    fn native_kind_from_concrete_type_inline_scalars() {
+        // Round-trip every inline-scalar ConcreteType through the
+        // mapping helper.
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::F64),
+            NativeKind::Float64
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::I64),
+            NativeKind::Int64
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::I32),
+            NativeKind::Int32
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::I16),
+            NativeKind::Int16
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::I8),
+            NativeKind::Int8
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::U64),
+            NativeKind::UInt64
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::U32),
+            NativeKind::UInt32
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::U16),
+            NativeKind::UInt16
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::U8),
+            NativeKind::UInt8
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::Bool),
+            NativeKind::Bool
+        );
+    }
+
+    #[test]
+    fn native_kind_from_concrete_type_heap_arms() {
+        // Heap ConcreteType arms map to their matching Ptr(HeapKind)
+        // discriminator (or NativeKind::String for the ADR-005 §2 special
+        // case).
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::String),
+            NativeKind::String
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::Decimal),
+            NativeKind::Ptr(HeapKind::Decimal)
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::BigInt),
+            NativeKind::Ptr(HeapKind::BigInt)
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::DateTime),
+            NativeKind::Ptr(HeapKind::Temporal)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Void is not a well-formed capture type")]
+    fn native_kind_from_concrete_type_void_panics() {
+        // Top-level ConcreteType::Void in a capture slot is malformed —
+        // the helper refuses to map it to a sentinel kind (a Bool-default
+        // fallback would be forbidden #9 per §2.7.7).
+        let _ = native_kind_from_concrete_type(&ConcreteType::Void);
     }
 }
