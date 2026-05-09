@@ -38,7 +38,13 @@
 
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
+use crate::heap_value::{
+    HashMapData, HeapKind, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
+    TemporalData, TypedArrayData, TypedObjectStorage,
+};
+use crate::native_kind::NativeKind;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Interior-mutable cell backing a `CaptureKind::Shared` capture.
 ///
@@ -76,12 +82,28 @@ use std::collections::HashMap;
 ///
 /// ## Layout invariants (load-bearing for JIT)
 ///
-/// - Size: 16 bytes.
 /// - Offset 0: `AtomicU8` state. `0` = unlocked, `1` = locked. All other
 ///   bit patterns are reserved — the JIT CAS is `0 → 1` for lock and
 ///   `1 → 0` for unlock.
 /// - Offsets 1..=7: padding. Must be zero on construction but not read.
 /// - Offset 8: `ValueWord` payload (u64 bit pattern).
+/// - Trailing fields after offset 16: kind tracking (added by ADR-006
+///   §2.7.8 / Q10). NOT read by the JIT — JIT only touches state @ 0
+///   and value @ 8 via the `SHARED_CELL_*_OFFSET` constants below.
+///
+/// ## ADR-006 §2.7.8 / Q10 — parallel-kind invariant extended to cells
+///
+/// Cell-storage structs that hold raw heap-pointer bits grow a parallel
+/// `NativeKind` companion alongside their raw payload (per ADR-006
+/// §2.7.8 / Q10). For `SharedCell` the payload is single-slot
+/// (`UnsafeCell<u64>`), so the companion is a single `kind: NativeKind`
+/// field set at construction (`SharedCell::new(value, kind)`) and read
+/// at drop (`Drop for SharedCell`). The drop dispatch mirrors
+/// `KindedSlot::drop` in `kinded_slot.rs:274` — same retire-the-Arc
+/// matrix, same forbidden alternatives (no `vw_drop`, no `is_heap` probe,
+/// no Bool-default fallback). Construction sites must source the kind
+/// at the same call where the bits are sourced — see ADR-006 §2.7.8 for
+/// the binding rules.
 ///
 /// ## Contention
 ///
@@ -103,6 +125,22 @@ pub struct SharedCell {
     _pad: [u8; 7],
     /// Value payload. Read/written only while the lock is held.
     pub value: std::cell::UnsafeCell<u64>,
+    /// Per-cell `NativeKind` companion, set at construction and read at
+    /// drop (ADR-006 §2.7.8 / Q10). When `kind` selects a heap-bearing
+    /// arm, `value`'s bits are the result of `Arc::into_raw::<T>` for
+    /// the matching `T`, and `Drop` retires exactly one strong-count
+    /// share. For inline-scalar kinds (Int*, UInt*, Float64, Bool, ...)
+    /// drop is a no-op. Lockstep invariant: `kind` MUST stay in sync
+    /// with `value` — every write to `value` from a different kind goes
+    /// through `Drop` + `new()` (i.e. replace the whole cell), never
+    /// in-place reassignment of `value` alone. Mid-life kind changes
+    /// are forbidden.
+    ///
+    /// Located AFTER `value` so the JIT-baked offsets
+    /// (`SHARED_CELL_VALUE_OFFSET = 8`, `SHARED_CELL_STATE_OFFSET = 0`)
+    /// stay stable. The JIT reads only state and value; it does not
+    /// touch this field.
+    kind: NativeKind,
 }
 
 // SAFETY: SharedCell provides interior mutability guarded by its own
@@ -120,7 +158,12 @@ const _: () = {
     // (`SHARED_CELL_STATE_OFFSET` / `SHARED_CELL_VALUE_OFFSET` in
     // `shape-jit::ffi::object::closure`), so a mismatch surfaces as a
     // hard build error here, not a runtime miscompile.
-    assert!(std::mem::size_of::<SharedCell>() == 16);
+    //
+    // The total struct size grew from 16 to 24 bytes when the §2.7.8 / Q10
+    // `kind: NativeKind` companion field landed (added AFTER `value` so
+    // the JIT-baked offsets are unaffected). The JIT does not read total
+    // size — only the two offset constants below — so the size delta is
+    // safe.
     assert!(std::mem::align_of::<SharedCell>() == 8);
     assert!(std::mem::offset_of!(SharedCell, state) == 0);
     assert!(std::mem::offset_of!(SharedCell, value) == 8);
@@ -151,14 +194,41 @@ pub const SHARED_CELL_LOCKED: u8 = 1;
 pub const SHARED_CELL_UNLOCKED: u8 = 0;
 
 impl SharedCell {
-    /// Construct a new unlocked cell holding `value`.
+    /// Construct a new unlocked cell holding `value` with the matching
+    /// `NativeKind` companion (ADR-006 §2.7.8 / Q10).
+    ///
+    /// `kind` MUST classify `value`'s bits at construction. When `kind`
+    /// selects a heap-bearing arm (e.g. `NativeKind::String`,
+    /// `NativeKind::Ptr(_)`), `value` MUST be the result of
+    /// `Arc::into_raw::<T>` for the matching `T` and the caller transfers
+    /// exactly one strong-count share into the cell. `Drop` retires that
+    /// share when the last `Arc<SharedCell>` share is released. For
+    /// inline-scalar kinds the bits are the raw scalar value and `Drop`
+    /// is a no-op for the value field.
+    ///
+    /// Mid-life kind changes are forbidden: every write that changes the
+    /// kind must replace the whole cell (drop + reconstruct), never
+    /// reassign `value` alone — the lockstep invariant matches the
+    /// stack-side §2.7.7 rule.
     #[inline]
-    pub fn new(value: u64) -> Self {
+    pub fn new(value: u64, kind: NativeKind) -> Self {
         Self {
             state: std::sync::atomic::AtomicU8::new(SHARED_CELL_UNLOCKED),
             _pad: [0; 7],
             value: std::cell::UnsafeCell::new(value),
+            kind,
         }
+    }
+
+    /// Read the cell's `NativeKind` companion.
+    ///
+    /// Set once at construction; never changes during the cell's lifetime
+    /// (ADR-006 §2.7.8 / Q10 lockstep invariant). Callers that need to
+    /// drop the cell's value through `KindedSlot` / `drop_with_kind`
+    /// dispatch read this and pass it alongside the value bits.
+    #[inline]
+    pub fn kind(&self) -> NativeKind {
+        self.kind
     }
 
     /// Acquire the lock, blocking (spinning) until the state byte
@@ -238,6 +308,133 @@ impl SharedCell {
     pub unsafe fn unlock(&self) {
         use std::sync::atomic::Ordering;
         self.state.store(SHARED_CELL_UNLOCKED, Ordering::Release);
+    }
+}
+
+/// Retire the inner `value` share when the cell itself is dropped
+/// (ADR-006 §2.7.8 / Q10 — "set at construction, read at drop").
+///
+/// The cell is wrapped in `Arc<SharedCell>`; this `Drop` fires only when
+/// the last `Arc` share retires. At that point the `value` slot's bits
+/// must release whatever resource the `kind` companion classifies them
+/// as. This mirrors `KindedSlot::drop` in `kinded_slot.rs:274` exactly —
+/// same Arc-decrement matrix, same forbidden alternatives:
+///
+/// - **No `vw_drop(bits)`** (forbidden #8 per CLAUDE.md / ADR-006 §2.7.7):
+///   the dispatch is on `self.kind`, not on tag bits.
+/// - **No `is_heap()` / "drop only if heap-shaped" probe** (forbidden #7):
+///   the kind already encodes the discriminator; inline-scalar arms fall
+///   through to a no-op without probing.
+/// - **No Bool-default fallback** (§2.7.7 #9): the kind is always
+///   concrete — set at construction, never `Unknown`/`Pending`/`Dynamic`
+///   (those `NativeKind` variants are deleted).
+impl Drop for SharedCell {
+    fn drop(&mut self) {
+        // SAFETY: we hold the cell exclusively (last Arc share is
+        // retiring), so we can read the `UnsafeCell<u64>` payload
+        // without acquiring the spinlock — no other thread can touch it.
+        let bits = unsafe { *self.value.get() };
+        if bits == 0 {
+            return;
+        }
+        // SAFETY: per the construction-side contract on `SharedCell::new`,
+        // when `self.kind` selects a heap-bearing arm the `bits` are the
+        // result of `Arc::into_raw::<T>` for the matching `T`. The cell
+        // owned exactly one strong-count share for the value's lifetime;
+        // we retire it here. For inline-scalar kinds the bits are a raw
+        // scalar value and drop is a no-op.
+        unsafe {
+            match self.kind {
+                NativeKind::String => {
+                    Arc::decrement_strong_count(bits as *const String);
+                }
+                NativeKind::Ptr(hk) => match hk {
+                    HeapKind::String => {
+                        Arc::decrement_strong_count(bits as *const String);
+                    }
+                    HeapKind::TypedArray => {
+                        Arc::decrement_strong_count(bits as *const TypedArrayData);
+                    }
+                    HeapKind::TypedObject => {
+                        Arc::decrement_strong_count(bits as *const TypedObjectStorage);
+                    }
+                    HeapKind::HashMap => {
+                        Arc::decrement_strong_count(bits as *const HashMapData);
+                    }
+                    HeapKind::Decimal => {
+                        Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
+                    }
+                    HeapKind::BigInt => {
+                        Arc::decrement_strong_count(bits as *const i64);
+                    }
+                    HeapKind::DataTable => {
+                        Arc::decrement_strong_count(bits as *const crate::datatable::DataTable);
+                    }
+                    HeapKind::IoHandle => {
+                        Arc::decrement_strong_count(bits as *const IoHandleData);
+                    }
+                    HeapKind::NativeView => {
+                        Arc::decrement_strong_count(bits as *const NativeViewData);
+                    }
+                    HeapKind::Content => {
+                        Arc::decrement_strong_count(bits as *const crate::content::ContentNode);
+                    }
+                    HeapKind::Instant => {
+                        Arc::decrement_strong_count(bits as *const std::time::Instant);
+                    }
+                    HeapKind::Temporal => {
+                        Arc::decrement_strong_count(bits as *const TemporalData);
+                    }
+                    HeapKind::TableView => {
+                        Arc::decrement_strong_count(bits as *const TableViewData);
+                    }
+                    HeapKind::TaskGroup => {
+                        Arc::decrement_strong_count(bits as *const TaskGroupData);
+                    }
+                    // Char: inline-scalar payload (codepoint bits, not an
+                    // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
+                    HeapKind::Char => {}
+                    // Closure / Future / NativeScalar: these HeapKind
+                    // discriminators do not have an `Arc<T>` slot payload
+                    // routed through this path. A `SharedCell` constructed
+                    // with one of these kinds and a non-zero pointer is a
+                    // construction-side bug; debug-assert and silently
+                    // no-op in release rather than guess at the bits.
+                    HeapKind::Closure | HeapKind::Future | HeapKind::NativeScalar => {
+                        debug_assert!(
+                            false,
+                            "SharedCell::drop: non-zero bits with non-Arc-payload kind {:?}",
+                            hk
+                        );
+                    }
+                },
+                // Inline-scalar kinds: nothing to decrement. Bits are a
+                // raw value, not a pointer.
+                NativeKind::Float64
+                | NativeKind::NullableFloat64
+                | NativeKind::Int8
+                | NativeKind::NullableInt8
+                | NativeKind::UInt8
+                | NativeKind::NullableUInt8
+                | NativeKind::Int16
+                | NativeKind::NullableInt16
+                | NativeKind::UInt16
+                | NativeKind::NullableUInt16
+                | NativeKind::Int32
+                | NativeKind::NullableInt32
+                | NativeKind::UInt32
+                | NativeKind::NullableUInt32
+                | NativeKind::Int64
+                | NativeKind::NullableInt64
+                | NativeKind::UInt64
+                | NativeKind::NullableUInt64
+                | NativeKind::IntSize
+                | NativeKind::NullableIntSize
+                | NativeKind::UIntSize
+                | NativeKind::NullableUIntSize
+                | NativeKind::Bool => {}
+            }
+        }
     }
 }
 
