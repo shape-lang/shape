@@ -12,8 +12,8 @@
 //! `Array<number>` marshal extension (FromSlot/ToSlot for typed-array
 //! heap pointers) lands. Tracked alongside the parser-module deferral
 //! list. The functions previously here read/wrote byte arrays via
-//! `as_any_array().to_generic()` runtime tag-decode dispatch — strict-
-//! typed answer is `Arc<TypedBuffer<f64>>` typed args + ToSlot
+//! the deleted `as_any_array().to_generic()` tag_bits dispatch —
+//! strict-typed answer is `Arc<TypedBuffer<f64>>` typed args + ToSlot
 //! projection of `ConcreteReturn::ArrayF64` to a heap-allocated
 //! TypedArray slot.
 
