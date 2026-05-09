@@ -1325,6 +1325,229 @@ calls (suspension state crossing a `MethodFnV2` boundary). Per
 suspension shape gets its own follow-up if/when async method calls
 land in the snapshot subset.
 
+#### 2.7.11 Value-call ABI kind-awareness — `op_call_value` over `&[KindedSlot]` (Q12 ruling)
+
+Phase 1.B-vm Wave 6.5 close (`e0915f3`) left the value-call dispatch
+path — `op_call_value` in `executor/control_flow/mod.rs` and the
+`call_value_immediate_*` family in `executor/call_convention.rs` —
+as `todo!("phase-2c — see ADR-006 §2.7.4")` stubs. The blocker is
+the same shape as §2.7.10/Q11 surfaced for method dispatch: the
+pre-§2.7.11 ABI is kind-blind in both directions, and the §2.7.7 /
+§2.7.8 parallel-kind invariant stops at the call-frame boundary.
+
+```rust
+// Pre-§2.7.11 (kind-blind, currently `todo!()`):
+fn call_value_immediate_static(
+    &mut self,
+    callee_bits: u64,         // raw u64 — no NativeKind for callee
+    arg_bits: &[u64],         // raw u64 args — no NativeKind track
+) -> Result<u64, VMError>;    // raw u64 result — no NativeKind
+```
+
+Across Wave-α and Wave-δ migrations, ~150 PHF handler bodies in
+`executor/objects/*_methods.rs` collapsed to `NotImplemented(SURFACE)`
+with the surface message "closure-callback path unmigrated" because
+no kinded callee dispatch exists. The canonical example is
+`array_sort.rs::handle_order_by_v2` (close commit at Wave-δ
+`MR-array-sort-sets-joins`): the kinded `MethodFnV2` ABI landed
+(§2.7.10/Q11), the receiver kind = `NativeKind::Ptr(HeapKind::TypedArray)`
+flows in cleanly, but the comparator-closure callback path needed to
+invoke `key_fn(elem)` per element cannot run because
+`call_value_immediate_*` is `todo!()`. Without this ruling,
+`.map / .filter / .reduce / .orderBy / .thenBy / .find / .some /
+.every / .forEach` and every higher-order method body remains
+SURFACE — the user-facing language is missing closures-as-values
+end-to-end.
+
+**Decision (Q12 ruling):** the value-call ABI extends the §2.7.7 /
+§2.7.8 / §2.7.10 parallel-kind invariant by **carrying the kind on
+the carrier itself across the call frame**, mirroring Q11 for the
+value-call path:
+
+```rust
+// §2.7.11 (kinded):
+fn call_value_immediate_static(
+    &mut self,
+    callee: KindedSlot,           // kinded callee (Ptr(HeapKind::Closure) /
+                                  //   Ptr(HeapKind::FunctionRef) / etc.)
+    args: &[KindedSlot],          // kinded args per §2.7.6 dispatch-slice case
+) -> Result<KindedSlot, VMError>; // kinded result
+```
+
+`callee.kind` is the callee classification (Closure / FunctionRef /
+TraitObjectMethod / ForeignFn / Bound method) — sourced from the
+§2.7.7 stack parallel-kind track at the dispatch shell (no
+fabrication, no tag decode). `args[i].kind` per arg, same source.
+`op_call_value` constructs the `&[KindedSlot]` slice from popped
+stack args using the same WB2.4 retain-on-read discipline §2.7.10
+established for `op_call_method` — pop one share per arg, hand to
+`KindedSlot::new`, slice borrows, dispatch, `mem::forget` the
+returned carrier after re-pushing the share.
+
+**Frame setup — closure-capture kind flow.** This is the §2.7.8
+cell-storage extension across the call boundary. When the dispatch
+classifies `callee.kind == NativeKind::Ptr(HeapKind::Closure)`, the
+frame setup:
+
+1. Reads the closure layout: `ClosureLayout.capture_native_kinds`
+   (the parallel-kind track on `OwnedClosureBlock` per Wave-α
+   `G-owned-closure-block` close).
+2. For each capture, calls `OwnedClosureBlock::read_capture_kinded`
+   (per §2.7.8 / Q10) to recover `(bits, kind)` and pushes onto the
+   new frame's locals via the same `push_kinded` primitive the
+   §2.7.7 stack uses.
+3. Sets `CallFrame.closure_heap_kind: Option<NativeKind>` (added by
+   B9 Wave-α) from the closure's heap kind label, so closure-self
+   loads (`LoadOwnedClosureSelf`) recover the parallel-kind track
+   without re-decoding.
+
+The closure-call path is the §2.7.8 cell-storage parallel-kind
+invariant *transitively closed* across the call boundary: the
+producing opcode pushed each capture onto the closure's
+`OwnedClosureBlock` with a known kind (Wave-α G-owned-closure-block);
+the dispatch shell hands each capture into the new frame with that
+kind preserved (this ruling); the new frame's local-load opcodes
+recover the kind from the frame's parallel-kind track (already
+landed). End-to-end: no fabrication, no tag decode, no `is_heap()`
+probe, no Bool-default fallback — the kind flows through every hop.
+
+**Options considered:**
+
+- **Option A: keep `&[u64]` + a parallel `ClosureLayout`-side kind
+  table, decode at the call site.** **Rejected.** The
+  `OwnedClosureBlock` already carries `capture_native_kinds` per
+  §2.7.8/Q10; piping that through a separate side-channel into
+  `call_value_immediate_*` would re-introduce the parallel-track
+  shape at the dispatch ABI level — exactly the §2.7.6 / Q8
+  carrier-API-bound rejection that ruled out the parallel slice
+  in §2.7.10. The carrier-on-the-struct shape is canonical at the
+  runtime-tier dispatch boundary; the parallel-track shape is
+  appropriate at the storage-tier (stack, cells), not at the
+  dispatch boundary. Same ruling as §2.7.10 Option A.
+
+- **Option B: stack-based calling convention preserved (read args
+  from the stack inside `call_value_immediate_*`).** **Rejected.**
+  This is the deleted pre-§2.7.10 shape applied to the value-call
+  path: a kind-blind handler reading from a kinded stack would
+  need to fabricate kinds at the read site (§2.7.7 #9 forbidden),
+  or call back through a deleted `pop_raw_u64`-shape primitive
+  (§2.7.7 forbidden). The §2.7.10 dispatch-slice ABI is the
+  established shape for boundary carriers; value-call extends it.
+
+- **Option C: `callee: KindedSlot, args: &[KindedSlot] → Result<KindedSlot, _>`.**
+  **Accepted.** Mirrors §2.7.10/Q11 for the value-call path. The
+  carrier is the canonical §2.7.6 / Q8 vocabulary; the slice is
+  the canonical §2.7.1 case 4 dispatch-slice form; closure-capture
+  kind flow uses the existing §2.7.8 / Q10 cell-storage parallel-
+  kind track read via `OwnedClosureBlock::read_capture_kinded`.
+  Migration cost: ~5 dispatch entry-point signatures
+  (`call_value_immediate_static`, `_polymorphic`, `_async`,
+  `_method`, plus `op_call_value` itself); ~30 stub call-sites in
+  `executor/objects/*` re-fill from SURFACE to real bodies once
+  the dispatch entry-points land.
+
+**Forbidden shapes this rules out (mirror of §2.7.7 / §2.7.8 /
+§2.7.10 forbidden lists, applied to value-call ABI):**
+
+- `args: &mut [u64]` with kind decoded from raw bits — same
+  §2.7.7 #4 / #7 deleted tag_bits dispatch.
+- `callee: u64` with `is_heap()` probe to classify Closure vs.
+  FunctionRef — §2.7.7 #7 forbidden, the deleted ValueWord-shape probe.
+- `&mut [KindedSlot]` mutable form or `Vec<KindedSlot>` by-move —
+  same desynchronized-drop concern as §2.7.10. Borrow-only `&[..]`
+  keeps the share-accounting at the dispatch shell.
+- Result type `(u64, NativeKind)` — same §2.7.6 / Q8 carrier-API-
+  bound rejection as §2.7.10.
+- **Bool-default fallback for closure captures with unresolved kind**
+  at frame setup — §2.7.8 #4 forbidden. The correct response when a
+  capture's kind cannot be sourced from `ClosureLayout.capture_native_kinds`
+  is `NotImplemented(SURFACE)` and surface back to the supervisor;
+  never silent-leak.
+- **Transitional shims preserving deleted ABI-shape names** —
+  `call_value_legacy` / `call_value_raw_u64` / `dispatch_value_call_handler_raw`
+  / `call_value_with_u64_slice` — same §2.7.7 #1 rule, same
+  defection-attractor at the value-call dispatch layer. Migrate
+  every entry-point in-wave; do not preserve a kind-blind variant
+  as a transitional layer.
+- **Defection-attractor descriptors** — "value-call bridge",
+  "closure-callback translator", "frame-setup probe", "callee-kind
+  helper", "capture-injection adapter". Per the 2026-05-09 user
+  ruling broadening the W-series rename family, any descriptor of
+  the deleted kind-blind value-call ABI that uses bridge / probe /
+  helper / hop / translator / adapter framing belongs to the same
+  defection-attractor family CLAUDE.md "Renames to refuse on sight"
+  enumerates.
+
+**Performance characteristics** (mirror of §2.7.10):
+
+- Per-call overhead: +N×8 bytes for the `&[KindedSlot]` slice (vs.
+  pre-§2.7.11 `N×8` raw-u64 slice), where N is arg count. Slice
+  is allocated once per call on the dispatch shell's stack frame;
+  no heap allocation, no pointer chase per arg.
+- Frame setup: closure-capture loop is M kind reads from
+  `ClosureLayout.capture_native_kinds` (1 byte each) + M
+  `read_capture_kinded` calls (1 word + 1 byte each). The kind
+  reads are linear in capture count; the kind decoding is O(1) per
+  capture.
+- IC fast path for closure-call (`call_value_immediate_static`
+  hot path): callee kind dispatch is a single `match` on
+  `NativeKind` (1-byte cmp + jump table); same dispatch table as
+  §2.7.7 / §2.7.8 / §2.7.10. No new dispatch surface.
+- Strictly the same cost as the pre-§2.7.11 `todo!()` stub once
+  filled in — i.e., the cost of doing the work the language
+  promises.
+
+**Cross-check on debug builds:** for each capture pushed onto the
+new frame, the kind read from `ClosureLayout.capture_native_kinds`
+should match the kind the closure-allocation opcode emitted (the
+emitter knows what kind it captured). A `debug_assert_eq!` inside
+the frame-setup loop catches kind drift during development.
+
+**Migration scope (Wave-7 territory):**
+
+1. Sub-cluster **W7-cv-static**: rewrite
+   `call_value_immediate_static` in `executor/call_convention.rs`
+   to take `(KindedSlot, &[KindedSlot]) → Result<KindedSlot, _>`.
+   Frame setup integrates `OwnedClosureBlock::read_capture_kinded`
+   per §2.7.8.
+2. Sub-cluster **W7-cv-polymorphic**: same flip for
+   `call_value_immediate_polymorphic` (the fall-through for
+   undetermined-callee-kind dispatch).
+3. Sub-cluster **W7-cv-async**: same flip for the async closure
+   path (`call_value_async` / suspension-resumption shape).
+4. Sub-cluster **W7-cv-method**: cross-link with §2.7.10 — the
+   path where `op_call_value` resolves to a method dispatch (e.g.,
+   bound-method calls). Routes through the §2.7.10 `op_call_method`
+   path with the kinded carrier preserved.
+5. Sub-cluster **W7-op-call-value**: rewrite `op_call_value` in
+   `executor/control_flow/mod.rs` to construct the `&[KindedSlot]`
+   slice via the §2.7.10 `op_call_method` precedent, dispatch on
+   `callee.kind`, route to the correct entry-point.
+6. Sub-cluster **W7-frame-setup**: integrate
+   `CallFrame.closure_heap_kind` (B9 field) with the new frame's
+   parallel-kind track at frame entry, so subsequent local-load
+   opcodes recover kinds without re-decoding.
+7. Sub-cluster **W7-stub-refill**: the ~150 method bodies in
+   `executor/objects/*` that surfaced to `NotImplemented(SURFACE)`
+   with "closure-callback path unmigrated" messages re-fill from
+   SURFACE to real bodies once 1-6 land. This is mostly mechanical
+   per the `array_sort.rs::handle_join_str_v2` recipe — the body
+   migrates off SURFACE per §2.7.6 / Q8 heterogeneous-kind body
+   pattern, calling into the now-live closure-callback path for
+   the `key_fn(elem)` / `predicate(elem)` / `transform(elem)`
+   invocation step.
+
+The architectural ABI flip is the deliverable of sub-clusters 1-6;
+sub-cluster 7 is the downstream Wave-9 mechanical migration once
+the ABI lands.
+
+**Out-of-scope this ruling:** Snapshot/restore of in-flight value
+calls (suspension state crossing a `call_value_immediate_*`
+boundary). Per §2.7.4, snapshot rebuild is Phase 2c; the kinded-
+ABI in-flight value-call suspension shape gets its own follow-up
+if/when async value-calls land in the snapshot subset. Same
+out-of-scope clause as §2.7.10.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
