@@ -16,9 +16,7 @@ use shape_ast::ast::functions::Annotation;
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
-use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_pairs};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::KindedSlot;
 
 /// Check if a type string looks like `Option<T>` or `T?`.
 fn is_option_type(type_str: &str) -> bool {
@@ -166,116 +164,47 @@ impl ComptimeTarget {
         }
     }
 
-    /// Convert this target to a ValueWord TypedObject.
+    /// Convert this target to a `KindedSlot` TypedObject describing the
+    /// annotated item.
     ///
-    /// This is the primary constructor — `to_vmvalue()` delegates here.
-    pub fn to_nanboxed(&self) -> ValueWord {
-        let nb_str = |s: &str| ValueWord::from_string(Arc::new(s.to_string()));
-        let nb_string = |s: String| ValueWord::from_string(Arc::new(s));
-        let ensure_schema = |names: &[&str]| {
-            let field_names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
-            let _ = register_predeclared_any_schema(&field_names);
-        };
-
-        ensure_schema(&["name", "type"]);
-        ensure_schema(&["name", "type", "annotations"]);
-        ensure_schema(&["name", "type", "annotations", "optional"]);
-        ensure_schema(&["name", "type", "const"]);
-        ensure_schema(&["name", "args"]);
-        ensure_schema(&[
-            "kind",
-            "name",
-            "fields",
-            "params",
-            "return_type",
-            "annotations",
-            "captures",
-        ]);
-
-        // kind
-        let kind_str = match self.kind {
-            AnnotationTargetKind::Function => "function",
-            AnnotationTargetKind::Type => "type",
-            AnnotationTargetKind::Module => "module",
-            AnnotationTargetKind::Expression => "expression",
-            AnnotationTargetKind::Block => "block",
-            AnnotationTargetKind::AwaitExpr => "await_expr",
-            AnnotationTargetKind::Binding => "binding",
-        };
-
-        // fields: array of {name, type, annotations, optional} TypedObjects
-        let fields_arr: ArgVec = ArgVec::from_vec(self
-            .fields
-            .iter()
-            .map(|(fname, ftype, fanns)| {
-                // Each annotation becomes {name, args} where args is an array of strings
-                let anns_arr: ArgVec = ArgVec::from_vec(fanns
-                    .iter()
-                    .map(|(aname, aargs)| {
-                        let args_arr: ArgVec = ArgVec::from_vec(
-                            aargs.iter().map(|a| nb_string(a.clone())).collect());
-                        typed_object_from_pairs(&[
-                            ("name", nb_string(aname.clone())),
-                            ("args", ValueWord::from_array(shape_value::vmarray_from_vec(args_arr.into_inner()))),
-                        ])
-                    })
-                    .collect());
-                // Detect Option<T> types and expose an `optional` flag + unwrapped inner type
-                let is_optional = is_option_type(ftype);
-                let effective_type = if is_optional {
-                    unwrap_option_type(ftype)
-                } else {
-                    ftype.clone()
-                };
-                typed_object_from_pairs(&[
-                    ("name", nb_string(fname.clone())),
-                    ("type", nb_string(effective_type)),
-                    ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(anns_arr.into_inner()))),
-                    ("optional", ValueWord::from_bool(is_optional)),
-                ])
-            })
-            .collect());
-
-        // params: array of {name, type} TypedObjects
-        let params_arr: ArgVec = ArgVec::from_vec(self
-            .params
-            .iter()
-            .map(|(pname, ptype, is_const)| {
-                typed_object_from_pairs(&[
-                    ("name", nb_string(pname.clone())),
-                    ("type", nb_string(ptype.clone())),
-                    ("const", ValueWord::from_bool(*is_const)),
-                ])
-            })
-            .collect());
-
-        // return_type
-        let ret = self
-            .return_type
-            .as_ref()
-            .map(|r| nb_string(r.clone()))
-            .unwrap_or_else(ValueWord::none);
-
-        // annotations
-        let ann_arr: ArgVec = ArgVec::from_vec(self
-            .annotations
-            .iter()
-            .map(|a| nb_string(a.clone()))
-            .collect());
-
-        // captures: array of captured variable names
-        let captures_arr: ArgVec = ArgVec::from_vec(
-            self.captures.iter().map(|c| nb_string(c.clone())).collect());
-
-        typed_object_from_pairs(&[
-            ("kind", nb_str(kind_str)),
-            ("name", nb_string(self.name.clone())),
-            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(fields_arr.into_inner()))),
-            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(params_arr.into_inner()))),
-            ("return_type", ret),
-            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(ann_arr.into_inner()))),
-            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(captures_arr.into_inner()))),
-        ])
+    /// **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous body
+    /// constructed a `HeapValue::TypedObject { schema_id, slots, heap_mask }`
+    /// by stamping per-field `ValueWord` constructors (`from_string`,
+    /// `from_array`, `from_bool`) into the deleted `ArgVec` /
+    /// `vmarray_from_vec` builders. After the strict-typing bulldozer:
+    ///
+    /// - `HeapValue::TypedObject` no longer carries the inline `{schema_id,
+    ///   slots, heap_mask}` shape — it now wraps `Arc<TypedObjectStorage>`
+    ///   per ADR-006 §2.3.
+    /// - `ValueWord`, `ValueWordExt`, `ArgVec`, and `vmarray_from_vec` are
+    ///   deleted from `shape-value`.
+    /// - The per-FieldType constructor surface (`ValueSlot::from_string_arc`,
+    ///   `from_typed_array`, `from_typed_object`) per ADR-006 §2.4 is the
+    ///   replacement for ValueSlot construction, but the comptime-target
+    ///   serialization additionally needs a kind-threaded
+    ///   `typed_object_from_pairs` that takes `&[(&str, KindedSlot)]` and
+    ///   builds `Arc<TypedObjectStorage>` directly. That helper is part of
+    ///   the comptime-rebuild surface and is deferred to Phase 2c (per
+    ///   playbook §7 #4).
+    ///
+    /// Until Phase 2c lands, `to_nanboxed` panics rather than emitting a
+    /// placeholder TypedObject that would silently drop `optional` flags,
+    /// `field_annotations`, or `captures` — comptime annotation handlers
+    /// rely on these for AI-first metadata propagation, so partial output
+    /// would corrupt downstream `@ai`/`@description`/`@range` resolution.
+    pub fn to_nanboxed(&self) -> KindedSlot {
+        let _ = (
+            &self.kind,
+            &self.name,
+            &self.fields,
+            &self.params,
+            &self.return_type,
+            &self.annotations,
+            &self.captures,
+            is_option_type as fn(&str) -> bool,
+            unwrap_option_type as fn(&str) -> String,
+        );
+        todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
     }
 }
 
@@ -478,7 +407,14 @@ mod tests {
         assert_eq!(target.fields[1].2[1].1, vec!["0", "1"]);
     }
 
+    // phase-2c: comptime target serialization rebuild — see ADR-006 §2.4.
+    // The previous body asserted `value.type_name() == "object"` against a
+    // ValueWord TypedObject; both the construction (`to_nanboxed`) and the
+    // observation surface (`ValueWord::type_name`) are deleted in the
+    // strict-typing bulldozer. Re-enable when the kind-threaded
+    // KindedSlot-returning `to_nanboxed` rebuild lands.
     #[test]
+    #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn test_target_to_vmvalue() {
         let target = ComptimeTarget {
             kind: AnnotationTargetKind::Function,
@@ -490,11 +426,11 @@ mod tests {
             captures: vec!["outer_var".to_string()],
         };
 
-        let value = target.to_nanboxed();
-        assert_eq!(value.type_name(), "object");
+        let _value = target.to_nanboxed();
     }
 
     #[test]
+    #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn test_target_to_vmvalue_with_field_annotations() {
         let target = ComptimeTarget {
             kind: AnnotationTargetKind::Type,
@@ -517,8 +453,7 @@ mod tests {
             captures: Vec::new(),
         };
 
-        let value = target.to_nanboxed();
-        assert_eq!(value.type_name(), "object");
+        let _value = target.to_nanboxed();
     }
 
     #[test]
@@ -619,8 +554,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn test_target_captures_vmvalue_included() {
-        // Verify captures field appears in ValueWord output
+        // Verify captures field appears in the comptime-target serialization.
         let target = ComptimeTarget {
             kind: AnnotationTargetKind::Function,
             name: "closure".to_string(),
@@ -631,9 +567,7 @@ mod tests {
             captures: vec!["x".to_string(), "y".to_string()],
         };
 
-        let value = target.to_nanboxed();
-        // Now returns TypedObject
-        assert_eq!(value.type_name(), "object");
+        let _value = target.to_nanboxed();
     }
 
     #[test]
@@ -677,66 +611,11 @@ mod tests {
         assert_eq!(target.fields[2].0, "age");
         assert_eq!(target.fields[2].1, "Option<number>");
 
-        // Verify the nanboxed representation includes optional flags
-        let value = target.to_nanboxed();
-        assert_eq!(value.type_name(), "object");
-
-        // Extract fields array from the target TypedObject
-        if let Some(fields_map) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&value) {
-            let fields_arr = fields_map.get("fields").expect("should have fields");
-            if let Some(view) = fields_arr.as_any_array() {
-                let arr = view.to_generic();
-                assert_eq!(arr.len(), 3);
-
-                // Check first field is NOT optional
-                if let Some(f0) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[0]) {
-                    let opt = f0.get("optional").expect("should have optional field");
-                    assert_eq!(
-                        opt.as_bool(),
-                        Some(false),
-                        "non-option field should be optional=false"
-                    );
-                    let type_str = f0.get("type").expect("should have type");
-                    assert_eq!(
-                        type_str.as_str(),
-                        Some("string"),
-                        "non-option field type should be 'string'"
-                    );
-                }
-
-                // Check second field IS optional with unwrapped type
-                if let Some(f1) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[1]) {
-                    let opt = f1.get("optional").expect("should have optional field");
-                    assert_eq!(
-                        opt.as_bool(),
-                        Some(true),
-                        "Option<string> field should be optional=true"
-                    );
-                    let type_str = f1.get("type").expect("should have type");
-                    assert_eq!(
-                        type_str.as_str(),
-                        Some("string"),
-                        "Option<string> field type should be unwrapped to 'string'"
-                    );
-                }
-
-                // Check third field IS optional with unwrapped type
-                if let Some(f2) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[2]) {
-                    let opt = f2.get("optional").expect("should have optional field");
-                    assert_eq!(
-                        opt.as_bool(),
-                        Some(true),
-                        "Option<number> field should be optional=true"
-                    );
-                    let type_str = f2.get("type").expect("should have type");
-                    assert_eq!(
-                        type_str.as_str(),
-                        Some("number"),
-                        "Option<number> field type should be unwrapped to 'number'"
-                    );
-                }
-            }
-        }
+        // The serialized-form assertion (TypedObject field readback via the
+        // deleted `typed_object_to_hashmap_nb` + `as_any_array` ValueWord
+        // helpers) is deferred to phase-2c — see ADR-006 §2.4. The struct
+        // shape above is the material AST→target invariant; the readback
+        // test is the consumer side of the comptime-rebuild surface.
     }
 
     #[test]
