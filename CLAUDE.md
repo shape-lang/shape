@@ -215,7 +215,7 @@ The strict-typing plan (`~/.claude/plans/stop-native-vs-tagged-tax.md`) deletes 
 
 - **`ValueWord` at runtime.** Deleted. Do not reintroduce as a "shim", "bridge", "compatibility layer", or "serialization helper". Snapshot/wire uses per-slot kind metadata.
 - **Generic opcodes** (`Add`, `Sub`, `Lt`, etc. without kind suffix). Deleted. Only typed variants exist.
-- **Runtime tag-decode hops.** Specifically forbidden: `synthesize_value_word_from_raw`, `is_tagged()` in handlers, `last_program_return_kind` runtime stamp, `normalize_persisted_for_slot`, per-`FieldKind` capture decode.
+- **Runtime `tag_bits` dispatch (deleted).** Specifically forbidden: `synthesize_value_word_from_raw`, `is_tagged()` in handlers, `last_program_return_kind` runtime stamp, `normalize_persisted_for_slot`, per-`FieldKind` capture decode.
 - **`Convert<X>To<Y>` opcodes** added to paper over a kind-tracker gap. The W4-δ `ConvertBoolToString` opcode is the canonical example of what not to do — the bool source's kind was statically knowable; the right fix was extending the compiler's kind tracker.
 - **`SlotKind::Dynamic` / `SlotKind::Unknown`** in compiled bytecode. Deleted from the enum.
 - **`exec_*_dynamic_fallback`** handlers. Deleted.
@@ -249,6 +249,17 @@ These are specific phrases past sessions used to dress up dynamic dispatch and m
 - "dynamic-fallback retained by design"
 - "documented FFI-boundary helper"
 - "class-(a)/(b) cases"
+- "tag-decode bridge"
+- "tag-decode probe"
+- "tag-decode helper"
+- "tag-decode hop"
+- "tag-decode translator"
+- "tag-decode adapter"
+- "decoder pattern" / "decode bridge" / "decoder bridge"
+- "tag bridge" / "synthesis bridge"
+- `(decode|tag) (bridge|probe|helper|hop|translator|adapter)` — broader family rule (per 2026-05-09 user ruling): any descriptor of deleted tag-bit dispatch that uses bridge/probe/helper/hop/translator/adapter framing belongs to this defection-attractor family and is refused on sight.
+
+Tags don't exist post-strict-typing. Calling deleted code a "bridge" or "probe" or "helper" or "translator" between tagged and untagged forms perpetuates the wrong-architecture framing the W-series was an attempt to formalize — same defection-attractor family as the entries above. Describe deleted code by name (`tag_bits::is_tagged`, `synthesize_value_word_from_raw`) or by deletion-fate (`the deleted W-series pattern`), never by hypothetical role.
 
 ### Why this matters
 
