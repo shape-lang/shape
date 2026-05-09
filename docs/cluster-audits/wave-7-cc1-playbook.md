@@ -119,6 +119,61 @@ Six sub-clusters dispatched in two ordering bands.
 | **W7-cv-method** | `executor/call_convention.rs::execute_function_by_name`, `_by_id`, `execute_closure`, `execute_function_fast`, `execute_function_with_named_args`, `resume`, `jit_trampoline_call_closure` (the only `_raw` survivor). Public callers in `shape-cli`, `shape-runtime`, `remote.rs`. | 7 entry-points |
 | **W7-op-call-value** | `executor/control_flow/mod.rs`: `op_call_value`, `op_call_closure`, `op_call_function_indirect`, `dispatch_call_closure_like`. The JIT-dispatch surface in `op_call` (lines 222–236) stays SURFACE until W10. | 4 dispatch shells |
 
+### Round 2.5 — W7-closure-retain (inserted post-Round-2 audit, 2026-05-09)
+
+**Sequential, blocks Round 3.** Surfaced at W7-cv-static close: `clone_with_kind`
+and `drop_with_kind` in `crates/shape-vm/src/executor/vm_impl/stack.rs:130/243`
+are `debug_assert!(false)` for `HeapKind::Closure` (and `Future` /
+`NativeScalar`). The comment-design says "no Arc<T> slot payload routed through
+this path" — closures were modeled as single-ownership `Box<HeapValue>` outside
+the standard Arc-counted retain-on-read path.
+
+This conflicts with the §2.7.11 dispatch-shell shape: `op_call_value`
+(Round 3) constructs `KindedSlot` args from popped stack values, and those
+carriers' `Drop` calls `drop_with_kind` keyed on each `kind` — including
+`HeapKind::Closure` when a closure is passed as an arg or as the callee. The
+debug_assert WILL trip in error paths and on Gate 5 smoke (which is built
+around `arr.map(|x| ...)` where the closure value flows through the dispatch
+shell).
+
+**W7-closure-retain sub-cluster** wires the share semantics for
+`HeapKind::Closure` (and `Future`, `NativeScalar`) per the FilterExpr precedent
+(`Arc::increment_strong_count(bits as *const FilterNode)` at the matching
+typed-Arc target). Investigation needed to determine the exact share carrier:
+
+- `HeapValue::ClosureRaw(OwnedClosureBlock)` — the variant carries an
+  `OwnedClosureBlock` directly (not `Arc<OwnedClosureBlock>`).
+- `ValueSlot::as_heap_value()` reinterprets `slot.0 as *const HeapValue` —
+  meaning the slot bits ARE a `*const HeapValue` pointer.
+- The `*const HeapValue` is presumably an `Arc<HeapValue>` (or `Box<HeapValue>`,
+  but Box has no clone path — and the slot does need clone-on-share semantics).
+- Determine which it is by reading `from_typed_closure` / closure-push call
+  sites (probably in `executor/control_flow/mod.rs::op_make_closure` or
+  `executor/variables/mod.rs` closure-allocation paths).
+
+**Body shape (forecast — verify in audit):**
+
+```rust
+HeapKind::Closure => {
+    Arc::increment_strong_count(bits as *const HeapValue);  // or *const OwnedClosureBlock
+}
+// drop side:
+HeapKind::Closure => {
+    Arc::decrement_strong_count(bits as *const HeapValue);
+}
+```
+
+Same dispatch for `Future` and `NativeScalar` if they share the same
+`Box<HeapValue>` / `Arc<HeapValue>` shape; otherwise they get their own arms
+per their actual share carrier.
+
+**Gates:** `cargo build -p shape-vm --lib` succeeds; `bash scripts/check-no-dynamic.sh`
+exit 0; AGENTS.md row flipped to idle.
+
+**Time budget:** 1-2 hours. Single-file edit. If the audit reveals the share
+semantics are more complex than Arc<HeapValue> (e.g., OwnedClosureBlock has its
+own Arc), the sub-cluster forks into a deeper investigation and surfaces back.
+
 ### Out-of-band (W9, NOT this wave)
 
 **W7-stub-refill** (the §2.7.11 forecast names this) is **NOT this wave's
@@ -128,6 +183,26 @@ deliverable.** It is W9 mechanical migration per the plan in
 ---
 
 ## 4. Body shapes per sub-cluster
+
+### API name corrections (post-W7-cv-static audit, 2026-05-09)
+
+Three minor playbook typos were surfaced by Round 2 and corrected in code at
+W7-cv-static close (commit `06cdfce`). Round 3 agents must use the corrected
+names:
+
+- **`run_until_return(ctx)` does NOT exist.** The actual return-driver is
+  `pub(crate) fn execute_until_call_depth(target_depth: usize, ctx: ...) -> Result<(), VMError>`
+  at `executor/dispatch.rs:470`. Pattern: capture
+  `let saved_depth = self.call_stack.len();` *before* frame setup, drive
+  `self.execute_until_call_depth(saved_depth, ctx)?`, then `pop_kinded()` for
+  the return value as `(u64, NativeKind)` → wrap as `KindedSlot`.
+- **`slot.bits()` does NOT exist on `ValueSlot` / `KindedSlot`.** The accessor
+  is `slot.raw()` returning `u64`. Use `callee.slot.raw()` and
+  `slot.slot.raw()`.
+- **`VMError::TypeError(format!(...))` does NOT compile.** The variant is
+  `TypeError { expected: &'static str, got: &'static str }` (named struct
+  fields). For dispatch-error surfaces use `VMError::RuntimeError(format!(...))`
+  per the existing `op_call_value` precedent.
 
 ### W7-frame-setup
 
