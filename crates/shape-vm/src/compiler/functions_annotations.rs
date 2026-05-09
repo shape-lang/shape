@@ -379,6 +379,19 @@ impl BytecodeCompiler {
             })
     }
 
+    // SURFACE (cross-cluster cascade — see playbook §8): the
+    // `target_value: ValueWord` and `const_bindings:
+    // &[(String, shape_value::ValueWord)]` parameters below mirror the
+    // ABI of `super::comptime::execute_comptime_with_annotation_handler`
+    // (non-territory `compiler/comptime.rs:481`) and the
+    // `BytecodeCompiler::specialization_const_bindings` field type
+    // (mod.rs surface above). Both reference the deleted
+    // `shape_value::ValueWord` carrier (ADR-006 §2.7.7 forbidden #4).
+    // Per playbook §8 this is surface-and-stop for supervisor
+    // coordination; the kinded replacement is `KindedSlot` (mirroring
+    // the `comptime_builtins::ComptimeDirective::SetParamValue { value:
+    // KindedSlot }` migration already landed in
+    // `compiler/comptime_builtins.rs:33`).
     pub(super) fn execute_comptime_annotation_handler(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
@@ -1018,10 +1031,18 @@ impl BytecodeCompiler {
                             param_name
                         ));
                     };
-                    // Convert the comptime ValueWord to an AST literal expression
+                    // Convert the comptime KindedSlot to an AST literal
+                    // expression. Per ADR-006 §2.7.6 / playbook §1, the
+                    // cross-kind int-or-float coercion lives at the body
+                    // site, NOT on the `KindedSlot` carrier (the deleted
+                    // `as_number_coerce` was a §2.7.6/Q8 carrier-bound
+                    // violation). Use cluster A's `kind_coerce::coerce_to_f64`
+                    // body helper at the call site instead.
                     let default_expr = if let Some(i) = value.as_i64() {
                         Expr::Literal(Literal::Int(i), Span::DUMMY)
-                    } else if let Some(n) = value.as_number_coerce() {
+                    } else if let Some(n) =
+                        crate::executor::builtins::kind_coerce::coerce_to_f64(&value)
+                    {
                         Expr::Literal(Literal::Number(n), Span::DUMMY)
                     } else if let Some(b) = value.as_bool() {
                         Expr::Literal(Literal::Bool(b), Span::DUMMY)

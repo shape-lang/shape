@@ -236,7 +236,7 @@ impl BytecodeCompiler {
         // V1.1C `CloneLocal` path reads the raw u64 bits and delegates to
         // `raw_helpers::clone_raw_bits`, which bumps the Arc on the cell
         // itself — it does not unwrap. Emitting `CloneLocal` on a boxed
-        // slot therefore leaves a `shared_cell` ValueWord on the stack,
+        // slot therefore leaves a `shared_cell` heap pointer on the stack,
         // which later arithmetic / method dispatch rejects ("cannot apply
         // '+' to int and shared_cell"). Fall through to the existing
         // emission so the legacy unwrap path handles it.
