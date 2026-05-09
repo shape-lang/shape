@@ -10,7 +10,7 @@
 #
 # Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
 
-26	\bsynthesize_value_word_from_raw\b	W-series tag-decode bridge (synthesize)
+26	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
 5	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
 5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
@@ -29,3 +29,6 @@
 0	tag normalization	rejected rename
 0	compatibility layer	rejected rename
 0	dynamic-fallback retained	rejected rename
+0	\btag[- ]decode[- ](bridge|probe|helper|hop|translator|adapter)\b	rejected rename family — defection-attractor framing of deleted tag_bits dispatch
+0	\b(decoder|decode)[- ]bridge\b	rejected rename family — decoder bridge framing
+2	\b(synthesis|tag)[- ]bridge\b	rejected rename family — synthesis bridge framing
