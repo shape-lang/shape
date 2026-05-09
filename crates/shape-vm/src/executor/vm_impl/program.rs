@@ -439,18 +439,23 @@ impl VirtualMachine {
     /// Get a snapshot of all module binding values.
     ///
     /// Phase-1b-vm: the legacy `ValueWord` carrier was deleted along
-    /// with the borrow-only module-binding read shim. The kinded
-    /// equivalent (`Vec<KindedSlot>` walked through a parallel-kind
-    /// track per ADR-006 §2.7.8 / Q10) is owned by the cell-storage
-    /// rebuild and the Phase-2c snapshot revival (§2.7.4). The host
-    /// surface stays here as a `todo!()` placeholder so callers fail
-    /// loudly instead of being silently passed an empty vec.
+    /// with the borrow-only module-binding read shim. The §2.7.8 / Q10
+    /// parallel-kind track is now live on `module_binding_kinds`, and
+    /// `module_binding_read_owned_kinded` returns `KindedSlot` shares
+    /// per binding — the kinded read backbone is in place. This
+    /// particular method's return type, however, is still the deleted
+    /// `Vec<ValueWord>`, which keeps the host-API signature flip on
+    /// the Phase-2c snapshot revival (§2.7.4) — flip to
+    /// `Vec<KindedSlot>` and walk
+    /// `(0..self.module_bindings_len()).map(|i|
+    /// self.module_binding_read_owned_kinded(i)).collect()`.
     pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
         todo!(
             "phase-2c — see ADR-006 §2.7.4: module_bindings_snapshot \
-             needs a kinded carrier (Vec<KindedSlot>) walked through \
-             the parallel-kind track for module_bindings (§2.7.8 / \
-             Q10). The legacy ValueWord-shape return is deleted."
+             still returns Vec<ValueWord> (deleted carrier); flip the \
+             return type to Vec<KindedSlot> and walk \
+             `module_binding_read_owned_kinded` per index. The §2.7.8 \
+             parallel-kind track is live, so the body is one map+collect."
         );
     }
 

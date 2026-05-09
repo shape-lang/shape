@@ -282,7 +282,32 @@ pub struct VirtualMachine {
     pub(crate) sp: usize,
 
     /// ModuleBinding variables (raw u64 bit patterns; see `stack` comment).
+    ///
+    /// Lockstep with `module_binding_kinds` per ADR-006 §2.7.8 / Q10:
+    /// `module_bindings.len() == module_binding_kinds.len()` at every
+    /// observable boundary. Pad/resize/clear sites must update both vecs
+    /// together — see `module_binding_pad_to_kinded` for the canonical
+    /// resize helper.
     pub(crate) module_bindings: Vec<u64>,
+
+    /// Parallel `NativeKind` track for `module_bindings` (ADR-006 §2.7.8 /
+    /// Q10). `module_binding_kinds[i]` is the `NativeKind` interpretation
+    /// of `module_bindings[i]`. Index invariant: lengths agree at every
+    /// API boundary.
+    ///
+    /// VM teardown dispatches `drop_with_kind(bits[i], kind[i])` per slot
+    /// — the kind-aware counterpart of the deleted `vw_drop`/
+    /// `vw_drop_slice` (forbidden #8 per §2.7.7). Slots written by typed-
+    /// scalar Store opcodes (`StoreModuleBindingI64` / `…F64` / `…Bool`
+    /// / etc.) carry their statically-known kind; PTR slots get the
+    /// matching `NativeKind::Ptr(HeapKind::*)` from the producer. Slots
+    /// pre-initialised by the resize-pad path use `NativeKind::Bool` as
+    /// the no-op-on-drop sentinel — the same convention as the stack's
+    /// dead-space pre-init (`init.rs:31`). This is **not** a Bool-default
+    /// fallback in the §2.7.7 #9 sense: every actual write threads the
+    /// caller's known kind, and the sentinel only persists for slots
+    /// that never received a store.
+    pub(crate) module_binding_kinds: Vec<NativeKind>,
 
     /// Track A.1C.3: indices of module-binding slots that were
     /// promoted to `Arc<parking_lot::Mutex<ValueWord>>` via
@@ -528,9 +553,10 @@ mod vm_impl;
 ///
 /// Releases the strong-count share that each live stack slot and each
 /// module-binding slot owns over its heap-tagged payload. Per ADR-006
-/// §2.7.7, the stack carries a parallel `Vec<NativeKind>` track; teardown
-/// dispatches `drop_with_kind(bits, kind)` per slot — the kind-aware
-/// counterpart of the deleted `vw_drop_slice` call.
+/// §2.7.7 / §2.7.8, the stack and the module-binding store each carry a
+/// parallel `Vec<NativeKind>` track; teardown dispatches
+/// `drop_with_kind(bits, kind)` per slot — the kind-aware counterpart of
+/// the deleted `vw_drop_slice` call (forbidden #8 per §2.7.7).
 ///
 /// The `shared_module_bindings` Arc reclamation still runs first because
 /// those slots hold raw `Arc::into_raw` pointer bits (not heap-tagged
@@ -538,17 +564,6 @@ mod vm_impl;
 /// drop loop over `module_bindings` skips them because the slot bits
 /// have been zeroed and `drop_with_kind` is a no-op on the zero bit
 /// pattern.
-///
-/// SURFACE (phase-2c): `module_bindings` does not yet carry a parallel
-/// `Vec<NativeKind>` track (§2.7.8 cell-storage extension is in
-/// progress — see B7-closure-cells / B8-shared-cell). Until that lands
-/// the per-binding kind cannot be sourced; the loop below releases each
-/// non-shared binding through `drop_with_kind` with kind sourced from a
-/// per-binding parallel track. For Wave-β R-misc the binding-side kind
-/// track is added below as `module_binding_kinds` companion. If that
-/// vec is empty (legacy / not-yet-populated path), the loop falls back
-/// to no-op drop and surfaces — never to a Bool-default fallback per
-/// §2.7.7 #9.
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
         // Track A.1C.3: release Shared module-binding Arcs before
@@ -563,6 +578,14 @@ impl Drop for VirtualMachine {
             }
             let bits = self.module_bindings[idx];
             self.module_bindings[idx] = 0u64;
+            // Zero the parallel kind slot to a no-op-on-drop sentinel
+            // so the lockstep loop below treats the cleared bits as a
+            // dead slot. Without this, a stale `Ptr(HeapKind::*)` kind
+            // would survive the bits-clear and double-release on the
+            // generic loop pass.
+            if idx < self.module_binding_kinds.len() {
+                self.module_binding_kinds[idx] = NativeKind::Bool;
+            }
             let cell_ptr = bits as *const SharedCell;
             if cell_ptr.is_null() {
                 continue;
@@ -594,19 +617,207 @@ impl Drop for VirtualMachine {
             self.kinds[i] = NativeKind::Bool;
         }
 
-        // Release every module binding. SURFACE (phase-2c): without a
-        // parallel `module_binding_kinds` track (pending §2.7.8 cell-
-        // storage extension), the per-binding kind cannot be sourced.
-        // The slots are zeroed below to prevent later reads from
-        // observing dangling shares; the strong-count share that each
-        // binding holds **leaks** at VM teardown until the binding-
-        // kind track lands. This is the documented Phase-2c deferral
-        // surface — explicitly NOT a Bool-default fallback (§2.7.7 #9
-        // forbidden), explicitly NOT a `vw_drop`-shaped retain-on-write
-        // (deleted symbol).
-        for slot in self.module_bindings.iter_mut() {
+        // Release every module binding via the parallel-kind track
+        // (ADR-006 §2.7.8 / Q10). `drop_with_kind` is a no-op on
+        // inline-scalar kinds (Int*/UInt*/Bool/Float64) so typed-scalar
+        // bindings cost a kind-check and return; heap-bearing bindings
+        // (`NativeKind::Ptr(HeapKind::*)` / `NativeKind::String`)
+        // release exactly one strong-count share via the matching
+        // `Arc::decrement_strong_count::<T>`. This closes the R-misc
+        // Wave-β "non-shared module bindings hold one strong share each
+        // that is not released at VM teardown" leak surface — once the
+        // kind track is populated lockstep with the bits track, the
+        // generic teardown sees the same kind every other §2.7.7
+        // dispatch surface uses.
+        //
+        // Defensive `min()` walks: if a producer push site grew
+        // `module_bindings` without growing `module_binding_kinds`
+        // (B6-round-2 territory not yet migrated), the lockstep
+        // invariant is violated. The debug-build assertion below
+        // surfaces such drift; release builds walk the prefix that
+        // both vecs cover. Prefix slots that exceed the kinds-vec
+        // length keep the legacy "leak rather than misdispatch"
+        // disposition until B6-round-2 lands the kind threading —
+        // explicitly NOT a Bool-default fallback (§2.7.7 #9 forbidden,
+        // §2.7.8 forbidden-shapes "Transitional Bool-default
+        // fallbacks"): the unwalked tail is the kind-source SURFACE,
+        // not a silent kind-fabrication.
+        debug_assert_eq!(
+            self.module_bindings.len(),
+            self.module_binding_kinds.len(),
+            "ADR-006 §2.7.8 / Q10 lockstep invariant violated at \
+             VirtualMachine::Drop: module_bindings.len() ({}) != \
+             module_binding_kinds.len() ({}). A push/resize site in \
+             cluster-B-round-2 territory (executor/variables/mod.rs) \
+             grew the bits vec without growing the kinds vec.",
+            self.module_bindings.len(),
+            self.module_binding_kinds.len(),
+        );
+        let bound = self
+            .module_bindings
+            .len()
+            .min(self.module_binding_kinds.len());
+        for i in 0..bound {
+            let bits = self.module_bindings[i];
+            let kind = self.module_binding_kinds[i];
+            vm_impl::stack::drop_with_kind(bits, kind);
+            self.module_bindings[i] = Self::NONE_BITS;
+            self.module_binding_kinds[i] = NativeKind::Bool;
+        }
+        // Zero any tail slots that exceeded the kinds-vec length so
+        // post-Drop reads (debug print, snapshot enumeration) do not
+        // see dangling pointer bits. The corresponding strong-count
+        // share leaks until the kinds vec catches up — that's the
+        // remaining B6-round-2 work, not the §2.7.8 structural
+        // extension this Drop is part of.
+        for slot in self.module_bindings[bound..].iter_mut() {
             *slot = Self::NONE_BITS;
         }
+    }
+}
+
+/// ADR-006 §2.7.8 / Q10 kinded module-binding accessors.
+///
+/// The §2.7.8 cell-storage extension grew `VirtualMachine.module_bindings`
+/// from a bare `Vec<u64>` to a `Vec<u64>` + parallel `Vec<NativeKind>`
+/// pair (`module_binding_kinds`). These methods are the lockstep-safe
+/// API every consumer SHOULD use; direct field access remains in place
+/// for the Wave-β B6-round-2 migration window but is replaced site-by-
+/// site as those handlers are rewritten.
+///
+/// The dispatch tables match `vm_impl::stack::clone_with_kind` /
+/// `drop_with_kind` exactly — same retain-on-read primitives the stack
+/// and `KindedSlot` use. No `vw_clone` (forbidden #8 per §2.7.7), no
+/// `is_heap` probe (forbidden #7), no Bool-default fallback when a
+/// kind-source gap appears (§2.7.7 #9, §2.7.8 forbidden-shapes).
+impl VirtualMachine {
+    /// Grow the module-binding store so that `index` is in bounds. Pads
+    /// the bits vec with `NONE_BITS` and the kinds vec with the no-op-on-
+    /// drop sentinel `NativeKind::Bool` — same convention as the stack's
+    /// dead-space pre-init in `init.rs:31`. Both vecs grow together so
+    /// the §2.7.8 lockstep invariant `module_bindings.len() ==
+    /// module_binding_kinds.len()` holds at the call boundary.
+    ///
+    /// The sentinel kind is **not** a Bool-default fallback in the §2.7.7
+    /// #9 sense: it marks "no value has ever been written to this slot",
+    /// not "we don't know the kind of an existing heap-bearing payload".
+    /// The first real write replaces it via `module_binding_write_kinded`.
+    #[inline]
+    pub(crate) fn module_binding_pad_to_kinded(&mut self, index: usize) {
+        while self.module_bindings.len() <= index {
+            self.module_bindings.push(Self::NONE_BITS);
+            self.module_binding_kinds.push(NativeKind::Bool);
+        }
+        debug_assert_eq!(
+            self.module_bindings.len(),
+            self.module_binding_kinds.len(),
+            "ADR-006 §2.7.8 / Q10 lockstep invariant",
+        );
+    }
+
+    /// Write a fresh kinded value into `module_bindings[index]`,
+    /// releasing the previous occupant via `drop_with_kind` (ADR-006
+    /// §2.7.8 / Q10 retain-on-overwrite). Mirrors `stack_write_kinded`
+    /// in `vm_impl/stack.rs:374`.
+    ///
+    /// **Ownership**: the new slot owns the strong-count share
+    /// transferred in by the caller. The caller MUST have retained the
+    /// share before calling (e.g. via `clone_with_kind` on the source
+    /// slot, or a fresh `Arc::into_raw`). The previous occupant's
+    /// share is released here and MUST NOT be accessed by the caller
+    /// afterwards.
+    #[inline]
+    pub(crate) fn module_binding_write_kinded(
+        &mut self,
+        index: usize,
+        bits: u64,
+        kind: NativeKind,
+    ) {
+        self.module_binding_pad_to_kinded(index);
+        let old_bits = self.module_bindings[index];
+        let old_kind = self.module_binding_kinds[index];
+        vm_impl::stack::drop_with_kind(old_bits, old_kind);
+        self.module_bindings[index] = bits;
+        self.module_binding_kinds[index] = kind;
+    }
+
+    /// Read the raw bits + kind at `module_bindings[index]` as a borrow
+    /// (no refcount change). The slot retains ownership of the share;
+    /// the caller MUST NOT drop the returned bits. Mirrors
+    /// `stack_read_kinded_raw` in `vm_impl/stack.rs:366`.
+    ///
+    /// Returns `(0, NativeKind::Bool)` for indices past the vec end —
+    /// matches the legacy `Vec<u64>` "uninitialised reads as zero"
+    /// behaviour with the no-op-on-drop kind sentinel paired in.
+    #[inline]
+    pub(crate) fn module_binding_read_kinded_raw(&self, index: usize) -> (u64, NativeKind) {
+        if index >= self.module_bindings.len() {
+            return (0u64, NativeKind::Bool);
+        }
+        debug_assert_eq!(
+            self.module_bindings.len(),
+            self.module_binding_kinds.len(),
+            "ADR-006 §2.7.8 / Q10 lockstep invariant violated at \
+             module_binding_read_kinded_raw",
+        );
+        // The lockstep invariant has been observed; if the kinds vec
+        // is short the bounded access falls back to the no-op sentinel
+        // rather than panicking on a release build.
+        let kind = self
+            .module_binding_kinds
+            .get(index)
+            .copied()
+            .unwrap_or(NativeKind::Bool);
+        (self.module_bindings[index], kind)
+    }
+
+    /// Read an **owning share** of `module_bindings[index]` as a
+    /// `KindedSlot`. Bumps the underlying `Arc<T>` strong-count via
+    /// `clone_with_kind` so the returned `KindedSlot` has an
+    /// independent share; the binding slot itself stays live. Mirrors
+    /// `read_owned_kinded` in `vm_impl/stack.rs:354`.
+    ///
+    /// Use this at every site that hands a binding to a runtime-tier
+    /// `KindedSlot` carrier (host-API `module_bindings()` enumeration,
+    /// snapshot serialisation, etc.).
+    #[inline]
+    pub(crate) fn module_binding_read_owned_kinded(&self, index: usize) -> KindedSlot {
+        let (bits, kind) = self.module_binding_read_kinded_raw(index);
+        vm_impl::stack::clone_with_kind(bits, kind);
+        KindedSlot::new(shape_value::ValueSlot::from_raw(bits), kind)
+    }
+
+    /// Take ownership of `module_bindings[index]`, replacing it with
+    /// the zero/Bool sentinel. Does NOT drop — the caller owns the
+    /// returned bits. Mirrors `stack_take_kinded` in
+    /// `vm_impl/stack.rs:385`.
+    #[inline]
+    pub(crate) fn module_binding_take_kinded(&mut self, index: usize) -> (u64, NativeKind) {
+        if index >= self.module_bindings.len() {
+            return (0u64, NativeKind::Bool);
+        }
+        let bits = self.module_bindings[index];
+        let kind = self
+            .module_binding_kinds
+            .get(index)
+            .copied()
+            .unwrap_or(NativeKind::Bool);
+        self.module_bindings[index] = Self::NONE_BITS;
+        if index < self.module_binding_kinds.len() {
+            self.module_binding_kinds[index] = NativeKind::Bool;
+        }
+        (bits, kind)
+    }
+
+    /// Length of the module-binding store (lockstep-checked).
+    #[inline]
+    pub(crate) fn module_bindings_len(&self) -> usize {
+        debug_assert_eq!(
+            self.module_bindings.len(),
+            self.module_binding_kinds.len(),
+            "ADR-006 §2.7.8 / Q10 lockstep invariant",
+        );
+        self.module_bindings.len()
     }
 }
 

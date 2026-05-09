@@ -30,7 +30,12 @@ impl VirtualMachine {
             stack: vec![0u64; crate::constants::DEFAULT_STACK_CAPACITY],
             kinds: vec![NativeKind::Bool; crate::constants::DEFAULT_STACK_CAPACITY],
             sp: 0,
+            // ADR-006 §2.7.8 / Q10: module-binding storage carries a
+            // parallel `NativeKind` track in lockstep with the raw bits.
+            // Both vecs start empty; the resize-pad helper grows them
+            // together (see `VirtualMachine::module_binding_pad_to_kinded`).
             module_bindings: Vec::new(),
+            module_binding_kinds: Vec::new(),
             shared_module_bindings: std::collections::HashSet::new(),
             call_stack: Vec::with_capacity(crate::constants::DEFAULT_CALL_STACK_CAPACITY),
             loop_stack: Vec::new(),

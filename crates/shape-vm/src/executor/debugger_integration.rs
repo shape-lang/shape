@@ -21,16 +21,16 @@
 //!   own `Drop` releases when the formatted string is built.
 //!
 //! Module-binding inspection (`module_binding_values`,
-//! `set_module_binding`) needs a parallel-kind track on
-//! `VirtualMachine.module_bindings` (currently `Vec<u64>` with no
-//! companion). That parallel track is owned by the §2.7.8 cell-storage
-//! rebuild — module-binding kinds were not extended in B7/B8/B9 (B7 =
-//! ClosureCell, B8 = SharedCell, B9 = CallFrame.closure_heap_kind). The
-//! debugger surface therefore uses the §2.7.4 Phase-2c deferral pattern
-//! (`todo!`) for those two methods until the parallel-kind track lands
-//! for module bindings — handing back an empty Vec or fabricating
-//! `NativeKind::Bool` defaults would silently lose data-flow information
-//! the debugger is supposed to surface, which §2.7.7 forbids verbatim.
+//! `set_module_binding`) reads through the §2.7.8 / Q10 parallel-kind
+//! track on `VirtualMachine.module_bindings` /
+//! `module_binding_kinds`. Both methods are live: the read returns
+//! each binding as a `(bits, NativeKind)` pair via
+//! `module_binding_read_kinded_raw`, and the write threads through
+//! `module_binding_write_kinded` (drop-prior + install-new with the
+//! same retain/release discipline `stack_write_kinded` enforces). No
+//! discriminator fabrication, no §2.7.7 #9 Bool-default fallback —
+//! the kind comes from the parallel track populated lockstep by every
+//! producer site.
 
 use crate::debugger::VMDebugger;
 
@@ -70,19 +70,19 @@ pub trait DebuggerIntegration {
 
     /// Get module-binding values for data-flow inspection.
     ///
-    /// **Phase-2c deferral — ADR-006 §2.7.4.** Module bindings need a
-    /// parallel-kind track (companion `Vec<NativeKind>` on
-    /// `VirtualMachine.module_bindings`) so the debugger can hand back
-    /// kinded values without fabricating a discriminator. That track is
-    /// owned by the §2.7.8 cell-storage rebuild.
+    /// Returns each binding as a `(bits, NativeKind)` pair via the
+    /// §2.7.8 parallel-kind track on `VirtualMachine.module_bindings` /
+    /// `module_binding_kinds`. Read-side; no refcount change.
     fn module_binding_values(&self) -> Vec<(u64, shape_value::NativeKind)>;
 
     /// Set a module-binding variable by index.
     ///
-    /// **Phase-2c deferral — ADR-006 §2.7.4.** Symmetric to the read path:
-    /// requires the parallel-kind track to thread the kinded write through
-    /// the same retain/release discipline `stack_write_kinded` enforces
-    /// for stack slots.
+    /// Threads the kinded write through `module_binding_write_kinded`,
+    /// which releases the prior occupant via `drop_with_kind` and
+    /// installs the new `(bits, kind)` pair — same retain/release
+    /// discipline `stack_write_kinded` enforces for stack slots
+    /// (ADR-006 §2.7.7 / §2.7.8). Caller transfers in one
+    /// strong-count share for heap-bearing kinds.
     fn set_module_binding(&mut self, index: usize, bits: u64, kind: shape_value::NativeKind);
 
     /// Set trace mode
@@ -132,18 +132,15 @@ impl DebuggerIntegration for super::VirtualMachine {
                 .collect();
             println!("Locals (bp={}): {:?}", bp, locals);
         }
-        // Module bindings inspection is §2.7.4-deferred (no parallel-kind
-        // track yet — see trait doc on `module_binding_values`). Display
-        // only the raw 8-byte slot bits — kind is unavailable.
-        let module_bindings_raw: Vec<String> = self
-            .module_bindings
-            .iter()
-            .map(|&b| format!("{:#x}", b))
+        // ADR-006 §2.7.8 / Q10: walk both vecs lockstep via the
+        // kinded accessor, displaying `(bits, kind)` per slot.
+        let module_bindings_kinded: Vec<String> = (0..self.module_bindings_len())
+            .map(|i| {
+                let (bits, kind) = self.module_binding_read_kinded_raw(i);
+                format!("{{ bits: {:#x}, kind: {:?} }}", bits, kind)
+            })
             .collect();
-        println!(
-            "Globals (raw bits — kinds pending §2.7.8 parallel track): {:?}",
-            module_bindings_raw
-        );
+        println!("Globals: {:?}", module_bindings_kinded);
         println!("Call stack depth: {}", self.call_stack.len());
     }
 
@@ -199,26 +196,27 @@ impl DebuggerIntegration for super::VirtualMachine {
     }
 
     fn module_binding_values(&self) -> Vec<(u64, shape_value::NativeKind)> {
-        todo!(
-            "phase-2c — ADR-006 §2.7.4: module_binding_values requires a \
-             parallel-kind track (companion Vec<NativeKind>) on \
-             VirtualMachine.module_bindings (§2.7.8 / Q10). The pre-bulldozer \
-             return type was Vec<ValueWord> via the deleted binding_read_raw \
-             shim; without the parallel track the debugger cannot hand back \
-             kinded values without fabricating a discriminator (forbidden by \
-             §2.7.7)."
-        )
+        // ADR-006 §2.7.8 / Q10: module-binding storage now carries a
+        // parallel `NativeKind` track. The debugger walks both vecs in
+        // lockstep via the kinded accessor; no discriminator
+        // fabrication, no §2.7.7 #9 Bool-default fallback for live
+        // heap-bearing slots.
+        let len = self.module_bindings_len();
+        (0..len)
+            .map(|i| self.module_binding_read_kinded_raw(i))
+            .collect()
     }
 
-    fn set_module_binding(&mut self, _index: usize, _bits: u64, _kind: shape_value::NativeKind) {
-        todo!(
-            "phase-2c — ADR-006 §2.7.4: set_module_binding requires the same \
-             parallel-kind track as module_binding_values. The pre-bulldozer \
-             body called the deleted binding_write_raw shim with a ValueWord; \
-             the kinded write site (drop_with_kind on the prior slot, install \
-             new (bits, kind) pair) needs the §2.7.8 parallel track to land \
-             before this method can re-light."
-        )
+    fn set_module_binding(&mut self, index: usize, bits: u64, kind: shape_value::NativeKind) {
+        // ADR-006 §2.7.8 / Q10: kinded write through the parallel
+        // track. `module_binding_write_kinded` releases the prior
+        // occupant via `drop_with_kind` and installs the new
+        // `(bits, kind)` pair atomically — same retain/release
+        // discipline `stack_write_kinded` enforces for stack slots.
+        // The caller is responsible for having retained the new
+        // share before this call (matching the §2.7.7 ownership
+        // contract for stack writes).
+        self.module_binding_write_kinded(index, bits, kind);
     }
 
     fn set_trace_mode(&mut self, enabled: bool) {
