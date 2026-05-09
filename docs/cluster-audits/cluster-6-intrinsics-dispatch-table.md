@@ -222,8 +222,8 @@ encoding the element type). Body dispatches inner per-T arm.
 - **Watchlist match (close)**: re-introduces an inline kind-tag at the
   marshal-arg layer — same shape as the rejected "Convert<X>To<Y>
   opcode" pattern from CLAUDE.md ("Add a new opcode for this specific
-  conversion"). The kind discriminator is a runtime tag-decode by
-  another name. **Likely REJECT.**
+  conversion"). The kind discriminator is the deleted tag_bits dispatch
+  by another name. **Likely REJECT.**
 - Loses the strict-typed input at the marshal layer.
 
 **Effort**: 1-2 days but architecturally suspect.
