@@ -99,8 +99,8 @@ impl VirtualMachine {
             }
             _ => {
                 // The op was emitted against a non-typed-array receiver
-                // shape. Generic-VW-array, unified-array, and the legacy
-                // tag-decode dispatch were the pre-existing cover for this
+                // shape. Generic-VW-array, unified-array, and the deleted
+                // tag_bits dispatch were the pre-existing cover for this
                 // — all forbidden per ADR-006 §2.7.7. Surface per
                 // playbook §8.
                 drop_with_kind(value_bits, value_kind);

@@ -25,8 +25,8 @@
 //!    type itself).
 //! - `as_heap_ref()` (forbidden — playbook §4 #7; replaced by
 //!   `slot.as_heap_value()` on `KindedSlot::slot`).
-//! - `tag_bits::*` / `is_tagged()` / the W-series ValueWord-synthesis bridge
-//!   (forbidden — playbook §4 #7).
+//! - `tag_bits::*` / `is_tagged()` / the deleted W-series ValueWord
+//!   synthesizer (forbidden — playbook §4 #7).
 //!
 //! On top of those, the `MethodHandler` ABI itself
 //! (`fn(&mut VM, &mut [u64], _) -> Result<u64, VMError>`) is **kind-less in
@@ -75,9 +75,9 @@
 //!   surface markers).
 //! - Sibling shim hits: 0 (none in pre-existing file; verified at audit).
 //! - Forbidden-pattern carry-overs: 0 (`ValueWord`, `as_heap_ref`, `vw_drop`,
-//!   `value_word_drop`, `as_vw_ref`, `tag_bits`, ValueWord-synthesis bridge
-//!   are all gone; the `extract_heap_ref` import lived in the now-deleted
-//!   bodies and is not reintroduced).
+//!   `value_word_drop`, `as_vw_ref`, `tag_bits`, and the deleted ValueWord
+//!   synthesizer are all gone; the `extract_heap_ref` import lived in the
+//!   now-deleted bodies and is not reintroduced).
 //! - Surfaces: 6 (`exec_objects` opcode dispatch + 5 method-dispatch entries:
 //!   `op_call_method`, `op_make_range`, `op_wrap_type_annotation`,
 //!   `dispatch_method_handler`, plus the v2 typed-array PHF fast path baked

@@ -71,10 +71,10 @@ impl BytecodeExecutor {
 
     // Pattern D bridge `normalize_persisted_for_slot` deleted by the
     // strict-typing bulldozer. REPL persistence must store raw native
-    // bits per the binding's compile-time-proved kind; no runtime
-    // tag-decode at the load boundary. Phase 2 rewires
-    // save_module_bindings_to_context / restore to use per-slot kind
-    // metadata directly.
+    // bits per the binding's compile-time-proved kind; the deleted
+    // tag_bits dispatch never re-runs at the load boundary. Phase 2
+    // rewires save_module_bindings_to_context / restore to use per-slot
+    // kind metadata directly.
 
     /// Wave E+5.5: propagate known-binding type info from a persistent
     /// REPL `ExecutionContext` into the compiler's type tracker, so the

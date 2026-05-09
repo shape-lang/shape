@@ -13,7 +13,7 @@
 //! call site and consumes a `&KindedSlot`.
 //!
 //! Per §2.7.6: "runtime-tier dispatch on a carrier at a builtin
-//! boundary, not a hot-path tag-decode."
+//! boundary; the deleted hot-path tag_bits dispatch never runs here."
 
 use shape_value::{KindedSlot, NativeKind, VMError, heap_value::HeapKind};
 

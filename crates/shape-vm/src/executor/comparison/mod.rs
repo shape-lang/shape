@@ -114,8 +114,8 @@ impl VirtualMachine {
             //
             // Wave 6.5: Int comparisons read native i64 bits via `pop_kinded`
             // and unconditionally push `NativeKind::Bool`. The pre-Wave-6
-            // dual-path tag probe is gone (deleted in substep-1; would
-            // always have returned false on native bits).
+            // dual-path `is_tagged()` call is gone (deleted in substep-1;
+            // would always have returned false on native bits).
             GtInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
