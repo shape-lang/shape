@@ -15,7 +15,8 @@ use shape_lsp::inlay_hints::InlayHintConfig;
 use shape_runtime::engine::ShapeEngine;
 use shape_runtime::initialize_shared_runtime;
 use shape_runtime::output_adapter::OutputAdapter;
-use shape_value::{PrintResult, ValueWordExt};
+use shape_runtime::print_result::PrintResult;
+use shape_value::KindedSlot;
 use shape_vm::BytecodeExecutor;
 
 // ---------------------------------------------------------------------------
@@ -40,9 +41,9 @@ impl CaptureAdapter {
 }
 
 impl OutputAdapter for CaptureAdapter {
-    fn print(&mut self, result: PrintResult) -> shape_value::ValueWord {
+    fn print(&mut self, result: PrintResult) -> KindedSlot {
         self.lines.lock().unwrap().push(result.rendered);
-        shape_value::ValueWord::none()
+        KindedSlot::none()
     }
 
     fn clone_box(&self) -> Box<dyn OutputAdapter> {
