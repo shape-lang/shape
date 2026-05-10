@@ -584,7 +584,9 @@ mod tests {
                     mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Unknown])),
+            // W11: `NativeKind::Unknown` deleted; `Bool` is a benign stand-in
+            // for this single-slot test descriptor (the slot is never read).
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Bool])),
             osr_entry_points: vec![],
         };
 

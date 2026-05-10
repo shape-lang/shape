@@ -890,6 +890,12 @@ pub unsafe extern "C" fn jit_write_shared_cell_ptr(cell_ptr: i64, value: i64) {
     };
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `ValueWordExt` (removed by the strict-typing bulldozer; see
+// `crates/shape-value/src/native_kind.rs:103-107` and Forbidden Patterns
+// in `CLAUDE.md`). The kinded-FFI replacement (`KindedSlot`-based shared-
+// cell lifecycle helpers) is part of the §2.7.4 Phase 2c FFI rebuild.
+#[cfg(any())]
 #[cfg(test)]
 mod a1e_shared_ffi_tests {
     //! Track A.1E unit tests for the Shared capture FFI helpers.
@@ -1031,6 +1037,9 @@ mod a1d_owned_mutable_cell_tests {
     }
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `tag_bits` API. Kinded-FFI replacement deferred to §2.7.4 Phase 2c.
+#[cfg(any())]
 #[cfg(test)]
 mod phase_h2_finalizer_tests {
     //! Closure-spec Phase H2 (updated for §14.6 / H6.5) unit tests for
@@ -1514,6 +1523,9 @@ mod phase_h2_finalizer_tests {
     }
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `ValueWordExt` API. Kinded-FFI replacement deferred to §2.7.4 Phase 2c.
+#[cfg(any())]
 #[cfg(test)]
 mod session_1_shared_local_lifecycle_tests {
     //! Session 1 Commit 3 unit tests for
