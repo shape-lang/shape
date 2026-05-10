@@ -124,16 +124,18 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::ClosureLayout;
     use shape_value::v2::closure_raw::OwnedClosureBlock;
-    use shape_value::{ValueWord, ValueWordExt};
     use std::sync::Arc;
 
     unsafe {
         if header_ptr.is_null() || layout_ptr.is_null() {
-            // Safety valve: refuse to construct an invalid closure. Callers
-            // must not deref the TAG_NONE return as a function — this is a
-            // codegen bug if it ever fires.
-            return shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
+            // Safety valve: refuse to construct an invalid closure. Per
+            // ADR-006 §2.7.5 the JIT-FFI carries raw `u64` plus a parallel
+            // `NativeKind` companion stamped at JIT compile time from the
+            // call signature; the kind for this entry-point is
+            // `NativeKind::Ptr(HeapKind::Closure)` and a null payload (raw
+            // 0u64) is the carrier-level miss. Callers must not deref the
+            // return as a function — this is a codegen bug if it ever fires.
+            return 0u64;
         }
 
         let layout_ref: &ClosureLayout = &*layout_ptr;
@@ -163,11 +165,15 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
         // `atomic_rmw add 1` loop — those stay with the block.
         let owned = OwnedClosureBlock::from_raw(header_ptr as *const u8, layout_arc);
 
-        // Wrap in the H6.5 `HeapValue::ClosureRaw` variant. Readers migrated
-        // through `VmClosureHandle` (H6.2–H6.4) see the Raw backing
-        // transparently; the legacy `Closure { function_id, upvalues }`
-        // rebuild is gone.
-        ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        // Wrap in the H6.5 `HeapValue::ClosureRaw` variant. Per ADR-006
+        // §2.7.5 / W7 closure-share carrier audit (commit `5fa4b19`,
+        // 2026-05-09): closure share carrier is `Arc<HeapValue>`, returned
+        // here as raw `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(owned)))
+        // as u64`. The companion `NativeKind::Ptr(HeapKind::Closure)` is
+        // stamped at the JIT call signature; the runtime-tier
+        // `clone_with_kind` / `drop_with_kind` dispatch tables retain /
+        // release `Arc<HeapValue>` per W7-closure-retain.
+        Arc::into_raw(Arc::new(HeapValue::ClosureRaw(owned))) as u64
     }
 }
 
