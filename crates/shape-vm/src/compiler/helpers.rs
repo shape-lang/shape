@@ -3608,7 +3608,12 @@ impl BytecodeCompiler {
             | "describe" | "aggregate" | "group_by" | "index_by" | "indexBy"
             | "simulate" | "toMat" | "to_mat"
         )
-        // Column methods (from COLUMN_METHODS PHF map)
+        // (W15-column, 2026-05-10) `Column` value-type methods deleted
+        // per ADR-006 §2.7.21 / Q22. `toArray` survives as a
+        // TypedArray-shape method (Array.toArray() identity); kept here
+        // because the predicate is a name-set, not a receiver-kind
+        // classifier — `toArray` is reachable on TypedArray receivers
+        // through `ARRAY_METHODS`.
         || matches!(method, "toArray")
         // IndexedTable methods (from INDEXED_TABLE_METHODS PHF map)
         || matches!(method, "resample" | "between")

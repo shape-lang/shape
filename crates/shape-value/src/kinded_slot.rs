@@ -131,6 +131,9 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashset(h),
             NativeKind::Ptr(HeapKind::HashSet),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).

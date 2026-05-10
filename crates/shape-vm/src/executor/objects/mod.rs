@@ -118,8 +118,11 @@ pub mod array_transform;
 // DataTable method handlers.
 pub mod datatable_methods;
 
-// Column method handlers.
-pub mod column_methods;
+// (W15-column, 2026-05-10) `column_methods` deleted: ADR-006 §2.7.21 / Q22.
+// `Column` is not a surviving `HeapKind` variant — its semantics are
+// absorbed by `HeapKind::TableView` + `TableViewData::ColumnRef` (see
+// `crates/shape-value/src/heap_value.rs`). The previous file held 11
+// surface-only stubs and a stale PHF map; both are removed.
 
 // IndexedTable method handlers.
 pub mod indexed_table_methods;

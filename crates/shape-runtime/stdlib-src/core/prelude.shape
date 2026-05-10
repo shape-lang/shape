@@ -25,7 +25,8 @@ use std::core::int_methods
 use std::core::hashmap_methods
 use std::core::option_methods
 use std::core::result_methods
-use std::core::column_methods
+// (W15-column, 2026-05-10) `column_methods` deleted per ADR-006
+// §2.7.21 / Q22 — `Column` is absorbed by `TableView::ColumnRef`.
 use std::core::table_methods
 
 // Sweep phase 4a: the `Json` enum is the canonical surface returned by
