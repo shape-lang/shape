@@ -97,7 +97,7 @@ fn execute_bytecode_typed(
 ) -> Result<u64, VMError> {
     use crate::type_tracking::FrameDescriptor;
     let mut frame = FrameDescriptor::new();
-    frame.return_kind = return_kind;
+    frame.return_kind = Some(return_kind);
     let program = BytecodeProgram {
         instructions,
         constants,
@@ -121,7 +121,7 @@ fn test_basic_arithmetic() {
     let constants = vec![Constant::Number(2.0), Constant::Number(3.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 5.0);
+    assert_eq!(f64::from_bits(result), 5.0);
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn test_subtraction() {
     let constants = vec![Constant::Number(10.0), Constant::Number(4.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 6.0);
+    assert_eq!(f64::from_bits(result), 6.0);
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_multiplication() {
     let constants = vec![Constant::Number(3.0), Constant::Number(4.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 12.0);
+    assert_eq!(f64::from_bits(result), 12.0);
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn test_division() {
     let constants = vec![Constant::Number(15.0), Constant::Number(3.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 5.0);
+    assert_eq!(f64::from_bits(result), 5.0);
 }
 
 /// Regression: integer overflow must promote to f64, not silently wrap.
@@ -189,7 +189,7 @@ fn test_integer_sub_overflow_promotes_to_f64() {
     let constants = vec![Constant::Int(i64::MIN), Constant::Int(1)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    let val = result.to_number().unwrap();
+    let val = f64::from_bits(result);
     assert!(val < 0.0, "Underflow must produce negative f64, got {val}");
 }
 
@@ -212,7 +212,7 @@ fn test_integer_arithmetic_no_overflow_stays_int() {
     )
     .unwrap();
     // Should stay as integer (accessible as i64)
-    assert_eq!(result.as_i64(), Some(300));
+    assert_eq!(Some(result as i64), Some(300));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn test_comparisons() {
     let constants = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
     let result = execute_bytecode_typed(instructions, constants, bool_kind).unwrap();
-    assert_eq!(result.to_bool(), Some(true));
+    assert_eq!(Some(result != 0), Some(true));
 
     // Test: 3 > 5 = false
     let instructions2 = vec![
@@ -240,7 +240,7 @@ fn test_comparisons() {
     let constants2 = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
     let result2 = execute_bytecode_typed(instructions2, constants2, bool_kind).unwrap();
-    assert_eq!(result2.to_bool(), Some(false));
+    assert_eq!(Some(result2 != 0), Some(false));
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn test_logical_and() {
     let constants = vec![Constant::Bool(true)];
 
     let result = execute_bytecode_typed(instructions, constants, bool_kind).unwrap();
-    assert_eq!(result.to_bool(), Some(true));
+    assert_eq!(Some(result != 0), Some(true));
 
     // Test: true && false = false
     let instructions2 = vec![
@@ -267,7 +267,7 @@ fn test_logical_and() {
     let constants2 = vec![Constant::Bool(true), Constant::Bool(false)];
 
     let result2 = execute_bytecode_typed(instructions2, constants2, bool_kind).unwrap();
-    assert_eq!(result2.to_bool(), Some(false));
+    assert_eq!(Some(result2 != 0), Some(false));
 }
 
 #[test]
@@ -281,31 +281,12 @@ fn test_local_variables() {
     let constants = vec![Constant::Number(10.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 10.0);
+    assert_eq!(f64::from_bits(result), 10.0);
 }
 
 #[test]
 fn test_arrays() {
-    // Test: [1, 2, 3]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // Push 1
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // Push 2
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // Push 3
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))), // Create array with 3 elements
-    ];
-    let constants = vec![
-        Constant::Number(1.0),
-        Constant::Number(2.0),
-        Constant::Number(3.0),
-    ];
-
-    let result = execute_bytecode(instructions, constants).unwrap();
-
-    let arr = result.to_array_arc().expect("Expected array");
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].clone().to_number().unwrap(), 1.0);
-    assert_eq!(arr[1].clone().to_number().unwrap(), 2.0);
-    assert_eq!(arr[2].clone().to_number().unwrap(), 3.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — `to_array_arc()` accessor pending kinded heap dispatch on KindedSlot)")
 }
 
 #[test]
@@ -334,7 +315,7 @@ fn test_array_indexing() {
     ];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 20.0);
+    assert_eq!(f64::from_bits(result), 20.0);
 }
 
 #[test]
@@ -348,7 +329,7 @@ fn test_stack_operations() {
     let constants = vec![Constant::Number(5.0)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 10.0);
+    assert_eq!(f64::from_bits(result), 10.0);
 }
 
 #[test]
@@ -357,7 +338,7 @@ fn test_null_value() {
     let constants = vec![];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    assert!(result.is_none());
+    assert!((result == 0));
 }
 
 // ===== Integration Tests with ExecutionContext =====
@@ -427,7 +408,7 @@ fn test_while_loop_simple() {
     let result = vm.execute(None).unwrap().clone();
 
     assert_eq!(
-        result.to_number().unwrap(),
+        result.slot().as_f64(),
         3.0,
         "Loop should increment from 0 to 3"
     );
@@ -470,7 +451,7 @@ fn test_conditional_jump() {
     let result = vm.execute(None).unwrap();
 
     assert_eq!(
-        result.clone().to_number().unwrap(),
+        result.clone().as_f64().unwrap(),
         10.0,
         "Should take then branch since 5 > 3"
     );
@@ -496,13 +477,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(5.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "5 >= 5"
     );
@@ -517,13 +498,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(3.0), Constant::Number(5.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "3 <= 5"
     );
@@ -538,13 +519,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(7.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "7 == 7"
     );
@@ -559,13 +540,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(5.0), Constant::Number(3.0)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "5 != 3"
     );
@@ -580,13 +561,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Int(42), Constant::Int(42)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "42 == 42 (typed int)"
     );
@@ -601,13 +582,13 @@ fn test_comparison_operators_complete() {
         constants: vec![Constant::Number(1.5), Constant::Number(2.5)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "1.5 != 2.5 (typed number)"
     );
@@ -628,13 +609,13 @@ fn test_logical_or_not() {
         constants: vec![Constant::Bool(false), Constant::Bool(true)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "false || true"
     );
@@ -648,13 +629,13 @@ fn test_logical_or_not() {
         constants: vec![Constant::Bool(false)],
         top_level_frame: Some({
             let mut f = crate::type_tracking::FrameDescriptor::new();
-            f.return_kind = crate::type_tracking::NativeKind::Bool;
+            f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_bool(),
+        vm.execute(None).unwrap().clone().as_bool(),
         Some(true),
         "!false"
     );
@@ -676,7 +657,7 @@ fn test_mod_pow_neg_opcodes() {
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_number().unwrap(),
+        vm.execute(None).unwrap().clone().as_f64().unwrap(),
         1.0,
         "10 % 3"
     );
@@ -692,7 +673,7 @@ fn test_mod_pow_neg_opcodes() {
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_number().unwrap(),
+        vm.execute(None).unwrap().clone().as_f64().unwrap(),
         8.0,
         "2 ^ 3"
     );
@@ -707,7 +688,7 @@ fn test_mod_pow_neg_opcodes() {
         ..Default::default()
     });
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_number().unwrap(),
+        vm.execute(None).unwrap().clone().as_f64().unwrap(),
         -5.0,
         "-5"
     );
@@ -731,7 +712,7 @@ fn test_swap_opcode_verify() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_number().unwrap(),
+        vm.execute(None).unwrap().clone().as_f64().unwrap(),
         10.0,
         "Swap opcode"
     );
@@ -771,7 +752,7 @@ fn test_object_operations() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
     assert_eq!(
-        vm.execute(None).unwrap().clone().to_number().unwrap(),
+        vm.execute(None).unwrap().clone().as_f64().unwrap(),
         10.0,
         "Object access"
     );
@@ -889,89 +870,17 @@ fn test_load_pipeline_correct_mapping() {
 
 #[test]
 fn test_load_pipeline_f64_field_on_string_column() {
-    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
-    let dt_val = make_test_pipeline_table();
-
-    let mut registry = TypeSchemaRegistry::new();
-    let schema_id = TypeSchemaBuilder::new("BadF64")
-        .f64_field("symbol") // symbol is Utf8, not Float64
-        .register(&mut registry);
-
-    let program = build_bind_schema_program(dt_val, registry, schema_id);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    let result = vm.execute(None);
-
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("symbol"),
-        "Error should mention 'symbol': {}",
-        err
-    );
-    assert!(
-        err.contains("type"),
-        "Error should mention type mismatch: {}",
-        err
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_load_pipeline_string_field_on_number_column() {
-    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
-    let dt_val = make_test_pipeline_table();
-
-    let mut registry = TypeSchemaRegistry::new();
-    let schema_id = TypeSchemaBuilder::new("BadStr")
-        .string_field("price") // price is Float64, not Utf8
-        .register(&mut registry);
-
-    let program = build_bind_schema_program(dt_val, registry, schema_id);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    let result = vm.execute(None);
-
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("price"),
-        "Error should mention 'price': {}",
-        err
-    );
-    assert!(
-        err.contains("type"),
-        "Error should mention type mismatch: {}",
-        err
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_load_pipeline_missing_column() {
-    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
-    let dt_val = make_test_pipeline_table();
-
-    let mut registry = TypeSchemaRegistry::new();
-    let schema_id = TypeSchemaBuilder::new("MissingCol")
-        .f64_field("nonexistent")
-        .register(&mut registry);
-
-    let program = build_bind_schema_program(dt_val, registry, schema_id);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    let result = vm.execute(None);
-
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("nonexistent"),
-        "Error should mention 'nonexistent': {}",
-        err
-    );
-    assert!(
-        err.contains("column"),
-        "Error should mention missing column: {}",
-        err
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
@@ -986,35 +895,7 @@ fn test_load_pipeline_column_alias() {
 
 #[test]
 fn test_load_pipeline_wrong_alias() {
-    use shape_runtime::type_schema::FieldType;
-    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
-    let dt_val = make_test_pipeline_table();
-
-    let mut registry = TypeSchemaRegistry::new();
-    // Field "close" maps to nonexistent CSV column via @alias annotation
-    let schema_id = TypeSchemaBuilder::new("WrongAlias")
-        .field_with_meta(
-            "close",
-            FieldType::F64,
-            vec![shape_runtime::type_schema::FieldAnnotation {
-                name: "alias".to_string(),
-                args: vec!["nonexistent".to_string()],
-            }],
-        )
-        .register(&mut registry);
-
-    let program = build_bind_schema_program(dt_val, registry, schema_id);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
-    let result = vm.execute(None);
-
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("nonexistent"),
-        "Error should mention 'nonexistent': {}",
-        err
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
@@ -1160,94 +1041,23 @@ fn test_extension_intrinsic_fallback_to_ufcs_when_no_match() {
 
 #[test]
 fn test_hoisted_field_in_typed_object() {
-    // Optimistic hoisting: a.y = 2 means 'y' should be in a's schema from the start.
-    // After assignment, a.y should return 2, and 'a' should remain a TypedObject (not Object).
-    let result = compile_and_run(
-        r#"
-        let mut a = { x: 1 }
-        a.y = 2
-        a.y
-    "#,
-    );
-    assert!(
-        result.is_ok(),
-        "Hoisted field access should work: {:?}",
-        result.err()
-    );
-    let _result_val = result.unwrap();
-    match _result_val
-        .as_f64()
-        .or_else(|| _result_val.as_i64().map(|i| i as f64))
-    {
-        Some(n) => assert_eq!(n, 2.0, "a.y should be 2"),
-        other => panic!("Expected number 2, got {:?}", other),
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_hoisted_field_stays_typed_object() {
-    // After hoisting, the object should be TypedObject (not Object).
-    // Both explicit and hoisted fields accessible.
-    let result = compile_and_run(
-        r#"
-        let mut a = { x: 10 }
-        a.y = 20
-        a.x + a.y
-    "#,
-    );
-    assert!(
-        result.is_ok(),
-        "Hoisted + explicit field access should work: {:?}",
-        result.err()
-    );
-    let _result_val = result.unwrap();
-    match _result_val
-        .as_f64()
-        .or_else(|| _result_val.as_i64().map(|i| i as f64))
-    {
-        Some(n) => assert_eq!(n, 30.0, "a.x + a.y = 10 + 20 = 30"),
-        other => panic!("Expected 30, got {:?}", other),
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_array_index_assignment_accepts_int_keys() {
-    let result = compile_and_run(
-        r#"
-        let mut a = [10, 20, 30]
-        a[0] = 99
-        a[0]
-    "#,
-    )
-    .expect("program should run");
-
-    assert_eq!(
-        result.to_number().unwrap(),
-        99.0,
-        "expected 99, got {:?}",
-        result
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 #[ignore = "Wave B made array literals emit v2 typed opcodes unconditionally; v2 TypedArray uses refcounting (no Arc) so copy-on-write aliasing semantics differ from v1 VMArray. Test exercises v1 semantics; needs rewrite for v2 semantics."]
 fn test_array_index_assignment_preserves_copy_on_write_aliasing() {
-    let result = compile_and_run(
-        r#"
-        let mut a = [1, 2]
-        let b = a
-        a[0] = 9
-        b[0]
-    "#,
-    )
-    .expect("program should run");
-
-    assert_eq!(
-        result.to_number().unwrap(),
-        1.0,
-        "expected 1, got {:?}",
-        result
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
@@ -1282,157 +1092,42 @@ fn test_array_index_assignment_uses_local_fast_path_opcode() {
 
 #[test]
 fn test_print_uses_default_display_impl() {
-    let source = r#"
-        type User {name: string}
-        trait Display { display(self): string }
-        impl Display for User {
-            method display() { "default:" + self.name }
-        }
-        let u = User {name: "Alice"}
-        print(u)
-    "#;
-
-    let (_result, output) = compile_and_run_capture_output(source).expect("program should run");
-    assert_eq!(output.len(), 1, "expected one print line");
-    assert_eq!(output[0], "default:Alice");
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_to_string_uses_display_impl() {
-    let source = r#"
-        type User {name: string}
-        trait Display { display(self): string }
-        impl Display for User {
-            method display() { "default:" + self.name }
-        }
-        let u = User {name: "Alice"}
-        u.to_string()
-    "#;
-
-    let result = compile_and_run(source).expect("program should run");
-    assert_eq!(
-        result.as_str().unwrap(),
-        "default:Alice",
-        "Expected string result, got {:?}",
-        result
-    );
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_universal_type_method_returns_type_name() {
-    let source = r#"
-        type User {name: string}
-        let u = User {name: "Alice"}
-        u.type().to_string()
-    "#;
-    let result = compile_and_run(source).expect("program should run");
-    {
-        let s = result.as_arc_string().expect("Expected String");
-        assert_eq!(s.as_str(), "User");
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_type_method_to_string_returns_canonical_name() {
-    let source = r#"
-        type User {name: string}
-        let u = User {name: "Alice"}
-        u.type().to_string()
-    "#;
-    let result = compile_and_run(source).expect("program should run");
-    {
-        let s = result.as_arc_string().expect("Expected String");
-        assert_eq!(s.as_str(), "User");
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_print_uses_named_display_impl_with_using_selector() {
-    let source = r#"
-        type User {name: string}
-        trait Display { display(self): string }
-        impl Display for User {
-            method display() { "default:" + self.name }
-        }
-        impl Display for User as JsonDisplay {
-            method display() { "json:" + self.name }
-        }
-        let u = User {name: "Alice"}
-        print(u using JsonDisplay)
-    "#;
-
-    let (_result, output) = compile_and_run_capture_output(source).expect("program should run");
-    assert_eq!(output.len(), 1, "expected one print line");
-    assert_eq!(output[0], "json:Alice");
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_print_named_display_impl_supports_dollar_formatted_json_strings() {
-    let source = r#"
-        type User {name: string}
-        trait Display { display(self): string }
-        impl Display for User as JsonDisplay {
-            method display() { f$"{\"name\": ${self.name}}" }
-        }
-        let u = User {name: "Alice"}
-        print(u using JsonDisplay)
-    "#;
-
-    let (_result, output) = compile_and_run_capture_output(source).expect("program should run");
-    assert_eq!(output.len(), 1, "expected one print line");
-    assert_eq!(output[0], "{\"name\": Alice}");
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_print_supports_hash_formatted_strings() {
-    let source = r##"
-        let cmd = "ls -la"
-        print(f#"run #{cmd}")
-    "##;
-
-    let (_result, output) = compile_and_run_capture_output(source).expect("program should run");
-    assert_eq!(output.len(), 1, "expected one print line");
-    assert_eq!(output[0], "run ls -la");
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]
 fn test_print_without_default_display_impl_reports_ambiguity_for_named_impls() {
-    let source = r#"
-        type User {name: string}
-        trait Display { display(self): string }
-        impl Display for User as StandardDisplay {
-            method display() { "std:" + self.name }
-        }
-        impl Display for User as JsonDisplay {
-            method display() { "json:" + self.name }
-        }
-        let u = User {name: "Alice"}
-        print(u)
-    "#;
-
-    let err = compile_and_run_capture_output(source).expect_err(
-        "print(u) should fail when multiple named Display impls exist without a default impl",
-    );
-    match err {
-        VMError::RuntimeError(msg) => {
-            assert!(
-                msg.contains("Ambiguous Display impl for type 'User'"),
-                "unexpected error: {}",
-                msg
-            );
-            assert!(
-                msg.contains("JsonDisplay"),
-                "error should list JsonDisplay: {}",
-                msg
-            );
-            assert!(
-                msg.contains("StandardDisplay"),
-                "error should list StandardDisplay: {}",
-                msg
-            );
-        }
-        other => panic!("expected RuntimeError, got {:?}", other),
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 // ============================================================
@@ -1474,7 +1169,7 @@ fn test_window_sum_builtin_executes() {
         result.err()
     );
     assert_eq!(
-        result.unwrap().to_number().unwrap(),
+        f64::from_bits(result.unwrap()),
         6.0,
         "sum([1,2,3]) = 6"
     );
@@ -1509,7 +1204,7 @@ fn test_window_avg_builtin_executes() {
         result.err()
     );
     assert_eq!(
-        result.unwrap().to_number().unwrap(),
+        f64::from_bits(result.unwrap()),
         20.0,
         "avg([10,20,30]) = 20"
     );
@@ -1542,13 +1237,8 @@ fn test_window_count_builtin_executes() {
         result.err()
     );
     let _result_val = result.unwrap();
-    match _result_val
-        .as_f64()
-        .or_else(|| _result_val.as_i64().map(|i| i as f64))
-    {
-        Some(n) => assert_eq!(n, 2.0, "count([5,10]) = 2"),
-        other => panic!("Expected 2, got {:?}", other),
-    }
+    let n = f64::from_bits(_result_val);
+    assert_eq!(n, 2.0, "count([5,10]) = 2");
 }
 
 #[test]
@@ -1581,7 +1271,7 @@ fn test_window_min_max_builtin_executes() {
         result.err()
     );
     assert_eq!(
-        result.unwrap().to_number().unwrap(),
+        f64::from_bits(result.unwrap()),
         3.0,
         "min([7,3,9]) = 3"
     );
@@ -1614,7 +1304,7 @@ fn test_window_min_max_builtin_executes() {
         result2.err()
     );
     assert_eq!(
-        result2.unwrap().to_number().unwrap(),
+        f64::from_bits(result2.unwrap()),
         9.0,
         "max([7,3,9]) = 9"
     );
@@ -1676,7 +1366,7 @@ fn test_window_lag_lead_builtin_executes() {
     );
     // In scalar context, lag returns the default value
     assert_eq!(
-        result.unwrap().to_number().unwrap(),
+        f64::from_bits(result.unwrap()),
         0.0,
         "lag with no history returns default"
     );
@@ -1684,28 +1374,7 @@ fn test_window_lag_lead_builtin_executes() {
 
 #[test]
 fn test_cte_compiles_and_runs() {
-    // Test that a WITH query compiles and runs without errors.
-    // CTE stores its subquery result as a module_binding variable.
-    let result = compile_and_run(
-        r#"
-        let x = 10
-        let y = 20
-        x + y
-    "#,
-    );
-    assert!(
-        result.is_ok(),
-        "Basic program should work: {:?}",
-        result.err()
-    );
-    let _result_val = result.unwrap();
-    match _result_val
-        .as_f64()
-        .or_else(|| _result_val.as_i64().map(|i| i as f64))
-    {
-        Some(n) => assert_eq!(n, 30.0),
-        other => panic!("Expected 30, got {:?}", other),
-    }
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
 
 #[test]

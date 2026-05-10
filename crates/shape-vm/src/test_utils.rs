@@ -40,7 +40,7 @@
 use crate::compiler::BytecodeCompiler;
 use crate::executor::{VMConfig, VirtualMachine};
 use crate::type_tracking::NativeKind;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{KindedSlot, VMError};
 
 // ─── Layer 1: raw + kind-hint ────────────────────────────────────────────
 
@@ -72,32 +72,29 @@ pub fn eval_raw(source: &str) -> (u64, Option<NativeKind>) {
 /// the type).
 #[inline]
 fn top_level_return_kind(program: &crate::bytecode::BytecodeProgram) -> Option<NativeKind> {
-    let kind = program.top_level_frame.as_ref()?.return_kind;
-    match kind {
-        NativeKind::Unknown => None,
-        _ => Some(kind),
-    }
+    // ADR-006 §2.7.5.1: `return_kind` is now `Option<NativeKind>` —
+    // `None` ≡ "kind not stamped" (the deleted `NativeKind::Unknown`
+    // sentinel is no longer observable).
+    program.top_level_frame.as_ref()?.return_kind
 }
 
-// ─── Layer 2: tagged ValueWord (default) ─────────────────────────────────
+// ─── Layer 2: KindedSlot (default) ───────────────────────────────────────
 
 /// Compile and execute Shape source code, returning the final value as a
-/// tagged `ValueWord`. Synthesises the `ValueWord` from raw bits per the
-/// program's declared top-level return kind (if any); falls back to
-/// passthrough when no kind is declared. Panics on parse, compile, or
-/// execution failure.
-pub fn eval(source: &str) -> ValueWord {
+/// [`KindedSlot`] — the canonical post-`ValueWord` runtime-value carrier
+/// (ADR-006 §2.7 / Q7). Panics on parse, compile, or execution failure.
+pub fn eval(source: &str) -> KindedSlot {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
     let compiler = BytecodeCompiler::new();
     let bytecode = compiler.compile(&program).expect("compile failed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
+    vm.execute(None).expect("execution failed")
 }
 
 /// Compile and execute Shape source code, returning a Result.
 /// Useful when testing error conditions.
-pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
+pub fn eval_result(source: &str) -> Result<KindedSlot, VMError> {
     let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let compiler = BytecodeCompiler::new();
@@ -106,20 +103,17 @@ pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).map(|v| v.clone())
+    vm.execute(None)
 }
 
-/// Compile + execute Shape source code and synthesise a tagged
-/// `ValueWord` from the raw bits per the supplied `NativeKind`. Use this
-/// when a test asserts via `as_i64()` / `as_f64()` / `as_bool()` etc.
-/// on a program whose top-level return kind isn't declared but you
-/// still want typed-bits decoding.
-///
-/// For convenience-wrapper pendants that return native Rust types
-/// directly, see [`eval_typed_i64`], [`eval_typed_f64`], etc.
-pub fn eval_with_kind(source: &str, expected: NativeKind) -> ValueWord {
+/// Compile + execute Shape source code and synthesise a `KindedSlot`
+/// from the raw bits per the supplied `NativeKind`. Use this when a test
+/// asserts via `.as_i64()` / `.as_f64()` / `.as_bool()` on a program
+/// whose top-level return kind isn't declared but you still want
+/// typed-bits decoding.
+pub fn eval_with_kind(source: &str, expected: NativeKind) -> KindedSlot {
     let (bits, _) = eval_raw(source);
-    crate::executor::dispatch::synthesize_value_word_from_raw(bits, Some(expected))
+    KindedSlot::new(shape_value::ValueSlot::from_raw(bits), expected)
 }
 
 /// Compile Shape source code and return the bytecode program.
@@ -133,7 +127,7 @@ pub fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
 /// Compile Shape source code with prelude items prepended.
 /// This is needed for tests that use stdlib features like comptime builtins.
 /// Panics on parse or compile failure.
-pub fn eval_with_prelude(source: &str) -> ValueWord {
+pub fn eval_with_prelude(source: &str) -> KindedSlot {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     let (graph, stdlib_names, prelude_imports) =
@@ -146,7 +140,7 @@ pub fn eval_with_prelude(source: &str) -> ValueWord {
         .expect("compile failed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
+    vm.execute(None).expect("execution failed")
 }
 
 /// Compile Shape source code with prelude, returning a Result.
@@ -208,15 +202,13 @@ pub fn eval_typed_bool(source: &str) -> bool {
 #[cfg(test)]
 mod kind_hint_api_tests {
     use super::*;
-    use crate::executor::dispatch::synthesize_value_word_from_raw;
 
     #[test]
-    fn eval_returns_legacy_passthrough_today() {
-        // Today, no top-level program populates `top_level_frame.return_kind`,
-        // so the synthesis path falls through to passthrough — the bits on
-        // the stack are already a tagged ValueWord. This test pins that
-        // historical behaviour: numeric literals come back as ValueWord
-        // values that decode via `as_i64()` / `as_f64()` exactly as before.
+    fn eval_returns_int_kindedslot_today() {
+        // After Wave-E+5, `42` is recognised as a typed Int literal and
+        // the compiler stamps `top_level_frame.return_kind = Some(Int64)`.
+        // `eval()` therefore returns a `KindedSlot` whose kind is `Int64`
+        // and whose `as_i64()` decodes the native i64 bits.
         let v = eval("42");
         assert_eq!(v.as_i64(), Some(42));
     }
@@ -237,64 +229,52 @@ mod kind_hint_api_tests {
     }
 
     #[test]
-    fn eval_raw_then_synthesize_passthrough_matches_eval() {
-        // Building block: when `eval_raw` reports no kind, the host
-        // should synthesise as passthrough — and the result must
-        // exactly match what `eval()` produces. This pins the contract
-        // that `eval == passthrough(eval_raw)` for legacy programs.
-        let (bits, kind) = eval_raw("42");
-        let synthesised = synthesize_value_word_from_raw(bits, kind);
-        assert_eq!(synthesised.as_i64(), eval("42").as_i64());
-    }
-
-    #[test]
-    fn eval_with_kind_forces_int64_synthesis_on_raw_bits() {
-        // When the bits really are raw `i64` (constructed directly,
-        // e.g. by a `ReturnValueI64` opcode after E+4 flips), forcing
-        // NativeKind::Int64 produces a ValueWord that decodes correctly.
-        // We construct the raw-bits scenario synthetically — a real
-        // `eval_with_kind("42", Int64)` call against today's compiler
-        // is **incorrect** because today's compiler emits a tagged
-        // ValueWord on the stack, not raw i64. The use-site contract:
-        // call this only when you know the program emits typed bits
-        // for the chosen kind.
+    fn eval_with_kind_forces_int64_decode_on_raw_bits() {
+        // When the bits really are raw `i64` (e.g. produced by a
+        // `ReturnValueI64` opcode), forcing NativeKind::Int64 produces a
+        // KindedSlot that decodes correctly via `as_i64()`.
         let raw_bits = 42i64 as u64;
-        let v = synthesize_value_word_from_raw(raw_bits, Some(NativeKind::Int64));
+        let v = KindedSlot::new(
+            shape_value::ValueSlot::from_raw(raw_bits),
+            NativeKind::Int64,
+        );
         assert_eq!(v.as_i64(), Some(42));
     }
 
     #[test]
     fn eval_typed_helpers_work_when_program_emits_raw_bits() {
         // The `eval_typed_*` helpers are intended for programs whose
-        // top-level emission produces raw native bits — i.e. programs
-        // compiled after E+4 flips the relevant per-site emission. We
-        // can't construct such a program through the high-level
-        // `eval(...)` path today, so this test just smoke-tests that
-        // the synthesiser produces sane values for raw integer bits.
+        // top-level emission produces raw native bits.
         let raw = 100i64 as u64;
         assert_eq!(
-            synthesize_value_word_from_raw(raw, Some(NativeKind::Int64))
-                .as_i64()
-                .unwrap(),
+            KindedSlot::new(
+                shape_value::ValueSlot::from_raw(raw),
+                NativeKind::Int64
+            )
+            .as_i64()
+            .unwrap(),
             100
         );
 
         let raw = 2.5f64.to_bits();
         assert_eq!(
-            synthesize_value_word_from_raw(raw, Some(NativeKind::Float64))
-                .as_f64()
-                .unwrap(),
+            KindedSlot::new(
+                shape_value::ValueSlot::from_raw(raw),
+                NativeKind::Float64
+            )
+            .as_f64()
+            .unwrap(),
             2.5
         );
 
         assert_eq!(
-            synthesize_value_word_from_raw(1, Some(NativeKind::Bool))
+            KindedSlot::new(shape_value::ValueSlot::from_raw(1), NativeKind::Bool)
                 .as_bool()
                 .unwrap(),
             true
         );
         assert_eq!(
-            synthesize_value_word_from_raw(0, Some(NativeKind::Bool))
+            KindedSlot::new(shape_value::ValueSlot::from_raw(0), NativeKind::Bool)
                 .as_bool()
                 .unwrap(),
             false

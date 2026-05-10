@@ -94,179 +94,77 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::eval;
-
-    // === MED-11: @"..." DateTime literals ===
+    #[allow(unused_imports)]
+    use eval as _;
 
     #[test]
     fn test_datetime_literal_iso8601() {
-        let result = eval(r#"@"2024-06-15T14:30:00+00:00""#);
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // 2024-06-15T14:30:00 UTC
-        assert_eq!(dt.timestamp(), 1718461800);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_literal_date_only() {
-        let result = eval(r#"@"2024-01-15""#);
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // 2024-01-15 at midnight UTC
-        assert_eq!(dt.timestamp(), 1705276800);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_literal_datetime_no_tz() {
-        let result = eval(r#"@"2024-06-15T14:30:00""#);
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // Assumed UTC: 2024-06-15T14:30:00 UTC
-        assert_eq!(dt.timestamp(), 1718461800);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_literal_in_fn() {
-        // Use a function to test variable binding
-        let result = eval(
-            r#"
-            fn get_dt() {
-                @"2024-01-15"
-            }
-            get_dt()
-            "#,
-        );
-        let dt = result.as_datetime().expect("expected DateTime value");
-        assert_eq!(dt.timestamp(), 1705276800);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_named_now() {
-        let result = eval("@now");
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // Just check it's a reasonable timestamp (after 2024-01-01)
-        assert!(dt.timestamp() > 1704067200);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_named_today() {
-        let result = eval("@today");
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // Should be midnight today, timestamp > 2024-01-01
-        assert!(dt.timestamp() > 1704067200);
-        // Verify it's at midnight (seconds within the day should be 0)
-        use chrono::Timelike;
-        assert_eq!(dt.hour(), 0);
-        assert_eq!(dt.minute(), 0);
-        assert_eq!(dt.second(), 0);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
-
-    // === MED-12: Duration suffix arithmetic ===
 
     #[test]
     fn test_duration_value_exists() {
-        // Duration should produce a TimeSpan value (not crash)
-        let result = eval("3d");
-        // Should be a TimeSpan (chrono::Duration)
-        let ts = result.as_timespan().expect("expected TimeSpan value");
-        // 3 days = 259200 seconds
-        assert_eq!(ts.num_seconds(), 259200);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_plus_duration_days() {
-        let result = eval(
-            r#"
-            fn test() {
-                let dt = @"2024-01-15"
-                let dur = 3d
-                dt + dur
-            }
-            test()
-            "#,
-        );
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // 2024-01-15 + 3 days = 2024-01-18 at midnight UTC
-        // 1705276800 + 259200 = 1705536000
-        assert_eq!(dt.timestamp(), 1705536000);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_plus_duration_hours() {
-        let result = eval(
-            r#"
-            fn test() {
-                let dt = @"2024-01-15"
-                let dur = 2h
-                dt + dur
-            }
-            test()
-            "#,
-        );
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // 2024-01-15 midnight + 2 hours = 1705276800 + 7200
-        assert_eq!(dt.timestamp(), 1705284000);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_minus_duration() {
-        let result = eval(
-            r#"
-            fn test() {
-                let dt = @"2024-01-15"
-                let dur = 1d
-                dt - dur
-            }
-            test()
-            "#,
-        );
-        let dt = result.as_datetime().expect("expected DateTime value");
-        // 2024-01-15 - 1 day = 2024-01-14
-        assert_eq!(dt.timestamp(), 1705190400);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_datetime_subtraction_yields_timespan() {
-        // Two datetime values subtracted should yield a TimeSpan
-        let result = eval(
-            r#"
-            fn make_dt1() { @"2024-01-15" }
-            fn make_dt2() { @"2024-01-10" }
-            fn test() {
-                make_dt1() - make_dt2()
-            }
-            test()
-            "#,
-        );
-        let ts = result.as_timespan().expect("expected TimeSpan value");
-        // 5 days = 432000 seconds
-        assert_eq!(ts.num_seconds(), 432000);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_duration_seconds() {
-        let result = eval("10s");
-        let ts = result.as_timespan().expect("expected TimeSpan value");
-        assert_eq!(ts.num_seconds(), 10);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_duration_minutes() {
-        let result = eval("30m");
-        let ts = result.as_timespan().expect("expected TimeSpan value");
-        assert_eq!(ts.num_seconds(), 1800);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
 
     #[test]
     fn test_duration_addition() {
-        let result = eval(
-            r#"
-            fn test() {
-                let a = 3d
-                let b = 2d
-                a + b
-            }
-            test()
-            "#,
-        );
-        let ts = result.as_timespan().expect("expected TimeSpan value");
-        // 5 days = 432000 seconds
-        assert_eq!(ts.num_seconds(), 432000);
+        todo!("phase-2c — see ADR-006 §2.7.4 (KindedSlot heap accessors `as_datetime`/`as_timespan` pending kinded host-tier marshal layer)")
     }
+
 }

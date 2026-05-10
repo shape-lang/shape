@@ -9,7 +9,7 @@ use crate::VMConfig;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use crate::type_tracking::NativeKind;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{KindedSlot, VMError};
 
 /// Compile + execute Shape source code, returning the **raw u64 bits**
 /// at the top of stack plus the program's declared top-level return
@@ -28,30 +28,25 @@ pub fn eval_raw(source: &str) -> (u64, Option<NativeKind>) {
 
 #[inline]
 fn top_level_return_kind(program: &crate::bytecode::BytecodeProgram) -> Option<NativeKind> {
-    let kind = program.top_level_frame.as_ref()?.return_kind;
-    match kind {
-        NativeKind::Unknown => None,
-        _ => Some(kind),
-    }
+    program.top_level_frame.as_ref()?.return_kind
 }
 
 /// Compile and execute Shape source code, returning the final value as
-/// a tagged `ValueWord`. Synthesises from raw bits per the program's
-/// declared top-level return kind, or passthrough when unknown.
+/// a [`KindedSlot`] (ADR-006 §2.7 / Q7).
 /// Panics on parse, compile, or execution failure.
-pub fn eval(source: &str) -> ValueWord {
+pub fn eval(source: &str) -> KindedSlot {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
     let mut compiler = BytecodeCompiler::new();
     compiler.set_source(source);
     let bytecode = compiler.compile(&program).expect("compile failed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
+    vm.execute(None).expect("execution failed")
 }
 
 /// Compile and execute Shape source code, returning a Result.
 /// Useful when testing error conditions.
-pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
+pub fn eval_result(source: &str) -> Result<KindedSlot, VMError> {
     let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut compiler = BytecodeCompiler::new();
@@ -61,15 +56,15 @@ pub fn eval_result(source: &str) -> Result<ValueWord, VMError> {
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).map(|v| v.clone())
+    vm.execute(None)
 }
 
-/// Compile + execute and synthesise a tagged `ValueWord` from the raw
-/// bits per the supplied `NativeKind`. Use when a test needs typed-bits
-/// decoding for a program that doesn't declare a top-level return type.
-pub fn eval_with_kind(source: &str, expected: NativeKind) -> ValueWord {
+/// Compile + execute and synthesise a `KindedSlot` from the raw bits per
+/// the supplied `NativeKind`. Use when a test needs typed-bits decoding
+/// for a program that doesn't declare a top-level return type.
+pub fn eval_with_kind(source: &str, expected: NativeKind) -> KindedSlot {
     let (bits, _) = eval_raw(source);
-    crate::executor::dispatch::synthesize_value_word_from_raw(bits, Some(expected))
+    KindedSlot::new(shape_value::ValueSlot::from_raw(bits), expected)
 }
 
 /// Compile Shape source code and return the bytecode program.
@@ -84,7 +79,7 @@ pub fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
 /// Compile Shape source code with prelude items prepended.
 /// This is needed for tests that use stdlib features like comptime builtins.
 /// Panics on parse or compile failure.
-pub fn eval_with_prelude(source: &str) -> ValueWord {
+pub fn eval_with_prelude(source: &str) -> KindedSlot {
     let program = shape_ast::parser::parse_program(source).expect("parse failed");
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     let (graph, stdlib_names, prelude_imports) =
@@ -98,7 +93,7 @@ pub fn eval_with_prelude(source: &str) -> ValueWord {
         .expect("compile failed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
+    vm.execute(None).expect("execution failed")
 }
 
 /// Compile Shape source code with prelude, returning a Result.

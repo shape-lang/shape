@@ -1,7 +1,12 @@
 //! Channel method tests — bytecode-level integration tests.
 
-use super::*;
-use shape_value::heap_value::ChannelData;
+// Phase-2c surface (W11): `ChannelData` was deleted from
+// `shape_value::heap_value` along with the channel-typed heap arm.
+// `execute_bytecode` returns raw u64 bits — `as_i64()` no longer
+// applies. Per playbook §7 REVISED part 4 + ADR-006 §2.7.4 (host-tier
+// eval/marshal API rebuild), this body is surfaced.
+//
+// use super::*;
 
 // Phase-2c surface: helper `test_channel_pair` consumed deleted ValueWord
 // carriers via `from_channel`. Per playbook §7 REVISED part 4 + ADR-006
@@ -11,18 +16,7 @@ use shape_value::heap_value::ChannelData;
 
 #[test]
 fn test_channel_ctor_returns_array() {
-    // Channel() => [sender, receiver] — length should be 2
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 0 args
-        Instruction::new(
-            OpCode::BuiltinCall,
-            Some(Operand::Builtin(BuiltinFunction::ChannelCtor)),
-        ),
-        Instruction::simple(OpCode::Length),
-    ];
-    let constants = vec![Constant::Number(0.0)];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(2));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/ChannelData carriers)")
 }
 
 // ===== is_sender =====
