@@ -573,31 +573,83 @@ impl VirtualMachine {
                         builtin
                     );
                 }
+                // ── W8-WJ: window function dispatch (ADR-006 §2.7.10/Q11) ──
+                //
+                // Each handler is a free fn matching the MethodFnV2 body
+                // shape: `fn(&mut VM, &[KindedSlot], Option<&mut Ctx>) ->
+                // Result<KindedSlot, VMError>`. The dispatch shell pops
+                // builtin args via `pop_builtin_args` (which constructs
+                // `Vec<KindedSlot>` from the §2.7.7 stack parallel-kind
+                // track), borrows it as `&[KindedSlot]` to the handler,
+                // then re-pushes the kinded result via `push_kinded_slot`.
                 BuiltinFunction::WindowRowNumber
                 | BuiltinFunction::WindowRank
                 | BuiltinFunction::WindowDenseRank
-                | BuiltinFunction::WindowNtile
-                | BuiltinFunction::WindowLag
-                | BuiltinFunction::WindowLead
-                | BuiltinFunction::WindowFirstValue
+                | BuiltinFunction::WindowNtile => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_row_number_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowLag | BuiltinFunction::WindowLead => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_lag_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowFirstValue
                 | BuiltinFunction::WindowLastValue
-                | BuiltinFunction::WindowNthValue
-                | BuiltinFunction::WindowSum
-                | BuiltinFunction::WindowAvg
-                | BuiltinFunction::WindowMin
-                | BuiltinFunction::WindowMax
-                | BuiltinFunction::WindowCount => {
-                    todo!(
-                        "phase-1b-vm wave 5e — window function body \
-                         migration pending (handle_window_functions): {:?}",
-                        builtin
-                    );
+                | BuiltinFunction::WindowNthValue => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_first_value_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowSum => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_sum_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowAvg => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_avg_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowMin => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_min_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowMax => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_max_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowCount => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_count_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::JoinExecute => {
-                    todo!(
-                        "phase-1b-vm wave 5e — JOIN body migration pending \
-                         (handle_join_execute)"
-                    );
+                    // SURFACE — cross-cluster cascade with
+                    // `datatable_methods::joins` ABI flip (W9 method-body
+                    // re-fill). Drains stack args to keep the parallel-
+                    // kind track balanced, then surfaces.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    return self.handle_join_execute();
                 }
                 BuiltinFunction::Reflect => {
                     todo!(
@@ -615,10 +667,11 @@ impl VirtualMachine {
                     ));
                 }
                 BuiltinFunction::EvalDateTimeExpr => {
-                    todo!(
-                        "phase-1b-vm wave 5e — handle_eval_datetime_expr \
-                         body migration pending"
-                    );
+                    // SURFACE — Phase-2c §2.7.4 boundary (HeapKind::Temporal
+                    // carrier dispatch). Drains stack args first to keep
+                    // the parallel-kind track balanced.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    return self.handle_eval_datetime_expr(_ctx);
                 }
                 BuiltinFunction::EvalDataDateTimeRef
                 | BuiltinFunction::EvalDataSet

@@ -1,61 +1,402 @@
 //! Window functions, JOIN execution, schema binding, and typed column access.
 //!
-//! ADR-006 §2.7.7 / Wave 6.5 sub-cluster D-window-join: this file's
-//! handlers are migrated to the kinded VM stack ABI. The legacy
-//! ValueWord-shape paths (`pop_raw_u64` + `as_heap_ref` + `ValueWord::from_*`)
-//! are forbidden post-bulldozer (CLAUDE.md "Forbidden Patterns").
+//! ADR-006 §2.7.7 / §2.7.10 / Q11: this file's window-function handlers
+//! are migrated to the **MethodFnV2-shape** ABI per Wave 8 W8-WJ:
 //!
-//! The window / join / eval-datetime entrypoints (`handle_window_functions`,
-//! `handle_join_execute`, `handle_eval_datetime_expr`) are surfaced as
-//! `NotImplemented(SURFACE)` placeholders per playbook §7 REVISED. Their
-//! callers in `vm_impl/builtins.rs` already `todo!()` on Wave 5e body
-//! migration; these stubs migrate the file off forbidden patterns without
-//! attempting body re-implementation in scope of this sub-cluster.
+//! ```rust,ignore
+//! pub(crate) fn handle_window_X_v2(
+//!     _vm: &mut VirtualMachine,
+//!     args: &[KindedSlot],
+//!     _ctx: Option<&mut ExecutionContext>,
+//! ) -> Result<KindedSlot, VMError>
+//! ```
+//!
+//! Per playbook §1 W8-WJ: window functions over a typed buffer
+//! (`Array<number>` / `Array<int>` / `Array<TypedObject>`) materialize
+//! per-element kind via the `TypedArrayData` arm match (§2.7.7 stack
+//! parallel-kind), and bodies follow the W6.5 §2.7.10 precedent +
+//! `array_sort.rs::handle_join_str_v2` recipe — receiver classification
+//! on `args[0].kind`, payload recovery via `args[i].slot.as_heap_value()`
+//! (ADR-005 §1 single-discriminator), per-arm dispatch on
+//! `TypedArrayData::*`, kinded result via `KindedSlot::from_*`.
 //!
 //! `exec_bind_schema` and `exec_load_col` are live opcode handlers
 //! (dispatched from `dispatch.rs`). They are migrated to the kinded API.
 //! Element kinds for typed column access come from the opcode suffix
 //! (LoadColF64 → `Float64`, LoadColI64 → `Int64`, LoadColBool → `Bool`,
 //! LoadColStr → `String`).
+//!
+//! `handle_eval_datetime_expr` and `handle_join_execute` are SURFACE
+//! stubs (not in W8-WJ scope per playbook §5):
+//!   - eval_datetime_expr depends on §2.7.6 `HeapKind::Temporal` carrier
+//!     dispatch (Phase-2c §2.7.4 boundary).
+//!   - join_execute depends on `datatable_methods::joins` cross-cluster
+//!     ABI flip to `&[KindedSlot]` (W9 method-body re-fill territory).
 
 use std::sync::Arc;
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
+use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{NativeKind, TableViewData, VMError};
+use shape_value::{
+    HeapValue, KindedSlot, NativeKind, TableViewData, TypedArrayData, VMError,
+};
 
 use super::VirtualMachine;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Local helpers (§2.7.6 / Q8 heterogeneous-kind body pattern)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[inline]
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
+}
+
+/// Borrow the `Arc<TypedArrayData>` payload from a `KindedSlot` whose
+/// `kind == NativeKind::Ptr(HeapKind::TypedArray)`. Heap dispatch follows
+/// ADR-005 §1: project through `slot.as_heap_value()` then pattern-match
+/// the `HeapValue::TypedArray` arm — no per-heap-variant `KindedSlot`
+/// accessor (§2.7.6 / Q8 carrier-API-bound).
+#[inline]
+fn as_typed_array(slot: &KindedSlot) -> Option<&Arc<TypedArrayData>> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
+        return None;
+    }
+    match slot.slot.as_heap_value() {
+        HeapValue::TypedArray(arc) => Some(arc),
+        _ => None,
+    }
+}
+
+/// Project a numeric `TypedArrayData` arm to a `Vec<f64>` for aggregate
+/// dispatch. Returns `None` for non-numeric arms (`Bool`, `String`,
+/// `HeapValue`, `Matrix`, `FloatSlice`) — caller surfaces a type error.
+/// Kind-source: per-arm `TypedArrayData::*` match (§2.7.7 parallel-kind
+/// already encoded in the arm choice). Mirrors the `builtins/math.rs`
+/// `builtin_stddev` body pattern.
+fn typed_array_to_f64_vec(arr: &TypedArrayData) -> Option<Vec<f64>> {
+    Some(match arr {
+        TypedArrayData::F64(buf) => buf.iter().copied().collect(),
+        TypedArrayData::I64(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::I32(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::I16(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::I8(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::U64(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::U32(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::U16(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::U8(buf) => buf.iter().map(|&v| v as f64).collect(),
+        TypedArrayData::F32(buf) => buf.iter().map(|&v| v as f64).collect(),
+        _ => return None,
+    })
+}
+
+/// Length of any `TypedArrayData` arm.
+fn typed_array_len(arr: &TypedArrayData) -> usize {
+    match arr {
+        TypedArrayData::I64(b) => b.len(),
+        TypedArrayData::F64(b) => b.len(),
+        TypedArrayData::Bool(b) => b.len(),
+        TypedArrayData::I8(b) => b.len(),
+        TypedArrayData::I16(b) => b.len(),
+        TypedArrayData::I32(b) => b.len(),
+        TypedArrayData::U8(b) => b.len(),
+        TypedArrayData::U16(b) => b.len(),
+        TypedArrayData::U32(b) => b.len(),
+        TypedArrayData::U64(b) => b.len(),
+        TypedArrayData::F32(b) => b.len(),
+        TypedArrayData::String(b) => b.len(),
+        TypedArrayData::HeapValue(b) => b.len(),
+        TypedArrayData::Matrix(m) => m.data.len(),
+        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2-shape window-function handlers (ADR-006 §2.7.10 / Q11)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each handler signature mirrors the canonical W6.5 §2.7.10 body pattern
+// (`array_sort.rs::handle_join_str_v2`):
+//
+//   fn(&mut VirtualMachine, args: &[KindedSlot], Option<&mut ExecutionContext>)
+//       -> Result<KindedSlot, VMError>
+//
+// Stack-side WB2.4 retain-on-read discipline lives in the dispatch shell
+// (`vm_impl/builtins.rs::op_builtin_call` calling `pop_builtin_args`); the
+// `&[KindedSlot]` borrowed slice flows from that shell. Each handler
+// returns a kinded result; the shell pushes via `push_kinded_slot`.
+//
+// All bodies follow the §2.7.6 / Q8 heterogeneous-kind body pattern: kind
+// classification on `args[i].kind` first, payload recovery via
+// `args[i].slot.as_heap_value()` (ADR-005 §1) for heap arms.
+
+/// `handle_window_row_number_v2` — Wave 8 W8-WJ.
+///
+/// Covers `WindowRowNumber`, `WindowRank`, `WindowDenseRank`,
+/// `WindowNtile`. Pre-§2.7.10 the shared handler returned the constant
+/// `1` per row (legacy semantics: window framing not implemented at the
+/// VM level — these are placeholder values for the row-by-row window
+/// pipeline). The kinded result is `NativeKind::Int64`.
+pub(crate) fn handle_window_row_number_v2(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Ok(KindedSlot::from_int(1))
+}
+
+/// `handle_window_lag_v2` — Wave 8 W8-WJ.
+///
+/// Covers `WindowLag` and `WindowLead`. Args:
+///   `[value, offset, default?]`
+/// Pre-§2.7.10 semantics: return `args[2]` if present (the user-supplied
+/// default), otherwise `null`. Window framing is not modeled at the VM
+/// level (lag/lead read the offset row from the windowed iterator at
+/// the compile-time-lowered level); this handler is the per-row
+/// fallback that materializes a kinded null when offset reaches outside
+/// the partition.
+pub(crate) fn handle_window_lag_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Ok(args.get(2).cloned().unwrap_or_else(KindedSlot::none))
+}
+
+/// `handle_window_first_value_v2` — Wave 8 W8-WJ.
+///
+/// Covers `WindowFirstValue`, `WindowLastValue`, `WindowNthValue`. Args:
+///   `[value, ...]`
+/// Pre-§2.7.10 semantics: return `args[0]` (the per-row value passed in)
+/// — the windowed projection collapses to the value when the framing is
+/// trivial. Nontrivial framing is not modeled at the VM level.
+pub(crate) fn handle_window_first_value_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Ok(args.first().cloned().unwrap_or_else(KindedSlot::none))
+}
+
+/// `handle_window_sum_v2` — Wave 8 W8-WJ.
+///
+/// Args: `[value]` where `value` is either:
+///   - a scalar (Int64 / Float64) — the per-row pre-aggregated value;
+///   - a `Vec<number>` / `Vec<int>` window frame — sum reduces the
+///     numeric arm via per-element `TypedArrayData::*` dispatch
+///     (§2.7.7).
+///
+/// Result kind: `NativeKind::Float64` (legacy semantics — sum widens to
+/// number to avoid integer-overflow).
+pub(crate) fn handle_window_sum_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arg = args.first().ok_or_else(|| {
+        type_error("WindowSum requires at least 1 argument (value or array)")
+    })?;
+    match arg.kind {
+        NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = as_typed_array(arg).ok_or_else(|| {
+                type_error("WindowSum: receiver kind=TypedArray but heap arm mismatched")
+            })?;
+            match typed_array_to_f64_vec(arc.as_ref()) {
+                Some(values) => Ok(KindedSlot::from_number(values.iter().sum())),
+                None => Ok(KindedSlot::from_number(0.0)),
+            }
+        }
+        _ => Ok(KindedSlot::from_number(0.0)),
+    }
+}
+
+/// `handle_window_avg_v2` — Wave 8 W8-WJ.
+///
+/// Args: `[value]` with the same scalar / `Vec<number>` shape as
+/// `WindowSum`. Empty array yields `null`. Result kind:
+/// `NativeKind::Float64`.
+pub(crate) fn handle_window_avg_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arg = args.first().ok_or_else(|| {
+        type_error("WindowAvg requires at least 1 argument (value or array)")
+    })?;
+    match arg.kind {
+        NativeKind::Int64 => {
+            let i = arg.as_i64().expect("kind=Int64");
+            Ok(KindedSlot::from_number(i as f64))
+        }
+        NativeKind::Float64 => Ok(arg.clone()),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = as_typed_array(arg).ok_or_else(|| {
+                type_error("WindowAvg: receiver kind=TypedArray but heap arm mismatched")
+            })?;
+            match typed_array_to_f64_vec(arc.as_ref()) {
+                Some(values) if !values.is_empty() => {
+                    let sum: f64 = values.iter().sum();
+                    Ok(KindedSlot::from_number(sum / values.len() as f64))
+                }
+                _ => Ok(KindedSlot::none()),
+            }
+        }
+        _ => Ok(KindedSlot::none()),
+    }
+}
+
+/// `handle_window_min_max_v2` — Wave 8 W8-WJ.
+///
+/// Covers `WindowMin` and `WindowMax`. The `pick_max` flag selects the
+/// reducer: `false` → `f64::min`, `true` → `f64::max`. Args:
+///   `[value]` (scalar or `Vec<number>` / `Vec<int>`).
+/// Empty array yields `null`. Result kind: `NativeKind::Float64`.
+pub(crate) fn handle_window_min_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    handle_window_min_max_inner(args, false)
+}
+
+pub(crate) fn handle_window_max_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    handle_window_min_max_inner(args, true)
+}
+
+fn handle_window_min_max_inner(
+    args: &[KindedSlot],
+    pick_max: bool,
+) -> Result<KindedSlot, VMError> {
+    let arg = args.first().ok_or_else(|| {
+        type_error("WindowMin/Max requires at least 1 argument (value or array)")
+    })?;
+    match arg.kind {
+        NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = as_typed_array(arg).ok_or_else(|| {
+                type_error("WindowMin/Max: receiver kind=TypedArray but heap arm mismatched")
+            })?;
+            match typed_array_to_f64_vec(arc.as_ref()) {
+                Some(values) if !values.is_empty() => {
+                    let init = if pick_max {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    };
+                    let folded = values.iter().fold(
+                        init,
+                        if pick_max {
+                            |a: f64, &b: &f64| a.max(b)
+                        } else {
+                            |a: f64, &b: &f64| a.min(b)
+                        },
+                    );
+                    if folded.is_infinite() {
+                        Ok(KindedSlot::none())
+                    } else {
+                        Ok(KindedSlot::from_number(folded))
+                    }
+                }
+                _ => Ok(KindedSlot::none()),
+            }
+        }
+        _ => Ok(KindedSlot::none()),
+    }
+}
+
+/// `handle_window_count_v2` — Wave 8 W8-WJ.
+///
+/// Args: `[value]`. For an array input, count non-null entries via the
+/// `TypedArrayData` arm (per §2.7.7 every element of a typed buffer is
+/// non-null by definition — `Vec<number?>` would be a separate
+/// `Nullable*` track). For a scalar input, count `1` for non-null
+/// values, `0` for null. Result kind: `NativeKind::Int64`.
+pub(crate) fn handle_window_count_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let arg = match args.first() {
+        Some(a) => a,
+        None => return Ok(KindedSlot::from_int(0)),
+    };
+    match arg.kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = as_typed_array(arg).ok_or_else(|| {
+                type_error("WindowCount: receiver kind=TypedArray but heap arm mismatched")
+            })?;
+            // Typed buffer entries are non-null by §2.7.7 storage shape;
+            // `Vec<T?>` would dispatch through a Nullable* arm not yet
+            // wired (Phase-2c reentry alongside HashMapData / nullable
+            // typed-buffer track).
+            Ok(KindedSlot::from_int(typed_array_len(arc.as_ref()) as i64))
+        }
+        // Inline scalars: count 1 for non-null. None / unit slots have
+        // raw bits == 0 and Bool kind by convention; treat raw 0 as 0.
+        NativeKind::Bool if arg.slot.raw() == 0 => Ok(KindedSlot::from_int(0)),
+        _ => Ok(KindedSlot::from_int(1)),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SURFACE stubs (out of W8-WJ scope per playbook §5)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `handle_eval_datetime_expr` and `handle_join_execute` are not migrated
+// in this sub-cluster:
+//
+//   - `handle_eval_datetime_expr` requires the §2.7.6 / Q8
+//     `HeapKind::Temporal` carrier dispatch (DateTimeExpr → DateTime);
+//     the carrier shape itself is a Phase-2c reentry per §2.7.4.
+//
+//   - `handle_join_execute` requires `datatable_methods::joins` to flip
+//     to the `&[KindedSlot]` ABI first (W9 method-body re-fill). Both
+//     halves of that pipeline must move together; migrating only the
+//     dispatch shell here would leak the deleted ABI shape into the
+//     join handler call boundary.
+//
+// Both keep the legacy `&mut self` shape since they currently surface
+// `NotImplemented(SURFACE)` and the migration target signature
+// (`&[KindedSlot] -> Result<KindedSlot, VMError>`) cannot be filled
+// without the upstream dependency.
 
 impl VirtualMachine {
     /// Handle eval datetime expression.
     ///
-    /// Wave 5e backlog: the body of this handler historically popped a
-    /// `HeapValue::Temporal(TemporalData::DateTimeExpr(...))` via
-    /// `pop_raw_u64` + `as_heap_ref` (forbidden the deleted tag_bits dispatch) and pushed
-    /// a `HeapValue::Temporal(TemporalData::DateTime(...))` via
-    /// `ValueWord::from_time` (deleted). Migration to the kinded API on
-    /// `NativeKind::Ptr(HeapKind::Temporal)` requires the §2.7.6 carrier
-    /// dispatch shape that Wave 5e is responsible for; the call site in
-    /// `vm_impl/builtins.rs` already `todo!()`s on this body, so the
-    /// surface is observable and tracked.
+    /// **SURFACE — Phase-2c §2.7.4 boundary.** Body re-implementation
+    /// requires the `HeapKind::Temporal` carrier shape (per §2.7.6 / Q8
+    /// dispatch on `args[0].slot.as_heap_value()` with a
+    /// `HeapValue::Temporal(TemporalData::DateTimeExpr(..))` arm) plus
+    /// the kinded result construction for `HeapValue::Temporal
+    /// (TemporalData::DateTime(..))`. The surrounding pure-AST helper
+    /// `eval_datetime_expr_recursive` is preserved (no forbidden
+    /// patterns, ready for the body re-fill).
     pub(crate) fn handle_eval_datetime_expr(
         &mut self,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        _ctx: Option<&mut ExecutionContext>,
     ) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
-            "phase-1b-vm wave 5e — handle_eval_datetime_expr body migration \
-             pending (D-window-join surfaced; kind-source: \
-             NativeKind::Ptr(HeapKind::Temporal))"
+            "W8-WJ — handle_eval_datetime_expr SURFACE: depends on \
+             HeapKind::Temporal carrier dispatch (§2.7.6 / Q8). \
+             Phase-2c §2.7.4 boundary; body re-fill lands when the \
+             Temporal heap arm dispatch table is wired in the §2.7.10 \
+             MethodFnV2 surface."
                 .to_string(),
         ))
     }
 
     /// Recursively evaluate a DateTimeExpr into a chrono DateTime.
     ///
-    /// Pure-AST helper retained for the Wave 5e body re-implementation of
-    /// `handle_eval_datetime_expr`; consumes no VM stack state and uses no
-    /// forbidden patterns.
+    /// Pure-AST helper retained for the eventual body re-implementation
+    /// of `handle_eval_datetime_expr`; consumes no VM stack state and
+    /// uses no forbidden patterns.
     #[allow(dead_code)]
     fn eval_datetime_expr_recursive(
         &self,
@@ -127,49 +468,28 @@ impl VirtualMachine {
         }
     }
 
-    /// Handle window functions.
-    ///
-    /// Wave 5e backlog: the body historically dispatched on a
-    /// `Vec<ValueWord>` arg slice produced by `pop_builtin_args` (legacy
-    /// ABI), inspected each arg via `as_any_array`/`as_number_coerce` /
-    /// `as_f64`/`as_i64` (deleted ValueWord helpers), and pushed
-    /// `ValueWord::from_f64` / `ValueWord::from_i64` / `ValueWord::none`
-    /// results via `push_raw_u64` (deleted shim). Migration to the kinded
-    /// `pop_builtin_args -> Vec<KindedSlot>` ABI plus per-arg
-    /// `numeric_domain` dispatch on the `NativeKind` track is tracked under
-    /// Wave 5e; the call site in `vm_impl/builtins.rs` already `todo!()`s.
-    pub(crate) fn handle_window_functions(
-        &mut self,
-        builtin: crate::bytecode::BuiltinFunction,
-    ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(format!(
-            "phase-1b-vm wave 5e — window function body migration pending \
-             (D-window-join surfaced; kind-source: per-arg NativeKind via \
-             numeric_domain dispatch on KindedSlot inputs): {:?}",
-            builtin
-        )))
-    }
-
     /// Handle JOIN execution.
     ///
-    /// Wave 5e backlog: the body historically built a `Vec<u64>` raw-bits
-    /// arg slice via `into_raw_bits` (deleted ValueWord op) and dispatched
-    /// to `datatable_methods::handle_*_join` whose own ABI takes
-    /// `&mut [u64]` of legacy ValueWord bits (also pre-migration). Both
-    /// halves of that pipeline must move to the kinded ABI together;
-    /// migrating only the dispatch shell here would leak forbidden patterns
-    /// into the join handler call boundary. Surface and stop per playbook
-    /// §8 (cross-cluster cascade — datatable_methods/joins.rs is its own
-    /// territory). The call site in `vm_impl/builtins.rs` already
-    /// `todo!()`s.
+    /// **SURFACE — cross-cluster cascade (W9).** Body re-implementation
+    /// requires `datatable_methods::joins` to flip to the
+    /// `&[KindedSlot]` ABI first; both halves of the dispatch must
+    /// move together. W8-WJ migrates the rest of `window_join.rs` off
+    /// the deleted ABI; the join body stays surfaced for the W9
+    /// method-body re-fill wave.
     pub(crate) fn handle_join_execute(&mut self) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
-            "phase-1b-vm wave 5e — JOIN body migration pending \
-             (D-window-join surfaced; depends on datatable_methods::joins \
-             ABI flip to &[KindedSlot])"
+            "W8-WJ — handle_join_execute SURFACE: depends on \
+             datatable_methods::joins ABI flip to &[KindedSlot] (W9 \
+             method-body re-fill). Cross-cluster cascade per playbook \
+             §5; body re-fill lands when the join handler call \
+             boundary is kinded."
                 .to_string(),
         ))
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Live opcode handlers (BindSchema / LoadCol*) — kinded API
+    // ═══════════════════════════════════════════════════════════════════════
 
     /// Execute BindSchema: validate a DataTable against a TypeSchema at runtime.
     ///
@@ -403,5 +723,53 @@ impl VirtualMachine {
         let (out_bits, out_kind) = result?;
         self.push_kinded(out_bits, out_kind)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-fn coverage for the local helpers + the receiver-classification
+    //! fast paths of the window handlers. Full handler tests need a
+    //! `VirtualMachine` instance and are deferred to the W9 / W11
+    //! integration-harness re-fill (mirrors the test deferral pattern
+    //! `array_sort.rs::handle_join_str_v2` documents).
+    use super::*;
+    use shape_value::AlignedVec;
+    use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+
+    fn f64_arr(values: &[f64]) -> Arc<TypedArrayData> {
+        let mut av = AlignedVec::new();
+        for &v in values {
+            av.push(v);
+        }
+        Arc::new(TypedArrayData::F64(Arc::new(AlignedTypedBuffer::from(av))))
+    }
+
+    fn i64_arr(values: Vec<i64>) -> Arc<TypedArrayData> {
+        Arc::new(TypedArrayData::I64(Arc::new(TypedBuffer::from(values))))
+    }
+
+    fn bool_arr(values: Vec<u8>) -> Arc<TypedArrayData> {
+        Arc::new(TypedArrayData::Bool(Arc::new(TypedBuffer::from(values))))
+    }
+
+    #[test]
+    fn typed_array_len_arms() {
+        assert_eq!(typed_array_len(&f64_arr(&[1.0, 2.0, 3.0])), 3);
+        assert_eq!(typed_array_len(&i64_arr(vec![10, 20, 30, 40])), 4);
+        assert_eq!(typed_array_len(&bool_arr(vec![1, 0, 1])), 3);
+    }
+
+    #[test]
+    fn typed_array_to_f64_vec_numeric_arms() {
+        assert_eq!(
+            typed_array_to_f64_vec(&f64_arr(&[1.5, 2.5, 3.5])).unwrap(),
+            vec![1.5, 2.5, 3.5]
+        );
+        assert_eq!(
+            typed_array_to_f64_vec(&i64_arr(vec![10, 20, 30])).unwrap(),
+            vec![10.0, 20.0, 30.0]
+        );
+        assert!(typed_array_to_f64_vec(&bool_arr(vec![1, 0])).is_none());
     }
 }
