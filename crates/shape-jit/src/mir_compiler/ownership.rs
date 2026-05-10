@@ -6,7 +6,6 @@
 //! - Drop: arc_release for heap types, no-op for primitives
 
 use cranelift::prelude::*;
-use shape_value::ValueWordExt;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;
@@ -105,15 +104,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Returns native types when possible (F64 for floats, I64 for ints, I8 for bools).
     /// Consumers that need an I64 slot (e.g. for a dynamic local) rely on
     /// `ensure_kind` in `conversions.rs` to do the width extension.
-    /// v2-boundary: Int, None, StringId, Str, Function, Method, ClosurePlaceholder
-    /// all produce I64 (ValueWord bit-pattern) because the VM stack and FFI
-    /// boundaries expect the uniform 8-byte slot.
+    /// Per ADR-006 §2.7.5 the JIT FFI carrier is `(u64, NativeKind)` — the
+    /// constant's `NativeKind` is stamped at the call signature; the bits
+    /// emitted here are raw native u64 with no NaN-box / `tag_bits` wrap.
     pub(crate) fn compile_constant(&mut self, constant: &MirConstant) -> Result<Value, String> {
         match constant {
             MirConstant::Int(n) => {
-                // NaN-box the integer (I64 can't distinguish native from NaN-boxed).
-                let boxed = shape_value::ValueWord::from_i64(*n).raw_bits();
-                Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                // Raw native i64 bits; kind companion is `NativeKind::Int64`
+                // stamped at the JIT-FFI carrier site.
+                Ok(self.builder.ins().iconst(types::I64, *n))
             }
             MirConstant::Float(bits) => {
                 // Native F64 — direct float constant. ~100x faster than FFI path.
@@ -149,9 +148,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::Function(name) => {
-                // Resolve function name to index, NaN-box as function ref
+                // Resolve function name to index. Per ADR-006 §2.7.5 the
+                // JIT-FFI carrier flows the function-ref kind on the
+                // companion; the boxing helper at the value-ffi boundary
+                // produces the raw u64 the carrier wraps.
                 if let Some(&idx) = self.function_indices.get(name.as_str()) {
-                    let boxed = shape_value::ValueWord::from_function(idx).raw_bits();
+                    let boxed = crate::ffi::value_ffi::box_function(idx);
                     Ok(self.builder.ins().iconst(types::I64, boxed as i64))
                 } else {
                     Ok(self.builder.ins().iconst(types::I64, 0i64))
@@ -180,8 +182,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let fid_opt = self.closure_placeholder_fids.get(idx).copied();
                 if let Some(fid) = fid_opt {
                     if fid != u16::MAX {
-                        let boxed =
-                            shape_value::ValueWord::from_function(fid).raw_bits();
+                        let boxed = crate::ffi::value_ffi::box_function(fid);
                         return Ok(self.builder.ins().iconst(types::I64, boxed as i64));
                     }
                 }

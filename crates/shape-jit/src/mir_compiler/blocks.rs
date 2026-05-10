@@ -124,12 +124,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             let Some(&var) = self.locals.get(&slot) else {
                 continue;
             };
-            // NONE_BITS — matches the interpreter's pre-AllocSharedLocal
-            // slot state (legacy NaN-boxed null sentinel). Using a
-            // well-known bit pattern avoids undefined bits in the cell.
-            let none_bits = shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
-            let init = self.builder.ins().iconst(types::I64, none_bits as i64);
+            // NONE bits — matches the interpreter's pre-AllocSharedLocal
+            // slot state. Per ADR-006 §2.7.5 the JIT-FFI carrier flows the
+            // None kind on the companion; the raw bits come from the
+            // value-ffi `TAG_NULL` constant (the canonical None encoding
+            // at the FFI boundary).
+            let init = self
+                .builder
+                .ins()
+                .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
             let inst = self
                 .builder
                 .ins()
