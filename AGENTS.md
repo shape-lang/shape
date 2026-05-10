@@ -39,6 +39,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-set-methods` | `../shape-w9-set-methods` | W9-set-methods — kinded set method bodies | — | `crates/shape-vm/src/executor/objects/set_methods.rs` (~12 sites) | idle (close pending; audit confirmed no surviving HeapKind::Set / HeapValue::Set arm — every site remains NotImplemented(SURFACE) per Wave 9 playbook §4 surface-and-stop, ADR-006 §2.7.4 deferral; surface message rewritten to cite §2.7.4 + "HashMapData typed-buffer mutation API" follow-up + Path A `Arc<HashSetData>` / Path B `TypedSet<T>` design space; shape-vm --lib clean; check-no-dynamic exit 0) | 2026-05-10 |
 
 ## Status values
 
