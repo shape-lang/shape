@@ -746,7 +746,7 @@ impl VirtualMachine {
     /// that matches their opcode suffix. The encoded `<Kind>` flows
     /// through to the caller's parallel kind track via `push_kinded`.
     #[inline]
-    fn return_value_inner(
+    pub(in crate::executor) fn return_value_inner(
         &mut self,
         return_bits: u64,
         return_kind: shape_value::NativeKind,

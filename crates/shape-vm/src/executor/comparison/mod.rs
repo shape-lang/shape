@@ -452,6 +452,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<IteratorState>` lazy-iterator carriers emitted by the
         // iterator-method PHF.
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10).
+        NativeKind::Ptr(HeapKind::Result) => "result",
+        NativeKind::Ptr(HeapKind::Option) => "option",
     }
 }
 

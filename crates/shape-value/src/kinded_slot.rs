@@ -41,8 +41,8 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, OptionData,
+    ResultData, TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -131,6 +131,9 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashset(h),
             NativeKind::Ptr(HeapKind::HashSet),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).
@@ -140,6 +143,27 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_raw(bits),
             NativeKind::Ptr(HeapKind::Iterator),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Result)`-kind slot. ADR-006 §2.7.17 /
+    /// Q18 amendment (Wave 14 W14-variant-codegen). Mirror of
+    /// `from_iterator` typed-Arc dispatch shape.
+    #[inline]
+    pub fn from_result(r: Arc<ResultData>) -> Self {
+        Self::new(
+            ValueSlot::from_result(r),
+            NativeKind::Ptr(HeapKind::Result),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Option)`-kind slot. ADR-006 §2.7.17 /
+    /// Q18 amendment (Wave 14 W14-variant-codegen).
+    #[inline]
+    pub fn from_option(o: Arc<OptionData>) -> Self {
+        Self::new(
+            ValueSlot::from_option(o),
+            NativeKind::Ptr(HeapKind::Option),
         )
     }
 
@@ -395,6 +419,19 @@ impl Drop for KindedSlot {
                     HeapKind::Iterator => {
                         Arc::decrement_strong_count(bits as *const IteratorState);
                     }
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): mirror of the Iterator arm. Slot
+                    // bits are `Arc::into_raw(Arc<ResultData>)`; retire
+                    // one `Arc<ResultData>` strong-count share. At
+                    // refcount=0 `ResultData::Drop` (auto-derived from
+                    // its embedded `KindedSlot` payload) retires the
+                    // inner-value share recursively.
+                    HeapKind::Result => {
+                        Arc::decrement_strong_count(bits as *const ResultData);
+                    }
+                    HeapKind::Option => {
+                        Arc::decrement_strong_count(bits as *const OptionData);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -588,6 +625,16 @@ impl Clone for KindedSlot {
                     // §2.7.16's typed-Arc dispatch.
                     HeapKind::Iterator => {
                         Arc::increment_strong_count(bits as *const IteratorState);
+                    }
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): mirror of the Drop arm above. Bumps
+                    // one `Arc<ResultData>` / `Arc<OptionData>`
+                    // strong-count share.
+                    HeapKind::Result => {
+                        Arc::increment_strong_count(bits as *const ResultData);
+                    }
+                    HeapKind::Option => {
+                        Arc::increment_strong_count(bits as *const OptionData);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).

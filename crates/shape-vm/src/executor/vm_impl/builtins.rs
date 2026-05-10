@@ -507,35 +507,63 @@ impl VirtualMachine {
                 // Content builders, DateTime constructors, Table from
                 // rows, JSON navigation helpers, Window functions, Join,
                 // Reflect, MatFromFlat, MakeContent*. ─────────────────────
-                BuiltinFunction::SomeCtor
-                | BuiltinFunction::OkCtor
-                | BuiltinFunction::ErrCtor => {
-                    // Phase-2c §2.7.4 SURFACE: Option/Result ctors produce
-                    // values whose deconstructors (`op_try_unwrap`,
-                    // `op_unwrap_option`, `op_is_ok`, `op_is_err`,
-                    // `op_unwrap_ok`, `op_unwrap_err` in
-                    // `executor/exceptions/mod.rs`) all return
-                    // `NotImplemented(PHASE_2C_EXCEPTION_OBJECT_SURFACE)`
-                    // pending the variant-codegen rebuild on the kinded
-                    // `Arc<TypedObjectStorage>` model. Landing the
-                    // constructor side without the inspection side would
-                    // produce values nothing can read — the surface stays
-                    // closed at both ends until the variant-codegen
-                    // cluster lands. Pop args (their `KindedSlot::Drop`
-                    // retires per-arg shares per §2.7.7) and surface.
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(format!(
-                        "{:?} — SURFACE: Option/Result variant ctor depends \
-                         on Phase-2c variant-codegen rebuild (kinded \
-                         Arc<TypedObjectStorage> model). Paired with the \
-                         deconstructor SURFACE in \
-                         executor/exceptions/mod.rs (PHASE_2C_\
-                         EXCEPTION_OBJECT_SURFACE: op_try_unwrap, \
-                         op_unwrap_option, op_is_ok, op_is_err, \
-                         op_unwrap_ok, op_unwrap_err). ADR-006 §2.7.4 / \
-                         playbook §10 E-exceptions row.",
-                        builtin
-                    )));
+                BuiltinFunction::SomeCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Some(x)` builds a fresh
+                    // `Arc<OptionData>` carrier with `is_some=true` and
+                    // the popped argument as the typed payload share.
+                    // The `pop_builtin_args` carrier owns one strong-
+                    // count share per heap-bearing kind; ownership
+                    // transfers into the `OptionData::payload` slot
+                    // verbatim (the carrier is moved, not cloned).
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Some() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let opt = std::sync::Arc::new(
+                        shape_value::heap_value::OptionData::some(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_option(opt))?;
+                }
+                BuiltinFunction::OkCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Ok(x)` builds a fresh
+                    // `Arc<ResultData>` carrier with `is_ok=true` and
+                    // the popped argument as the typed payload share.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Ok() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let res = std::sync::Arc::new(
+                        shape_value::heap_value::ResultData::ok(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                }
+                BuiltinFunction::ErrCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Err(e)` builds a fresh
+                    // `Arc<ResultData>` carrier with `is_ok=false` and
+                    // the popped argument as the typed payload share.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Err() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let res = std::sync::Arc::new(
+                        shape_value::heap_value::ResultData::err(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_result(res))?;
                 }
                 BuiltinFunction::HashMapCtor => {
                     // Wave 5e W13-hashmap-ctor (2026-05-10): `let m = HashMap()`

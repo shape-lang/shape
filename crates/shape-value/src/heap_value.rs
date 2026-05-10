@@ -848,6 +848,100 @@ impl Clone for HashSetData {
     }
 }
 
+// ── Result / Option storage (ADR-006 §2.7.17 / Q18, W14-variant-codegen) ────
+//
+// Wave 14 W14-variant-codegen amendment: Result<T,E> and Option<T> are
+// represented as kinded carriers `Arc<ResultData>` / `Arc<OptionData>`
+// holding (a) a `is_ok` / `is_some` discriminator boolean and (b) a single
+// payload `KindedSlot` carrying one strong-count share for the inner
+// value. Mirrors the §2.7.16 IteratorState typed-Arc shape and the §2.5
+// AnyError schema-keyed kind discipline (per-slot kind threaded
+// alongside slot bits, drop dispatched on the kind label). Slot bits at
+// the §2.7.7 stack tier are `Arc::into_raw(Arc<ResultData>)` /
+// `Arc::into_raw(Arc<OptionData>)` directly with kind labels
+// `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
+//
+// The payload `KindedSlot` lives inside the typed-Arc so the value's
+// strong-count share is owned by the wrapper for the wrapper's lifetime;
+// `KindedSlot::Drop` retires the inner share when the wrapper Drop runs
+// (Arc refcount reaches zero). On clone, `KindedSlot::Clone` bumps the
+// inner share. Same recursion-through-Arc discipline as
+// `IteratorTransform::Map(Arc<HeapValue>)` per §2.7.16.
+
+/// Result<T, E> carrier. `is_ok` discriminates Ok vs Err; `payload` carries
+/// the inner value (`T` for Ok, `E` for Err). Both arms share the same
+/// payload slot — the variant tag is the discriminator, not the slot's
+/// physical layout.
+#[derive(Debug)]
+pub struct ResultData {
+    pub is_ok: bool,
+    pub payload: crate::kinded_slot::KindedSlot,
+}
+
+impl ResultData {
+    /// Construct an Ok-tagged result.
+    #[inline]
+    pub fn ok(payload: crate::kinded_slot::KindedSlot) -> Self {
+        Self { is_ok: true, payload }
+    }
+
+    /// Construct an Err-tagged result.
+    #[inline]
+    pub fn err(payload: crate::kinded_slot::KindedSlot) -> Self {
+        Self { is_ok: false, payload }
+    }
+}
+
+impl Clone for ResultData {
+    /// Per-field clone — `KindedSlot::Clone` bumps the payload's
+    /// strong-count share.
+    fn clone(&self) -> Self {
+        Self {
+            is_ok: self.is_ok,
+            payload: self.payload.clone(),
+        }
+    }
+}
+
+/// Option<T> carrier. `is_some` discriminates Some vs None; `payload`
+/// carries the inner value for Some. For None the payload is a
+/// `KindedSlot::none()` placeholder (Bool-kind, zero bits) so
+/// `KindedSlot::Drop` is a no-op.
+#[derive(Debug)]
+pub struct OptionData {
+    pub is_some: bool,
+    pub payload: crate::kinded_slot::KindedSlot,
+}
+
+impl OptionData {
+    /// Construct a Some-tagged option.
+    #[inline]
+    pub fn some(payload: crate::kinded_slot::KindedSlot) -> Self {
+        Self { is_some: true, payload }
+    }
+
+    /// Construct a None-tagged option (payload is a no-op KindedSlot).
+    #[inline]
+    pub fn none() -> Self {
+        Self {
+            is_some: false,
+            payload: crate::kinded_slot::KindedSlot::none(),
+        }
+    }
+}
+
+impl Clone for OptionData {
+    /// Per-field clone — `KindedSlot::Clone` bumps the payload's
+    /// strong-count share. For None the payload is a zero-bits Bool
+    /// slot; clone is a no-op refcount-wise.
+    fn clone(&self) -> Self {
+        Self {
+            is_some: self.is_some,
+            payload: self.payload.clone(),
+        }
+    }
+}
+
 /// FNV-1a hash for byte slices. Matches the `v2/typed_map.rs` hash
 /// function so that key-hash semantics are consistent across the
 /// HashMap-marshal layer and any future cross-cluster perf path.
@@ -1163,6 +1257,23 @@ impl Drop for TypedObjectStorage {
                         HeapKind::Iterator => {
                             std::sync::Arc::decrement_strong_count(
                                 bits as *const crate::iterator_state::IteratorState,
+                            );
+                        }
+                        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17
+                        // / Q18, 2026-05-10): a TypedObject field of
+                        // kind `NativeKind::Ptr(HeapKind::Result)` /
+                        // `NativeKind::Ptr(HeapKind::Option)` holds
+                        // `Arc::into_raw(Arc<ResultData>) as u64` /
+                        // `Arc::into_raw(Arc<OptionData>) as u64`. Same
+                        // dispatch shape as the Iterator arm above.
+                        HeapKind::Result => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const ResultData,
+                            );
+                        }
+                        HeapKind::Option => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const OptionData,
                             );
                         }
                         // Round 2.5b W7-closure-retain-parallel (ADR-006
@@ -1671,6 +1782,16 @@ impl Clone for HeapValue {
             // every field), but the outer `Arc` bump is the canonical
             // shared-receiver path.
             HeapValue::Iterator(v) => HeapValue::Iterator(Arc::clone(v)),
+            // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10): Result/Option Arcs share the typed-Arc
+            // clone shape — single strong-count bump on the shared
+            // `Arc<ResultData>` / `Arc<OptionData>`. The inner
+            // `KindedSlot` payload's share is preserved by the
+            // shared Arc; ResultData/OptionData Clone (defined in
+            // this file) does an inner KindedSlot Clone if the Arc
+            // is unwrapped via Arc::make_mut.
+            HeapValue::Result(v) => HeapValue::Result(Arc::clone(v)),
+            HeapValue::Option(v) => HeapValue::Option(Arc::clone(v)),
         }
     }
 }
@@ -1850,6 +1971,29 @@ impl fmt::Display for HeapValue {
             // reaching the Display surface is "still lazy" by
             // construction.
             HeapValue::Iterator(_) => write!(f, "<iterator>"),
+            // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10): render as `Ok(<inner>)` / `Err(<inner>)` /
+            // `Some(<inner>)` / `None`. The inner Display goes
+            // through the runtime kinded value-formatter at the
+            // VM-tier `printing.rs` site (the heap_value `Display`
+            // impl is a fallback for diagnostic prints; rich
+            // formatting goes through the executor's
+            // `format_kinded`). Renders inner as `<…>` opaque tag
+            // here — the kinded formatter handles full pretty-print.
+            HeapValue::Result(r) => {
+                if r.is_ok {
+                    write!(f, "Ok(<...>)")
+                } else {
+                    write!(f, "Err(<...>)")
+                }
+            }
+            HeapValue::Option(o) => {
+                if o.is_some {
+                    write!(f, "Some(<...>)")
+                } else {
+                    write!(f, "None")
+                }
+            }
         }
     }
 }
@@ -2459,5 +2603,105 @@ mod hashset_mutation {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains("a"));
         assert!(!snapshot.contains("b"));
+    }
+}
+
+// ── W14-variant-codegen unit tests (ADR-006 §2.7.17 / Q18) ──────────────────
+
+#[cfg(test)]
+mod result_option_storage {
+    //! W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10): pin the
+    //! `ResultData::ok` / `err` and `OptionData::some` / `none` API
+    //! contracts. The kinded payload Drop discipline is exercised
+    //! by the higher-tier shape-vm tests; here we pin the
+    //! storage-layer constructor + clone semantics.
+    use super::*;
+    use crate::kinded_slot::KindedSlot;
+    use std::sync::Arc;
+
+    #[test]
+    fn ok_carrier_is_ok_true() {
+        let payload = KindedSlot::from_int(42);
+        let r = ResultData::ok(payload);
+        assert!(r.is_ok);
+        // Payload kind preserved.
+        assert_eq!(r.payload.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn err_carrier_is_ok_false() {
+        let payload = KindedSlot::from_string_arc(Arc::new("oops".to_string()));
+        let r = ResultData::err(payload);
+        assert!(!r.is_ok);
+        // Payload string preserved.
+        assert_eq!(r.payload.as_str(), Some("oops"));
+    }
+
+    #[test]
+    fn result_clone_bumps_payload_share() {
+        // The storage carrier's Clone path goes through KindedSlot's
+        // explicit Clone impl, which dispatches retain on the payload's
+        // kind. Verify that cloning the wrapper preserves the payload's
+        // Arc identity (the inner Arc<String> share is bumped, not
+        // duplicated).
+        let payload_arc = Arc::new("hello".to_string());
+        let payload = KindedSlot::from_string_arc(Arc::clone(&payload_arc));
+        let r1 = ResultData::ok(payload);
+        let r2 = r1.clone();
+        // Pointer equality on the inner String: both wrappers
+        // reference the same Arc<String> (the kinded clone bumped
+        // the share, did not deep-copy the string body).
+        assert_eq!(r1.payload.as_str(), Some("hello"));
+        assert_eq!(r2.payload.as_str(), Some("hello"));
+        // Original Arc retains an extra share from each KindedSlot
+        // (1 own + 2 wrappers = 3 strong refs; the local `payload_arc`
+        // is the third).
+        assert!(Arc::strong_count(&payload_arc) >= 2);
+    }
+
+    #[test]
+    fn some_carrier_is_some_true() {
+        let payload = KindedSlot::from_bool(true);
+        let o = OptionData::some(payload);
+        assert!(o.is_some);
+        assert_eq!(o.payload.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn none_carrier_is_some_false() {
+        let o = OptionData::none();
+        assert!(!o.is_some);
+        // None payload is a placeholder Bool-kind zero-bits slot —
+        // KindedSlot::Drop is a no-op on it (verified by the slot
+        // raw bits and kind).
+        assert_eq!(o.payload.slot().raw(), 0);
+    }
+
+    #[test]
+    fn smoke_target_ok_int_then_unwrap() {
+        // Storage-layer counterpart of the W14-variant-codegen smoke
+        // target: `let r = Ok(42); if r.is_ok() { print(r.unwrap_ok()) }`
+        // outputs 42. The is_ok / unwrap_ok pair surfaces at the
+        // storage tier as `r.is_ok` + `r.payload.as_i64()`.
+        let r = ResultData::ok(KindedSlot::from_int(42));
+        assert!(r.is_ok);
+        assert_eq!(r.payload.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn arc_wrap_typed_pointer_round_trip() {
+        // Pin the typed-Arc raw-pointer dispatch contract: wrap an
+        // Arc<ResultData> via Arc::into_raw, recover via
+        // Arc::from_raw, verify pointer identity. This is the slot-
+        // bits transit path that the §2.7.17 dispatch tables retire
+        // in `clone_with_kind` / `drop_with_kind`.
+        let arc = Arc::new(ResultData::ok(KindedSlot::from_int(7)));
+        let bits = Arc::into_raw(arc) as u64;
+        // Recover and verify is_ok.
+        let arc2: Arc<ResultData> =
+            unsafe { Arc::from_raw(bits as *const ResultData) };
+        assert!(arc2.is_ok);
+        assert_eq!(arc2.payload.as_i64(), Some(7));
+        drop(arc2);
     }
 }

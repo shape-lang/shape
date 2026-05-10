@@ -148,6 +148,28 @@ macro_rules! define_heap_types {
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
             Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
+            // 2026-05-10): Result<T,E> carrier — replaces the deleted
+            // pre-bulldozer `Some/Ok/Err` `ValueWord`-shaped HeapValue
+            // arms. Slot bits are `Arc::into_raw(Arc<ResultData>)`. Full
+            // `HeapValue::Result(Arc<ResultData>)` arm: variant
+            // discriminators (`op_is_ok` / `op_is_err`) and unwrap
+            // operations (`op_unwrap_ok` / `op_unwrap_err` /
+            // `op_try_unwrap`) recover the typed Arc via
+            // `slot.as_heap_value()` per ADR-005 §1 single-discriminator.
+            // Mirror of §2.7.16 Iterator typed-Arc shape (full
+            // HeapValue arm, NOT pure-discriminator like §2.7.9
+            // FilterExpr / §2.7.12 SharedCell).
+            Result,        // 23  (Wave 14 W14-variant-codegen, 2026-05-10)
+            // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
+            // 2026-05-10): Option<T> carrier — sibling of Result with
+            // `is_some` discriminator instead of `is_ok`. The dual-shape
+            // representation (vs null-coding `Some(x) ≡ x`, `None ≡ null
+            // sentinel`) is required because `SomeCtor` may take a
+            // null-bearing `T?` payload, which cannot be distinguished
+            // from None under null-coding. Slot bits are
+            // `Arc::into_raw(Arc<OptionData>)`; full HeapValue arm.
+            Option,        // 24  (Wave 14 W14-variant-codegen, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -313,6 +335,26 @@ macro_rules! define_heap_types {
             /// cursor triple is opaque at the dispatch shell —
             /// terminals walk `arc.transforms` and dispatch per stage).
             Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10) =====
+            /// Result<T, E> carrier (`Arc<ResultData>`). Used by the
+            /// `OkCtor` / `ErrCtor` builtin producers and the
+            /// `op_is_ok` / `op_is_err` / `op_unwrap_ok` /
+            /// `op_unwrap_err` / `op_try_unwrap` discriminators.
+            /// Slot bits are `Arc::into_raw(Arc<ResultData>) as u64`;
+            /// recovery goes through `slot.as_heap_value()` →
+            /// `HeapValue::Result(arc)` per ADR-005 §1
+            /// single-discriminator. The inner `payload: KindedSlot`
+            /// owns one strong-count share for the wrapped value;
+            /// `ResultData::Drop` (auto-derived from `KindedSlot`'s
+            /// explicit Drop) retires the share at refcount=0.
+            Result(std::sync::Arc<$crate::heap_value::ResultData>),
+            /// Option<T> carrier (`Arc<OptionData>`). Used by the
+            /// `SomeCtor` builtin producer and the `op_unwrap_option`
+            /// discriminator (the `None` half is also constructed as
+            /// `OptionData::none()` at compiler emission sites). Same
+            /// kinded-payload discipline as `Result` per §2.7.17.
+            Option(std::sync::Arc<$crate::heap_value::OptionData>),
         }
 
         impl HeapValue {
@@ -342,6 +384,8 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                     HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::Result(..) => HeapKind::Result,
+                    HeapValue::Option(..) => HeapKind::Option,
                 }
             }
 
@@ -378,6 +422,13 @@ macro_rules! define_heap_types {
                     // if its terminal evaluation will yield zero
                     // elements after filter / take 0 etc.).
                     HeapValue::Iterator(_) => true,
+                    // Result and Option are always truthy when present
+                    // (a wrapper's variant tag is a runtime contract;
+                    // truthiness reflects "carrier exists" not the
+                    // inner success/none state). Inner-aware boolean
+                    // tests go through `op_is_ok` / `op_is_err`.
+                    HeapValue::Result(_) => true,
+                    HeapValue::Option(_) => true,
                 }
             }
 
@@ -413,6 +464,8 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                     HeapValue::Iterator(_) => "iterator",
+                    HeapValue::Result(_) => "result",
+                    HeapValue::Option(_) => "option",
                 }
             }
         }

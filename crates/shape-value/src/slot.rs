@@ -157,6 +157,20 @@ impl ValueSlot {
         Self(Arc::into_raw(h) as u64)
     }
 
+    /// Store an `Arc<ResultData>` directly. Mirrors
+    /// `HeapValue::Result(Arc<ResultData>)`. ADR-006 §2.7.17 / Q18
+    /// amendment (Wave 14 W14-variant-codegen).
+    pub fn from_result(r: Arc<crate::heap_value::ResultData>) -> Self {
+        Self(Arc::into_raw(r) as u64)
+    }
+
+    /// Store an `Arc<OptionData>` directly. Mirrors
+    /// `HeapValue::Option(Arc<OptionData>)`. ADR-006 §2.7.17 / Q18
+    /// amendment (Wave 14 W14-variant-codegen).
+    pub fn from_option(o: Arc<crate::heap_value::OptionData>) -> Self {
+        Self(Arc::into_raw(o) as u64)
+    }
+
     /// Store an `Arc<DataTable>` directly. Mirrors
     /// `HeapValue::DataTable(Arc<DataTable>)`.
     pub fn from_data_table(t: Arc<DataTable>) -> Self {

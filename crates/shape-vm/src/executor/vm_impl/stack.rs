@@ -153,6 +153,21 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::Iterator => {
                     Arc::increment_strong_count(bits as *const IteratorState);
                 }
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): Result/Option-kinded slots own one
+                // `Arc::into_raw(Arc<ResultData>)` / `Arc<OptionData>`
+                // strong-count share. Bumps one share — same dispatch
+                // shape as Iterator arm above.
+                HeapKind::Result => {
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::ResultData,
+                    );
+                }
+                HeapKind::Option => {
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::OptionData,
+                    );
+                }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
                 // Round 2.5 W7-closure-retain (ADR-006 §2.7.11 / Q12,
@@ -346,6 +361,23 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<HeapValue>` (closure) shares transitively.
                 HeapKind::Iterator => {
                     Arc::decrement_strong_count(bits as *const IteratorState);
+                }
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): mirror of `clone_with_kind` Result/
+                // Option arm. Retires one `Arc<ResultData>` /
+                // `Arc<OptionData>` strong-count share. At refcount=0
+                // `ResultData::Drop` / `OptionData::Drop` retires the
+                // inner-value share recursively (KindedSlot Drop
+                // dispatches on the per-payload `kind` companion).
+                HeapKind::Result => {
+                    Arc::decrement_strong_count(
+                        bits as *const shape_value::heap_value::ResultData,
+                    );
+                }
+                HeapKind::Option => {
+                    Arc::decrement_strong_count(
+                        bits as *const shape_value::heap_value::OptionData,
+                    );
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}

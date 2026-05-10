@@ -3283,6 +3283,197 @@ must be materialized via a terminal (`collect` / `forEach` / etc.)
 before any cross-process boundary. The wire/JSON arms reject Iterator
 slots in the same shape as FilterExpr / Reference.
 
+#### 2.7.17 Variant carriers — `HeapValue::Result(Arc<ResultData>)` / `HeapValue::Option(Arc<OptionData>)` (Q18 ruling)
+
+W14-variant-codegen (close 2026-05-10) lands the kinded Result/Option
+carriers, replacing the deleted pre-bulldozer `Some/Ok/Err`
+`ValueWord`-shaped HeapValue arms (Phase-1.A bulldozed). Pre-strict-
+typing the variant ctors pushed `ValueWord::from_heap_value(HeapValue::
+Some(ValueWord_inner))` etc. and dispatched the variant discriminators
+(`op_is_ok`, `op_is_err`, `op_unwrap_ok`, `op_unwrap_err`,
+`op_unwrap_option`, `op_try_unwrap`, `op_error_context`,
+`op_type_check`) via `tag_bits` on the wrapper bits — both forbidden
+post-§2.7.7 (CLAUDE.md "Forbidden code" #1, #4, #6). The
+pre-W14-variant-codegen scope was the 8 op_* discriminator handlers in
+`executor/exceptions/mod.rs` plus the 3 ctor bodies in
+`executor/vm_impl/builtins.rs` (`SomeCtor`, `OkCtor`, `ErrCtor`) — all
+surfacing as `NotImplemented(SURFACE: §2.7.4)` at the
+W13-result-option-ops audit (close `61d0f49`).
+
+**Decision (Q18 ruling):** Result and Option rebuild on typed
+`Arc<ResultData>` / `Arc<OptionData>` payloads carried by fresh
+`HeapKind` arms — full HeapValue arms (NOT pure-discriminator like
+§2.7.9 FilterExpr / §2.7.12 SharedCell), mirroring the §2.7.16
+Iterator typed-Arc dispatch with both kind-label refcount discipline
+and `slot.as_heap_value()` recovery for handler bodies. The decision
+rejects two alternatives:
+
+- **Path B — single `__Result` / `__Option` schema-keyed
+  `Arc<TypedObjectStorage>`:** would re-use the AnyError TypedObject
+  precedent (§2.5 / W13-anyerror) with discriminator and payload
+  fields. Rejected because the payload field would need a Bool-default
+  fallback for non-heap inner values (the schema's per-slot
+  `field_kinds` table can't represent "kind varies per instance"
+  without a parallel kind track adjacent to the storage); duplicating
+  the §2.7.7 stack parallel-kind contract at the schema tier defeats
+  the carrier-API-bound (§2.7.6 / Q8). Result/Option payloads are
+  inherently kind-polymorphic (the inner T is whatever the producing
+  expression emitted), so a typed-Arc carrier with an embedded
+  `KindedSlot` payload is the natural fit.
+
+- **Path C — null-coding Option only (`Some(x) ≡ x`, `None ≡ null
+  sentinel`):** matches the legacy compiler emit (`op_is_null` test
+  in `compiler/patterns/checking.rs:213`), is zero-overhead for the
+  common case, and reuses the existing null-sentinel discipline.
+  Rejected as the canonical representation (but PRESERVED as a
+  fallback for compiler emit sites that haven't migrated) because
+  `Some(x)` where `T = T?` (a doubly-nullable type) cannot
+  distinguish `Some(None)` from `None` under null-coding. The kinded
+  `Arc<OptionData>` carrier with explicit `is_some` discriminator
+  resolves this without losing soundness.
+
+**The kinded carriers (`shape-value/src/heap_value.rs`):**
+
+```rust
+pub struct ResultData {
+    pub is_ok: bool,
+    pub payload: KindedSlot,    // owns one share for the inner value
+}
+
+pub struct OptionData {
+    pub is_some: bool,
+    pub payload: KindedSlot,    // None: KindedSlot::none() placeholder
+}
+```
+
+Both structs implement `Clone` via per-field clone — `KindedSlot::Clone`
+bumps the inner share per Q8. Drop is auto-derived from the embedded
+`KindedSlot`'s explicit Drop impl (kind-dispatched refcount retire per
+§2.7.6 / Q8). The recursion-through-Arc discipline is the same as
+§2.7.16 `IteratorTransform::Map(Arc<HeapValue>)` (the iterator
+state's stash of a closure carrier).
+
+**The new `HeapKind` arms:**
+
+```rust
+pub enum HeapKind {
+    // ... String=0 .. Iterator=22 ..
+    Result,    // 23  (Wave 14 W14-variant-codegen, 2026-05-10)
+    Option,    // 24  (Wave 14 W14-variant-codegen, 2026-05-10)
+}
+
+pub enum HeapValue {
+    // ... existing arms ...
+    Result(Arc<ResultData>),
+    Option(Arc<OptionData>),
+}
+```
+
+Slot bits for a `Result`-kinded slot are
+`Arc::into_raw(Arc<ResultData>) as u64`; Option mirrors. Like §2.7.16
+Iterator (and unlike §2.7.9 FilterExpr / §2.7.13 Reference),
+**`as_heap_value()` IS valid** on Result/Option-labeled bits: the
+discriminator handlers (`op_is_ok` / `op_is_err` / `op_unwrap_ok` /
+`op_unwrap_err` / `op_unwrap_option` / `op_try_unwrap` /
+`op_error_context`) recover the typed Arc via
+`slot.as_heap_value()` → `HeapValue::Result(arc)` /
+`HeapValue::Option(arc)` per ADR-005 §1 single-discriminator. The
+handler-side helpers (`read_result` / `read_option`) implement this
+classifier, mirroring `iterator_methods.rs::as_iterator`.
+
+**Why kind is on the carrier rather than fabricated downstream:**
+§2.7.7 forbidden-shape #4 (tag-bit chains) and §2.7.7 / §2.7.8 / §2.7.9
+/ §2.7.10 / §2.7.11 invariant — kind comes from the producing-opcode
+emit, never fabricated downstream. The variant ctors
+(`SomeCtor` / `OkCtor` / `ErrCtor`) are the producing sites; they pop
+the input arg's `KindedSlot` carrier, transfer the share into a fresh
+`Arc<ResultData>` / `Arc<OptionData>`, and label the resulting slot
+with `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::
+Option)` directly. The discriminator opcodes consume those labels as
+their classification input — no runtime kind decode, no `is_heap()`
+probe.
+
+**The 8 op_* handler bodies (`executor/exceptions/mod.rs`):**
+
+| op | Behavior |
+|---|---|
+| `op_is_ok` | classify Result, push Bool(`is_ok`) |
+| `op_is_err` | classify Result, push Bool(`!is_ok`) |
+| `op_unwrap_ok` | classify Result, retain payload via KindedSlot::Clone, push (Err: throw RuntimeError) |
+| `op_unwrap_err` | classify Result, retain payload, push (Ok: throw) |
+| `op_unwrap_option` | classify Option (or null-coded), retain payload, push (None/null: throw) |
+| `op_try_unwrap` | Ok(v)/Some(v) → push v; Err(e)/None → early-return wrapper to caller via `return_value_inner`; bare non-null → pass-through |
+| `op_error_context` | Ok/Some(v) → push v; Err/None → `build_any_error(payload, cause=context, ..)` + `handle_exception` |
+| `op_type_check` | match TypeAnnotation against carrier kind (Basic scalars + Generic Result/Option/Array/Map/Set/Iterator); other forms conservatively false |
+
+The retain-on-extract pattern (`KindedSlot::Clone` on the inner
+payload, then `KindedSlot::Drop` on the outer wrapper) is the WB2.4
+discipline per §2.7.7 — pin-tested by the
+`unwrap_refcount_regression_tests` block in the same file (preserved
+as `#[cfg(feature = "phase-2c-exception-rebuild")]` for the deeper
+match-binding integration tests; the storage-tier round-trip is
+covered by the §2.7.17 unit tests in `heap_value.rs`).
+
+**Mechanical lockstep updates (4 dispatch tables — every Q8/Q10
+retain/release table — plus the knock-on exhaustive matches):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::Result`
+   ordinal 23 + `HeapKind::Option` ordinal 24 + matching
+   `HeapValue::Result(Arc<ResultData>)` / `HeapValue::Option(Arc<OptionData>)`
+   arms + `kind()` / `is_truthy()` / `type_name()` / `Clone` /
+   `Display` updates.
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arms to
+   `Arc::increment/decrement_strong_count::<ResultData|OptionData>`.
+3. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arms; new `from_result` /
+   `from_option` constructors.
+4. `crates/shape-value/src/v2/closure_layout.rs::SharedCell::drop` —
+   mirror of (2). `crates/shape-value/src/heap_value.rs::TypedObjectStorage::drop`
+   — mirror of (2).
+5. `kind_type_name` updates in `executor/printing.rs`,
+   `executor/arithmetic/mod.rs`, `executor/comparison/mod.rs`,
+   `executor/objects/typed_access.rs` — Result/Option display as
+   "result" / "option".
+6. Wire/JSON arms (`shape-runtime/src/wire_conversion.rs`,
+   `shape-runtime/src/json_value.rs`) reject Result/Option as
+   within-program control-flow values (deferred to AnyError marshal
+   for thrown errors / unwrapped inner for Ok/Some — out-of-scope
+   for this amendment, same shape as §2.7.16 Iterator deferral).
+
+**Why typed-Arc dispatch (mirror of Iterator §2.7.16) and not pure-
+discriminator (FilterExpr §2.7.9 / SharedCell §2.7.12):**
+
+- The variant discriminator handlers consume Result/Option values via
+  `slot.as_heap_value()` → `HeapValue::Result(arc)` /
+  `HeapValue::Option(arc)` for handler-body recovery (preserves
+  ADR-005 §1 single-discriminator) — there is no second recovery
+  path. The pure-discriminator pattern is reserved for variants whose
+  payloads never flow through `HeapValue` materialization;
+  variant-discriminator handlers do, so the parallel arm is
+  load-bearing here.
+
+- Result/Option values can be stored in TypedObject slots and
+  `TypedArrayData::HeapValue` buffers (e.g. `Array<Result<int,
+  string>>`); the storage-tier `TypedObjectStorage::drop` and
+  `SharedCell::drop` dispatch tables retire `Arc<ResultData>` /
+  `Arc<OptionData>` shares directly via the kind label, NOT through
+  `HeapValue` materialization. This is the same shape as HashMap /
+  HashSet / Iterator at the storage tier — full HeapValue arm but
+  storage-tier dispatch goes through the kind label.
+
+**Out-of-scope this amendment:** wire/JSON serialization of
+in-flight Result/Option carriers (deferred to the AnyError marshal /
+unwrapped-inner-value path). The compiler's null-coding emit path for
+`Option<T>` (`op_is_null` test in `compiler/patterns/checking.rs:213`)
+is **preserved as a fallback** at the consumer side
+(`op_unwrap_option` / `op_try_unwrap` / `op_error_context`) — the
+canonical `Some(x)` ctor produces an `Arc<OptionData>` carrier, but
+legacy-emitted `None` (a null sentinel) and bare-value `Some(x) ≡ x`
+flows are recognised by the discriminator handlers via the
+`is_null_sentinel` helper. A future cluster migrates the compiler
+emit to the kinded `OptionData` carrier exclusively.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-
