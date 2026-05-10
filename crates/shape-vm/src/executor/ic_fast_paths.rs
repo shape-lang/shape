@@ -362,14 +362,17 @@ mod tests {
     #[test]
     fn test_method_ic_handler_roundtrip() {
         // Verify function pointer can be stored and recovered via transmute.
-        // The dummy returns 0u64 — the §2.7 null sentinel under the
-        // post-§2.7.7 stack ABI (zero bits + Bool kind = no-op drop).
+        // Post-§2.7.10/Q11 ABI: handler takes `&[KindedSlot]` and returns
+        // `Result<KindedSlot, VMError>`. The dummy returns the §2.7 null
+        // sentinel (`KindedSlot::none()` — zero bits + Bool kind = no-op
+        // drop), preserving the original test's "do-nothing" semantics
+        // under the kinded ABI.
         fn dummy_handler(
             _vm: &mut VirtualMachine,
-            _args: &mut [u64],
+            _args: &[shape_value::KindedSlot],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-        ) -> Result<u64, shape_value::VMError> {
-            Ok(0u64)
+        ) -> Result<shape_value::KindedSlot, shape_value::VMError> {
+            Ok(shape_value::KindedSlot::none())
         }
         let ptr = dummy_handler as MethodFnV2 as usize;
         assert_ne!(ptr, 0);

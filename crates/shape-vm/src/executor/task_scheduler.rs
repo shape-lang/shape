@@ -432,12 +432,14 @@ impl Default for TaskScheduler {
 mod tests {
     use super::*;
 
-    /// Helper: a function-id "callable" — inline scalar payload, kind
-    /// `NativeKind::Ptr(HeapKind::Function)` per playbook §3 Function row.
-    /// Function ids are not Arc-backed (drop_with_kind is a no-op for the
-    /// Function HeapKind), making this the simplest test fixture.
+    /// Helper: a function-id "callable" — inline scalar payload. Post-W11
+    /// the dedicated `HeapKind::Function` variant was never added; the
+    /// `Future` variant has the same drop-shape (inline scalar, no
+    /// Arc-backed retain/release per `kinded_slot.rs:394`) and is the
+    /// stand-in test fixture for this scheduler-only register/take/resolve
+    /// cycle.
     fn function_callable(func_id: u64) -> Kinded {
-        (func_id, NativeKind::Ptr(HeapKind::Function))
+        (func_id, NativeKind::Ptr(HeapKind::Future))
     }
 
     /// Helper: a float result.

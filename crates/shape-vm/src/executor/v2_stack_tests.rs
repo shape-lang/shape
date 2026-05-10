@@ -32,7 +32,10 @@ fn execute_program_typed(
     return_kind: NativeKind,
 ) -> Result<u64, VMError> {
     let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
-    frame.return_kind = return_kind;
+    // `FrameDescriptor.return_kind` is `Option<NativeKind>` per ADR-006
+    // §2.7.8/Q10 (single-slot cell-storage shape — `None` ≡ "kind not
+    // stamped"). Test helpers always stamp a kind, so wrap in `Some`.
+    frame.return_kind = Some(return_kind);
     program.top_level_frame = Some(frame);
     execute_program(program)
 }

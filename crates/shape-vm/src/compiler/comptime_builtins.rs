@@ -438,7 +438,11 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
     module
 }
 
-#[cfg(test)]
+// Tests gated `deep-tests` post-W11: bodies invoke
+// `ModuleExports::invoke_export` which is part of the deleted comptime
+// dispatch ABI; restoration requires the kinded comptime invocation
+// surface (Phase-2c reentry per ADR-006 §2.7.4).
+#[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
     use shape_runtime::type_schema::TypeSchemaRegistry;

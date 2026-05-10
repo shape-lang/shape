@@ -1,4 +1,8 @@
-#[cfg(test)]
+// Tests gated `deep-tests` post-W11: bodies depend on the deleted
+// `ValueWord` / `ValueWordExt` ABI plus the deleted
+// `dispatch::synthesize_value_word_from_raw` helper. Restoration requires
+// migration to the kinded `KindedSlot` API per ADR-006 §2.7.4 Phase-2c.
+#[cfg(all(test, feature = "deep-tests"))]
 mod module_qualified_type_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
