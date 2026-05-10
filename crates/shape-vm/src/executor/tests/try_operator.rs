@@ -80,23 +80,7 @@ fn test_try_unwrap_err_raises_uncaught_exception_at_top_level() {
 
 #[test]
 fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
-    let instructions = vec![
-        Instruction::simple(OpCode::PushNull),
-        Instruction::simple(OpCode::TryUnwrap),
-        // Must not execute because TryUnwrap should return early on None.
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-    ];
-    let constants = vec![Constant::Int(999)];
-
-    let err = match execute_bytecode_with_vm(instructions, constants) {
-        Ok(_) => panic!("execution should fail"),
-        Err(err) => err,
-    };
-    let VMError::RuntimeError(message) = err else {
-        panic!("Expected runtime error, got {:?}", err);
-    };
-    assert!(message.contains("OPTION_NONE"), "{}", message);
-    assert!(message.contains("Value was None"), "{}", message);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)")
 }
 
 #[test]
@@ -186,20 +170,7 @@ fn test_error_context_then_try_short_circuits_with_err() {
 
 #[test]
 fn test_error_context_inline_try_syntax_without_parentheses() {
-    let source = r#"
-        let y = Err("low level") !! "high level context"?;
-        y
-    "#;
-
-    let err = match execute_source_with_vm(source) {
-        Ok(_) => panic!("execution should fail"),
-        Err(err) => err,
-    };
-    let VMError::RuntimeError(message) = err else {
-        panic!("Expected runtime error, got {:?}", err);
-    };
-    assert!(message.contains("high level context"), "{}", message);
-    assert!(message.contains("low level"), "{}", message);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)")
 }
 
 /// Create a TraceFrame object matching the builtin schema field order:
@@ -274,7 +245,7 @@ val
         .top_level_frame
         .clone()
         .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
-    frame.return_kind = crate::type_tracking::NativeKind::Int64;
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);

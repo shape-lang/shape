@@ -6,9 +6,7 @@
 //!
 //! These tests verify interpreter correctness and do not require the JIT feature.
 
-use super::*;
 use super::test_utils::eval_result as eval;
-use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ── Arity 0 ────────────────────────────────────────────────────────
 

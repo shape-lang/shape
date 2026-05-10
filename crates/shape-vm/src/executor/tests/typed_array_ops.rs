@@ -4,611 +4,167 @@
 //! Tests use the legacy stack-based CallMethod convention:
 //!   push receiver, push args..., push method_name, push arg_count, CallMethod
 
-use super::*;
-use shape_value::{ValueWord, ValueWordExt};
-use shape_value::aligned_vec::AlignedVec;
-use std::sync::Arc;
-
-// ===== Helpers =====
-
-fn float_array(vals: &[f64]) -> ValueWord {
-    let mut av = AlignedVec::with_capacity(vals.len());
-    for &v in vals {
-        av.push(v);
-    }
-    ValueWord::from_float_array(Arc::new(av.into()))
-}
-
-fn int_array(vals: &[i64]) -> ValueWord {
-    ValueWord::from_int_array(Arc::new(vals.to_vec().into()))
-}
-
-fn bool_array(vals: &[bool]) -> ValueWord {
-    let bytes: Vec<u8> = vals.iter().map(|&b| b as u8).collect();
-    ValueWord::from_bool_array(Arc::new(bytes.into()))
-}
-
-// ===== Construction via NewTypedArray =====
+// Phase-2c surface (W11): every test body in this file consumed
+// the deleted `ValueWord` carrier (`ValueWord::from_i64`,
+// `ValueWord::from_*_array`, `Constant::Value(ValueWord)`, etc.).
+// Per playbook §7 REVISED part 4 + ADR-006 §2.7.4 (host-tier
+// eval/marshal API rebuild — deleted host-tier carriers), bodies
+// are surfaced as `todo!()` until Phase-2c restores the kinded
+// host-tier carriers. Restore once the kinded constant-table /
+// kinded marshal layer lands.
 
 #[test]
 fn test_new_typed_array_ints() {
-    // [1, 2, 3] should produce Vec<int>
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 1
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 2
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 3
-        Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(3))),
-    ];
-    // After Wave-E+5, Constant::Int pushes raw native i64 bits, but
-    // the dynamic NewTypedArray handler classifies elements via
-    // tagged-ValueWord introspection. Wrap via Constant::Value so each
-    // element arrives tagged.
-    let constants = vec![
-        Constant::Value(ValueWord::from_i64(1)),
-        Constant::Value(ValueWord::from_i64(2)),
-        Constant::Value(ValueWord::from_i64(3)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert!(result.as_int_array().is_some());
-    assert_eq!(result.as_int_array().unwrap().as_slice(), &[1, 2, 3]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_new_typed_array_floats() {
-    // [1.5, 2.5, 3.5] should produce Vec<number>
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(3))),
-    ];
-    let constants = vec![
-        Constant::Number(1.5),
-        Constant::Number(2.5),
-        Constant::Number(3.5),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert!(result.as_float_array().is_some());
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1.5, 2.5, 3.5]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_new_typed_array_bools() {
-    // [true, false, true] should produce Vec<bool>
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(3))),
-    ];
-    // After Wave-E+5, Constant::Bool pushes raw native bool bits, but
-    // the dynamic NewTypedArray handler classifies elements via
-    // tagged-ValueWord introspection. Wrap via Constant::Value so each
-    // element arrives tagged.
-    let constants = vec![
-        Constant::Value(ValueWord::from_bool(true)),
-        Constant::Value(ValueWord::from_bool(false)),
-        Constant::Value(ValueWord::from_bool(true)),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert!(result.as_bool_array().is_some());
-    assert_eq!(result.as_bool_array().unwrap().as_slice(), &[1u8, 0u8, 1u8]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_new_typed_array_mixed_falls_back() {
-    // [1, "hello"] — mixed types should fall back to generic Array
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::NewTypedArray, Some(Operand::Count(2))),
-    ];
-    let constants = vec![Constant::Int(1), Constant::String("hello".to_string())];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    // Should be a generic array, not a typed array
-    assert!(result.as_int_array().is_none());
-    assert!(result.as_float_array().is_none());
-    assert!(result.to_array_arc().is_some());
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
-
-// R5.6 + Strict-typing-sweep Phase 2: Vec arithmetic and broadcasts that
-// went through the `*Dynamic` fallback (Vec*Vec, Vec*scalar, scalar*Vec,
-// Vec<int> + Vec<number>) had their runtime paths deleted alongside the
-// dynamic opcodes. The compiler retargets these shapes at compile time to
-// `BuiltinCall(IntrinsicVec*)` (R5.4E), which is pinned by
-// `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` in
-// `operator_overload.rs`. Kernel semantics live in
-// `shape-runtime::intrinsics::vector::tests` (incl. overflow).
-
-// ===== FloatArray methods =====
 
 #[test]
 fn test_float_array_sum() {
-    // [1.0, 2.0, 3.0, 4.0].sum() = 10.0
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0, 4.0])),
-        Constant::String("sum".to_string()),
-        Constant::Number(0.0), // 0 args
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 10.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_avg() {
-    // [2.0, 4.0, 6.0, 8.0].avg() = 5.0
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[2.0, 4.0, 6.0, 8.0])),
-        Constant::String("avg".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 5.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_min() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[5.0, 2.0, 8.0, 1.0])),
-        Constant::String("min".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 1.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_max() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[5.0, 2.0, 8.0, 1.0])),
-        Constant::String("max".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 8.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_len() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::String("len".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(3));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_dot_product() {
-    // [1.0, 2.0, 3.0].dot([4.0, 5.0, 6.0]) = 1*4 + 2*5 + 3*6 = 32.0
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // receiver
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // arg
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // method name
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // arg count
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::Value(float_array(&[4.0, 5.0, 6.0])),
-        Constant::String("dot".to_string()),
-        Constant::Number(1.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 32.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_norm() {
-    // [3.0, 4.0].norm() = 5.0
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[3.0, 4.0])),
-        Constant::String("norm".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 5.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_cumsum() {
-    // [1.0, 2.0, 3.0, 4.0].cumsum() = [1.0, 3.0, 6.0, 10.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0, 4.0])),
-        Constant::String("cumsum".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1.0, 3.0, 6.0, 10.0]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_diff() {
-    // [1.0, 3.0, 6.0, 10.0].diff() = [2.0, 3.0, 4.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 3.0, 6.0, 10.0])),
-        Constant::String("diff".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[2.0, 3.0, 4.0]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_abs() {
-    // [-1.0, 2.0, -3.0].abs() = [1.0, 2.0, 3.0]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[-1.0, 2.0, -3.0])),
-        Constant::String("abs".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1.0, 2.0, 3.0]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_float_array_to_array() {
-    // [1.0, 2.0, 3.0].toArray() => generic Array with 3 elements
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0, 2.0, 3.0])),
-        Constant::String("toArray".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 3);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
-
-// ===== IntArray methods =====
 
 #[test]
 fn test_int_array_sum() {
-    // Vec<int> [10, 20, 30].sum() = 60
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[10, 20, 30])),
-        Constant::String("sum".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(60));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_avg() {
-    // Vec<int> [2, 4, 6].avg() = 4.0
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[2, 4, 6])),
-        Constant::String("avg".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.to_number().unwrap(), 4.0);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_min() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[5, 2, 8, 1])),
-        Constant::String("min".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(1));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_max() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[5, 2, 8, 1])),
-        Constant::String("max".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(8));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_len() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[1, 2, 3, 4, 5])),
-        Constant::String("len".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(5));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_abs() {
-    // [-1, 2, -3].abs() = [1, 2, 3]
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[-1, 2, -3])),
-        Constant::String("abs".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_int_array().unwrap();
-    assert_eq!(arr.as_slice(), &[1, 2, 3]);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_to_array() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[1, 2, 3])),
-        Constant::String("toArray".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 3);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
-
-// ===== BoolArray methods =====
 
 #[test]
 fn test_bool_array_count() {
-    // [true, false, true, true].count() = 3
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[true, false, true, true])),
-        Constant::String("count".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(3));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_any() {
-    // [false, false, true].any() = true
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[false, false, true])),
-        Constant::String("any".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(true));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_any_all_false() {
-    // [false, false, false].any() = false
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[false, false, false])),
-        Constant::String("any".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(false));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_all() {
-    // [true, true, true].all() = true
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[true, true, true])),
-        Constant::String("all".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(true));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_all_with_false() {
-    // [true, false, true].all() = false
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[true, false, true])),
-        Constant::String("all".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_bool(), Some(false));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_len() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[true, false])),
-        Constant::String("len".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result.as_i64(), Some(2));
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_bool_array_to_array() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(bool_array(&[true, false, true])),
-        Constant::String("toArray".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 3);
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
-
-// ===== Error cases =====
 
 #[test]
 fn test_float_array_unknown_method_errors() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(float_array(&[1.0])),
-        Constant::String("nonexistent".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants);
-    assert!(result.is_err());
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
 
 #[test]
 fn test_int_array_unknown_method_errors() {
-    let instructions = vec![
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::CallMethod),
-    ];
-    let constants = vec![
-        Constant::Value(int_array(&[1])),
-        Constant::String("nonexistent".to_string()),
-        Constant::Number(0.0),
-    ];
-    let result = execute_bytecode(instructions, constants);
-    assert!(result.is_err());
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
 }
+

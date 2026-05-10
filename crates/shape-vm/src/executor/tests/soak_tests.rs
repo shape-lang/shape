@@ -2,9 +2,7 @@
 //!
 //! Run: `cargo test -p shape-vm soak_`
 
-use super::*;
 use super::test_utils::{eval, eval_typed_i64};
-use shape_value::{ValueWord, ValueWordExt};
 
 /// Expected sum of 0..n using the closed-form formula.
 fn expected_sum(n: i64) -> i64 {

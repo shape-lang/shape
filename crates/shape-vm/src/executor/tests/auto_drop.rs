@@ -6,7 +6,6 @@
 
 use crate::bytecode::OpCode;
 use crate::executor::tests::test_utils::{compile, eval};
-use shape_value::{ValueWord, ValueWordExt};
 
 #[test]
 fn test_auto_drop_at_scope_exit() {
@@ -43,7 +42,7 @@ fn test_auto_drop_at_scope_exit() {
         test_fn()
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_i64(), Some(1));
 }
 
 #[test]
@@ -154,7 +153,7 @@ fn test_auto_drop_nested_scopes() {
         test_fn()
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_i64(), Some(1));
 }
 
 #[test]
@@ -171,7 +170,7 @@ fn test_auto_drop_error_does_not_propagate() {
         test_fn()
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(99.0));
+    assert_eq!(result.as_i64(), Some(99));
 }
 
 #[test]
