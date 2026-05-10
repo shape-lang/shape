@@ -30,7 +30,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let is_stack_closure = matches!(place, Place::Local(s) if self.stack_closure_slots.contains_key(s));
                     let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
                     // Native primitive types (Float64, Int32, Bool) never need refcounting.
-                    if !is_stack_closure && !super::types::is_native_slot(slot_kind) {
+                    // `None` (kind not inferred) treats as non-native heap-shaped — same as
+                    // the legacy `Unknown` arm: takes refcount via the LocalTypeInfo branch.
+                    let is_native = slot_kind.map_or(false, super::types::is_native_slot);
+                    if !is_stack_closure && !is_native {
                         let type_info = self
                             .local_types
                             .get(slot.0 as usize)
@@ -283,8 +286,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let slot = place.root_local();
         let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
-        // Native primitive types never need refcounting.
-        if !super::types::is_native_slot(slot_kind) {
+        // Native primitive types never need refcounting. `None` is
+        // treated as non-native (legacy `Unknown` arm).
+        let is_native = slot_kind.map_or(false, super::types::is_native_slot);
+        if !is_native {
             let val = self.read_place(place)?;
             let type_info = self
                 .local_types
@@ -368,8 +373,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let slot = place.root_local();
         if matches!(place, Place::Local(_)) {
             let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-            // Native primitive types never need refcounting.
-            if super::types::is_native_slot(slot_kind) {
+            // Native primitive types never need refcounting. `None` is
+            // treated as non-native (legacy `Unknown` arm — falls
+            // through to the heap-type branch below).
+            if slot_kind.map_or(false, super::types::is_native_slot) {
                 return Ok(());
             }
 

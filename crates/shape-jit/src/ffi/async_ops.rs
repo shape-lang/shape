@@ -194,20 +194,25 @@ pub extern "C" fn jit_join_await(ctx: *mut JITContext, task_group_bits: u64) -> 
 /// # Returns
 /// 0 on success, -1 on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_cancel_task(_ctx: *mut JITContext, future_bits: u64) -> i32 {
-    let f = CANCEL_TASK_FN.load(std::sync::atomic::Ordering::Acquire);
-    if f.is_null() {
-        return -1;
-    }
-    let cancel: fn(u64) = unsafe { std::mem::transmute(f) };
-
-    let vw = crate::ffi::object::conversion::jit_bits_to_nanboxed(future_bits);
-    if vw.as_future().is_some() {
-        cancel(future_bits);
-        0
-    } else {
-        -1
-    }
+pub extern "C" fn jit_cancel_task(_ctx: *mut JITContext, _future_bits: u64) -> i32 {
+    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4 / §2.7.5):
+    // pre-strict-typing this called `vw.as_future()` on the
+    // ValueWord-shaped output of `jit_bits_to_nanboxed`, decoding
+    // the future kind from the deleted ValueWord tag bits. The
+    // §2.7.5 carrier returns a `(u64, NativeKind)` JitFfiCarrier,
+    // not a ValueWord — `as_future()` no longer exists. Kinded
+    // rebuild: dispatch on the carrier's `NativeKind ==
+    // NativeKind::Ptr(HeapKind::Future)` arm (§2.7.6/Q8) with the
+    // kind threaded from the JIT-emitted call signature per
+    // §2.7.5; until the FFI signature widens to carry the kind
+    // companion, surface-and-stop.
+    todo!(
+        "phase-2c §2.7.4/§2.7.5 / W10 jit-playbook §5: kinded \
+         future-classification — jit_cancel_task. The deleted \
+         ValueWord::as_future decode is gone; the JIT FFI \
+         signature must widen to carry a NativeKind companion per \
+         ADR-006 §2.7.5 / §2.7.6 / Q8."
+    )
 }
 
 /// Enter an async scope (structured concurrency boundary).

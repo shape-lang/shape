@@ -9,7 +9,9 @@
 
 use crate::context::JITContext;
 use crate::ffi::value_ffi::*;
-use crate::jit_array::JitArray;
+// crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// `jit_get_all_rows` returned a `JitArray`-of-data-row indices; it
+// surfaces per ADR-006 §2.7.4 / W10 jit-playbook §5.
 
 // DELETED: jit_market_list_instruments - Finance-specific, moved to stdlib/finance/data.shape
 
@@ -20,32 +22,18 @@ use crate::jit_array::JitArray;
 // DELETED: jit_market_last_rows - Finance-specific, moved to stdlib/finance/data.shape
 // Generic replacement: Use jit_get_all_rows() and slice in Shape
 
-/// Get all data rows from the execution context
-pub extern "C" fn jit_get_all_rows(ctx: *mut JITContext) -> u64 {
-    use shape_runtime::context::ExecutionContext;
-
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &*ctx;
-
-        if ctx_ref.exec_context_ptr.is_null() {
-            return TAG_NULL;
-        }
-
-        let exec_ctx = &mut *(ctx_ref.exec_context_ptr as *mut ExecutionContext);
-
-        // Get all data rows from the execution context
-        match exec_ctx.get_all_rows() {
-            Ok(rows) => {
-                // Convert to array of data row indices
-                let data_rows: Vec<u64> = (0..rows.len()).map(box_data_row).collect();
-                JitArray::from_vec(data_rows).heap_box()
-            }
-            Err(_) => TAG_NULL,
-        }
-    }
+/// Get all data rows from the execution context.
+///
+/// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): result allocation
+/// went through the deleted `JitArray::from_vec(...).heap_box()`.
+/// Kinded rebuild allocates a `TypedArray<i64>` (data-row indices)
+/// per ADR-006 §2.7.6/Q8 and returns through the kinded carrier.
+pub extern "C" fn jit_get_all_rows(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_get_all_rows. Result allocation needs `TypedArray<i64>` \
+         per ADR-006 §2.7.6/Q8."
+    )
 }
 
 /// Align multiple symbols by dataset ID

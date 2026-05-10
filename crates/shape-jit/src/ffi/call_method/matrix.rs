@@ -58,52 +58,44 @@ fn matrix_transpose(jm: &JitMatrix) -> u64 {
     unified_box(HK_MATRIX, new_jm)
 }
 
-fn matrix_flatten(jm: &JitMatrix) -> u64 {
-    let data = unsafe { std::slice::from_raw_parts(jm.data, jm.total_len as usize) };
-    use crate::jit_array::JitArray;
-    let mut arr = JitArray::new();
-    for &val in data {
-        arr.push(box_number(val));
-    }
-    arr.heap_box()
+// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): matrix_flatten /
+// matrix_shape / matrix_row / matrix_col all returned a freshly
+// allocated `JitArray` of `box_number` elements via the deleted
+// `JitArray::new()` / `push` / `heap_box` constructors. The kinded
+// rebuild allocates a `TypedArray<f64>` for the result and returns
+// it through the §2.7.6/Q8 carrier with `kind =
+// NativeKind::Ptr(HeapKind::TypedArray)` (element kind =
+// NativeKind::Float64). Every caller in `call_matrix_method` flows
+// through the surface below.
+
+fn matrix_flatten(_jm: &JitMatrix) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         matrix_flatten. Result allocation needs `TypedArray<f64>` \
+         per ADR-006 §2.7.6/Q8."
+    )
 }
 
-fn matrix_shape(jm: &JitMatrix) -> u64 {
-    use crate::jit_array::JitArray;
-    let mut arr = JitArray::new();
-    arr.push(box_number(jm.rows as f64));
-    arr.push(box_number(jm.cols as f64));
-    arr.heap_box()
+fn matrix_shape(_jm: &JitMatrix) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         matrix_shape. Result allocation needs `TypedArray<f64>` \
+         (or `TypedArray<i64>`) per ADR-006 §2.7.6/Q8."
+    )
 }
 
-fn matrix_row(jm: &JitMatrix, idx: usize) -> u64 {
-    let rows = jm.rows as usize;
-    let cols = jm.cols as usize;
-    if idx >= rows {
-        return TAG_NULL;
-    }
-    let data = unsafe { std::slice::from_raw_parts(jm.data, jm.total_len as usize) };
-    use crate::jit_array::JitArray;
-    let mut arr = JitArray::new();
-    let start = idx * cols;
-    for j in 0..cols {
-        arr.push(box_number(data[start + j]));
-    }
-    arr.heap_box()
+fn matrix_row(_jm: &JitMatrix, _idx: usize) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         matrix_row. Result allocation needs `TypedArray<f64>` \
+         per ADR-006 §2.7.6/Q8."
+    )
 }
 
-fn matrix_col(jm: &JitMatrix, idx: usize) -> u64 {
-    let _rows = jm.rows as usize;
-    let cols = jm.cols as usize;
-    if idx >= cols {
-        return TAG_NULL;
-    }
-    let data = unsafe { std::slice::from_raw_parts(jm.data, jm.total_len as usize) };
-    use crate::jit_array::JitArray;
-    let mut arr = JitArray::new();
-    let rows = jm.rows as usize;
-    for i in 0..rows {
-        arr.push(box_number(data[i * cols + idx]));
-    }
-    arr.heap_box()
+fn matrix_col(_jm: &JitMatrix, _idx: usize) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         matrix_col. Result allocation needs `TypedArray<f64>` \
+         per ADR-006 §2.7.6/Q8."
+    )
 }

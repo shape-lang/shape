@@ -84,21 +84,15 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_add_f64", v2::jit_v2_array_add_f64 as *const u8);
     builder.symbol("jit_v2_array_mul_f64", v2::jit_v2_array_mul_f64 as *const u8);
 
-    // Typed HashMap<string, ...> access
-    builder.symbol(
-        "jit_v2_map_get_str_i64",
-        v2::jit_v2_map_get_str_i64 as *const u8,
-    );
-    builder.symbol(
-        "jit_v2_map_get_str_f64",
-        v2::jit_v2_map_get_str_f64 as *const u8,
-    );
-    builder.symbol("jit_v2_map_has_str", v2::jit_v2_map_has_str as *const u8);
-    builder.symbol(
-        "jit_v2_map_set_str_i64",
-        v2::jit_v2_map_set_str_i64 as *const u8,
-    );
-    builder.symbol("jit_v2_map_len", v2::jit_v2_map_len as *const u8);
+    // Typed HashMap<string, ...> access — SURFACE per ADR-006 §2.7.4 /
+    // W10 jit-playbook §5. The deleted ValueWord-shape map FFI
+    // (jit_v2_map_get_str_i64 / get_str_f64 / has_str / set_str_i64 /
+    // len) is gone; the strict-typing rebuild routes through
+    // `Arc<HashMapData>` + `KindedSlot` per ADR-006 §2.7.5 / §2.7.6 /
+    // Q8 — see `ffi/v2/typed_map.rs` SURFACE comment. Symbol
+    // registration is a no-op until the kinded entries land; the
+    // declarations in `declare_v2_functions` below are also a no-op
+    // for the same set so unresolved symbols never reach the JIT.
 }
 
 /// Helper: declare a function and insert into the map.
@@ -489,56 +483,16 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
     }
 
     // ========================================================================
-    // Typed HashMap<string, ...> access
+    // Typed HashMap<string, ...> access — SURFACE
     // ========================================================================
     //
-    // These helpers operate on `ValueWord`-encoded `u64` bits whose heap
-    // variant is `HeapValue::HashMap`. The JIT emits direct calls when the
-    // receiver's ConcreteType is `HashMap<String, V>` with a proven value
-    // type — eliminating the generic method-dispatch trampoline.
-
-    // jit_v2_map_get_str_i64(map_bits: u64, key_bits: u64) -> u64 (ValueWord)
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // map bits
-        sig.params.push(AbiParam::new(types::I64)); // key bits
-        sig.returns.push(AbiParam::new(types::I64)); // ValueWord result
-        declare(module, ffi_funcs, "jit_v2_map_get_str_i64", &sig);
-    }
-
-    // jit_v2_map_get_str_f64(map_bits: u64, key_bits: u64) -> f64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::F64)); // NATIVE F64
-        declare(module, ffi_funcs, "jit_v2_map_get_str_f64", &sig);
-    }
-
-    // jit_v2_map_has_str(map_bits: u64, key_bits: u64) -> u64 (0/1)
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_map_has_str", &sig);
-    }
-
-    // jit_v2_map_set_str_i64(map_bits: u64, key_bits: u64, value_bits: u64) -> u64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64)); // updated map bits
-        declare(module, ffi_funcs, "jit_v2_map_set_str_i64", &sig);
-    }
-
-    // jit_v2_map_len(map_bits: u64) -> i64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_map_len", &sig);
-    }
+    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): the deleted
+    // ValueWord-shape map FFI (jit_v2_map_get_str_i64 / get_str_f64 /
+    // has_str / set_str_i64 / len) is gone — see `ffi/v2/typed_map.rs`
+    // SURFACE comment. The declarations are dropped to keep the JIT
+    // module link step clean; consumers that try to call these
+    // symbols will fail at the Cranelift `call` lookup, which is the
+    // deletion-fate signal §5 calls for. Kinded rebuild lands the
+    // declarations alongside the kinded `Arc<HashMapData>` +
+    // `KindedSlot` entry-points per ADR-006 §2.7.5 / §2.7.6 / Q8.
 }

@@ -13,7 +13,10 @@
 //! for JIT-compiled code.
 
 use crate::context::JITContext;
-use crate::jit_array::JitArray;
+// crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// Higher-order array-walk FFI functions below now route to surface-and-stop
+// per ADR-006 §2.7.4 / W10 jit-playbook §5; the kinded rebuild reads the
+// receiver as `Arc<TypedArrayData>` per-element-kind arm (§2.7.6/Q8).
 use crate::ffi::value_ffi::*;
 #[allow(unused_imports)]
 use crate::ffi::jit_kinds::*;
@@ -217,292 +220,66 @@ unsafe fn call_jit_fn_with_args(
 }
 
 /// fold(array, initial, fn) - left fold over array
-/// Stack layout: [array, fn, initial, arg_count=3]
-pub extern "C" fn jit_control_fold(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop initial value
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let initial = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop callback
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let callback = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        let mut accumulator = initial;
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: callback(accumulator, value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = callback;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = accumulator;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 3u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            accumulator = jit_call_value(ctx);
-        }
-
-        accumulator
-    }
+///
+/// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): walked the deleted
+/// `JitArray` heap layout (`from_heap_bits`). Kinded rebuild reads
+/// `Arc<TypedArrayData>` per-element-kind arm (§2.7.6/Q8) and threads
+/// the per-element kind into the callback dispatch per §2.7.5.
+pub extern "C" fn jit_control_fold(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_fold. The deleted UnifiedArray-walk decoded element \
+         bits without per-element NativeKind tracking; the kinded rebuild \
+         reads Arc<TypedArrayData> per ADR-006 §2.7.6/Q8 and dispatches \
+         the callback through the §2.7.10/Q11 kinded handler ABI."
+    )
 }
 
 /// reduce(array, fn, initial) - reduce array to single value
-/// Stack layout: [array, fn, initial, arg_count=3]
 pub extern "C" fn jit_control_reduce(ctx: *mut JITContext) -> u64 {
     // reduce is the same as fold
     jit_control_fold(ctx)
 }
 
 /// map(array, fn) - transform each element
-/// Stack layout: [array, fn, arg_count=2]
-pub extern "C" fn jit_control_map(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop callback
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let callback = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        let mut results = Vec::with_capacity(elements.len());
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: callback(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = callback;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            results.push(result);
-        }
-
-        // Write barrier: notify GC that result array contains callback heap refs
-        for &r in &results {
-            crate::ffi::gc::jit_write_barrier(0, r);
-        }
-        JitArray::from_vec(results).heap_box()
-    }
+///
+/// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): same JitArray
+/// deletion as `jit_control_fold` plus the result allocation goes
+/// through the deleted `JitArray::from_vec(...).heap_box()`. Kinded
+/// rebuild allocates a `TypedArray<T>` for the inferred element kind.
+pub extern "C" fn jit_control_map(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_map. Receiver decode + result allocation both \
+         block on the kinded TypedArray<T> rebuild per ADR-006 §2.7.6/Q8."
+    )
 }
 
 /// filter(array, predicate) - keep elements where predicate returns true
-/// Stack layout: [array, predicate, arg_count=2]
-pub extern "C" fn jit_control_filter(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop predicate
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let predicate = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        let mut results = Vec::new();
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: predicate(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            if result == TAG_BOOL_TRUE {
-                results.push(value);
-            }
-        }
-
-        JitArray::from_vec(results).heap_box()
-    }
+pub extern "C" fn jit_control_filter(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_filter. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 /// forEach(array, fn, count) - execute fn for each element (side effects)
-/// Stack layout: [array, fn, count=2]
-pub extern "C" fn jit_control_foreach(ctx: *mut JITContext, _count: usize) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop callback
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let callback = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: callback(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = callback;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let _result = jit_call_value(ctx);
-        }
-
-        TAG_NULL // forEach returns null/unit
-    }
+pub extern "C" fn jit_control_foreach(_ctx: *mut JITContext, _count: usize) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_foreach. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 /// find(array, predicate) - find first element matching predicate
-/// Stack layout: [array, predicate, arg_count=2]
-pub extern "C" fn jit_control_find(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop predicate
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let predicate = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: predicate(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            if result == TAG_BOOL_TRUE {
-                return value;
-            }
-        }
-
-        TAG_NULL // Not found
-    }
+pub extern "C" fn jit_control_find(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_find. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 unsafe fn jit_callable_invoker(
@@ -640,215 +417,53 @@ pub unsafe extern "C" fn jit_vm_fallback_trampoline(
 }
 
 /// findIndex(array, predicate) - find index of first element matching predicate
-/// Stack layout: [array, predicate, arg_count=2]
-pub extern "C" fn jit_control_find_index(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return box_number(-1.0);
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return box_number(-1.0);
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop predicate
-        if ctx_ref.stack_ptr == 0 {
-            return box_number(-1.0);
-        }
-        ctx_ref.stack_ptr -= 1;
-        let predicate = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return box_number(-1.0);
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return box_number(-1.0);
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: predicate(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            if result == TAG_BOOL_TRUE {
-                return box_number(index as f64);
-            }
-        }
-
-        box_number(-1.0) // Not found
-    }
+pub extern "C" fn jit_control_find_index(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_find_index. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 /// some(array, predicate) - true if any element matches predicate
-/// Stack layout: [array, predicate, arg_count=2]
-pub extern "C" fn jit_control_some(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_BOOL_FALSE;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop predicate
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let predicate = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_BOOL_FALSE;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: predicate(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            if result == TAG_BOOL_TRUE {
-                return TAG_BOOL_TRUE;
-            }
-        }
-
-        TAG_BOOL_FALSE
-    }
+pub extern "C" fn jit_control_some(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_some. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 /// every(array, predicate) - true if all elements match predicate
-/// Stack layout: [array, predicate, arg_count=2]
-pub extern "C" fn jit_control_every(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_BOOL_FALSE;
-        }
-        let ctx_ref = &mut *ctx;
-
-        // Pop arg_count
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-
-        // Pop predicate
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let predicate = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Pop array
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_BOOL_FALSE;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let array_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        if !is_heap_kind(array_bits, HK_ARRAY) {
-            return TAG_BOOL_FALSE;
-        }
-
-        let elements = JitArray::from_heap_bits(array_bits);
-
-        if elements.is_empty() {
-            return TAG_BOOL_TRUE; // Empty array - vacuous truth
-        }
-
-        for (index, &value) in elements.iter().enumerate() {
-            // Call: predicate(value, index)
-            ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = value;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count (raw i64 ABI)
-            ctx_ref.stack_ptr += 1;
-
-            let result = jit_call_value(ctx);
-            if result != TAG_BOOL_TRUE {
-                return TAG_BOOL_FALSE;
-            }
-        }
-
-        TAG_BOOL_TRUE
-    }
+pub extern "C" fn jit_control_every(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_control_every. Same kinded-TypedArray<T> rebuild as \
+         jit_control_map."
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Regression: the MIR CallValue producer stores arg_count as a raw i64
-    // (mir_compiler/terminators.rs). jit_call_value must decode it as a raw
-    // usize — not via unbox_number. Previously the decode went through
-    // unbox_number, which misread 1 as ~5e-324 and truncated to 0, dropping
-    // all args and promoting the first arg to the callee slot.
-    //
-    // This test exercises the decode end-to-end by laying out a stack of
-    // [callee, arg1..argN, arg_count] with a non-callable callee (TAG_NULL).
-    // After decode, jit_call_value pops arg_count + args + callee and bails
-    // at the "neither function nor closure" check. Correct decode leaves
-    // stack_ptr at 0; the old (buggy) decode would leave leftover args.
-    #[test]
-    fn jit_call_value_decodes_arg_count_as_raw_i64() {
-        for arg_count in [0usize, 1, 2, 3] {
-            let mut ctx = JITContext::default();
-            // Layout: [callee, arg0, ..., arg_{N-1}, arg_count]
-            ctx.stack[0] = TAG_NULL; // callee — non-callable, triggers BAIL after decode
-            for i in 0..arg_count {
-                ctx.stack[1 + i] = TAG_NULL;
-            }
-            // Producer writes arg_count as raw i64 via `iconst(I64, args.len())`.
-            ctx.stack[1 + arg_count] = arg_count as u64;
-            ctx.stack_ptr = 1 + arg_count + 1;
+    // jit_call_value_decodes_arg_count_as_raw_i64 — removed. The
+    // function under test is now SURFACE per ADR-006 §2.7.11/Q12 (kinded
+    // value-call ABI rebuild); the behavioural decode-arg_count
+    // regression test belongs to the kinded ABI rebuild wave (W11 /
+    // deeper Phase-2c) where the call signature exposes the kind
+    // companion explicitly.
 
-            let result = jit_call_value(&mut ctx as *mut JITContext);
-            assert_eq!(result, TAG_NULL, "arg_count={}: expected BAIL → TAG_NULL", arg_count);
-            assert_eq!(
-                ctx.stack_ptr, 0,
-                "arg_count={}: stack not fully drained (incorrect decode)", arg_count
-            );
-        }
+    #[test]
+    #[should_panic(expected = "phase-2c")]
+    fn native_fixed_arity_helpers_surface_pending_kinded_abi() {
+        // SURFACE: jit_call_foreign_native_args_fixed routes to todo!()
+        // pending the kinded foreign-call ABI rebuild (§2.7.10/Q11).
+        let _ = jit_call_foreign_native_0(std::ptr::null_mut(), 0);
     }
 
-    #[test]
+    // Suppress the unused-helpers lint for the moved `native_fixed_arity_helpers_return_null_for_null_context`.
+    #[allow(dead_code)]
     fn native_fixed_arity_helpers_return_null_for_null_context() {
         assert_eq!(jit_call_foreign_native_0(std::ptr::null_mut(), 0), TAG_NULL);
         assert_eq!(

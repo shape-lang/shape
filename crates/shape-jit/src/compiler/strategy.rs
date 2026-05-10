@@ -66,10 +66,10 @@ impl JITCompiler {
             let ffi = self.build_ffi_refs(&mut builder);
 
             {
-                let slot_kinds = program
+                let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = program
                     .top_level_frame
                     .as_ref()
-                    .map(|fd| fd.slots.clone())
+                    .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
                 // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
                 // The bytecode-program-level side-table is in flux upstream
@@ -191,10 +191,10 @@ impl JITCompiler {
             let ffi = self.build_ffi_refs(&mut builder);
 
             {
-                let slot_kinds = program
+                let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = program
                     .top_level_frame
                     .as_ref()
-                    .map(|fd| fd.slots.clone())
+                    .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
                 // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
                 // The bytecode-program-level side-table is in flux upstream

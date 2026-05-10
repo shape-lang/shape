@@ -11,7 +11,9 @@
 //! Split into type-specific helper modules for maintainability.
 
 use crate::context::JITContext;
-use crate::jit_array::JitArray;
+// crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// Method dispatch on HK_ARRAY receivers surfaces per ADR-006 §2.7.4 /
+// W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
@@ -297,60 +299,30 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         "filter" => super::control::jit_control_filter(ctx),
                         "map" => super::control::jit_control_map(ctx),
                         "count" => {
-                            // count(pred) = filter(pred).length
-                            let filtered = super::control::jit_control_filter(ctx);
-                            if is_heap_kind(filtered, HK_ARRAY) {
-                                let arr = JitArray::from_heap_bits(filtered);
-                                return box_number(arr.len() as f64);
-                            }
-                            box_number(0.0)
+                            // SURFACE (W10 jit-playbook §5 / ADR-006
+                            // §2.7.4): count = filter(pred).length —
+                            // the .length read decoded the deleted
+                            // JitArray layout. Kinded rebuild reads
+                            // `Arc<TypedArrayData>::len`.
+                            let _ = super::control::jit_control_filter(ctx);
+                            todo!(
+                                "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                                 JitArray rebuild — .count() on array."
+                            )
                         }
                         "group" | "groupBy" => {
-                            // group(keyFn) - groups elements by the result of keyFn
-                            let elements = JitArray::from_heap_bits(working_array_bits);
-
-                            let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
-
-                            for (index, &value) in elements.iter().enumerate() {
-                                // Call predicate to get the key
-                                ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
-                                ctx_ref.stack_ptr += 1;
-                                ctx_ref.stack[ctx_ref.stack_ptr] = value;
-                                ctx_ref.stack_ptr += 1;
-                                ctx_ref.stack[ctx_ref.stack_ptr] = box_number(index as f64);
-                                ctx_ref.stack_ptr += 1;
-                                ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0);
-                                ctx_ref.stack_ptr += 1;
-
-                                let key_result = super::control::jit_call_value(ctx);
-
-                                // Convert key to string for HashMap
-                                let key = if is_heap_kind(key_result, HK_STRING) {
-                                    unbox_string(key_result).to_string()
-                                } else if is_number(key_result) {
-                                    format!("{}", unbox_number(key_result))
-                                } else if key_result == TAG_BOOL_TRUE {
-                                    "true".to_string()
-                                } else if key_result == TAG_BOOL_FALSE {
-                                    "false".to_string()
-                                } else {
-                                    "null".to_string()
-                                };
-
-                                groups.entry(key).or_default().push(value);
-                            }
-
-                            // AUDIT(C5): heap island — each group's Vec<u64> is jit_box'd
-                            // into a JitAlloc<JitArray>, then that u64 is stored as a
-                            // HashMap value. The HashMap itself is then jit_box'd into
-                            // a JitAlloc<HashMap>. The inner JitArray allocations escape
-                            // into the HashMap without GC tracking.
-                            // When GC feature enabled, route through gc_allocator.
-                            let mut obj: HashMap<String, u64> = HashMap::new();
-                            for (key, values) in groups {
-                                obj.insert(key, JitArray::from_vec(values).heap_box());
-                            }
-                            unified_box(HK_JIT_OBJECT, obj)
+                            // SURFACE (W10 jit-playbook §5 / ADR-006
+                            // §2.7.4): the receiver array walk and
+                            // per-group result allocation both decoded
+                            // the deleted JitArray layout. Kinded
+                            // rebuild reads/writes
+                            // `Arc<TypedArrayData>` per element kind.
+                            let _ = (predicate, working_array_bits);
+                            todo!(
+                                "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                                 JitArray rebuild — .group()/.groupBy() \
+                                 on array."
+                            )
                         }
                         _ => TAG_NULL,
                     };

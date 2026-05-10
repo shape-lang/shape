@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 
 use super::super::super::context::JITContext;
-use super::super::super::jit_array::JitArray;
+// super::super::super::jit_array::JitArray removed — see jit_array.rs
+// SURFACE comment. The HK_ARRAY arms of `jit_set_prop` and `jit_object_rest`
+// now route to surface-and-stop per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
@@ -76,102 +78,24 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                 obj_bits
             }
             Some(HK_ARRAY) => {
-                let arr = JitArray::from_heap_bits_mut(obj_bits);
-
-                if is_number(key_bits) {
-                    // Numeric index assignment
-                    let idx_f64 = unbox_number(key_bits);
-                    let len = arr.len() as i64;
-                    let idx = if idx_f64 < 0.0 {
-                        let neg_idx = idx_f64 as i64;
-                        let actual = len + neg_idx;
-                        if actual < 0 {
-                            return obj_bits;
-                        }
-                        actual as usize
-                    } else {
-                        idx_f64 as usize
-                    };
-                    if idx < arr.len() {
-                        super::super::gc::jit_write_barrier(arr[idx], value_bits);
-                        arr.set_boxed(idx, value_bits);
-                    }
-                    obj_bits
-                } else if is_heap_kind(key_bits, HK_RANGE) {
-                    // Range assignment: arr[start:end] = values
-                    use super::super::super::context::JITRange;
-                    let range = unified_unbox::<JITRange>(key_bits);
-                    let start_bits = range.start;
-                    let end_bits = range.end;
-
-                    let start_f64 = if is_number(start_bits) {
-                        unbox_number(start_bits)
-                    } else {
-                        0.0
-                    };
-                    let end_f64 = if is_number(end_bits) {
-                        unbox_number(end_bits)
-                    } else {
-                        arr.len() as f64
-                    };
-
-                    let len = arr.len() as i32;
-                    let mut actual_start = if start_f64 < 0.0 {
-                        len + start_f64 as i32
-                    } else {
-                        start_f64 as i32
-                    };
-                    let mut actual_end = if end_f64 < 0.0 {
-                        len + end_f64 as i32
-                    } else {
-                        end_f64 as i32
-                    };
-
-                    // Clamp bounds
-                    if actual_start < 0 {
-                        actual_start = 0;
-                    }
-                    if actual_end < 0 {
-                        actual_end = 0;
-                    }
-                    if actual_start > len {
-                        actual_start = len;
-                    }
-                    if actual_end > len {
-                        actual_end = len;
-                    }
-                    if actual_start > actual_end {
-                        actual_end = actual_start;
-                    }
-
-                    let start_idx = actual_start as usize;
-                    let end_idx = actual_end as usize;
-
-                    // Get values to insert
-                    if is_heap_kind(value_bits, HK_ARRAY) {
-                        let values = JitArray::from_heap_bits(value_bits);
-                        // Splice via Vec since JitArray doesn't support splice
-                        let mut vec = arr.as_slice().to_vec();
-                        vec.splice(start_idx..end_idx, values.iter().copied());
-                        // Rebuild the JitArray in-place
-                        let arr_mut = JitArray::from_heap_bits_mut(obj_bits);
-                        let new_arr = JitArray::from_vec(vec);
-                        // Splice replaces the entire array contents; barrier on the container write.
-                        super::super::gc::jit_write_barrier(obj_bits, obj_bits);
-                        std::ptr::write(arr_mut as *mut JitArray, new_arr);
-                    } else {
-                        // Single value - fill range with it
-                        for idx in start_idx..end_idx {
-                            if idx < arr.len() {
-                                super::super::gc::jit_write_barrier(arr[idx], value_bits);
-                                arr.set_boxed(idx, value_bits);
-                            }
-                        }
-                    }
-                    obj_bits
-                } else {
-                    obj_bits
-                }
+                // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): the
+                // numeric-index, range-splice, and per-element write
+                // paths all walked the deleted `JitArray` heap layout
+                // (`from_heap_bits_mut` / `set_boxed` / `from_vec`).
+                // Kinded rebuild reads the receiver as
+                // `Arc<TypedArrayData>` per-element-kind arm
+                // (§2.7.6/Q8) and dispatches per the JIT-stamped
+                // element kind (§2.7.5). Until then, leave the
+                // container untouched and signal failure to the
+                // caller via the unmodified `obj_bits` handle.
+                let _ = (key_bits, value_bits);
+                todo!(
+                    "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray \
+                     rebuild — jit_set_prop (HK_ARRAY arm). The deleted \
+                     UnifiedArray layout blocks index/range writes; \
+                     kinded rebuild reads Arc<TypedArrayData> per \
+                     ADR-006 §2.7.6/Q8."
+                )
             }
             _ => obj_bits,
         }
@@ -179,43 +103,18 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
 }
 
 /// ObjectRest: create a new object excluding specified keys
-/// Takes (obj_bits: u64, keys_bits: u64) and returns a new object with remaining keys
+///
+/// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): the keys argument
+/// was decoded via the deleted `JitArray::from_heap_bits` walk. Kinded
+/// rebuild reads `Arc<TypedArrayData>` of `NativeKind::String` element
+/// kind per §2.7.6/Q8 and threads each element's kind through the
+/// exclude-set construction.
 #[inline(always)]
-pub extern "C" fn jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64 {
-    unsafe {
-        // Get the source object
-        if !is_heap_kind(obj_bits, HK_JIT_OBJECT) {
-            return TAG_NULL;
-        }
-        let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
-
-        // Get the keys to exclude
-        if !is_heap_kind(keys_bits, HK_ARRAY) {
-            return TAG_NULL;
-        }
-        let keys = JitArray::from_heap_bits(keys_bits);
-
-        // Build exclude set
-        let mut exclude = std::collections::HashSet::new();
-        for &key_bits in keys.iter() {
-            if is_heap_kind(key_bits, HK_STRING) {
-                let s = unbox_string(key_bits);
-                exclude.insert(s.to_string());
-            }
-        }
-
-        // AUDIT(C7): heap island — values copied from source object into the rest
-        // HashMap may be JitAlloc pointers. These inner allocations escape into
-        // the new HashMap without GC tracking.
-        // When GC feature enabled, route through gc_allocator.
-        let mut rest = HashMap::new();
-        for (key, &value) in obj.iter() {
-            if !exclude.contains(key) {
-                rest.insert(key.clone(), value);
-            }
-        }
-
-        // Box and return
-        unified_box(HK_JIT_OBJECT, rest)
-    }
+pub extern "C" fn jit_object_rest(_obj_bits: u64, _keys_bits: u64) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_object_rest. The keys array walk decoded the deleted \
+         UnifiedArray layout; kinded rebuild reads Arc<TypedArrayData> \
+         of Arc<String> elements per ADR-006 §2.7.6/Q8."
+    )
 }

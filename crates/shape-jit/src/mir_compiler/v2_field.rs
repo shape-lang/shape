@@ -76,8 +76,9 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize => types::I64, // pointer-width
 
-        // Boxed/pointer-sized values
-        NativeKind::String | NativeKind::Dynamic | NativeKind::Unknown => types::I64,
+        // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
+        // every `Ptr(_)` heap arm.
+        NativeKind::String | NativeKind::Ptr(_) => types::I64,
     }
 }
 
@@ -103,7 +104,7 @@ pub fn slot_byte_width(kind: NativeKind) -> u32 {
         | NativeKind::NullableIntSize
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize => 8,
-        NativeKind::String | NativeKind::Dynamic | NativeKind::Unknown => 8,
+        NativeKind::String | NativeKind::Ptr(_) => 8,
     }
 }
 

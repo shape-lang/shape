@@ -96,7 +96,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // legacy 8-byte cell with no behavioural change.
                 let raw_val = self.read_place(place)?;
                 let root = place.root_local();
-                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0);
+                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0)
+                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
                 let cl_ty = super::types::cranelift_type_for_slot(kind);
                 let size = cl_ty.bytes();
                 // `create_sized_stack_slot` takes the log2 of the alignment;
@@ -162,12 +163,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                 let slot = p.root_local();
-                let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-                if kind != shape_vm::type_tracking::NativeKind::Unknown {
-                    Some(kind)
-                } else {
-                    None
-                }
+                super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
             }
             _ => None,
         }

@@ -108,8 +108,11 @@ pub struct MirToIR<'a, 'b> {
     /// Type info for each local slot (from MIR's LocalTypeInfo).
     pub(crate) local_types: Vec<LocalTypeInfo>,
     /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor),
-    /// enriched by MIR-level type inference.
-    pub(crate) slot_kinds: Vec<NativeKind>,
+    /// enriched by MIR-level type inference. `None` per slot means the
+    /// inference pass left the kind undetermined — codegen consumers
+    /// surface-and-stop on `None` per ADR-006 §2.7.7 (no deleted
+    /// `NativeKind::Unknown` placeholder).
+    pub(crate) slot_kinds: Vec<Option<NativeKind>>,
     /// v2: Per-slot fully-resolved `ConcreteType` from the bytecode compiler's
     /// `function_local_concrete_types` / `top_level_local_concrete_types`
     /// side-tables. Used by the v2 typed-array codegen path. Empty when the
@@ -426,7 +429,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<NativeKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         strings: &'a [String],
         entry_block: Block,
         function_indices: &'a HashMap<String, u16>,
@@ -455,7 +458,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<NativeKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -489,7 +492,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<NativeKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -803,12 +806,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if let Some(concrete) = layout.capture_types.get(i) {
                 if let Some(kind) = types::elem_slot_kind_for_concrete(concrete) {
                     let idx = param_slot.0 as usize;
-                    if idx < self.slot_kinds.len() {
-                        if self.slot_kinds[idx]
-                            == shape_vm::type_tracking::NativeKind::Unknown
-                        {
-                            self.slot_kinds[idx] = kind;
-                        }
+                    if idx < self.slot_kinds.len() && self.slot_kinds[idx].is_none() {
+                        self.slot_kinds[idx] = Some(kind);
                     }
                 }
             }

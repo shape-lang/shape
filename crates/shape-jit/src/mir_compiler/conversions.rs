@@ -19,8 +19,16 @@ use shape_vm::type_tracking::NativeKind;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Get the NativeKind for a given SlotId.
+    ///
+    /// Returns `Int64` when the inference pass left the slot
+    /// undetermined — same Cranelift width as the legacy `_ => I64`
+    /// catch-all in `cranelift_type_for_slot`. Codegen sites that
+    /// specifically need a "kind was proven by inference" answer
+    /// should call `slot_kind_for_local` directly and surface-and-stop
+    /// on `None` per ADR-006 §2.7.7.
     pub(crate) fn slot_kind_of(&self, slot: shape_vm::mir::types::SlotId) -> NativeKind {
         super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+            .unwrap_or(NativeKind::Int64)
     }
 
     /// Widen a Cranelift value to an I64 bit pattern (ValueWord-shaped) for

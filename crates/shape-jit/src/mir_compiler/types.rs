@@ -19,12 +19,21 @@ pub(crate) fn is_copy_type(type_info: &LocalTypeInfo) -> bool {
     matches!(type_info, LocalTypeInfo::Copy)
 }
 
-/// Get the NativeKind for a local, falling back to Unknown.
-pub(crate) fn slot_kind_for_local(slot_kinds: &[NativeKind], slot_idx: u16) -> NativeKind {
-    slot_kinds
-        .get(slot_idx as usize)
-        .copied()
-        .unwrap_or(NativeKind::Unknown)
+/// Get the NativeKind for a local. Returns `None` when the slot
+/// index is out of range OR the inference pass left the slot
+/// undetermined.
+///
+/// Per ADR-006 §2.7.7, the deleted `NativeKind::Unknown` placeholder
+/// is forbidden in the runtime parallel-kind track. This compile-time
+/// helper is a different layer (compile-time inference metadata, not
+/// the runtime track), but it adopts the same single-discriminator
+/// discipline by returning `Option<NativeKind>` rather than papering
+/// over the missing-kind case.
+pub(crate) fn slot_kind_for_local(
+    slot_kinds: &[Option<NativeKind>],
+    slot_idx: u16,
+) -> Option<NativeKind> {
+    slot_kinds.get(slot_idx as usize).copied().flatten()
 }
 
 /// Whether a NativeKind is i32 (Int32 or UInt32).
@@ -33,6 +42,7 @@ pub(crate) fn is_i32_slot(kind: NativeKind) -> bool {
 }
 
 /// Whether a NativeKind represents a native (non-NaN-boxed) Cranelift type.
+#[allow(dead_code)]
 pub(crate) fn is_native_slot(kind: NativeKind) -> bool {
     matches!(
         kind,
@@ -48,14 +58,15 @@ pub(crate) fn is_native_slot(kind: NativeKind) -> bool {
 }
 
 /// Map a NativeKind to its Cranelift type.
-/// Native numeric types get their natural width; everything else is I64 (NaN-boxed).
+/// Native numeric types get their natural width; everything else is I64.
 pub(crate) fn cranelift_type_for_slot(kind: NativeKind) -> cranelift::prelude::Type {
     match kind {
         NativeKind::Float64 => types::F64,
         NativeKind::Int32 | NativeKind::UInt32 => types::I32,
         NativeKind::Int8 | NativeKind::UInt8 | NativeKind::Bool => types::I8,
         NativeKind::Int16 | NativeKind::UInt16 => types::I16,
-        // Int64, UInt64, Unknown, Dynamic, String, Nullable*, IntSize, UIntSize
+        // Int64, UInt64, String, Ptr(_), Nullable*, IntSize, UIntSize:
+        // 8-byte raw u64 (typed pointer for heap arms, scalar for ints).
         _ => types::I64,
     }
 }
@@ -108,20 +119,30 @@ pub(crate) fn is_v2_typed_array_slot(
 /// When the bytecode compiler doesn't provide slot_kinds (empty vec),
 /// this pass fills them in from MIR-observable information.
 ///
+/// Returns a `Vec<Option<NativeKind>>`: `Some(k)` for slots whose kind
+/// the inference proved, `None` for slots the inference left
+/// undetermined (e.g. opaque field reads, or parameters with no
+/// kind-source). Per ADR-006 §2.7.7 we use `None` rather than the
+/// deleted `NativeKind::Unknown` placeholder — callers that need a
+/// concrete kind for codegen surface-and-stop on `None`.
+///
 /// Rules:
 /// - Assign(slot, Use(Constant(Float(_)))) → Float64
 /// - Assign(slot, Use(Constant(Int(_)))) → Int64 (NaN-boxed int uses 48-bit payload)
 /// - Assign(slot, Use(Constant(Bool(_)))) → Bool
 /// - Assign(slot, BinaryOp(arith, lhs, rhs)) → inherits from operands if both agree
 /// - Assign(slot, Use(Move/Copy(other_slot))) → inherits from other_slot
-/// - Conflicting assignments → Unknown
-pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[NativeKind]) -> Vec<NativeKind> {
+/// - Conflicting assignments → keep existing
+pub(crate) fn infer_slot_kinds(
+    mir: &MirFunction,
+    existing: &[Option<NativeKind>],
+) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
-    let mut kinds = vec![NativeKind::Unknown; n];
+    let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
 
     // Seed from existing slot_kinds (from bytecode compiler).
     for (i, &k) in existing.iter().enumerate() {
-        if i < n && k != NativeKind::Unknown {
+        if i < n && k.is_some() {
             kinds[i] = k;
         }
     }
@@ -133,14 +154,14 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[NativeKind]) -> Ve
                 StatementKind::Assign(place, rvalue) => {
                     if let Place::Local(slot) = place {
                         let idx = slot.0 as usize;
-                        if idx < n && kinds[idx] == NativeKind::Unknown {
+                        if idx < n && kinds[idx].is_none() {
                             if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
-                                kinds[idx] = inferred;
+                                kinds[idx] = Some(inferred);
                             }
                         } else if idx < n {
                             // Slot already has a kind — check for conflicts.
                             if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
-                                if inferred != kinds[idx] {
+                                if Some(inferred) != kinds[idx] {
                                     // Conflict: different types on different paths.
                                     // Keep the existing kind (first write wins for
                                     // simple programs; SSA form means each slot is
@@ -246,14 +267,16 @@ pub(crate) fn infer_slot_kinds(mir: &MirFunction, existing: &[NativeKind]) -> Ve
         }
     }
 
-    // Parameters keep Unknown if not otherwise determined — they receive
-    // NaN-boxed values from the calling convention.
+    // Parameters keep their existing-from-bytecode kind if any.
+    // Otherwise they remain `None` — callers needing a concrete
+    // kind for codegen surface-and-stop on the `None` per ADR-006
+    // §2.7.7 (no deleted `NativeKind::Unknown` placeholder).
     for &param_slot in &mir.param_slots {
         let idx = param_slot.0 as usize;
-        if idx < n && existing.get(idx).copied().unwrap_or(NativeKind::Unknown) != NativeKind::Unknown
-        {
-            // Keep the existing kind from the compiler for params.
-            kinds[idx] = existing[idx];
+        if idx < n {
+            if let Some(Some(k)) = existing.get(idx).copied() {
+                kinds[idx] = Some(k);
+            }
         }
     }
 
@@ -295,11 +318,11 @@ fn operand_local_slot(operand: &Operand) -> Option<usize> {
     }
 }
 
-/// Set `kinds[idx] = kind` if the slot was previously `Unknown`, returning
-/// `true` when an update happened.
-fn set_kind_if_unknown(kinds: &mut [NativeKind], idx: usize, kind: NativeKind) -> bool {
-    if idx < kinds.len() && kinds[idx] == NativeKind::Unknown && kind != NativeKind::Unknown {
-        kinds[idx] = kind;
+/// Set `kinds[idx] = Some(kind)` if the slot was previously
+/// undetermined (`None`), returning `true` when an update happened.
+fn set_kind_if_unknown(kinds: &mut [Option<NativeKind>], idx: usize, kind: NativeKind) -> bool {
+    if idx < kinds.len() && kinds[idx].is_none() {
+        kinds[idx] = Some(kind);
         true
     } else {
         false
@@ -307,7 +330,7 @@ fn set_kind_if_unknown(kinds: &mut [NativeKind], idx: usize, kind: NativeKind) -
 }
 
 /// Infer the NativeKind produced by an Rvalue.
-fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[NativeKind]) -> Option<NativeKind> {
+fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[Option<NativeKind>]) -> Option<NativeKind> {
     match rvalue {
         Rvalue::Use(operand) => infer_operand_kind(operand, kinds),
         Rvalue::BinaryOp(op, lhs, rhs) => {
@@ -343,18 +366,13 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[NativeKind]) -> Option<NativeKind
 }
 
 /// Infer the NativeKind of an operand.
-fn infer_operand_kind(operand: &Operand, kinds: &[NativeKind]) -> Option<NativeKind> {
+fn infer_operand_kind(operand: &Operand, kinds: &[Option<NativeKind>]) -> Option<NativeKind> {
     match operand {
         Operand::Constant(c) => infer_constant_kind(c),
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             let slot = place.root_local();
             let idx = slot.0 as usize;
-            let k = kinds.get(idx).copied().unwrap_or(NativeKind::Unknown);
-            if k != NativeKind::Unknown {
-                Some(k)
-            } else {
-                None
-            }
+            kinds.get(idx).copied().flatten()
         }
     }
 }
@@ -420,21 +438,21 @@ mod tests {
     fn infer_float_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Float(0))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], NativeKind::Float64);
+        assert_eq!(kinds[1], Some(NativeKind::Float64));
     }
 
     #[test]
     fn infer_int_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Int(42))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], NativeKind::Int64);
+        assert_eq!(kinds[1], Some(NativeKind::Int64));
     }
 
     #[test]
     fn infer_bool_from_constant() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Bool(true))]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[1], NativeKind::Bool);
+        assert_eq!(kinds[1], Some(NativeKind::Bool));
     }
 
     #[test]
@@ -456,7 +474,7 @@ mod tests {
             },
         ]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[3], NativeKind::Float64);
+        assert_eq!(kinds[3], Some(NativeKind::Float64));
     }
 
     #[test]
@@ -478,7 +496,7 @@ mod tests {
             },
         ]);
         let kinds = infer_slot_kinds(&mir, &[]);
-        assert_eq!(kinds[3], NativeKind::Bool);
+        assert_eq!(kinds[3], Some(NativeKind::Bool));
     }
 
     #[test]
@@ -508,7 +526,7 @@ mod tests {
         let kinds = infer_slot_kinds(&mir, &[]);
         assert_eq!(
             kinds[0],
-            NativeKind::Int64,
+            Some(NativeKind::Int64),
             "backward pass should infer x: Int64 from `x + Int(1)`"
         );
     }
@@ -558,16 +576,16 @@ mod tests {
         mir.param_slots = vec![SlotId(0), SlotId(1)];
         let kinds = infer_slot_kinds(&mir, &[]);
         // The inner binop picks up the type from `_2 + Int(1)` backwards.
-        assert_eq!(kinds[2], NativeKind::Int64);
+        assert_eq!(kinds[2], Some(NativeKind::Int64));
     }
 
     #[test]
     fn existing_kinds_preserved() {
         let mir = make_mir(vec![assign_const(1, MirConstant::Float(0))]);
-        let existing = vec![NativeKind::Unknown, NativeKind::Int32];
+        let existing = vec![None, Some(NativeKind::Int32)];
         let kinds = infer_slot_kinds(&mir, &existing);
         // Existing Int32 is preserved (not overridden by Float64 inference)
-        assert_eq!(kinds[1], NativeKind::Int32);
+        assert_eq!(kinds[1], Some(NativeKind::Int32));
     }
 
     #[test]
@@ -575,7 +593,6 @@ mod tests {
         assert_eq!(cranelift_type_for_slot(NativeKind::Float64), types::F64);
         assert_eq!(cranelift_type_for_slot(NativeKind::Int32), types::I32);
         assert_eq!(cranelift_type_for_slot(NativeKind::Bool), types::I8);
-        assert_eq!(cranelift_type_for_slot(NativeKind::Unknown), types::I64);
         assert_eq!(cranelift_type_for_slot(NativeKind::Int64), types::I64);
         assert_eq!(cranelift_type_for_slot(NativeKind::String), types::I64);
     }
@@ -604,7 +621,6 @@ mod tests {
         assert_eq!(cranelift_type_for_slot(NativeKind::UInt8).bytes(), 1);
         assert_eq!(cranelift_type_for_slot(NativeKind::Bool).bytes(), 1);
         // Non-native slots collapse to 8 bytes (legacy behaviour).
-        assert_eq!(cranelift_type_for_slot(NativeKind::Unknown).bytes(), 8);
         assert_eq!(cranelift_type_for_slot(NativeKind::String).bytes(), 8);
     }
 
@@ -623,7 +639,6 @@ mod tests {
             NativeKind::Int8,
             NativeKind::UInt8,
             NativeKind::Bool,
-            NativeKind::Unknown,
             NativeKind::String,
         ] {
             let size = cranelift_type_for_slot(kind).bytes();

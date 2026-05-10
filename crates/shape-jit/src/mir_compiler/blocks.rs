@@ -38,7 +38,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn declare_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx);
+            // None falls through to I64 (uniform NaN-boxed slot width)
+            // — same Cranelift width as the legacy `_ => I64` arm.
+            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
+                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
             let cl_type = slot_types::cranelift_type_for_slot(kind);
 
             let var = Variable::new(self.next_var);
@@ -53,7 +56,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn initialize_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx);
+            // None → I64 default, same as `declare_locals` above. The
+            // `default_value_for_kind` helper produces the matching
+            // zero/null for whatever Cranelift width the slot got.
+            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
+                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
 
             if let Some(&var) = self.locals.get(&slot_id) {
                 let init_val = self.default_value_for_kind(kind);
