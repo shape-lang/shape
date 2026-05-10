@@ -1657,11 +1657,17 @@ let x = 1
 
     #[test]
     fn test_metadata_column_methods() {
-        // Verify metadata API returns column methods
+        // (W15-column, 2026-05-10) `Column` value-type deleted per ADR-006
+        // §2.7.21 / Q22 — its semantics are absorbed by
+        // `HeapKind::TableView` + `TableViewData::ColumnRef`. The LSP API
+        // surface (`LanguageMetadata::column_methods()`) is preserved as
+        // an empty-`Vec` stub; this test verifies the stub shape rather
+        // than enumerating the deleted method list. When TableView
+        // `ColumnRef` projection methods are surfaced through the LSP,
+        // this test should re-flip to assert non-empty (and assert the
+        // surviving names).
         let methods = shape_runtime::metadata::LanguageMetadata::column_methods();
-        assert!(!methods.is_empty());
-        assert!(methods.iter().any(|m| m.name == "shift"));
-        assert!(methods.iter().any(|m| m.name == "filter")); // Generic filtering method
+        assert!(methods.is_empty());
     }
 
     #[test]

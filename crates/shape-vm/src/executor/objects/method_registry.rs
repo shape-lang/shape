@@ -218,24 +218,17 @@ pub static DATATABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "forwardFill" => crate::executor::objects::datatable_methods::handle_forward_fill,
 };
 
-/// PHF registry for Column methods (10 methods)
-///
-/// **Aggregation:** len, sum, mean, min, max, std
-/// **Access:** first, last, toArray
-/// **Transform:** abs
-pub static COLUMN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => crate::executor::objects::column_methods::v2_len,
-    "length" => crate::executor::objects::column_methods::v2_len,
-    "sum" => crate::executor::objects::column_methods::v2_sum,
-    "mean" => crate::executor::objects::column_methods::v2_mean,
-    "min" => crate::executor::objects::column_methods::v2_min,
-    "max" => crate::executor::objects::column_methods::v2_max,
-    "std" => crate::executor::objects::column_methods::v2_std,
-    "first" => crate::executor::objects::column_methods::v2_first,
-    "last" => crate::executor::objects::column_methods::v2_last,
-    "toArray" => crate::executor::objects::column_methods::v2_to_array,
-    "abs" => crate::executor::objects::column_methods::v2_abs,
-};
+// (W15-column, 2026-05-10) `COLUMN_METHODS` PHF deleted per ADR-006
+// §2.7.21 / Q22. There is no surviving `HeapKind::Column`: the kinded
+// equivalent of the deleted `HeapValue::ColumnRef` payload is a
+// `HeapKind::TableView` slot carrying a `TableViewData::ColumnRef
+// { schema_id, table, col_id }` projection (see
+// `crates/shape-value/src/heap_value.rs`). The PHF previously routed
+// to 11 `NotImplemented(SURFACE)` stubs and was unreachable in
+// practice — no dispatch shell classified a receiver kind into
+// `COLUMN_METHODS`. Column-shaped APIs (aggregation across a single
+// table column) belong on `TableView::ColumnRef` and live in
+// `crates/shape-vm/src/executor/objects/datatable_methods/`.
 
 /// PHF registry for HashMap methods (18 methods)
 ///

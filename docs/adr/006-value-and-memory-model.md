@@ -3622,6 +3622,161 @@ audit lands the same way).
 - Snapshot/wire serialization of Matrix (shape-runtime/snapshot.rs
   `BlobKind::Matrix` exists pre-audit; encoding policy is an N7
   architectural-choice deferral per `json_value.rs` line ~244).
+#### 2.7.21 `HeapKind::Column` — formal deletion (Q22 ruling, W15-column, 2026-05-10)
+
+W15-column (close 2026-05-10) is unique among the W15 sub-cluster
+agents: the audit-first step ruled the assigned territory **redundant
+with `HeapKind::TableView`**, and the close is a deletion rather than a
+rebuild.
+
+**The W15-column audit findings.** The W15 playbook
+(`docs/cluster-audits/wave-14-15-16-playbook.md` §2 W15-column)
+allocated `HeapKind::Column = 28` for a "single typed-buffer column"
+HeapValue, with the audit instruction "is this redundant with
+`TypedArrayData`? if so, surface the redundancy and propose either
+drop or keep with rationale". The audit found:
+
+1. **No `HeapKind::Column` exists.** The Phase-2b §2.3 trim removed
+   `HeapValue::ColumnRef { schema_id, table, col_id }` (the v1
+   `ValueWord::from_column_ref` payload) along with every other
+   `ValueWord`-shaped variant. `crates/shape-value/src/heap_variants.rs`
+   shows the surviving 23 ordinals (String=0 through Iterator=22); no
+   ordinal labels a `Column` shape.
+2. **The Column semantics are absorbed by TableView.** The kinded
+   replacement landed inside `HeapKind::TableView = 10`:
+   `TableViewData::ColumnRef { schema_id, table: Arc<DataTable>,
+   col_id: u32 }` (`crates/shape-value/src/heap_value.rs:1558`). This
+   is the projection-into-a-DataTable that the v1 `Column` shape
+   modeled — not a standalone typed buffer.
+3. **A standalone Column would not be a thin wrapper around
+   TypedArrayData.** `TypedArrayData` (heap_value.rs:1266) is the
+   *element-typed buffer* primitive (Int64 / Float64 / Bool / String /
+   HeapValue / Matrix / typed-int variants). v1 `Column` was a
+   *projection into a DataTable* (column-id-keyed view, retains the
+   table for cross-column operations). The two are not the same shape:
+   a Column needs the parent-table reference. The TableView::ColumnRef
+   carrier already holds it.
+4. **The dispatch surface is dead.** The pre-W15 worktree has a
+   `crates/shape-vm/src/executor/objects/column_methods.rs` file with
+   11 `NotImplemented(SURFACE)` handlers and a `COLUMN_METHODS` PHF map
+   referencing them, but no dispatch shell classifies a receiver kind
+   into `COLUMN_METHODS` — the PHF is unreachable. The compiler-side
+   stdlib `extend Column { ... }` declarations
+   (`crates/shape-runtime/stdlib-src/core/column_methods.shape`)
+   compile-type-check `column.method()` calls but produce only the
+   surface error at runtime. The whole substrate is dead code.
+
+**Decision (Q22 ruling):** delete the dead `Column` substrate. Do not
+add `HeapKind::Column = 28`; do not introduce
+`HeapValue::Column(Arc<ColumnData>)`; do not add a parallel
+`ColumnData` typed-buffer struct. Column-shaped APIs (single-column
+aggregation across a `DataTable`) belong on the existing
+`TableView::ColumnRef` projection and live in
+`crates/shape-vm/src/executor/objects/datatable_methods/`; new entries
+on `COLUMN_METHODS` would merely duplicate dispatch that the
+TypedArray and DataTable PHFs already cover.
+
+**Why deletion is correct, not "keep with rationale":** the W13-hashset
+recipe (close `0da1477`) that the playbook prescribes as the canonical
+rebuild template adds value when the audited shape has unique payload
+semantics not yet expressible (HashSet's one-keyspace dedup index,
+Iterator's cursor+transforms, etc.). The W15-column audit found the
+opposite: every Column semantic has a kinded home — element buffer →
+`TypedArrayData`, projection-into-table → `TableViewData::ColumnRef`,
+single-column aggregation → DataTable methods on the parent
+`TableViewData::TypedTable` carrier. Adding `HeapKind::Column = 28`
+would reintroduce the redundancy that §2.3 trimmed and create a third
+discriminator parallel to `TableView::ColumnRef` — exactly the
+"parallel discriminator drift" hazard ADR-005 §1 / ADR-006 §2.3 spell
+out.
+
+**Mechanical scope of this close (lockstep deletions):**
+
+1. `crates/shape-vm/src/executor/objects/column_methods.rs` — file
+   removed. Was 11 surface-only handlers (`v2_len`, `v2_sum`,
+   `v2_mean`, `v2_min`, `v2_max`, `v2_std`, `v2_first`, `v2_last`,
+   `v2_to_array`, `v2_abs`, `v2_len` aliased to `length`).
+2. `crates/shape-vm/src/executor/objects/mod.rs::pub mod
+   column_methods;` — removed; replaced with a deletion-pointer
+   comment citing this §-number.
+3. `crates/shape-vm/src/executor/objects/method_registry.rs::COLUMN_METHODS`
+   — removed; replaced with a deletion-pointer comment citing this
+   §-number.
+4. `crates/shape-runtime/stdlib-src/core/column_methods.shape` — file
+   removed.
+5. `crates/shape-runtime/stdlib-src/core/prelude.shape::use
+   std::core::column_methods` — removed; replaced with a
+   deletion-pointer comment.
+6. `crates/shape-runtime/src/metadata/methods.rs::column_methods()` —
+   reduced to an empty-`Vec` stub. Preserves the LSP-facing API
+   surface (`tools/shape-lsp/src/completion/types.rs` calls
+   `LanguageMetadata::column_methods()`); the stub returns no entries
+   because there is no surviving runtime type named `Column` whose
+   methods could populate it. The LSP `is_column_type` heuristic —
+   string-matching `series` / `column` / `series<...>` against typed
+   completions — is unaffected; the stub returns no completions when
+   the heuristic fires, which is correct behavior post-deletion.
+
+**Not deleted, intentionally:**
+
+- `FunctionCategory::Column` enum variant + the four `category:
+  "Column"` `BuiltinMetadata` entries
+  (`crates/shape-runtime/src/builtin_metadata.rs`). These categorize
+  *free* stdlib functions whose signatures take `Table<any>`, not the
+  deleted `Column` value-type. The categorization label is for
+  documentation (`shift`, `resample`, `map`, `filter` over a
+  `Table<any>`); the function bodies operate on the surviving
+  TableView shape, not on a Column carrier.
+- `crates/shape-abi-v1/src/binary_builder.rs::ColumnData` — a
+  serialization-format enum for the binary export format
+  (`Float64` / `Timestamp` / `Int64` / `String` / `Bool` per-column
+  buffer). Unrelated to runtime HeapValue dispatch; serves the wire
+  format only. ADR-005 §2 / ADR-006 §2.7.5.1 wire-format-shapes are a
+  separate layer.
+- `crates/shape-value/src/column_store/{native_dense_store,arrow_store,mod}.rs`
+  + `crates/shape-value/src/datatable.rs::ColumnPtrs` — the
+  `DataTable`'s internal column storage (Arrow / native dense). These
+  back the surviving `HeapKind::TableView` and are not Column
+  HeapValues; they are the TypedTable carrier's typed-buffer payload.
+
+**Forbidden shapes ruled out by this deletion:**
+
+- A `HeapKind::Column = 28` ordinal labeled with thin-wrapper
+  semantics — e.g., `HeapValue::Column(Arc<TypedArrayData>)` or
+  `HeapValue::Column { name: Arc<String>, data: Arc<TypedArrayData> }`.
+  The first is exactly the redundancy the playbook audit-instruction
+  flagged; the second is `TableViewData::ColumnRef`'s shape minus the
+  parent-table reference, which makes cross-column operations
+  ill-typed.
+- A revived `HeapValue::ColumnRef { schema_id, table, col_id }` arm.
+  The §2.3 trim is binding; recovery goes through
+  `slot.as_heap_value()` → `HeapValue::TableView(arc)` →
+  `TableViewData::ColumnRef { ... }` match.
+- A "Column shim retained for stdlib compat" — same defection-
+  attractor family as the W-series ValueWord renames per CLAUDE.md
+  "Forbidden rationalizations". The stdlib `extend Column` block is
+  compiler-only declarative metadata for `column.method()` syntax;
+  with the runtime substrate gone, the metadata has nothing to bind
+  to. Restoring it requires a new ADR amendment proposing a Column
+  HeapValue with measured justification (the same bar as ADR-005 §2's
+  String exception).
+
+**Phase-2c follow-up (not blocking this close):** the
+`TableViewData::ColumnRef` projection methods are not yet enumerable
+through the LSP metadata API — `column_methods()` returning an empty
+Vec is the conservative behavior. When `TableView::ColumnRef` grows a
+method registry (datatable_methods/ extension), the LSP completion
+path should route through that registry under the `is_column_type`
+heuristic; the heuristic itself is preserved. This is symmetric with
+the §2.7.16 Iterator close: the kinded carrier exists, the LSP
+metadata follows once the dispatch surface stabilizes.
+
+**Provenance.** §-number 2.7.21 / Q22 is from the W14-15-16 playbook
+§0 lockstep table; ordinal 28 was pre-assigned for `HeapKind::Column`
+but is not consumed by this close (the next W15 sub-cluster taking the
+ordinal-28 slot — if any — should bump per the playbook's "if your
+ordinal is already taken at edit time, bump to the next free" rule
+and cite this §-number as the deletion that freed it).
 
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
