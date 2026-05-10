@@ -151,6 +151,21 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // / E-async migration" docstring and `printing.rs`
                 // `HeapKind::Future` arm. Same shape as `HeapKind::Char`.
                 HeapKind::Future => {}
+                // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                // 2026-05-10): the `op_alloc_shared_local` /
+                // `op_alloc_shared_module_binding` push sites emit
+                // `Arc::into_raw(Arc<SharedCell>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::SharedCell)`. This arm
+                // dispatches the retain-on-read share as the matching
+                // `Arc<SharedCell>`, fixing the type-confusion gap that
+                // would arise from any off-label re-use of an existing
+                // HeapKind variant. Same dispatch shape as the
+                // `HeapKind::FilterExpr` §2.7.9 amendment.
+                HeapKind::SharedCell => {
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::v2::closure_layout::SharedCell,
+                    );
+                }
                 // `HeapKind::NativeScalar` has no kinded `Arc<T>` carrier
                 // yet — the redesign is the phase-2c surface tracked in
                 // ADR-006 §2.7.4. The `v2_stack_tests.rs` round-trip
@@ -295,6 +310,23 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // `Ptr(HeapKind::Future)` is inline future-id u64 — no
                 // refcount work. Mirror of the `clone_with_kind` arm.
                 HeapKind::Future => {}
+                // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                // 2026-05-10): mirror of the `clone_with_kind`
+                // `HeapKind::SharedCell` arm. Retires one
+                // `Arc<SharedCell>` strong-count share. Triggers
+                // `SharedCell::Drop` at refcount=0 which then dispatches
+                // the cell's interior payload via its persistent `kind`
+                // companion (§2.7.8 / Q10 lockstep) — closing the
+                // recursive release chain. The pre-amendment alternative
+                // (re-using e.g. `HeapKind::NativeView` to label
+                // `*const SharedCell`) would route the decrement to
+                // `Arc::decrement_strong_count::<NativeViewData>` against
+                // a `SharedCell` pointer — wrong-type retire, UB.
+                HeapKind::SharedCell => {
+                    Arc::decrement_strong_count(
+                        bits as *const shape_value::v2::closure_layout::SharedCell,
+                    );
+                }
                 // `HeapKind::NativeScalar` kinded carrier pending
                 // phase-2c kinded redesign (ADR-006 §2.7.4). When it
                 // lands, this arm wires its release per the chosen

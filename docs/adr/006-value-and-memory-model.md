@@ -228,7 +228,13 @@ heap_mask}` — the fields previously inline in `HeapValue::TypedObject`.
 a label-collision soundness gap surfaced by Wave-α D-raw-helpers
 (commit `a27c0e4`); see §2.7.9 for the full justification + the
 mechanical-lockstep dispatch-table updates that fan out from the
-addition.
+addition. Phase 1.B-vm Wave 8 W8-T25 (§2.7.12, 2026-05-10) added
+`HeapKind::SharedCell` (ordinal 19) so the §2.7.7 stack parallel-kind
+track and §2.7.8 cell-storage parallel-kind track can label
+`Arc<SharedCell>` cell-pointer bits with a dedicated discriminator —
+the precondition for unblocking `op_alloc_shared_local` /
+`op_alloc_shared_module_binding`; see §2.7.12 for the precedent
+mirror.
 
 ### 2.4 ValueSlot per-FieldType constructors
 
@@ -1575,6 +1581,163 @@ the runtime tier, one parallel-pair shape (raw u64 + parallel
 trampoline), no third hybrid. The W7 playbook
 (`docs/cluster-audits/wave-7-cc1-playbook.md`) carries this
 refinement as binding for all 6 sub-clusters.
+
+#### 2.7.12 `HeapKind::SharedCell` — Q8 cardinality amendment (Wave 8 W8-T25, 2026-05-10)
+
+Phase 1.B-vm Wave 8 W8-T25 (`docs/cluster-audits/wave-8-structural-playbook.md`
+§1) surfaced a structural gap in the §2.7.7 stack parallel-kind track
+and the §2.7.8 cell-storage / module-binding parallel-kind track:
+
+> `op_alloc_shared_local` / `op_alloc_shared_module_binding` in
+> `executor/variables/mod.rs` allocate an `Arc<SharedCell>`, take the
+> raw `Arc::into_raw` pointer, and need to label that cell-pointer
+> slot in the parallel-kind track. The bytecode opcode docstring
+> (`bytecode/opcode_defs.rs:1418`) anticipates the variant
+> ("`NativeKind::Ptr(HeapKind::SharedCell)` is the parallel-track
+> discriminator") but the `HeapKind` enum in `heap_variants.rs` has no
+> matching ordinal. Without the variant, the alloc opcodes have no
+> sound kind to push and the §2.7.8 #9 forbidden Bool-default fallback
+> would be the only option — refused on sight. The opcodes therefore
+> surfaced as `NotImplemented(SURFACE)` per §2.7.4.
+
+This is the same cardinality-extension shape as the §2.7.9 / Wave-γ
+G-heap-filter-expr amendment: a new HeapKind discriminator labels a
+distinct `Arc<T>` payload type whose retain/release dispatch must
+match 1:1 against the dispatch tables. Re-using an existing variant
+(e.g. labeling `*const SharedCell` as `HeapKind::NativeView`) would
+fire `Arc::increment/decrement_strong_count::<NativeViewData>`
+against an `Arc<SharedCell>` pointer — wrong-type retain/release at
+every retain/drop site. Same UB class as the pre-§2.7.9
+`Arc<FilterNode>` mislabel; same fix shape.
+
+**Decision (Q13 cardinality amendment):** add a new HeapKind variant
+`SharedCell` (ordinal 19, immediately after `FilterExpr`'s ordinal 18
+per §2.3's append-only ordering convention). The amendment is gated
+by the §2.7.6 / Q8 cardinality bound's option (a) "Adding a
+`NativeKind` variant to `shape-value` (gated by ADR-006 / Q-ruling —
+same gate as ADR-005 §1 single-discriminator additions)" — applied
+via this section.
+
+**Why a new variant rather than off-label re-use of `NativeView` (or
+any other existing label):** the payload type (`Arc<SharedCell>`)
+requires `Arc::decrement_strong_count::<SharedCell>` at retire, which
+in turn fires `SharedCell::Drop` — and `SharedCell::Drop` itself
+dispatches its inner `value` bits through `drop_with_kind` per the
+§2.7.8 / Q10 lockstep invariant on the cell's persistent
+`kind: NativeKind` field. Mislabeling the cell-pointer slot would
+walk a different destructor (e.g. `NativeViewData::Drop`) against the
+`SharedCell`'s memory layout — UB at every retire. Per §2.7.7 /
+§2.7.8, the `clone_with_kind` / `drop_with_kind` dispatch tables are
+the **single source of truth** for typed-Arc retain/release; the
+discriminator must match the payload 1:1.
+
+**Why no parallel `HeapValue::SharedCell` enrichment is required by
+ADR-005 §1 single-discriminator:** ADR-005 §1 says HeapValue is the
+single discriminator for **heap-resident values** *that flow through
+`HeapValue` materialization*. `Arc<SharedCell>` cell-pointer slots do
+**not**: they are emitted to the kinded stack / module-binding store /
+closure-capture cells via `Arc::into_raw(Arc<SharedCell>)` and
+consumed via `Arc::from_raw(...)` directly on the slot bits, never
+wrapped in `Box<HeapValue>` or accessed via `slot.as_heap_value()`.
+Calling `slot.as_heap_value()` on a `SharedCell`-labeled slot is
+**undefined behavior** (the slot bits are an `Arc::into_raw::<SharedCell>`
+pointer, not a `*const HeapValue`); heap dispatch on
+`SharedCell`-kinded slots goes through the kind label, not through
+`as_heap_value()`. This matches the §2.7.9 FilterExpr precedent
+exactly — same pure-discriminator role, same `as_heap_value()`
+unsoundness, same justification for not enriching `HeapValue`.
+
+`HeapKind::SharedCell` is therefore **a pure-discriminator HeapKind
+variant without a corresponding `HeapValue` arm** (the second such
+variant after FilterExpr; the §2.7.9 amendment explicitly allowed
+this shape going forward).
+
+**Mechanical lockstep updates (the new variant fans out to 4 dispatch
+tables — every Q8/Q10 retain/release table):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::SharedCell`
+   ordinal 19 (no `HeapValue` arm; pure-discriminator label per the
+   precedent).
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm to
+   `Arc::increment/decrement_strong_count::<SharedCell>`.
+3. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arm.
+4. `crates/shape-value/src/heap_value.rs` — `TypedObjectStorage::drop`
+   §2.7.8 mirror (a TypedObject field of kind
+   `NativeKind::Ptr(HeapKind::SharedCell)` retires one
+   `Arc<SharedCell>` strong-count share).
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror. Yes — a `SharedCell` whose `kind` companion is
+   `NativeKind::Ptr(HeapKind::SharedCell)` retires the inner
+   `Arc<SharedCell>` share transitively. This is the closure-capture
+   shape where one shared-mutable variable is itself captured shared
+   into another closure (the inner `SharedCell` wraps an outer
+   `SharedCell` cell-pointer).
+6. `crates/shape-vm/src/executor/variables/mod.rs::op_alloc_shared_local`
+   + `op_alloc_shared_module_binding` — push sites use
+   `NativeKind::Ptr(HeapKind::SharedCell)` to label the
+   `Arc::into_raw(Arc<SharedCell>) as u64` cell-pointer bits.
+
+There is no fan-out to `printing.rs` / `comparison/mod.rs` /
+`arithmetic/mod.rs` / `wire_conversion.rs` / `json_value.rs` because
+`SharedCell`-labeled slots are an interior-only cell-pointer shape:
+they do not flow through user-visible printing / comparison /
+arithmetic / wire-serialisation surfaces. Loaders go through
+`op_load_shared_local` / `op_load_shared_capture` which dispatch on
+the cell's interior kind (stripping the `SharedCell` outer label
+before pushing onto the kinded stack); the `SharedCell` outer label
+is only ever observed by the four dispatch tables above + the alloc
+sites.
+
+**Cardinality cost:** `HeapKind` grows from 19 variants to 20; the
+§2.7.6 Q8 bound (~25 constructors / ~5-10 scalar accessors max on
+`KindedSlot`) is unchanged because `SharedCell` does not need a new
+constructor or accessor — the existing `Ptr(HeapKind::*)` constructor
+generic shape applies. Total dispatch surface grows by one arm per
+table, no new dispatch tables.
+
+**Forbidden alternatives this rules out:**
+
+- "Just keep using `HeapKind::NativeView` (or `Closure`, or any other
+  Arc-bearing arm) as a stand-in label for `*const SharedCell`."
+  Wrong-type retain/release at every retain/drop site (same UB shape
+  as the pre-§2.7.9 FilterExpr/NativeView mislabel). Refused:
+  dispatch tables must match payloads 1:1.
+- "Bool-default the alloc-site kind and let the load opcode peek at
+  the cell to recover the kind." This is exactly the §2.7.7 #9 /
+  §2.7.8 forbidden-shapes Bool-default fallback — refused on sight.
+  The kind discriminator is sourced from the alloc-site (where the
+  bits are sourced) and threaded through the parallel-kind track,
+  not recovered later.
+- "Probe the slot bits at retire to disambiguate
+  `Arc<SharedCell>` from other `Arc<T>` shapes." This is the
+  `(decode|tag|kind) (bridge|probe|helper|hop|translator|adapter)`
+  family defection (CLAUDE.md "Renames to refuse on sight") —
+  re-introducing bit-pattern probing as a substitute for a kind
+  discriminator. Refused on sight.
+- "Add a `HeapValue::SharedCell(Arc<SharedCell>)` arm so
+  `slot.as_heap_value()` works." `Arc<SharedCell>` cell-pointer slots
+  do not flow through `Box<HeapValue>` materialization; adding the
+  arm would create a parallel materialization path the dispatch
+  tables would then have to support, contradicting the
+  pure-discriminator role. Refused per §2.7.9 precedent.
+- "Transitional shim — call it `shared-cell bridge` /
+  `shared-cell-pointer probe` / `Arc<SharedCell> hop` / `cell-bits
+  translator` / `shared-storage adapter`." These are the W8-T25
+  defection-attractor family per the playbook §3 #19 + CLAUDE.md
+  "Renames to refuse on sight" `(decode|tag|kind|dispatch|value.call|
+  closure.callback|frame.setup|callee|capture) (bridge|probe|helper|
+  hop|translator|adapter|shim)` broader-family rule. Refused on sight.
+
+**Out-of-scope this amendment:** routing `SharedCell` cell-pointer
+slots through `HeapValue` materialization. No caller materializes a
+`Box<HeapValue::SharedCell>` or expects `slot.as_heap_value()` to
+return one. If a future caller needs `HeapValue` materialization of a
+`SharedCell` cell-pointer (e.g. for a snapshot/wire surface that
+crosses the §2.7.4 Phase-2c boundary), the work is a separate ADR
+amendment with the same single-discriminator analysis applied to the
+materialization path.
 
 ## 3. Lifetime, ownership, and storage planning
 

@@ -439,6 +439,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // FilterExpr discriminator labels query-DSL Arc<FilterNode>
         // payloads emitted by `executor/logical/mod.rs`.
         NativeKind::Ptr(HeapKind::FilterExpr) => "filter_expr",
+        // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment, 2026-05-10):
+        // `Arc<SharedCell>` cell-pointer slots emitted by
+        // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
+        NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
     }
 }
 

@@ -378,6 +378,21 @@ impl Drop for KindedSlot {
                     // `printing.rs` `HeapKind::Future` arm. Same shape
                     // as `HeapKind::Char`.
                     HeapKind::Future => {}
+                    // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                    // 2026-05-10): `SharedCell`-kinded `KindedSlot`s
+                    // own one `Arc::into_raw(Arc<SharedCell>)` strong-
+                    // count share — the runtime-tier carrier shape for
+                    // an `Arc<SharedCell>` cell-pointer that flows
+                    // through dispatch-slice / module-binding /
+                    // exception-payload carriers. Retires one
+                    // `Arc<SharedCell>` strong-count share. Same dispatch
+                    // shape as the `HeapKind::FilterExpr` §2.7.9
+                    // amendment.
+                    HeapKind::SharedCell => {
+                        Arc::decrement_strong_count(
+                            bits as *const crate::v2::closure_layout::SharedCell,
+                        );
+                    }
                     // `HeapKind::NativeScalar` has no kinded `Arc<T>`
                     // carrier yet — the redesign is the phase-2c
                     // surface tracked in ADR-006 §2.7.4. The
@@ -521,6 +536,20 @@ impl Clone for KindedSlot {
                     // directly in `bits` — Rust copies the slot bits
                     // below; no refcount work. Mirror of the Drop arm.
                     HeapKind::Future => {}
+                    // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                    // 2026-05-10): mirror of the Drop arm above. Bumps
+                    // one `Arc<SharedCell>` strong-count share — the
+                    // slot bits are `Arc::into_raw(Arc<SharedCell>)`
+                    // pointing to a closure-capture / module-binding /
+                    // local-slot SharedCell. Carriers that duplicate
+                    // `KindedSlot` (e.g. `read_owned_kinded` on a stack
+                    // slot whose kind is SharedCell) owe one matching
+                    // strong-count bump.
+                    HeapKind::SharedCell => {
+                        Arc::increment_strong_count(
+                            bits as *const crate::v2::closure_layout::SharedCell,
+                        );
+                    }
                     // `HeapKind::NativeScalar` kinded carrier pending
                     // phase-2c kinded redesign (ADR-006 §2.7.4). When
                     // it lands, this arm wires its retain per the

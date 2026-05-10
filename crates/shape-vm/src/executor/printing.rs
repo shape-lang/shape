@@ -284,6 +284,20 @@ impl<'a> ValueFormatter<'a> {
                 let _ = bits;
                 "<filter_expr>".to_string()
             }
+            HeapKind::SharedCell => {
+                // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                // 2026-05-10): `SharedCell` cell-pointer slots are an
+                // interior-only cell-pointer shape; user-facing prints
+                // go through `op_load_shared_local` /
+                // `op_load_shared_capture` which strip the SharedCell
+                // outer label and dispatch on the cell's interior kind.
+                // Reaching this arm with a SharedCell-labeled slot at
+                // a print surface is a kind-source bug (the print path
+                // observed a raw cell pointer instead of the unwrapped
+                // payload). Render as an opaque tag for diagnostics.
+                let _ = bits;
+                "<shared_cell>".to_string()
+            }
         }
     }
 

@@ -659,6 +659,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::NativeScalar) => "native_scalar",
         // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment).
         NativeKind::Ptr(HeapKind::FilterExpr) => "filter_expr",
+        // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment, 2026-05-10).
+        NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
     }
 }
 

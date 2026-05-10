@@ -52,7 +52,7 @@ use crate::{
     executor::VirtualMachine,
     memory::{record_heap_write, write_barrier_slot},
 };
-use shape_value::{NativeKind, VMError};
+use shape_value::{HeapKind, NativeKind, VMError};
 
 impl VirtualMachine {
     /// Resolve the `ClosureLayout` for the currently-executing closure
@@ -1455,48 +1455,83 @@ impl VirtualMachine {
     // Shared local opcodes (AllocSharedLocal / Load / Store / Drop)
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_alloc_shared_local(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
-        // ADR-006 §2.7.8 / Q10 SURFACE — `HeapKind::SharedCell` variant
-        // is not yet in the heap-variants enum (`heap_variants.rs:61`).
-        // The slot's parallel-kind track entry needs a discriminator
-        // for `*const SharedCell` cell-pointer bits, which the
-        // pre-amendment `HeapKind` ordinal table does not carry. The
-        // bytecode opcode comment at `bytecode/opcode_defs.rs:1418`
-        // anticipates the variant ("`NativeKind::Ptr(HeapKind::SharedCell)`
-        // is the parallel-track discriminator") but the enum has not
-        // been amended.
+    fn op_alloc_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
+        // 2026-05-10): with `HeapKind::SharedCell` now in the heap-
+        // variants enum and wired through every Q8/Q10 dispatch table
+        // (`clone_with_kind` / `drop_with_kind` in `vm_impl/stack.rs`,
+        // `KindedSlot::clone` / `KindedSlot::drop` in `kinded_slot.rs`,
+        // `SharedCell::drop` in `v2/closure_layout.rs`,
+        // `TypedObjectStorage::drop` in `heap_value.rs`), the parallel-
+        // kind track has the discriminator required to label
+        // `*const SharedCell` cell-pointer bits.
         //
-        // Closing this requires a small B8 follow-up:
+        // Lifecycle (per `bytecode/opcode_defs.rs:1426`):
+        //   1. Pop the initial value (raw bits + payload `NativeKind`)
+        //      off the kinded stack — the share owned by the popped
+        //      slot transfers into the cell's `value` field.
+        //   2. Allocate `Arc::new(SharedCell::new(value_bits, value_kind))`.
+        //      `SharedCell::new` records the cell's persistent kind
+        //      companion per §2.7.8 / Q10 — the lockstep invariant the
+        //      Drop matrix relies on.
+        //   3. `Arc::into_raw(arc) as u64` produces the cell-pointer
+        //      bits; the local slot becomes the unique strong-count
+        //      owner.
+        //   4. Write the cell-pointer + `NativeKind::Ptr(HeapKind::SharedCell)`
+        //      kind into the local slot via `stack_write_kinded`. The
+        //      previous occupant (zero/Bool sentinel from frame
+        //      pre-init) is released as a no-op.
         //
-        //   1. Add `HeapKind::SharedCell` ordinal to
-        //      `heap_variants.rs::HeapKind` (and the symmetric
-        //      `HeapValue` arm per ADR-005 §1 single-discriminator —
-        //      even if the payload lives outside `HeapValue` like
-        //      `HeapKind::FilterExpr` does post-Wave-γ G-heap-filter-expr
-        //      per ADR-006 §2.7.9 amendment).
-        //   2. Wire the matching `Arc::increment_strong_count::<SharedCell>`
-        //      / `Arc::decrement_strong_count::<SharedCell>` arms into
-        //      every Q8/Q10 dispatch table (`clone_with_kind` /
-        //      `drop_with_kind` in `vm_impl/stack.rs`,
-        //      `KindedSlot::clone` / `KindedSlot::drop` in
-        //      `kinded_slot.rs`).
-        //
-        // This is the same shape as the Wave-γ G-heap-filter-expr
-        // amendment (commit `5d4bbd8`); it is a structural sub-cluster,
-        // out of B6 territory per playbook §10. The §2.7.8 forbidden
-        // shape #9 (Bool-default fallback) is refused on sight; the
-        // SURFACE refusal is the correct shape per the cluster B
-        // partial-close disposition (commit `727143e`).
-        Err(VMError::NotImplemented(
-            "AllocSharedLocal: requires HeapKind::SharedCell variant amendment per \
-             ADR-006 §2.7.8 / Q10 + Wave-γ G-heap-filter-expr precedent. The slot's \
-             parallel-kind track has no discriminator for *const SharedCell \
-             cell-pointer bits today (the bytecode opcode comment anticipates the \
-             variant; the heap-variants enum has not been amended). Out of B6 \
-             territory (playbook §8 cross-cluster cascade trigger; small B8 \
-             structural follow-up)."
-                .into(),
-        ))
+        // Forbidden shapes refused on sight:
+        //   * §2.7.8 #9 Bool-default fallback for the cell's interior
+        //     kind — `value_kind` is sourced from the popped stack
+        //     slot's parallel-kind track (the same kind the producer
+        //     wrote at push time).
+        //   * `(decode|tag|kind|dispatch|...) (bridge|probe|helper|hop|
+        //     translator|adapter|shim)` defection-attractor framing
+        //     for the cell-pointer share — the `Arc<SharedCell>`
+        //     retain/release goes through the §2.7.7 / §2.7.8 dispatch
+        //     tables directly (the `HeapKind::SharedCell` arm), not
+        //     through any "bridge" or "probe".
+        use shape_value::v2::closure_layout::SharedCell;
+        use std::sync::Arc as StdArc;
+
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        // SAFETY: `SharedCell::new(bits, kind)` records the kind
+        // companion in lockstep with the value bits per §2.7.8 / Q10.
+        // `pop_kinded` transferred the share ownership out of the
+        // stack slot into our local; passing it to the cell transfers
+        // the share into the cell's `value` field. `SharedCell::Drop`
+        // will retire that share via `drop_with_kind(value_bits, value_kind)`
+        // when the last `Arc<SharedCell>` share retires.
+        let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
+        let cell_bits = StdArc::into_raw(cell) as u64;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            // Reclaim the share we were about to install. Use the same
+            // `Arc::from_raw` shape `op_drop_shared_local` uses.
+            unsafe {
+                drop(StdArc::from_raw(cell_bits as *const SharedCell));
+            }
+            return Err(VMError::RuntimeError(format!(
+                "AllocSharedLocal: slot {} out of bounds (stack len {})",
+                idx,
+                self.stack.len()
+            )));
+        }
+        // The frame-init sentinel at `slot` is `(NONE_BITS, Bool)`;
+        // `stack_write_kinded` releases that no-op then installs the
+        // new (cell_bits, SharedCell) pair in lockstep.
+        self.stack_write_kinded(
+            slot,
+            cell_bits,
+            NativeKind::Ptr(HeapKind::SharedCell),
+        );
+        Ok(())
     }
 
     fn op_load_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -1624,24 +1659,63 @@ impl VirtualMachine {
 
     fn op_alloc_shared_module_binding(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        // ADR-006 §2.7.8 / Q10 SURFACE — paired with `op_alloc_shared_local`
-        // above; same `HeapKind::SharedCell` variant gap. The
-        // module-binding parallel-kind track (Wave-γ G-module-bindings-kind,
-        // commit `27e2918`) is in place — `module_binding_write_kinded`
-        // accepts a `NativeKind` companion — but the matching variant
-        // for `*const SharedCell` cell-pointer bits is not yet in the
-        // heap-variants enum. Same B8 follow-up as `AllocSharedLocal`
-        // closes both.
-        Err(VMError::NotImplemented(
-            "AllocSharedModuleBinding: paired with AllocSharedLocal SURFACE — \
-             requires HeapKind::SharedCell variant amendment per ADR-006 §2.7.8 / \
-             Q10. The Wave-γ G-module-bindings-kind module_binding_write_kinded \
-             API is in place; only the heap-variants enum amendment is missing. \
-             Out of B6 territory (small B8 structural follow-up)."
-                .into(),
-        ))
+        // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
+        // 2026-05-10): paired with `op_alloc_shared_local` above. The
+        // Wave-γ G-module-bindings-kind `module_binding_write_kinded`
+        // API was already in place; only the `HeapKind::SharedCell`
+        // amendment was missing.
+        //
+        // Lifecycle (per `bytecode/opcode_defs.rs:1494`):
+        //   1. Pop the initial value (raw bits + payload `NativeKind`)
+        //      off the kinded stack.
+        //   2. Allocate `Arc::new(SharedCell::new(value_bits, value_kind))`.
+        //   3. `Arc::into_raw(arc) as u64` and write into
+        //      `module_bindings[idx]` via `module_binding_write_kinded`
+        //      with kind `NativeKind::Ptr(HeapKind::SharedCell)`.
+        //   4. Register `idx` with `shared_module_bindings` so the
+        //      VM-Drop special-case loop reclaims the Arc share via
+        //      `Arc::from_raw` (the kind-aware second loop sees the
+        //      zero/Bool sentinel left behind by the special-case loop
+        //      and is a no-op — see `executor/mod.rs::Drop for VirtualMachine`).
+        //
+        // Forbidden shapes refused on sight: same as
+        // `op_alloc_shared_local` — no Bool-default fallback, no
+        // `(decode|tag|...) (bridge|probe|...)` defection-attractor
+        // framing.
+        use shape_value::v2::closure_layout::SharedCell;
+        use std::sync::Arc as StdArc;
+
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        // SAFETY: same construction-side contract as
+        // `op_alloc_shared_local`. The popped slot's share transfers
+        // into the cell's `value` field; `SharedCell::Drop` retires it
+        // via `drop_with_kind` at refcount=0.
+        let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
+        let cell_bits = StdArc::into_raw(cell) as u64;
+        let index = idx as usize;
+        // `module_binding_write_kinded` grows the parallel tracks if
+        // `index` is past the current end (via `module_binding_pad_to_kinded`),
+        // releases the previous occupant via `drop_with_kind`, and
+        // installs `(cell_bits, NativeKind::Ptr(HeapKind::SharedCell))`
+        // in lockstep.
+        self.module_binding_write_kinded(
+            index,
+            cell_bits,
+            NativeKind::Ptr(HeapKind::SharedCell),
+        );
+        // Register the slot so VM-Drop reclaims the Arc<SharedCell>
+        // share via `Arc::from_raw`. The kind-aware second loop in
+        // `Drop for VirtualMachine` zeroes both bits and kind first,
+        // so the parallel-kind dispatch is a no-op for this slot at
+        // teardown — the explicit `Arc::from_raw` retire is the sole
+        // release path.
+        self.shared_module_bindings.insert(index);
+        Ok(())
     }
 
     fn op_load_shared_module_binding(
