@@ -510,34 +510,104 @@ impl VirtualMachine {
                 BuiltinFunction::SomeCtor
                 | BuiltinFunction::OkCtor
                 | BuiltinFunction::ErrCtor => {
+                    // Phase-2c §2.7.4 SURFACE: Option/Result ctors produce
+                    // values whose deconstructors (`op_try_unwrap`,
+                    // `op_unwrap_option`, `op_is_ok`, `op_is_err`,
+                    // `op_unwrap_ok`, `op_unwrap_err` in
+                    // `executor/exceptions/mod.rs`) all return
+                    // `NotImplemented(PHASE_2C_EXCEPTION_OBJECT_SURFACE)`
+                    // pending the variant-codegen rebuild on the kinded
+                    // `Arc<TypedObjectStorage>` model. Landing the
+                    // constructor side without the inspection side would
+                    // produce values nothing can read — the surface stays
+                    // closed at both ends until the variant-codegen
+                    // cluster lands. Pop args (their `KindedSlot::Drop`
+                    // retires per-arg shares per §2.7.7) and surface.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — Option/Result ctor body \
-                         migration pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "{:?} — SURFACE: Option/Result variant ctor depends \
+                         on Phase-2c variant-codegen rebuild (kinded \
+                         Arc<TypedObjectStorage> model). Paired with the \
+                         deconstructor SURFACE in \
+                         executor/exceptions/mod.rs (PHASE_2C_\
+                         EXCEPTION_OBJECT_SURFACE: op_try_unwrap, \
+                         op_unwrap_option, op_is_ok, op_is_err, \
+                         op_unwrap_ok, op_unwrap_err). ADR-006 §2.7.4 / \
+                         playbook §10 E-exceptions row.",
                         builtin
-                    );
+                    )));
                 }
-                BuiltinFunction::HashMapCtor
-                | BuiltinFunction::SetCtor
+                BuiltinFunction::HashMapCtor => {
+                    // Wave 5e collection-ctor body fill (W13-hashmap-ctor):
+                    // `let m = HashMap()` produces a fresh empty
+                    // `Arc<HashMapData>` slot. Reader contract is
+                    // `borrow_hashmap_slot`
+                    // (executor/objects/typed_access.rs:96): kind ==
+                    // `Ptr(HeapKind::HashMap)`, bits =
+                    // `Arc::into_raw::<HashMapData>`. `KindedSlot::from_hashmap`
+                    // is the canonical constructor (kinded_slot.rs:117),
+                    // `push_kinded_slot` transfers the share onto the
+                    // stack via `mem::forget` per §2.7.7.
+                    //
+                    // Args (if any — e.g. `HashMap()` is the no-arg
+                    // form; the typed-map emission path may also surface
+                    // initial pairs through this opcode in legacy
+                    // bytecode) are popped via `pop_builtin_args`; their
+                    // `KindedSlot::Drop` retires per-arg shares
+                    // kind-dispatched. The empty-ctor smoke target is
+                    // `let m = HashMap(); m.set("a", 1); m.set("b", 2);
+                    // m.delete("a"); print(m.size())` → 1.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let hm = std::sync::Arc::new(
+                        shape_value::heap_value::HashMapData::new(),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
+                }
+                BuiltinFunction::SetCtor
                 | BuiltinFunction::DequeCtor
                 | BuiltinFunction::PriorityQueueCtor => {
+                    // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
+                    // rebuild required. The pre-bulldozer HeapKind
+                    // ordinals for `Set`, `Deque`, `PriorityQueue`,
+                    // `Channel`, `Column`, `Matrix`, `Range` were deleted
+                    // when their `HeapValue` arms were trimmed in the
+                    // strict-typing Phase-2 pass; only `HashMap` was
+                    // rebuilt (Stage C P1(b), 2026-05-07). Each of these
+                    // ctors is its own Stage C cluster (per playbook
+                    // "Out of scope" list) — surface here, do not
+                    // fabricate a HeapKind.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — collection ctor body \
-                         migration pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "{:?} — SURFACE: Stage C HeapKind family rebuild \
+                         required. Set/Deque/PriorityQueue have no \
+                         HeapKind variant after the strict-typing Phase-2 \
+                         deletion (only HashMap was rebuilt, Stage C \
+                         P1(b)). Each is its own Stage C cluster per \
+                         the W13 playbook 'Out of scope' list. ADR-006 \
+                         §2.7.4 / §2.7.15.",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::MutexCtor
                 | BuiltinFunction::AtomicCtor
                 | BuiltinFunction::LazyCtor
                 | BuiltinFunction::ChannelCtor => {
+                    // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
+                    // rebuild required. Concurrency primitives (Mutex,
+                    // Atomic, Lazy, Channel) lost their HeapKind /
+                    // HeapValue arms in the strict-typing Phase-2 pass;
+                    // no kinded carrier exists to represent them. Each
+                    // is a separate Stage C cluster.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — concurrency ctor body \
-                         migration pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "{:?} — SURFACE: Stage C HeapKind family rebuild \
+                         required. Mutex/Atomic/Lazy/Channel have no \
+                         HeapKind variant after the strict-typing Phase-2 \
+                         deletion. Each is its own Stage C cluster per \
+                         the W13 playbook 'Out of scope' list. ADR-006 \
+                         §2.7.4.",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::MakeContentText
                 | BuiltinFunction::MakeContentFragment
