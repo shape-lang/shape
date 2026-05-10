@@ -585,20 +585,42 @@ impl VirtualMachine {
                         builtin
                     )));
                 }
+                BuiltinFunction::ChannelCtor => {
+                    // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                    // 2026-05-10): empty Channel ctor — `Channel()`
+                    // takes no args at landing; bounded-capacity
+                    // initialization is a follow-up. Build empty
+                    // `Arc<ChannelData>` (interior `Mutex<ChannelInner>`)
+                    // and push via `KindedSlot::from_channel`. Reader
+                    // contract: kind == Ptr(HeapKind::Channel),
+                    // bits = Arc::into_raw::<ChannelData>.
+                    //
+                    // Cross-task blocking `recv()` requires the §2.7.4
+                    // task-scheduler boundary and is SURFACE'd at the
+                    // method body — see
+                    // `executor/objects/channel_methods.rs`.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::ChannelData::new(),
+                    );
+                    let result = KindedSlot::from_channel(empty);
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::MutexCtor
                 | BuiltinFunction::AtomicCtor
-                | BuiltinFunction::LazyCtor
-                | BuiltinFunction::ChannelCtor => {
+                | BuiltinFunction::LazyCtor => {
                     // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
                     // rebuild required. Concurrency primitives (Mutex,
-                    // Atomic, Lazy, Channel) lost their HeapKind /
+                    // Atomic, Lazy) lost their HeapKind /
                     // HeapValue arms in the strict-typing Phase-2 pass;
                     // no kinded carrier exists to represent them. Each
-                    // is a separate Stage C cluster.
+                    // is a separate Stage C cluster (Channel landed as
+                    // Wave 15 W15-channel-rebuild, ADR-006 §2.7.20 /
+                    // Q21, 2026-05-10).
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     return Err(VMError::NotImplemented(format!(
                         "{:?} — SURFACE: Stage C HeapKind family rebuild \
-                         required. Mutex/Atomic/Lazy/Channel have no \
+                         required. Mutex/Atomic/Lazy have no \
                          HeapKind variant after the strict-typing Phase-2 \
                          deletion. Each is its own Stage C cluster per \
                          the W13 playbook 'Out of scope' list. ADR-006 \

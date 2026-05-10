@@ -3283,6 +3283,125 @@ must be materialized via a terminal (`collect` / `forEach` / etc.)
 before any cross-process boundary. The wire/JSON arms reject Iterator
 slots in the same shape as FilterExpr / Reference.
 
+#### 2.7.20 `HeapKind::Channel` — concurrency-primitive carrier (Wave 15 W15-channel-rebuild, 2026-05-10)
+
+**Question (Q21):** the strict-typing Phase-2 deletion removed the
+`HeapValue::Concurrency(ConcurrencyData::{Channel, Mutex, Atomic, Lazy}(_))`
+arm because every `ConcurrencyData` variant carried `ValueWord`-shaped
+payload fields. The W13 playbook "Out of scope" list called for each
+concurrency primitive to rebuild as its own Stage C cluster. **Channel
+is the first concurrency primitive to land kinded.** What is the
+correct typed-Arc shape for the rebuild, and how does it integrate
+with the §2.7.4 task-scheduler boundary?
+
+**Decision:** introduce `HeapKind::Channel` (ordinal 23) +
+`HeapValue::Channel(Arc<ChannelData>)`. Same retain/release dispatch
+shape as the §2.7.15 HashSet precedent (full HeapValue arm, NOT
+pure-discriminator like FilterExpr / SharedCell — receiver
+classification at method dispatch flows through
+`slot.as_heap_value()` per ADR-005 §1 single-discriminator).
+
+**Storage shape.** Unlike HashMap / HashSet / Iterator (immutable-on-
+clone with `Arc::make_mut` clone-on-write), Channel needs **interior
+mutability** so two `Arc<ChannelData>` shares of the same channel
+observe each other's `send` / `recv` mutations — the producer/
+consumer-endpoints shape. The inner state therefore lives behind a
+`Mutex<ChannelInner>`; the outer `Arc` is purely a refcount carrier.
+
+```rust
+pub struct ChannelData {
+    inner: std::sync::Mutex<ChannelInner>,
+}
+struct ChannelInner {
+    queue:  std::collections::VecDeque<KindedSlot>,
+    closed: bool,
+}
+```
+
+**Element typing.** The buffer stores `KindedSlot` payloads directly
+so heterogeneous-element queues are first-class — a channel can carry
+ints, strings, or typed objects without a per-element-kind
+specialisation. Each queued slot owns one strong-count share for
+heap-bearing kinds; the `KindedSlot::Drop` dispatch retires shares
+cleanly when the channel itself drops. This is the same shape
+`concurrency_methods.rs` (Mutex / Atomic / Lazy) will use when those
+primitives rebuild.
+
+**Sync-only path at landing.** The smoke target (`let c = Channel();
+c.send(1); c.recv()` returns `1`) exercises the same-thread sync
+path. Cross-task blocking `recv()` (the canonical async-channel use
+case) requires integration with the §2.7.4 task-scheduler boundary
+(`shape-vm/src/executor/task_scheduler.rs`) — the receiver suspends
+until a producer `send()`s. Per the W15 playbook surface-and-stop
+discipline, `recv()` on an empty queue returns `NotImplemented(SURFACE)`
+citing this section + §2.7.4. `try_recv()` is the non-blocking poll
+variant and is the canonical surface for sync use.
+
+**Sender/receiver endpoint split.** The pre-bulldozer Channel design
+had separate sender / receiver endpoint types (with
+`is_sender()` to classify a handle). The rebuild collapses both into
+a single `Arc<ChannelData>` carrier — any share is both producer and
+consumer. The `is_sender()` method is preserved at the PHF surface
+for source-compatibility but always errors with a SURFACE message;
+re-introducing typed sender / receiver endpoints is a phase-2c
+follow-up.
+
+**Dispatch tables (mirror of §2.7.15 HashSet, lockstep updates):**
+
+1. `clone_with_kind` / `drop_with_kind` (`vm_impl/stack.rs`) dispatch
+   the `HeapKind::Channel` arm to
+   `Arc::increment/decrement_strong_count::<ChannelData>`.
+2. `KindedSlot::Drop` / `KindedSlot::Clone` (`shape-value/src/kinded_slot.rs`)
+   mirror the same arm; new `KindedSlot::from_channel` constructor.
+3. `SharedCell::drop` (`shape-value/src/v2/closure_layout.rs`) mirrors
+   the same arm.
+4. `TypedObjectStorage::drop` (`shape-value/src/heap_value.rs`) mirrors
+   the same arm — a TypedObject field of kind
+   `Ptr(HeapKind::Channel)` retires one `Arc<ChannelData>` strong-count
+   share.
+
+**Knock-on `kind_type_name` updates** in `arithmetic/mod.rs`,
+`comparison/mod.rs`, `typed_access.rs`, `printing.rs` — Channel
+displays as "channel" (formatter renders
+`<channel:open:N>` / `<channel:closed:N>`).
+
+**Wire / JSON.** Channels are concurrency primitives with interior
+mutable state; no wire serialization at landing — same phase-2c
+deferral shape as HashMap / HashSet. `wire_conversion.rs` surfaces
+as opaque tag; `json_value.rs` rejects.
+
+**Forbidden alternatives this rules out:**
+
+- "Re-introduce `ConcurrencyData::Channel` in the deleted
+  `ValueWord`-encoded shape under a less-suspicious name." This is
+  the W-series defection-attractor (CLAUDE.md "Renames to refuse
+  on sight"); the kind dispatch must go through the
+  `HeapKind::Channel` arm and the payload must be a typed `Arc<T>`,
+  never a `Box<HeapValue>` wrapper or a tag-bit-decoded carrier.
+- "Skip the `Mutex<ChannelInner>` and use `Arc::make_mut` clone-on-
+  write like HashMap / HashSet." Wrong semantics: the
+  producer/consumer endpoints must observe each other's
+  mutations. `Arc::make_mut` clones the inner state on the first
+  mutation past refcount=1, breaking the shared-buffer contract.
+- "Skip the `HeapValue::Channel` arm and use a pure-discriminator
+  `HeapKind::Channel` like FilterExpr / SharedCell." Wrong fit:
+  channel method handlers recover the typed `Arc<ChannelData>` via
+  `slot.as_heap_value()` (per ADR-005 §1 single-discriminator) —
+  there is no second recovery path. Same justification as the
+  §2.7.15 HashSet / §2.7.16 Iterator arm-existence rulings.
+- "Bool-default fallback for empty `recv()` on the assumption that
+  `null` is the right answer." Forbidden #9 — a sync `recv()` on an
+  empty queue is the §2.7.4 task-scheduler suspend point;
+  surface-and-stop. Use `try_recv()` for the documented null-on-
+  empty poll variant.
+
+**Out-of-scope this amendment:** cross-task blocking `recv()` (the
+§2.7.4 task-scheduler integration); typed sender / receiver endpoint
+split (the pre-bulldozer two-handle shape); bounded-capacity
+backpressure (`Channel(capacity)` ctor signature); snapshot / wire
+serialization of in-flight queue state. All four are phase-2c
+follow-ups tracked separately.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-

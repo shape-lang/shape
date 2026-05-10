@@ -39,7 +39,8 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
+    ChannelData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+    TableViewData,
     TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
@@ -371,6 +372,18 @@ impl Drop for SharedCell {
                     // a HashMap sibling per §2.7.15).
                     HeapKind::HashSet => {
                         Arc::decrement_strong_count(bits as *const HashSetData);
+                    }
+                    // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                    // 2026-05-10): mirror of the HashSet arm. A
+                    // `SharedCell` whose single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::Channel)` carries
+                    // `Arc::into_raw(Arc<ChannelData>) as u64`. Retire
+                    // one `Arc<ChannelData>` strong-count share at cell
+                    // drop. The Channel is the first concurrency
+                    // primitive to flow through the §2.7.8 / Q10
+                    // cell-storage parallel-kind track.
+                    HeapKind::Channel => {
+                        Arc::decrement_strong_count(bits as *const ChannelData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

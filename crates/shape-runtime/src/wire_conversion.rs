@@ -244,6 +244,12 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // forEach / etc. before serialisation). Surface as an opaque
         // tag, same as FilterExpr / Reference.
         HeapValue::Iterator(_) => WireValue::String("<iterator>".to_string()),
+        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10):
+        // channels are concurrency primitives with interior
+        // `Mutex<ChannelInner>` state; no wire serialization at landing —
+        // same phase-2c deferral shape as HashMap / HashSet. Surface as
+        // an opaque tag for diagnostics.
+        HeapValue::Channel(_) => WireValue::String("<channel:phase-2c>".to_string()),
     }
 }
 

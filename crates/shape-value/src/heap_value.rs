@@ -861,6 +861,137 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── Channel storage (Wave 15 W15-channel, ADR-006 §2.7.20 / Q21,
+// 2026-05-10) ──────────────────────────────────────────────────────────────
+
+/// MPSC-style synchronous channel storage.
+///
+/// ADR-006 §2.7.20 / Q21 amendment (Wave 15 W15-channel-rebuild,
+/// 2026-05-10). Channel is a concurrency primitive; unlike the
+/// HashMap/HashSet siblings (insertion-ordered immutable-on-clone
+/// keys-buffer with `Arc::make_mut` clone-on-write), Channel needs
+/// **interior mutability** so that two `Arc<ChannelData>` shares of
+/// the same channel observe each other's `send` / `recv` mutations
+/// (the producer and consumer endpoints share the same buffer). The
+/// inner state therefore lives behind a `Mutex<ChannelInner>`; the
+/// outer `Arc` is purely a refcount carrier.
+///
+/// **Sync same-thread path only at landing.** Cross-task / cross-
+/// thread blocking `recv()` (the canonical async-channel use case)
+/// requires integration with the §2.7.4 task-scheduler boundary
+/// (`shape-vm/src/executor/task_scheduler.rs`), which is itself a
+/// phase-2c surface; per the W15 playbook the async paths SURFACE
+/// cleanly. The sync path (same-thread `send` then `recv`) lands
+/// here end-to-end.
+///
+/// **Element typing.** The buffer stores `KindedSlot` payloads
+/// directly so heterogeneous-element queues are first-class (a
+/// channel can carry ints, strings, or typed objects without a
+/// per-element-kind specialisation). Each slot owns one strong-
+/// count share for heap-bearing kinds; the `KindedSlot::Drop`
+/// dispatch retires shares cleanly when the channel itself drops.
+/// This is the same shape `concurrency_methods.rs` (Mutex/Atomic/
+/// Lazy) will use when those primitives rebuild — Channel is the
+/// first concurrency primitive to land kinded.
+///
+/// **Closed flag.** `closed: bool` records whether the producer
+/// side has signalled end-of-stream. After `close()` further
+/// `send()` calls return a closed-channel error; `recv()` continues
+/// to drain queued elements and only errors once the queue is
+/// empty (canonical drain-on-close semantics).
+#[derive(Debug)]
+pub struct ChannelData {
+    inner: std::sync::Mutex<ChannelInner>,
+}
+
+/// Inner mutable state of a `ChannelData`. Held under `Mutex` so
+/// concurrent `Arc<ChannelData>` shares observe each other's
+/// mutations.
+#[derive(Debug)]
+struct ChannelInner {
+    /// FIFO queue of pending kinded elements.
+    queue: std::collections::VecDeque<crate::kinded_slot::KindedSlot>,
+    /// Producer-side end-of-stream signal. Once set, further
+    /// `send()` calls return a closed-channel error and `recv()`
+    /// drains remaining elements before erroring.
+    closed: bool,
+}
+
+impl ChannelData {
+    /// Build an empty open channel.
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(ChannelInner {
+                queue: std::collections::VecDeque::new(),
+                closed: false,
+            }),
+        }
+    }
+
+    /// Number of pending elements. Useful for diagnostics; not part
+    /// of the user-facing method surface.
+    pub fn len(&self) -> usize {
+        self.inner.lock().expect("channel mutex poisoned").queue.len()
+    }
+
+    /// Whether the queue currently holds zero pending elements.
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("channel mutex poisoned")
+            .queue
+            .is_empty()
+    }
+
+    /// Whether `close()` has been called.
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().expect("channel mutex poisoned").closed
+    }
+
+    /// Append `slot` to the queue.
+    ///
+    /// Returns `Ok(())` on success, `Err(())` if the channel is
+    /// already closed (callers surface this as a runtime error
+    /// from the `send` method body).
+    pub fn send(&self, slot: crate::kinded_slot::KindedSlot) -> Result<(), ()> {
+        let mut inner = self.inner.lock().expect("channel mutex poisoned");
+        if inner.closed {
+            // Drop the slot — its share retires through KindedSlot::Drop.
+            drop(slot);
+            return Err(());
+        }
+        inner.queue.push_back(slot);
+        Ok(())
+    }
+
+    /// Pop the front element non-blocking.
+    ///
+    /// Returns `Some(slot)` if an element was available, `None`
+    /// otherwise. Per ADR §2.7.20 the same-thread sync path is the
+    /// supported surface; blocking `recv()` (await-style) requires
+    /// the §2.7.4 task-scheduler boundary and is SURFACE'd at the
+    /// method body.
+    pub fn try_recv(&self) -> Option<crate::kinded_slot::KindedSlot> {
+        self.inner
+            .lock()
+            .expect("channel mutex poisoned")
+            .queue
+            .pop_front()
+    }
+
+    /// Mark the channel closed. Idempotent — calling close on an
+    /// already-closed channel is a no-op.
+    pub fn close(&self) {
+        self.inner.lock().expect("channel mutex poisoned").closed = true;
+    }
+}
+
+impl Default for ChannelData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
 
 /// Task-group payload. Extracted from the inline
@@ -1084,6 +1215,20 @@ impl Drop for TypedObjectStorage {
                         // share at storage drop.
                         HeapKind::HashSet => {
                             std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
+                        }
+                        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20
+                        // / Q21, 2026-05-10): a TypedObject field of
+                        // kind `NativeKind::Ptr(HeapKind::Channel)`
+                        // holds slot bits =
+                        // `Arc::into_raw(Arc<ChannelData>)`. Same
+                        // dispatch shape as the HashSet arm above —
+                        // retire one `Arc<ChannelData>` strong-count
+                        // share at storage drop. The inner
+                        // `Mutex<ChannelInner>` Drop runs at
+                        // refcount=0, retiring queued `KindedSlot`
+                        // payloads.
+                        HeapKind::Channel => {
+                            std::sync::Arc::decrement_strong_count(bits as *const ChannelData);
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -1671,6 +1816,14 @@ impl Clone for HeapValue {
             // every field), but the outer `Arc` bump is the canonical
             // shared-receiver path.
             HeapValue::Iterator(v) => HeapValue::Iterator(Arc::clone(v)),
+            // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+            // 2026-05-10): Channel Arcs share the typed-Arc clone shape
+            // — single strong-count bump on the shared
+            // `Arc<ChannelData>`. The inner `ChannelData` carries a
+            // `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares
+            // observe each other's mutations; cloning the outer Arc
+            // hands out a fresh endpoint of the same channel.
+            HeapValue::Channel(v) => HeapValue::Channel(Arc::clone(v)),
         }
     }
 }
@@ -1850,6 +2003,16 @@ impl fmt::Display for HeapValue {
             // reaching the Display surface is "still lazy" by
             // construction.
             HeapValue::Iterator(_) => write!(f, "<iterator>"),
+            // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+            // 2026-05-10): channels are concurrency primitives with no
+            // user-facing literal; render as an opaque tag annotated
+            // with current queue length and closed flag for
+            // diagnostics.
+            HeapValue::Channel(c) => {
+                let len = c.len();
+                let state = if c.is_closed() { "closed" } else { "open" };
+                write!(f, "<channel:{}:{}>", state, len)
+            }
         }
     }
 }
@@ -2459,5 +2622,125 @@ mod hashset_mutation {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains("a"));
         assert!(!snapshot.contains("b"));
+    }
+}
+
+#[cfg(test)]
+mod channel_storage {
+    //! W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10): pin the
+    //! `send` / `try_recv` / `close` / `is_closed` / `len` / `is_empty`
+    //! API contracts on `ChannelData`. Sync same-thread path only —
+    //! cross-task blocking `recv()` is the §2.7.4 task-scheduler
+    //! boundary tracked separately.
+    use super::*;
+    use crate::kinded_slot::KindedSlot;
+    use std::sync::Arc;
+
+    #[test]
+    fn empty_channel_has_zero_len_and_is_empty_open() {
+        let c = ChannelData::new();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert!(!c.is_closed());
+        assert!(c.try_recv().is_none());
+    }
+
+    #[test]
+    fn send_then_try_recv_round_trips_int() {
+        // Storage-layer counterpart of the W15-channel-rebuild smoke
+        // target: `let c = Channel(); c.send(1); c.recv()` returns 1.
+        let c = ChannelData::new();
+        c.send(KindedSlot::from_int(1)).expect("send on open channel");
+        let got = c.try_recv().expect("queued element");
+        assert_eq!(got.as_i64(), Some(1));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn fifo_send_recv_order() {
+        // Producer pushes 1, 2, 3; consumer drains in the same order.
+        let c = ChannelData::new();
+        c.send(KindedSlot::from_int(1)).unwrap();
+        c.send(KindedSlot::from_int(2)).unwrap();
+        c.send(KindedSlot::from_int(3)).unwrap();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.try_recv().unwrap().as_i64(), Some(1));
+        assert_eq!(c.try_recv().unwrap().as_i64(), Some(2));
+        assert_eq!(c.try_recv().unwrap().as_i64(), Some(3));
+        assert!(c.try_recv().is_none());
+    }
+
+    #[test]
+    fn close_blocks_further_sends_but_drains_queued() {
+        // After close, send returns Err but queued elements still
+        // recv cleanly (canonical drain-on-close semantics).
+        let c = ChannelData::new();
+        c.send(KindedSlot::from_int(7)).unwrap();
+        c.close();
+        assert!(c.is_closed());
+        // Further send is rejected; the rejected slot is dropped
+        // (refcount discipline preserved through KindedSlot::Drop).
+        assert!(c.send(KindedSlot::from_int(8)).is_err());
+        // Queued element still drains.
+        assert_eq!(c.try_recv().unwrap().as_i64(), Some(7));
+        assert!(c.try_recv().is_none());
+    }
+
+    #[test]
+    fn shared_arc_send_recv_observes_other_share() {
+        // Two `Arc<ChannelData>` shares of the same channel observe
+        // each other's mutations — the producer/consumer-endpoints
+        // shape. Distinct from HashSet/HashMap (which are Arc::make_mut
+        // clone-on-write) — Channel uses interior mutability via
+        // Mutex.
+        let producer = Arc::new(ChannelData::new());
+        let consumer = Arc::clone(&producer);
+        producer.send(KindedSlot::from_int(42)).unwrap();
+        assert_eq!(consumer.len(), 1);
+        let got = consumer.try_recv().unwrap();
+        assert_eq!(got.as_i64(), Some(42));
+        // After consumer drained, producer-side observes empty.
+        assert!(producer.is_empty());
+    }
+
+    #[test]
+    fn dropping_channel_with_heap_payloads_retires_shares() {
+        // Refcount discipline: KindedSlot payloads queued in the
+        // channel own one strong-count share; dropping the channel
+        // (last `Arc<ChannelData>` share retired) must drop each
+        // queued slot and retire its inner share. Any Arc-leak would
+        // surface as a non-zero strong-count after the channel
+        // dropped.
+        let s = Arc::new("payload".to_string());
+        let weak = Arc::downgrade(&s);
+        let c = ChannelData::new();
+        c.send(KindedSlot::from_string_arc(s)).unwrap();
+        // The queued slot owns the only strong share.
+        assert_eq!(weak.strong_count(), 1);
+        drop(c);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "dropped Channel must retire queued KindedSlot shares"
+        );
+    }
+
+    #[test]
+    fn closed_send_drops_rejected_payload_share() {
+        // After close, a rejected send must NOT leak the payload
+        // share — KindedSlot::Drop runs on the rejected slot.
+        let c = ChannelData::new();
+        c.close();
+        let s = Arc::new("rejected".to_string());
+        let weak = Arc::downgrade(&s);
+        let slot = KindedSlot::from_string_arc(s);
+        assert_eq!(weak.strong_count(), 1);
+        // The rejected send consumes the slot and drops it internally.
+        assert!(c.send(slot).is_err());
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "rejected-send slot must drop, not leak"
+        );
     }
 }

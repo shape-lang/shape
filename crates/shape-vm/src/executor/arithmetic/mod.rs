@@ -667,6 +667,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::HashSet) => "set",
         // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10).
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10).
+        NativeKind::Ptr(HeapKind::Channel) => "channel",
     }
 }
 

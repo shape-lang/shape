@@ -452,6 +452,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<IteratorState>` lazy-iterator carriers emitted by the
         // iterator-method PHF.
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10):
+        // `Arc<ChannelData>` MPSC channel carriers emitted by `Channel()`
+        // ctor + the CHANNEL_METHODS PHF.
+        NativeKind::Ptr(HeapKind::Channel) => "channel",
     }
 }
 

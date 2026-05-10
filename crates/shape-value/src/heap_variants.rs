@@ -148,6 +148,24 @@ macro_rules! define_heap_types {
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
             Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // ADR-006 §2.7.20 / Q21 amendment (Wave 15 W15-channel-rebuild,
+            // 2026-05-10): MPSC-style synchronous channel concurrency
+            // primitive. Unlike HashMap/HashSet/Iterator (which are
+            // immutable-on-clone with `Arc::make_mut` clone-on-write),
+            // `ChannelData` carries interior mutability via
+            // `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares of
+            // the same channel observe each other's `send` / `recv`
+            // mutations (the producer/consumer-endpoints shape).
+            // Sync same-thread `send` / `try_recv` / `close` / `is_closed`
+            // land here; blocking `recv()` (cross-task await-style) is
+            // the §2.7.4 task-scheduler boundary and is SURFACE'd at
+            // the method body — see `executor/objects/channel_methods.rs`.
+            // Full HeapValue arm (NOT pure-discriminator) — Channel
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`c.send(...)` / `c.recv()`),
+            // can be stored in TypedObject slots and `TypedArrayData::HeapValue`
+            // buffers.
+            Channel,       // 23  (Wave 15 W15-channel-rebuild, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -313,6 +331,23 @@ macro_rules! define_heap_types {
             /// cursor triple is opaque at the dispatch shell —
             /// terminals walk `arc.transforms` and dispatch per stage).
             Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+            // 2026-05-10) =====
+            /// MPSC-style synchronous channel carrier (`Arc<ChannelData>`).
+            /// Unlike HashMap/HashSet (immutable-on-clone with
+            /// `Arc::make_mut` clone-on-write), `ChannelData` wraps a
+            /// `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares
+            /// of the same channel observe each other's `send` /
+            /// `recv` mutations — the producer/consumer-endpoints
+            /// shape. See `$crate::heap_value::ChannelData` for the
+            /// storage shape and the §2.7.20 amendment for the design
+            /// rationale.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): Channel values flow through
+            /// `slot.as_heap_value()` for receiver classification at
+            /// method dispatch — same shape as `HashSet` / `Iterator`.
+            Channel(std::sync::Arc<$crate::heap_value::ChannelData>),
         }
 
         impl HeapValue {
@@ -342,6 +377,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                     HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::Channel(..) => HeapKind::Channel,
                 }
             }
 
@@ -378,6 +414,10 @@ macro_rules! define_heap_types {
                     // if its terminal evaluation will yield zero
                     // elements after filter / take 0 etc.).
                     HeapValue::Iterator(_) => true,
+                    // Channel values are always truthy when present
+                    // (a live channel is a usable endpoint regardless of
+                    // queued-element count or closed state).
+                    HeapValue::Channel(_) => true,
                 }
             }
 
@@ -413,6 +453,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                     HeapValue::Iterator(_) => "iterator",
+                    HeapValue::Channel(_) => "channel",
                 }
             }
         }
