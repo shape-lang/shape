@@ -416,6 +416,22 @@ impl<'a> ValueFormatter<'a> {
                     unsafe { &*(bits as *const shape_value::heap_value::PriorityQueueData) };
                 self.format_priority_queue(pq)
             }
+            HeapKind::Range => {
+                // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                // user-visible literal form `start..end` (exclusive)
+                // or `start..=end` (inclusive). Matches the surface
+                // syntax round-trip and the `HeapValue::Range` Display
+                // impl in `heap_value.rs`. SAFETY: construction-side
+                // contract on `KindedSlot::from_range` — Range-kind
+                // bits are `Arc::into_raw(Arc<RangeData>)`.
+                let r: &shape_value::heap_value::RangeData =
+                    unsafe { &*(bits as *const shape_value::heap_value::RangeData) };
+                if r.inclusive {
+                    format!("{}..={}", r.start, r.end)
+                } else {
+                    format!("{}..{}", r.start, r.end)
+                }
+            }
         }
     }
 
@@ -745,6 +761,16 @@ impl<'a> ValueFormatter<'a> {
                 format!("<channel:{}:{}>", state, c.len())
             }
             HeapValue::PriorityQueue(p) => self.format_priority_queue(p.as_ref()),
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): user-visible
+            // literal form `start..end` / `start..=end` matching the
+            // surface syntax round-trip.
+            HeapValue::Range(r) => {
+                if r.inclusive {
+                    format!("{}..={}", r.start, r.end)
+                } else {
+                    format!("{}..{}", r.start, r.end)
+                }
+            }
         }
     }
 }

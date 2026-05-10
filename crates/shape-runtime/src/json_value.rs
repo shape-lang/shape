@@ -207,6 +207,20 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
                 .map(|v| JsonValue::Int(*v))
                 .collect(),
         )),
+
+        // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range
+        // serializes as a JSON array of materialised i64 values —
+        // mirror of HashSet's "array of strings" serialization shape
+        // (one mechanical-yes mapping; no architectural-choice
+        // deferral). Empty ranges produce an empty array. Step is
+        // baked into the materialisation, not exposed as a separate
+        // field.
+        HeapValue::Range(r) => Ok(JsonValue::Array(
+            r.to_vec_i64()
+                .into_iter()
+                .map(JsonValue::Int)
+                .collect(),
+        )),
     }
 }
 

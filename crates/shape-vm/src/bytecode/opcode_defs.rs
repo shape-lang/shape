@@ -369,8 +369,12 @@ define_opcodes! {
     SliceAccess = 0xB0, Object, pops: 3, pushes: 1;
     /// Null coalescing (a ?? b)
     NullCoalesce = 0xB1, Logical, pops: 2, pushes: 1;
-    /// Range constructor (start..end)
-    MakeRange = 0xB2, Object, pops: 2, pushes: 1;
+    /// Range constructor (start..end / start..=end). Pops 3 operands:
+    /// (start, end, inclusive_flag); pushes one Range value.
+    /// W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10) — corrected pops
+    /// from 2 to 3 (the compiler in `expressions/misc.rs:362-369`
+    /// emits 3 pushes — start, end, PushConst<Bool>(inclusive)).
+    MakeRange = 0xB2, Object, pops: 3, pushes: 1;
 
     // ===== Compact Typed Arithmetic (width-parameterised, ABI-stable) =====
     /// Width-typed add: Operand::Width selects I8..F64

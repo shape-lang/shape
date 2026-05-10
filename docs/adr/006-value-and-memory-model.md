@@ -4065,6 +4065,110 @@ fixed shape at landing); stable-priority semantics (insertion-order
 preservation among equal priorities). All three are future Phase-2c
 amendments with measurement; all three would require an §-level
 amendment of their own.
+#### 2.7.23 `HeapKind::Range` — Q24 amendment (W15-range, 2026-05-10)
+
+**Trigger.** The `HeapKind::Range` ordinal was deleted by the strict-
+typing bulldozer along with the cross-kind `HeapValue::Range { start:
+Option<Box<ValueWord>>, end: Option<Box<ValueWord>>, inclusive: bool }`
+shape. The kinded equivalent must answer: is `Range` a value type with
+identity, or a thin sugar over `IteratorState`? W13-iterator-state
+(§2.7.16) added an `IteratorSource::Range { start, end, step }`
+forward-compatibility hook, leaving the Range receiver itself as a
+phase-2c surface (`executor/objects/iterator_methods.rs::v2_range_iter`,
+`executor/objects/mod.rs::op_make_range`). The W14-15-16 playbook §2
+W15-range row asks: separate `HeapKind::Range` (Option A) or
+deletion-candidate that collapses to `IteratorState` (Option B)?
+
+**Decision (Q24 ruling):** Option A. `HeapKind::Range` is a separate
+typed-Arc carrier (`HeapValue::Range(Arc<RangeData>)`) with its own
+identity, methods, and conversion path to `IteratorState` via
+`Range.iter()`. The boundary is:
+
+- `RangeData` is a value with identity — `r.start`, `r.end`, `r.step`,
+  `r.inclusive`, `r.contains(x)`, prints as `0..10` / `0..=10`. It is
+  the receiver of the `start..end` / `start..=end` surface syntax.
+- `IteratorState` is a stateful pipeline with a cursor, transform
+  stages, and a source. Created by `r.iter()` (or `arr.iter()` /
+  `s.iter()` / `m.iter()`). It does not have a printable literal form.
+- The conversion at `Range.iter()` builds an `IteratorState { source:
+  IteratorSource::Range { start: r.start, end: r.end_exclusive(),
+  step: r.step }, transforms: empty, cursor: 0 }`. The
+  inclusive-bound adjustment is baked into `end_exclusive` (`r.end +
+  r.step` for inclusive ranges) so the post-conversion iterator
+  preserves the right element count.
+
+**Storage.** `RangeData` is four scalar fields (`i64`, `i64`, `i64`,
+`bool`). It does not carry inner Arcs, so `Drop` at refcount=0 is just
+`dealloc` of the small heap block. Slot bits are
+`Arc::into_raw(Arc<RangeData>) as u64` with kind
+`NativeKind::Ptr(HeapKind::Range)` per the §2.3 typed-Arc shape (mirror
+of HashMap / HashSet / Iterator).
+
+**Bounds today are i64 only.** Cross-kind range bounds (Decimal, BigInt,
+Float64, NativeScalar) — the use case the deleted `Option<Box<
+ValueWord>>` cross-kind shape was designed for — surface in
+`op_make_range` as `NotImplemented` (with a precise side label
+distinguishing open-range placeholders from genuine cross-kind bounds).
+Following the playbook's surface-and-stop discipline, this is the
+correct landing posture; the cross-kind extension is a follow-up
+§2.7.23 amendment with measurement of which bound types are actually
+needed (matches the §2.7.6 / Q8 cardinality-cost reasoning that gated
+the W13-hashset Path A vs Path B decision).
+
+**Step is implicit at landing.** The surface syntax does not have a step
+suffix today (`0..10` step 3 is not expressible). `RangeData::step`
+defaults to 1 in `op_make_range`. The field exists so `IteratorSource::
+Range::step` (which W13-iterator-state already provides) round-trips
+losslessly; explicit step syntax is a follow-up.
+
+**Why not Option B (delete `HeapKind::Range`):**
+
+- `HeapValue::Range` has methods that are not iterator methods —
+  `r.contains(x)` is a bound test, `r.start` / `r.end` are accessors,
+  `print(r)` produces the surface-syntax literal. Collapsing to
+  `IteratorState` would lose all of these.
+- `r.iter()` is observably idempotent — `r.iter().collect()` returns
+  the same array each call. An `IteratorState` is single-use: cursor
+  advances, terminals consume. The two have different identities.
+- The pre-bulldozer `HeapValue::Range` was distinct from `HeapValue::
+  Iterator`; collapsing them would be a semantic regression, not a
+  simplification.
+
+**Dispatch tables (lockstep with §2.7.7 / §2.7.8 / §2.7.10
+amendments).** Range arms added to:
+
+- `vm_impl/stack.rs::clone_with_kind` / `drop_with_kind`
+- `kinded_slot.rs::KindedSlot::Drop` / `KindedSlot::Clone`
+- `v2/closure_layout.rs::SharedCell::drop`
+- `heap_value.rs::TypedObjectStorage::drop`
+
+Plus `kind_type_name` -> `"range"` in `arithmetic/mod.rs`,
+`comparison/mod.rs`, `objects/typed_access.rs`. `printing.rs` renders
+the surface-syntax literal form (`0..10` / `0..=10`).
+`json_value.rs` materializes to a JSON array of i64 (mirror of
+HashSet's "array of strings" mechanical-yes mapping). `wire_conversion.
+rs` emits the literal-form string (deferred structured-wire follow-up,
+same shape as HashMap / HashSet).
+
+**Refused alternatives:**
+
+- "`HeapValue::Range` carries `Box<ValueWord>` bounds for cross-kind
+  support." `ValueWord` is deleted. Cross-kind range bounds need a
+  follow-up §2.7.23 amendment with measured demand, not a ValueWord
+  revival under a renamed alias.
+- "`Range` is a pure-discriminator like FilterExpr / SharedCell." The
+  `HeapValue::Range` arm is required for `slot.as_heap_value()`-based
+  receiver classification at method dispatch (the same shape HashMap /
+  HashSet / Iterator use). Pure-discriminator is reserved for variants
+  whose payloads never flow through `HeapValue` materialization.
+- "Skip `HeapKind::Range` and let `IteratorState` carry everything."
+  Loses Range identity (see Why-not-Option-B above); regression.
+
+**Out-of-scope this amendment:** open-range syntax (`..n` / `n..` /
+`..`), explicit step suffix syntax, cross-kind bounds (Decimal,
+BigInt, Float64). All three surface in `op_make_range` /
+`range_methods` with precise diagnostics; each is its own follow-up
+amendment.
 
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 

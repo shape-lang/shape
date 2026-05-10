@@ -266,6 +266,23 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
                 .map(|v| WireValue::Integer(*v))
                 .collect(),
         ),
+        // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range
+        // serializes as a JSON-ish `{"start", "end", "step",
+        // "inclusive"}` payload via the `as_array_for_wire` shape
+        // (range bounds + step are tiny scalars; lossless round-trip).
+        // Wire serialization here just stamps the literal-form string
+        // — full structured wire is the deferred Phase 2c marshal
+        // rebuild same as HashMap / HashSet (which surface as opaque
+        // tags above). Matches the playbook's "wire/JSON conversion
+        // arms (rejection or proper)" guidance.
+        HeapValue::Range(r) => {
+            let s = if r.inclusive {
+                format!("{}..={}", r.start, r.end)
+            } else {
+                format!("{}..{}", r.start, r.end)
+            };
+            WireValue::String(s)
+        }
     }
 }
 

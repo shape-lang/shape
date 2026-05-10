@@ -629,23 +629,19 @@ fn apply_remaining_stages(
 // Receiver-bound iter() factories — construct fresh IteratorState
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `Range.iter()` — Range receiver shape is itself a phase-2c surface
-/// (the kinded Range carrier hasn't landed yet; see
-/// `executor/objects/mod.rs::op_make_range`). Until that lands, this
-/// surfaces with a clear pointer at the upstream gap.
+/// `Range.iter()` — historical W13-iterator-state surface that pointed
+/// at the upstream `MakeRange` carrier gap. The W15-range cluster
+/// (ADR-006 §2.7.23 / Q24, 2026-05-10) lands the kinded `RangeData`
+/// carrier and the live `Range.iter()` body lives at
+/// `range_methods::range_iter`. This entry forwards there for any
+/// callers that still resolve the W13-era symbol; new code should
+/// reference `range_methods::range_iter` directly.
 pub fn v2_range_iter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "Range.iter — SURFACE: upstream Range carrier (HeapKind::Range) \
-         is itself phase-2c per ADR-006 §2.7.4 — see \
-         `executor/objects/mod.rs::op_make_range`. The W13-iterator-state \
-         carrier is in place (`IteratorSource::Range { start, end, step }` \
-         is provided), but no live receiver kind labels Range slots; \
-         re-entry once `MakeRange` lands.".into(),
-    ))
+    crate::executor::objects::range_methods::range_iter(vm, args, ctx)
 }
 
 /// `Array.iter()` — wraps the receiver `Arc<TypedArrayData>` into a fresh

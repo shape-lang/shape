@@ -196,6 +196,25 @@ macro_rules! define_heap_types {
             // Pre-assigned ordinal 25 per the wave-14-15-16 playbook
             // (no bump needed at landing).
             PriorityQueue, // 25  (Wave 15 W15-priority-queue, 2026-05-10)
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range value
+            // carrier — `start..end` and `start..=end` surface syntax build
+            // `Arc<RangeData>` slots. Distinct from `HeapKind::Iterator`
+            // (which models the post-`.iter()` stateful pipeline): Range is
+            // a value with identity (`r.start`, `r.contains(x)`, prints as
+            // `0..10`), Iterator is a cursor-bearing pipeline. The
+            // `Range.iter()` receiver method converts `RangeData` to
+            // `IteratorState { source: IteratorSource::Range { start, end,
+            // step } }`, where `IteratorSource::Range` was already provided
+            // by W13-iterator-state for forward compatibility. Full
+            // HeapValue arm (NOT pure-discriminator like FilterExpr /
+            // SharedCell): Range values flow through `slot.as_heap_value()`
+            // for receiver classification at method dispatch.
+            //
+            // Ordinal 30 chosen at W14-15-16 fan-out per the playbook
+            // §0 "Pre-assigned HeapKind ordinals" table. Slots 23 (Result),
+            // 24 (Option), 25 (PriorityQueue), 26 (Deque), 27 (Channel),
+            // 28 (Column), 29 (Matrix) reserved for W14/W15 sibling agents.
+            Range,         // 26  (W15-range, 2026-05-10; renumbered from drafted 30 at merge — Result/Option/Column/Matrix slots dissolved or audit-pivoted)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -411,6 +430,19 @@ macro_rules! define_heap_types {
             /// measurement; the smoke target is exercised on this
             /// shape).
             PriorityQueue(std::sync::Arc<$crate::heap_value::PriorityQueueData>),
+            // ===== W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10) =====
+            /// Range value carrier (`Arc<RangeData>`). Built by
+            /// `MakeRange` from the `start..end` / `start..=end` surface
+            /// syntax. Slot bits are `Arc::into_raw(Arc<RangeData>) as
+            /// u64` (typed-Arc shape, mirror of HashMap / HashSet /
+            /// Iterator). Recovery goes through `slot.as_heap_value()`
+            /// → `HeapValue::Range(arc)` for receiver classification at
+            /// method dispatch (`r.contains(x)` / `r.toArray()` /
+            /// `r.iter()`). Same dispatch shape as the FilterExpr §2.7.9
+            /// amendment for refcount discipline (clone_with_kind /
+            /// drop_with_kind retain/release `Arc<RangeData>` directly,
+            /// NOT through `HeapValue`).
+            Range(std::sync::Arc<$crate::heap_value::RangeData>),
         }
 
         impl HeapValue {
@@ -443,6 +475,7 @@ macro_rules! define_heap_types {
                     HeapValue::Deque(..) => HeapKind::Deque,
                     HeapValue::Channel(..) => HeapKind::Channel,
                     HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
+                    HeapValue::Range(..) => HeapKind::Range,
                 }
             }
 
@@ -490,6 +523,11 @@ macro_rules! define_heap_types {
                     // 2026-05-10): empty PQ is falsy, non-empty is
                     // truthy — mirror of the HashSet / HashMap shape.
                     HeapValue::PriorityQueue(d) => !d.is_empty(),
+                    // Empty range (zero elements) is falsy; non-empty is
+                    // truthy. Mirrors the HashSet/HashMap "empty is
+                    // falsy" pattern at §2.7.15. Cheap O(1) check via
+                    // `RangeData::is_empty()`.
+                    HeapValue::Range(r) => !r.is_empty(),
                 }
             }
 
@@ -528,6 +566,7 @@ macro_rules! define_heap_types {
                     HeapValue::Deque(_) => "deque",
                     HeapValue::Channel(_) => "channel",
                     HeapValue::PriorityQueue(_) => "priority_queue",
+                    HeapValue::Range(_) => "range",
                 }
             }
         }

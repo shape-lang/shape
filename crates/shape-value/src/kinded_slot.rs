@@ -42,8 +42,8 @@
 // ADR-006 §2.7
 use crate::heap_value::{
     ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
-    NativeViewData, PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
-    TypedObjectStorage,
+    NativeViewData, PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
+    TypedArrayData, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -184,6 +184,19 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_priority_queue(p),
             NativeKind::Ptr(HeapKind::PriorityQueue),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Range)`-kind slot. Stores the
+    /// `Arc<RangeData>` directly per ADR-006 §2.7.23 / Q24 (W15-range).
+    /// Slot bits are `Arc::into_raw(Arc<RangeData>) as u64`; recovery
+    /// goes through `slot.as_heap_value()` → `HeapValue::Range(arc)`
+    /// per ADR-005 §1 single-discriminator.
+    #[inline]
+    pub fn from_range(r: Arc<RangeData>) -> Self {
+        Self::new(
+            ValueSlot::from_range(r),
+            NativeKind::Ptr(HeapKind::Range),
         )
     }
 
@@ -463,6 +476,18 @@ impl Drop for KindedSlot {
                     HeapKind::PriorityQueue => {
                         Arc::decrement_strong_count(bits as *const PriorityQueueData);
                     }
+                    // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                    // mirror of `vm_impl/stack.rs::drop_with_kind`
+                    // Range arm. Slot bits are
+                    // `Arc::into_raw(Arc<RangeData>)` directly (typed-Arc
+                    // shape, mirror of HashMap / HashSet / Iterator);
+                    // retire one `Arc<RangeData>` strong-count share.
+                    // RangeData is `Copy`-shaped (four scalar fields,
+                    // no inner Arcs) so refcount=0 just deallocates the
+                    // small heap block.
+                    HeapKind::Range => {
+                        Arc::decrement_strong_count(bits as *const RangeData);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -679,6 +704,15 @@ impl Clone for KindedSlot {
                     // full-`HeapValue` arm.
                     HeapKind::PriorityQueue => {
                         Arc::increment_strong_count(bits as *const PriorityQueueData);
+                    }
+                    // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                    // mirror of the Drop Range arm above. Bumps one
+                    // `Arc<RangeData>` strong-count share — slot bits
+                    // are `Arc::into_raw(Arc<RangeData>)` directly per
+                    // §2.7.23's typed-Arc dispatch (mirror of HashMap /
+                    // HashSet / Iterator).
+                    HeapKind::Range => {
+                        Arc::increment_strong_count(bits as *const RangeData);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).

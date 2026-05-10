@@ -156,6 +156,9 @@ pub mod matrix_methods;
 // Iterator method handlers.
 pub mod iterator_methods;
 
+// Range method handlers (W15-range, ADR-006 §2.7.23 / Q24, 2026-05-10).
+pub mod range_methods;
+
 // Typed array (Vec<int>, Vec<number>, Vec<bool>) method handlers.
 pub mod typed_array_methods;
 
@@ -574,6 +577,9 @@ impl VirtualMachine {
                 HeapKind::PriorityQueue => method_registry::PRIORITY_QUEUE_METHODS
                     .get(method_name)
                     .copied(),
+                // W15-range close (ADR-006 §2.7.23/Q24): Range receivers
+                // route to the RANGE_METHODS PHF.
+                HeapKind::Range => method_registry::RANGE_METHODS.get(method_name).copied(),
                 // ADR-006 §2.7.10 explicitly excludes the closure /
                 // future / reference / shared-cell / filter-expr
                 // discriminators from method-call dispatch — these are
@@ -605,28 +611,94 @@ impl VirtualMachine {
         )))
     }
 
-    /// SURFACE: MakeRange cannot be migrated in this cluster.
+    /// `MakeRange` opcode body — pop (start, end, inclusive) from the §2.7.7
+    /// kinded stack and push a fresh `Arc<RangeData>` slot with kind
+    /// `NativeKind::Ptr(HeapKind::Range)` (W15-range, ADR-006 §2.7.23 / Q24).
     ///
-    /// The pre-Wave-6 body popped three `ValueWord` payloads (start, end,
-    /// inclusive) and constructed `ValueWord::from_heap_value(HeapValue::Range
-    /// { start: Option<Box<ValueWord>>, end: Option<Box<ValueWord>>, .. })`.
-    /// Every ingredient (`ValueWord::from_raw_bits`, `ValueWord::is_none`,
-    /// `Box<ValueWord>`, `ValueWord::from_heap_value`) is deleted. The kinded
-    /// equivalent constructs `Arc<HeapValue::Range { start: Option<Arc<...>>,
-    /// end: Option<Arc<...>>, .. }>` whose payload type itself is undecided
-    /// — Range bounds cross-kind (a range over `int` carries Int64 payloads;
-    /// a range over `Decimal` carries Arc<Decimal>; a range over the open
-    /// integers has `None`). The post-§2.7.7 Range payload shape needs an
-    /// ADR-006 follow-up; this is the same surface as `op_call_method`'s
-    /// handler-ABI cascade.
+    /// Stack layout at entry (from `compiler/expressions/misc.rs:369`):
+    ///
+    /// ```ignore
+    /// [.., start_value, end_value, PushConst<Bool>(inclusive), MakeRange]
+    /// ```
+    ///
+    /// Popping order is reverse-push: `inclusive` first, then `end`, then
+    /// `start`. Per the surface syntax, `start_value` and `end_value` are
+    /// `int`-typed expressions (`0..10`); the `PushNull` placeholder for
+    /// open ranges (`..n` / `n..`) reaches this handler with kind
+    /// `NativeKind::Bool` and bits zero (the `PushNull` shape) — open
+    /// ranges are surfaced as a SURFACE error pending the iterator-tier
+    /// semantic (`for i in 0..` infinite loops are their own ADR
+    /// follow-up; matches the pre-strict-typing surface).
+    ///
+    /// Other-kind bounds (Decimal, BigInt, NativeScalar) similarly
+    /// surface — the post-strict-typing `RangeData { start: i64, end: i64,
+    /// .. }` shape only models i64 ranges at landing. Cross-kind range
+    /// bounds are tracked as a follow-up §2.7.23 amendment (mirror of the
+    /// W14 Result/Option payload-cardinality discussion).
     pub(in crate::executor) fn op_make_range(&mut self) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "SURFACE: MakeRange depends on the deleted Box<ValueWord> Range payload \
-             shape. Cross-kind range bounds (int, Decimal, BigInt, open range) \
-             need a kinded HeapValue::Range redesign per ADR-006. See playbook \
-             §8 cross-cluster cascade."
-                .into(),
-        ))
+        use shape_value::{KindedSlot, NativeKind, ValueSlot, heap_value::RangeData};
+
+        // Pop in reverse-push order: inclusive flag first, then end, then start.
+        // We immediately wrap each pop result in a `KindedSlot` carrier so its
+        // `Drop` impl handles refcount release on every error path automatically
+        // — no manual `drop_with_kind` bookkeeping needed.
+        let incl_kinded = {
+            let (bits, kind) = self.pop_kinded()?;
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
+        };
+        let end_kinded = {
+            let (bits, kind) = self.pop_kinded()?;
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
+        };
+        let start_kinded = {
+            let (bits, kind) = self.pop_kinded()?;
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
+        };
+
+        // The `inclusive` operand is a `PushConst<Bool>` per
+        // `compiler/expressions/misc.rs:362-368`. Kind must be Bool —
+        // any other kind is a kind-source bug at the emit site.
+        let inclusive = match incl_kinded.kind() {
+            NativeKind::Bool => incl_kinded.slot().as_bool(),
+            _ => {
+                return Err(VMError::RuntimeError(
+                    "MakeRange: inclusive flag operand must be Bool (kind-source bug \
+                     at compile site — `compiler/expressions/misc.rs` emits a \
+                     `PushConst<Bool>` for the inclusive flag)".into(),
+                ));
+            }
+        };
+
+        // Bounds: only i64 supported at landing (ADR-006 §2.7.23). Other
+        // kinds — Float64 (`0.0..1.0` would-be syntax), Decimal, BigInt,
+        // NativeScalar — surface for the cross-kind Range payload
+        // follow-up. Bool with zero bits IS the `PushNull` open-range
+        // placeholder (`..n` / `n..` / `..`) emitted by the compiler;
+        // surface that distinctly so the diagnostic is precise.
+        let to_i64 = |k: &KindedSlot, side: &str| -> Result<i64, VMError> {
+            match k.kind() {
+                NativeKind::Int64 => Ok(k.slot().as_i64()),
+                NativeKind::Bool if k.slot().raw() == 0 => Err(VMError::NotImplemented(format!(
+                    "MakeRange: open-range bound on {side} side (PushNull placeholder) — \
+                     SURFACE: open ranges (`..n` / `n..` / `..`) need the iterator-tier \
+                     infinite-iter semantic per ADR-006 §2.7.23 follow-up. Closed ranges \
+                     (`start..end` / `start..=end`) work today.",
+                ))),
+                other => Err(VMError::NotImplemented(format!(
+                    "MakeRange: cross-kind bound on {side} side (got {other:?}) — \
+                     SURFACE: post-strict-typing RangeData only models i64 ranges at \
+                     landing. Cross-kind bounds (Decimal, BigInt, Float64, NativeScalar) \
+                     tracked as ADR-006 §2.7.23 follow-up.",
+                ))),
+            }
+        };
+
+        let start = to_i64(&start_kinded, "start")?;
+        let end = to_i64(&end_kinded, "end")?;
+
+        let range = std::sync::Arc::new(RangeData::new(start, end, 1, inclusive));
+        self.push_kinded_slot(KindedSlot::from_range(range))?;
+        Ok(())
     }
 }
 

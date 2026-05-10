@@ -18,7 +18,7 @@
 
 use crate::heap_value::{
     ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData,
-    PriorityQueueData, TypedArrayData, TypedObjectStorage,
+    PriorityQueueData, RangeData, TypedArrayData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -181,6 +181,13 @@ impl ValueSlot {
     /// PriorityQueue is a HashSet sibling, full-`HeapValue` arm shape.
     pub fn from_priority_queue(p: Arc<PriorityQueueData>) -> Self {
         Self(Arc::into_raw(p) as u64)
+    }
+
+    /// Store an `Arc<RangeData>` directly. Mirrors
+    /// `HeapValue::Range(Arc<RangeData>)`. ADR-006 §2.7.23 / Q24
+    /// amendment (W15-range, 2026-05-10).
+    pub fn from_range(r: Arc<RangeData>) -> Self {
+        Self(Arc::into_raw(r) as u64)
     }
 
     /// Store an `Arc<DataTable>` directly. Mirrors

@@ -40,8 +40,8 @@ use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
     ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
-    NativeViewData, PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
-    TypedObjectStorage,
+    NativeViewData, PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
+    TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -470,6 +470,16 @@ impl Drop for SharedCell {
                     // §2.7.18).
                     HeapKind::PriorityQueue => {
                         Arc::decrement_strong_count(bits as *const PriorityQueueData);
+                    }
+                    // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): a
+                    // `SharedCell` whose single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::Range)` carries
+                    // `Arc::into_raw(Arc<RangeData>) as u64` directly
+                    // (typed-Arc shape, mirror of HashMap / HashSet /
+                    // Iterator). Retire one `Arc<RangeData>`
+                    // strong-count share at cell drop.
+                    HeapKind::Range => {
+                        Arc::decrement_strong_count(bits as *const RangeData);
                     }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.

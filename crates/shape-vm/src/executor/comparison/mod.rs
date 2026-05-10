@@ -464,6 +464,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // 2026-05-10): `Arc<PriorityQueueData>` min-heap carriers
         // emitted by the `PriorityQueueCtor` ctor.
         NativeKind::Ptr(HeapKind::PriorityQueue) => "priority_queue",
+        // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+        // `Arc<RangeData>` range-value carriers emitted by `MakeRange`.
+        NativeKind::Ptr(HeapKind::Range) => "range",
     }
 }
 
