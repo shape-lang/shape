@@ -691,6 +691,163 @@ impl Clone for HashMapData {
     }
 }
 
+// ── HashSet storage (Wave 13 W13-hashset-rebuild, 2026-05-10) ───────────────
+
+/// HashSet storage — one keyspace, no values. Mirror of `HashMapData`
+/// with the values buffer dropped.
+///
+/// ADR-006 §2.7.15 / Q16 amendment (mirror of §2.7.9 FilterExpr / §2.7.13
+/// Reference precedent for the cardinality-amendment shape, but Set is
+/// a HashMap *sibling* — full `HeapValue::HashSet` arm rather than
+/// pure-discriminator). Reuses the Stage C P1(b) Phase 2d Array shape
+/// (`TypedBuffer<Arc<String>>`) for the keys buffer verbatim. Insertion
+/// order is the canonical storage; the `index` is a sidecar acceleration
+/// structure for O(1) `set.has(key)`.
+///
+/// **String-only keyspace at landing** (per the W9-set-methods owner
+/// audit's Path A scope and the §2.7.15 Q16 ruling). Heterogeneous-
+/// element keysets (int-keyed, TypedObject-keyed) are explicitly
+/// out-of-scope; the Path B (`TypedSet<T>` per element kind) rebuild
+/// is a future Phase-2c amendment with measurement.
+#[derive(Debug)]
+pub struct HashSetData {
+    /// Insertion-ordered keys (string-typed buffer).
+    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
+    /// Eager bucket-index: hash → list of indices into `keys` array.
+    /// Enables O(1) lookup at `set.has(key)`. Hash is FNV-1a over the
+    /// key string bytes — same as `HashMapData::index`.
+    pub index: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl HashSetData {
+    /// Build an empty HashSetData with no entries.
+    pub fn new() -> Self {
+        Self {
+            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Build from a `Vec<Arc<String>>` of keys, computing the bucket
+    /// index eagerly. Duplicate keys in the input are collapsed
+    /// (insertion-order preserved, first occurrence wins).
+    pub fn from_keys(keys: Vec<Arc<String>>) -> Self {
+        let mut out = Self::new();
+        for k in keys {
+            out.insert(k);
+        }
+        out
+    }
+
+    /// Number of entries.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.keys.data.len()
+    }
+
+    /// Whether the set is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.keys.data.is_empty()
+    }
+
+    /// Whether the set contains the given key. O(1) via the bucket
+    /// index plus a short bucket scan for collision disambiguation.
+    pub fn contains(&self, key: &str) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        let Some(bucket) = self.index.get(&hash) else {
+            return false;
+        };
+        for &idx in bucket {
+            let i = idx as usize;
+            if self.keys.data[i].as_str() == key {
+                return true;
+            }
+        }
+        false
+    }
+
+    // ── Mutation API (Wave 13 W13-hashset-rebuild, 2026-05-10) ──────────────
+    //
+    // Mirror of HashMapData's W13-hashmap-mutation API with the values
+    // buffer dropped. `Arc::make_mut` clone-on-write over the inner
+    // `Arc<TypedBuffer<Arc<String>>>` keys plus parallel bucket-index
+    // maintenance — same shape, one less buffer to mutate.
+
+    /// Insert a key. Returns `true` if the key was newly added,
+    /// `false` if it was already present (no-op in the latter case).
+    pub fn insert(&mut self, key: Arc<String>) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        if let Some(bucket) = self.index.get(&hash) {
+            for &idx in bucket {
+                let i = idx as usize;
+                if self.keys.data[i].as_str() == key.as_str() {
+                    return false;
+                }
+            }
+        }
+        let new_idx = self.keys.data.len();
+        Arc::make_mut(&mut self.keys).data.push(key);
+        self.index.entry(hash).or_default().push(new_idx as u32);
+        true
+    }
+
+    /// Remove the entry under `key`. Returns `true` if the key was
+    /// present (and removed), `false` if no entry existed. The bucket
+    /// index is updated to reflect the buffer's post-removal indices:
+    /// every entry after the removed slot shifts down by one position
+    /// (mirror of `HashMapData::remove`).
+    pub fn remove(&mut self, key: &str) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        let removed_idx: usize = {
+            let Some(bucket) = self.index.get(&hash) else {
+                return false;
+            };
+            let mut found: Option<usize> = None;
+            for (bucket_pos, &idx) in bucket.iter().enumerate() {
+                if self.keys.data[idx as usize].as_str() == key {
+                    found = Some(bucket_pos);
+                    break;
+                }
+            }
+            let bucket_pos = match found {
+                Some(p) => p,
+                None => return false,
+            };
+            let bucket = self.index.get_mut(&hash).expect("bucket present");
+            let removed_idx = bucket.swap_remove(bucket_pos) as usize;
+            if bucket.is_empty() {
+                self.index.remove(&hash);
+            }
+            removed_idx
+        };
+        Arc::make_mut(&mut self.keys).data.remove(removed_idx);
+        for bucket in self.index.values_mut() {
+            for slot in bucket.iter_mut() {
+                if (*slot as usize) > removed_idx {
+                    *slot -= 1;
+                }
+            }
+        }
+        true
+    }
+}
+
+impl Default for HashSetData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for HashSetData {
+    fn clone(&self) -> Self {
+        Self {
+            keys: Arc::clone(&self.keys),
+            index: self.index.clone(),
+        }
+    }
+}
+
 /// FNV-1a hash for byte slices. Matches the `v2/typed_map.rs` hash
 /// function so that key-hash semantics are consistent across the
 /// HashMap-marshal layer and any future cross-cluster perf path.
@@ -916,6 +1073,17 @@ impl Drop for TypedObjectStorage {
                         }
                         HeapKind::HashMap => {
                             std::sync::Arc::decrement_strong_count(bits as *const HashMapData);
+                        }
+                        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15
+                        // / Q16, 2026-05-10): a TypedObject field of
+                        // kind `NativeKind::Ptr(HeapKind::HashSet)` holds
+                        // slot bits = `Arc::into_raw(Arc<HashSetData>)`.
+                        // Same dispatch shape as the HashMap arm above
+                        // (HashSet is a HashMap sibling per §2.7.15) —
+                        // retire one `Arc<HashSetData>` strong-count
+                        // share at storage drop.
+                        HeapKind::HashSet => {
+                            std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -1468,6 +1636,10 @@ impl Clone for HeapValue {
             HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
             HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
             HeapValue::HashMap(v) => HeapValue::HashMap(Arc::clone(v)),
+            // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+            // 2026-05-10): mirror of HashMap — single strong-count bump
+            // on the shared `Arc<HashSetData>`, no payload copy.
+            HeapValue::HashSet(v) => HeapValue::HashSet(Arc::clone(v)),
             // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment):
             // FilterExpr Arcs share the typed-Arc clone shape — single
             // strong-count bump, no payload copy.
@@ -1622,6 +1794,20 @@ impl fmt::Display for HeapValue {
                         write!(f, ", ")?;
                     }
                     write!(f, "\"{}\": {}", k, v)?;
+                }
+                write!(f, "}}")
+            }
+            // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+            // 2026-05-10): one-keyspace mirror of HashMap's Display
+            // shape — `{"a", "b", ...}` braces with comma-separated
+            // quoted strings, no values.
+            HeapValue::HashSet(d) => {
+                write!(f, "{{")?;
+                for (i, k) in d.keys.data.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\"", k)?;
                 }
                 write!(f, "}}")
             }
@@ -2150,5 +2336,99 @@ mod hashmap_mutation {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.get("a").is_some());
         assert!(snapshot.get("b").is_none());
+    }
+}
+
+#[cfg(test)]
+mod hashset_mutation {
+    //! W13-hashset-rebuild (ADR-006 §2.7.15 / Q16, 2026-05-10): pin the
+    //! `insert` / `remove` / `contains` API contracts on `HashSetData`.
+    //! Mirror of `hashmap_mutation` with the values column dropped.
+    use super::*;
+    use std::sync::Arc;
+    fn k(s: &str) -> Arc<String> {
+        Arc::new(s.to_string())
+    }
+
+    #[test]
+    fn empty_set_has_zero_len_and_is_empty() {
+        let s = HashSetData::new();
+        assert_eq!(s.len(), 0);
+        assert!(s.is_empty());
+        assert!(!s.contains("a"));
+    }
+
+    #[test]
+    fn insert_returns_true_for_new_key_false_for_duplicate() {
+        let mut s = HashSetData::new();
+        assert!(s.insert(k("a")));
+        assert!(s.insert(k("b")));
+        assert_eq!(s.len(), 2);
+        // Duplicate insert is a no-op.
+        assert!(!s.insert(k("a")));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn contains_finds_inserted_keys() {
+        let mut s = HashSetData::new();
+        s.insert(k("a"));
+        s.insert(k("b"));
+        assert!(s.contains("a"));
+        assert!(s.contains("b"));
+        assert!(!s.contains("c"));
+    }
+
+    #[test]
+    fn remove_returns_true_for_present_false_for_missing() {
+        let mut s = HashSetData::new();
+        s.insert(k("a"));
+        s.insert(k("b"));
+        assert!(s.remove("a"));
+        assert!(!s.contains("a"));
+        assert!(s.contains("b"));
+        assert_eq!(s.len(), 1);
+        // Missing-key remove is a no-op.
+        assert!(!s.remove("c"));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn from_keys_collapses_duplicates_first_wins() {
+        let s = HashSetData::from_keys(vec![k("a"), k("b"), k("a"), k("c")]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.keys.data[0].as_str(), "a");
+        assert_eq!(s.keys.data[1].as_str(), "b");
+        assert_eq!(s.keys.data[2].as_str(), "c");
+    }
+
+    #[test]
+    fn smoke_target_add_two_then_size() {
+        // Storage-layer counterpart of the W13-hashset-rebuild smoke
+        // target: `let s = Set(); s.add("a"); s.add("b"); print(s.size())`
+        // outputs 2.
+        let mut s = HashSetData::new();
+        s.insert(k("a"));
+        s.insert(k("b"));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn arc_make_mut_clone_on_write_preserves_other_share() {
+        // Pin the §2.7.4 / playbook clone-on-write invariant: when
+        // `Arc<HashSetData>` has multiple shares, `Arc::make_mut`
+        // clones the inner `HashSetData` so the other share stays
+        // immutable. Mirror of `hashmap_mutation`'s clone-on-write
+        // test.
+        let mut a = Arc::new(HashSetData::new());
+        Arc::make_mut(&mut a).insert(k("a"));
+        let snapshot = Arc::clone(&a);
+        // After the snapshot, mutating `a` clones the inner data.
+        Arc::make_mut(&mut a).insert(k("b"));
+        assert_eq!(a.len(), 2);
+        // Snapshot retains the pre-mutation length.
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains("a"));
+        assert!(!snapshot.contains("b"));
     }
 }

@@ -120,6 +120,18 @@ macro_rules! define_heap_types {
             // NOTE: ordinal 20 (not the originally drafted 19) — T26 took
             // 19 first at merge time.
             SharedCell,    // 20  (Wave 8 W8-T25, 2026-05-10)
+            // ADR-006 §2.7.15 / Q16 amendment (Wave 13 W13-hashset-rebuild,
+            // 2026-05-10): one-keyspace Set carrier, structurally a mirror
+            // of the Stage C P1(b) `HeapKind::HashMap(Arc<HashMapData>)`
+            // shape with the values buffer dropped. Full HeapValue arm
+            // (NOT pure-discriminator like FilterExpr / SharedCell): Set
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`set.add(...)` /
+            // `set.has(...)` / `set.union(other)`), can be stored in
+            // TypedObject slots and `TypedArrayData::HeapValue` buffers.
+            // See §2.7.15 for the full justification + the rejected Path
+            // B (`TypedSet<T>` per element kind) alternative.
+            HashSet,       // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -243,6 +255,19 @@ macro_rules! define_heap_types {
             /// not `Arc<NativeViewData>` (the pre-Wave-γ type-confusion gap
             /// surfaced by Wave-α D-raw-helpers, commit `a27c0e4`).
             FilterExpr(std::sync::Arc<$crate::value::FilterNode>),
+            // ===== Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+            // 2026-05-10) =====
+            /// One-keyspace Set carrier. Mirror of
+            /// `HeapValue::HashMap(Arc<HashMapData>)` with the values
+            /// buffer dropped: insertion-ordered `Arc<TypedBuffer<Arc<
+            /// String>>>` keys + eager FNV-1a bucket index for O(1)
+            /// `set.has(key)`. See `$crate::heap_value::HashSetData` for
+            /// the storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): Set values flow through `as_heap_value()`
+            /// for method-receiver classification per the §2.7.15 amendment.
+            HashSet(std::sync::Arc<$crate::heap_value::HashSetData>),
             // ===== Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10) =====
             /// Reference-value carrier (`Arc<RefTarget>`) used by the
             /// `MakeRef` / `MakeFieldRef` / `MakeIndexRef` /
@@ -283,6 +308,7 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(..) => HeapKind::Temporal,
                     HeapValue::TableView(..) => HeapKind::TableView,
                     HeapValue::HashMap(..) => HeapKind::HashMap,
+                    HeapValue::HashSet(..) => HeapKind::HashSet,
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                 }
@@ -310,6 +336,7 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(td) => td.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
                     HeapValue::HashMap(d) => !d.is_empty(),
+                    HeapValue::HashSet(d) => !d.is_empty(),
                     // Filter-expression trees are always truthy when present.
                     HeapValue::FilterExpr(_) => true,
                     // Reference values are always truthy when present
@@ -346,6 +373,7 @@ macro_rules! define_heap_types {
                     HeapValue::Temporal(td) => td.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
                     HeapValue::HashMap(_) => "hashmap",
+                    HeapValue::HashSet(_) => "hashset",
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                 }

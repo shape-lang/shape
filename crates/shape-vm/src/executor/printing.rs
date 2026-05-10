@@ -239,6 +239,18 @@ impl<'a> ValueFormatter<'a> {
                 let map: &HashMapData = unsafe { &*(bits as *const HashMapData) };
                 self.format_hashmap(map, depth)
             }
+            HeapKind::HashSet => {
+                // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                // 2026-05-10): HashSetData stores a single
+                // `Vec<Arc<String>>` keys buffer (mirror of HashMapData
+                // with the values buffer dropped). Render as
+                // `{"a", "b", ...}`. SAFETY: construction-side contract
+                // on `KindedSlot::from_hashset`.
+                let _ = depth;
+                let set: &shape_value::heap_value::HashSetData =
+                    unsafe { &*(bits as *const shape_value::heap_value::HashSetData) };
+                self.format_hashset(set)
+            }
             HeapKind::DataTable => {
                 let dt: &shape_value::DataTable =
                     unsafe { &*(bits as *const shape_value::DataTable) };
@@ -552,6 +564,23 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
+    /// Format a `HashSetData` as `{"a", "b", ...}`. Wave 13
+    /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
+    /// HashMap's render shape with the values column dropped.
+    fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
+        let n = set.keys.data.len();
+        let mut out = String::with_capacity(2 + n * 6);
+        out.push('{');
+        for (i, k) in set.keys.data.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", k));
+        }
+        out.push('}');
+        out
+    }
+
     /// Format a `HashMapData` as `{key1: val1, key2: val2}`.
     ///
     /// Each value is an `Arc<HeapValue>` — dispatched through the
@@ -590,6 +619,7 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
             HeapValue::TypedObject(o) => self.format_typed_object(o.as_ref(), depth),
             HeapValue::HashMap(m) => self.format_hashmap(m.as_ref(), depth),
+            HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
             HeapValue::DataTable(t) => format!("{}", t),
             HeapValue::Content(n) => format!("{}", n),
             HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),

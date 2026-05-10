@@ -2487,6 +2487,282 @@ amendment add overhead). Either way it's an explicit Phase-2c wave,
 not a maintenance follow-up; the W12-jit-array audit was the
 boundary check.
 
+#### 2.7.15 `HeapKind::HashSet` — Q16 cardinality amendment (Wave 13 W13-hashset-rebuild, 2026-05-10)
+
+Phase 1.B-vm Wave 13 W13-hashset-rebuild
+(`docs/cluster-audits/wave-13-phase2c-playbook.md` Round 2) closes the
+W9-set-methods Stage C surface left open by close commit `4c81e54`.
+The W9 owner audit (file-level docstring in
+`crates/shape-vm/src/executor/objects/set_methods.rs`) recorded:
+
+> 1. `HeapKind` enumeration has no `Set` variant. The Phase-2 ValueWord
+>    bulldozer removed the pre-existing `HeapValue::Set { items:
+>    Vec<ValueWord> }` payload along with the rest of the heterogeneous-
+>    element collections.
+> 2. `BuiltinFunction::SetCtor` exists in the bytecode opcode table but
+>    the executor body in `vm_impl/builtins.rs:491` is itself a `todo!()`.
+>    Set values cannot reach a method handler from any execution path.
+> 3. The Wave 9 playbook §1 recipe prescribes `args[0].slot
+>    .as_heap_value()` receiver classification; the precondition for both
+>    is a surviving `HeapValue::Set` arm.
+
+The audit recommended **Path A — `Arc<HashSetData>` adjacent to Stage C
+P1(b) HashMapData**: same insertion-ordered `TypedBuffer<Arc<String>>`
+keys + bucket-index hash store, no values buffer. This amendment rules
+that path in.
+
+**Decision (Q16 ruling):** the Set carrier becomes a typed-
+`Arc<HashSetData>`-backed `HeapValue` arm, mirroring the §2.3 typed-Arc
+shape every other heap variant uses, and structurally a one-keyspace
+specialization of the Stage C P1(b) `HeapValue::HashMap(Arc<HashMapData>)`
+carrier (same `Arc<TypedBuffer<Arc<String>>>` keys, same eager FNV-1a
+bucket index, no values buffer). The §2.7.7 / §2.7.8 / §2.7.9 / §2.7.10
+/ §2.7.11 / §2.7.12 / §2.7.13 dispatch tables already established gain
+one new arm per table — no new dispatch surface.
+
+**The kinded carrier (`shape-value/src/heap_value.rs` +
+`shape-value/src/heap_variants.rs`):**
+
+```rust
+// New HeapKind variant — next free ordinal (21, after SharedCell at
+// ordinal 20 per §2.7.12) per §2.3 append-only ordering:
+pub enum HeapKind {
+    // ... String=0 .. HashMap=17 .. FilterExpr=18 .. Reference=19
+    // .. SharedCell=20 ..
+    HashSet,    // 21 (Wave 13 W13-hashset-rebuild, 2026-05-10)
+}
+
+// New HeapValue arm carrying typed Arc per §2.3 — full HeapValue arm
+// (mirror of HashMap's §2.3 shape, NOT FilterExpr / SharedCell's
+// pure-discriminator shape). Set values flow through the same opcodes
+// as every other heap value (`LoadLocal` / `StoreLocal` / closure
+// capture, store into `TypedObjectStorage` slots and
+// `TypedArrayData::HeapValue` buffers); `slot.as_heap_value()` returns
+// `HeapValue::HashSet(arc)` for downstream method dispatch.
+pub enum HeapValue {
+    // ... existing arms ...
+    HashSet(std::sync::Arc<HashSetData>),
+}
+
+// New HashSetData struct — one-keyspace mirror of HashMapData. No
+// values buffer; the `index` bucket map maps FNV-1a key hash to
+// indices into the keys buffer, same as HashMapData's index.
+pub struct HashSetData {
+    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
+    pub index: std::collections::HashMap<u64, Vec<u32>>,
+}
+```
+
+**Why a full `HeapValue::HashSet` arm rather than pure-discriminator
+(mirror of §2.7.9 FilterExpr / §2.7.12 SharedCell):** §2.7.9 /
+§2.7.12's pure-discriminator shape is justified because their payloads
+(`Arc<FilterNode>` and `Arc<SharedCell>` cell-pointer slots) are
+emitted directly to the kinded stack as `Arc::into_raw(...) as u64`
+and never wrapped in `HeapValue` — `as_heap_value()` is unsound on
+those slot bits. Set values do not have that justification: Set values
+flow through method dispatch (`set.add(...)`, `set.has(...)`,
+`set.union(other)`), can be stored in `TypedObjectStorage` slots and
+`TypedArrayData::HeapValue` buffers, and the W9 playbook §1 recipe
+explicitly prescribes `args[0].slot.as_heap_value()` for receiver
+classification. Pure-discriminator status would re-introduce the
+§2.7.9 type-confusion pattern at a different layer. **Set is a HashMap
+sibling, not a FilterExpr sibling.**
+
+**Why Path A (`Arc<HashSetData>` mirror of HashMap) rather than Path B
+(`TypedSet<T>` per element kind):** Path B was the W9 audit's second
+coherent option — monomorphized `TypedSet<T>` per element kind, with a
+hash-side index for O(1) `has`. Path A wins on three grounds:
+
+1. **String-keyspace coverage.** The 12 W9-set-methods SURFACE'd
+   handlers (`add`, `has`, `delete`, `size`, `is_empty`, `to_array`,
+   `union`, `intersection`, `difference`, `for_each`, `map`, `filter`)
+   plus the smoke target `let s = Set(); s.add("a"); s.add("b");
+   print(s.size())` exercise only a string keyspace. Same as the
+   Stage C P1(b) HashMap landing — string keys are the immediate
+   need; heterogeneous-element kinds are the §2.7.4 follow-up.
+2. **Lockstep cost.** Path A reuses the §2.7.4 `Arc<TypedBuffer<Arc<
+   String>>>` storage shape verbatim (same keys buffer, same FNV-1a
+   hashing, same bucket index); the dispatch-table lockstep is one
+   new arm in each of 4 tables. Path B requires a new monomorphized
+   variant per element kind across the same 4 dispatch tables —
+   ~10× the lockstep surface.
+3. **W13-hashmap-mutation precedent.** The mutation API
+   (`insert(Arc<String>, _)`, `remove(&str)`, `merge(&other)`) was
+   landed for HashMapData in commit `d8ec8c2` with `Arc::make_mut`
+   clone-on-write over the inner `Arc<TypedBuffer<Arc<String>>>` plus
+   parallel bucket-index rebuild. HashSetData mutation collapses the
+   same precedent to a one-keyspace specialization
+   (`insert(Arc<String>) -> bool`, `remove(&str) -> bool`,
+   `union/intersection/difference` build fresh `HashSetData::from_keys`
+   instances).
+
+Path B is a **future optimization** — when measured allocation
+pressure on string-keyed Sets exceeds the bucket-index miss cost
+(or when non-string keysets land — int-keyed Set, TypedObject-keyed
+Set), Path B's monomorphization becomes worth the lockstep cost. This
+ruling does not foreclose Path B; it rules in Path A as the
+W13-hashset-rebuild close shape.
+
+**Mechanical lockstep updates (the new variant fans out to 4 dispatch
+tables — every Q8/Q10 retain/release table — plus the
+`HeapValue::kind()` / `is_truthy()` / `type_name()` mirrors and the
+`KindedSlot` / `ValueSlot` constructors):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::HashSet`
+   ordinal 21 + `HeapValue::HashSet(Arc<HashSetData>)` arm. Update
+   `kind()` / `is_truthy()` / `type_name()`.
+2. `crates/shape-value/src/heap_value.rs` —
+   - `HashSetData` struct + `new()` / `from_keys()` / `len()` /
+     `is_empty()` / `contains()` / `insert(Arc<String>) -> bool` /
+     `remove(&str) -> bool` mutation API (mirror of HashMapData's
+     W13-hashmap-mutation API with the values buffer dropped).
+   - `TypedObjectStorage::drop` mirror — a TypedObject field of kind
+     `NativeKind::Ptr(HeapKind::HashSet)` retires one
+     `Arc<HashSetData>` strong-count share.
+3. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm to
+   `Arc::increment/decrement_strong_count::<HashSetData>`.
+4. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arm. Plus
+   `KindedSlot::from_hashset(Arc<HashSetData>) -> Self` constructor
+   (§2.7.6 / Q8 cardinality bound: one constructor per heap variant
+   that needs a `from_*` entry — same as `from_hashmap` /
+   `from_typed_object` / `from_typed_array`).
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror. A `SharedCell` whose single-slot payload is
+   `NativeKind::Ptr(HeapKind::HashSet)` retires one `Arc<HashSetData>`
+   strong-count share at cell drop.
+6. `crates/shape-value/src/slot.rs` — `ValueSlot::from_hashset(
+   Arc<HashSetData>)` constructor (mirror of `from_hashmap`).
+7. `crates/shape-vm/src/executor/objects/set_methods.rs` — migrate the
+   12 SURFACE'd handlers (`v2_add`, `v2_has`, `v2_delete`, `v2_size`,
+   `v2_is_empty`, `v2_to_array`, `v2_union`, `v2_intersection`,
+   `v2_difference`, `v2_for_each`, `v2_map`, `v2_filter`) from
+   `NotImplemented(SURFACE)` to real bodies. Read-only handlers borrow
+   the receiver `Arc<HashSetData>` via the §2.7.6 / Q8 `as_heap_value()`
+   + match path; mutation handlers `Arc::make_mut` over a cloned
+   receiver share for clone-on-write per §2.7.4 (mirror of the
+   W13-hashmap-mutation `v2_set` / `v2_delete` / `v2_merge` shape);
+   set-operation handlers (`union` / `intersection` / `difference`)
+   build a fresh `HashSetData` via `from_keys`; closure-callback
+   handlers (`for_each` / `map` / `filter`) route per-element callbacks
+   through `vm.call_value_immediate_nb` per §2.7.11 / Q12.
+8. `crates/shape-vm/src/executor/vm_impl/builtins.rs` —
+   `BuiltinFunction::SetCtor` body builds an empty
+   `Arc::new(HashSetData::new())` and pushes a
+   `KindedSlot::from_hashset(...)` (mirror of the still-pending
+   `HashMapCtor` shape; the cross-link ctor pair is part of the
+   wave-13 playbook Round 2).
+
+There is no fan-out to `printing.rs` / `comparison/mod.rs` /
+`arithmetic/mod.rs` / `wire_conversion.rs` / `json_value.rs` *in this
+amendment*; those surfaces preserve the §2.7.5 stable-FFI rejection
+arms by default and will gain `HashSet`-specific entries via the
+exhaustive-match compiler errors when the dispatch shell wires through
+to the SET_METHODS PHF map — same incremental shape as HashMap's
+landing.
+
+**Cardinality cost:** `HeapKind` grows from 20 variants to 21; the
+§2.7.6 / Q8 carrier-API bound gains one new constructor
+(`KindedSlot::from_hashset`) — total constructor count remains within
+the cardinality bound (~25 max) per §2.7.6. No new accessor (heap
+dispatch goes through `slot.as_heap_value()` per ADR-005 §1
+single-discriminator).
+
+**Forbidden shapes this rules out (mirror of §2.7.9 / §2.7.12 /
+§2.7.13 forbidden lists, applied to the Set carrier):**
+
+- **Resurrecting the deleted `HeapValue::Set { items: Vec<ValueWord> }`
+  arm under another name.** The pre-bulldozer shape carried
+  heterogeneous elements via `ValueWord`-encoded buckets and tag-bit
+  hash dispatch (`vw_hash` / `vw_equals`). Both `ValueWord` and the
+  heterogeneous-element bucket dispatch are deleted (CLAUDE.md
+  "Forbidden code" #1, #4). No `Vec<ValueWord>` revival, no
+  rename to `Vec<ValueBits>` / `Vec<RawSlot>` / `Vec<TaggedItem>`.
+  The W13-hashset-rebuild keyspace is explicitly string-only at
+  landing; non-string keysets are a separate ADR amendment with
+  measurement.
+- **Reusing an existing `HeapKind` variant as a stand-in label for
+  `*const HashSetData`.** Same wrong-type retain/release UB as the
+  pre-§2.7.9 FilterExpr/NativeView mislabel. Refused: dispatch
+  tables match payloads 1:1.
+- **Bool-default fallback for the unknown receiver kind at
+  `set_methods.rs::v2_*`.** The receiver kind is sourced from the
+  §2.7.7 stack parallel-kind track; a kind-mismatch surfaces as a
+  `RuntimeError` per playbook §6, not a silent leak.
+- **Pure-discriminator `HeapKind::HashSet` (mirror of §2.7.9
+  FilterExpr).** Refused per the analysis above — Set values flow
+  through `slot.as_heap_value()` and need a real `HeapValue::HashSet`
+  arm. Pure-discriminator status would re-introduce the §2.7.9
+  type-confusion pattern.
+- **Heterogeneous-element re-introduction by reusing
+  `Arc<TypedBuffer<Arc<HeapValue>>>` for keys.** Future work; not in
+  this amendment. Path B (`TypedSet<T>` per element kind) is the
+  monomorphized rebuild path when a non-string keyspace is
+  surfaced; out-of-scope here.
+- **Transitional shims preserving deleted Set-shape names**
+  (`SetLegacy` / `nanboxed::Set` / `as_set_items` /
+  `set_bucket_decode` / `vw_set_hash` / `vw_set_equals`). Same §2.7.7
+  #1 rule — the W-series "borrowed bits with call-pattern invariants"
+  defection-attractor at the Set-carrier layer. Migrate every
+  `set_methods.rs` handler in-wave; do not preserve a kind-blind
+  variant as a transitional layer.
+- **Defection-attractor descriptors** — "set bridge", "set-element
+  translator", "bucket probe", "key-decode helper", "set-projection
+  hop", "boundary adapter for set carrier". Per the 2026-05-09 user
+  ruling broadening the W-series rename family + playbook §3
+  forbidden #20, any descriptor of the deleted Set carrier that uses
+  bridge / probe / helper / hop / translator / adapter framing
+  belongs to the same defection-attractor family CLAUDE.md "Renames
+  to refuse on sight" enumerates. Describe the deleted carrier by
+  name (the pre-bulldozer `HeapValue::Set { items: Vec<ValueWord> }`)
+  or by deletion-fate (the heterogeneous-element ValueWord-shape Set
+  carrier), never by hypothetical role.
+
+**Performance characteristics:**
+
+- `Set()` ctor cost: one `Arc::new(HashSetData::new())` allocation +
+  empty `TypedBuffer<Arc<String>>` inner + empty `HashMap<u64,
+  Vec<u32>>`. Same as `HashMap()` with the values buffer dropped.
+- `set.add(key)` cost: one `Arc::clone` of the receiver, then
+  `Arc::make_mut` clone-on-write on the keys buffer (cheap on
+  unique receiver, full clone on shared) + bucket-index entry.
+  Hash is FNV-1a over the key bytes; collision bucket scan is O(k)
+  where k is the bucket size (typically 1–2 for non-pathological
+  inputs). Identical cost to `HashMap.set(key, _)` minus the values
+  buffer mutation.
+- `set.has(key)` cost: one FNV-1a hash + bucket index lookup + O(k)
+  collision scan. O(1) amortized — same as `HashMap.has(key)`.
+- `set.union(other)` / `set.intersection(other)` / `set.difference(
+  other)` cost: O(n+m) build of a fresh `HashSetData` via `from_keys`
+  (one allocation pair for the new keys buffer + bucket index).
+  No Arc::make_mut on the receivers; both inputs are borrowed
+  read-only.
+- IC fast path: Sets flow through the standard `LoadLocal` /
+  `StoreLocal` paths via their `NativeKind::Ptr(HeapKind::HashSet)`
+  kind label. No special IC entry; same as HashMap.
+
+**Out-of-scope this amendment:**
+
+- Heterogeneous-element keysets (int-keyed, TypedObject-keyed,
+  Char-keyed). String-only keyspace at landing, per the W9 audit's
+  Path A scope and the W13-hashmap-mutation precedent.
+- The `iter()` method (`set.iter()` returning a stateful iterator).
+  Same §2.7.4 deferral as `HashMap.iter()` — the kinded
+  Set-iteration shape (per-element key kind dispatch over the typed
+  buffer) is a phase-2c follow-up workstream tracked under
+  W13-iterator-state.
+- JIT FFI for Set methods. The JIT array FFI rebuild (§2.7.14 / Q15)
+  has the same deferral shape and Set inherits it; SetMethod calls
+  will deopt to the interpreter until the Q15 ruling lands. No
+  separate Q-ruling needed for Set since it follows the same FFI
+  rebuild path as HashMap and TypedArray.
+- Wire-format serialization of Set-bearing values. `wire_conversion.rs`
+  / `json_value.rs` will gain a `HashSet` arm via exhaustive-match
+  follow-up; the §2.7.5.1 stable-FFI boundary rule applies (HashSet
+  serializes as a JSON array of strings, mirror of HashMap's
+  serialization shape).
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure

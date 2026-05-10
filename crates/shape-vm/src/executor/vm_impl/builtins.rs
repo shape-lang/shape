@@ -517,8 +517,22 @@ impl VirtualMachine {
                         builtin
                     );
                 }
+                BuiltinFunction::SetCtor => {
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 /
+                    // Q16, 2026-05-10): empty Set ctor — discard any
+                    // args (the surface form `Set()` takes no args at
+                    // landing; `Set([elements])` initialization is a
+                    // follow-up). Build an empty
+                    // `Arc::new(HashSetData::new())` and push as a
+                    // `KindedSlot::from_hashset(...)`.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::HashSetData::new(),
+                    );
+                    let result = KindedSlot::from_hashset(empty);
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::HashMapCtor
-                | BuiltinFunction::SetCtor
                 | BuiltinFunction::DequeCtor
                 | BuiltinFunction::PriorityQueueCtor => {
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;

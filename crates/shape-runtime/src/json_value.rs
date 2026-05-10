@@ -103,6 +103,19 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
             Ok(JsonValue::Object(pairs))
         }
 
+        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+        // 2026-05-10): Set serializes as a JSON array of strings (the
+        // §2.7.15 amendment's documented wire shape — string-only
+        // keyspace at landing). One mechanical-yes mapping; no
+        // architectural-choice deferral.
+        HeapValue::HashSet(d) => Ok(JsonValue::Array(
+            d.keys
+                .data
+                .iter()
+                .map(|k| JsonValue::String((**k).clone()))
+                .collect(),
+        )),
+
         // TypedObject schema-aware (1)
         HeapValue::TypedObject(storage) => typed_object_to_json_value(
             storage.schema_id,

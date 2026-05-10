@@ -446,6 +446,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<SharedCell>` cell-pointer slots emitted by
         // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
         NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
+        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16, 2026-05-10).
+        NativeKind::Ptr(HeapKind::HashSet) => "set",
     }
 }
 

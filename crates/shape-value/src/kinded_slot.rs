@@ -41,8 +41,8 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
-    TemporalData, TypedArrayData, TypedObjectStorage,
+    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
+    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use crate::reference::RefTarget;
@@ -118,6 +118,18 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashmap(h),
             NativeKind::Ptr(HeapKind::HashMap),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::HashSet)`-kind slot. Mirror of
+    /// `from_hashmap` per ADR-006 §2.7.15 / Q16 amendment (Wave 13
+    /// W13-hashset-rebuild). Set is a HashMap sibling — full
+    /// `HeapValue::HashSet(Arc<HashSetData>)` arm, not pure-discriminator.
+    #[inline]
+    pub fn from_hashset(h: Arc<HashSetData>) -> Self {
+        Self::new(
+            ValueSlot::from_hashset(h),
+            NativeKind::Ptr(HeapKind::HashSet),
         )
     }
 
@@ -300,6 +312,12 @@ impl Drop for KindedSlot {
                     }
                     HeapKind::HashMap => {
                         Arc::decrement_strong_count(bits as *const HashMapData);
+                    }
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                    // 2026-05-10): mirror of the HashMap arm. Retires
+                    // one `Arc<HashSetData>` strong-count share.
+                    HeapKind::HashSet => {
+                        Arc::decrement_strong_count(bits as *const HashSetData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
@@ -486,6 +504,12 @@ impl Clone for KindedSlot {
                     }
                     HeapKind::HashMap => {
                         Arc::increment_strong_count(bits as *const HashMapData);
+                    }
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                    // 2026-05-10): mirror of the HashMap arm. Bumps one
+                    // `Arc<HashSetData>` strong-count share.
+                    HeapKind::HashSet => {
+                        Arc::increment_strong_count(bits as *const HashSetData);
                     }
                     HeapKind::Decimal => {
                         Arc::increment_strong_count(bits as *const rust_decimal::Decimal);

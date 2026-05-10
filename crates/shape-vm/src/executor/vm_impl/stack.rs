@@ -28,7 +28,7 @@ use super::super::*;
 use shape_value::{
     FilterNode, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
+        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
         TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
     },
 };
@@ -74,6 +74,16 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::HashMap => {
                     Arc::increment_strong_count(bits as *const HashMapData);
+                }
+                // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                // 2026-05-10): mirror of the HashMap arm. Slot bits are
+                // `Arc::into_raw(Arc<HashSetData>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::HashSet)`. Bumps one
+                // `Arc<HashSetData>` strong-count share — Set is a
+                // HashMap sibling per §2.7.15, full-`HeapValue` arm
+                // (NOT pure-discriminator like FilterExpr / SharedCell).
+                HeapKind::HashSet => {
+                    Arc::increment_strong_count(bits as *const HashSetData);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -253,6 +263,13 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::HashMap => {
                     Arc::decrement_strong_count(bits as *const HashMapData);
+                }
+                // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                // 2026-05-10): mirror of the HashMap arm. Retires one
+                // `Arc<HashSetData>` strong-count share — same dispatch
+                // shape per the §2.7.15 amendment.
+                HeapKind::HashSet => {
+                    Arc::decrement_strong_count(bits as *const HashSetData);
                 }
                 HeapKind::Decimal => {
                     Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
