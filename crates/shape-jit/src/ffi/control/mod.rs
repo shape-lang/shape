@@ -12,15 +12,12 @@
 //! Higher-order functions (fold, reduce, map, filter, forEach) and function call helpers
 //! for JIT-compiled code.
 
-use crate::context::{JITClosure, JITContext};
-use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
+use crate::context::JITContext;
 use crate::jit_array::JitArray;
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
-use shape_runtime::module_exports::RawCallableInvoker;
-use shape_value::{ValueWord, ValueWordExt};
+#[allow(unused_imports)]
+use crate::ffi::jit_kinds::*;
 use std::ffi::c_void;
-use std::sync::Arc;
 
 // ============================================================================
 // Trampoline VM — thread-local VirtualMachine for JIT-to-VM fallback
@@ -94,125 +91,37 @@ where
 /// table) would be reconstructed as a bare function, losing its captures
 /// and producing `Null` on return.
 fn dispatch_call_via_trampoline_vm(
-    function_id: u32,
-    upvalue_bits: Option<&[u64]>,
-    jit_args: &[u64],
-    jit_ctx: *const JITContext,
+    _function_id: u32,
+    _upvalue_bits: Option<&[u64]>,
+    _jit_args: &[u64],
+    _jit_ctx: *const JITContext,
 ) -> u64 {
-    TRAMPOLINE_VM.with(|cell| {
-        let vm_ptr = cell.get();
-        if vm_ptr.is_null() {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                eprintln!(
-                    "[jit-trampoline] fn_id={} BAIL: trampoline VM not registered",
-                    function_id
-                );
-            }
-            return TAG_NULL;
-        }
-        let vm = unsafe { &mut *vm_ptr };
-
-        // Convert JIT NaN-boxed args to ValueWord
-        let args: Vec<shape_value::ValueWord> = jit_args
-            .iter()
-            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, jit_ctx))
-            .collect();
-
-        if let Some(caps) = upvalue_bits {
-            // Closure dispatch: bind captures as the callee frame's
-            // upvalues. The raw bits are passed through verbatim —
-            // Immutable captures carry widened ValueWord bits, while
-            // OwnedMutable / Shared captures carry raw cell pointer bits
-            // that the interpreter's Load/Store*Capture opcodes recover.
-            let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
-            match vm.jit_trampoline_call_closure(function_id as u16, caps, &args, None) {
-                Ok(bits) => {
-                    if debug {
-                        eprintln!(
-                            "[jit-trampoline-closure] fn_id={} returned {:#x}",
-                            function_id, bits
-                        );
-                    }
-                    // `pop_raw_u64` transfers ownership of any Arc refcount
-                    // to us. Wrap in a `ValueWord` so its Drop releases
-                    // that refcount after `nanboxed_to_jit_bits` has
-                    // performed its own ref-management (unified-heap path
-                    // bumps the refcount; VM-format path clones fields
-                    // it wants to retain).
-                    let vw = shape_value::ValueWord::from_raw_bits(bits);
-                    nanboxed_to_jit_bits(&vw)
-                }
-                Err(e) => {
-                    if debug {
-                        eprintln!("[jit-trampoline-closure] fn_id={} ERROR: {}", function_id, e);
-                    }
-                    TAG_NULL
-                }
-            }
-        } else {
-            // Bare function (TAG_FUNCTION inline, no captures).
-            // Use call_value_immediate_nb instead of execute_function_by_id
-            // because execute_function_by_id calls reset() which wipes VM
-            // state. call_value_immediate_nb preserves existing state for
-            // nested calls.
-            let callee = shape_value::ValueWord::from_function(function_id as u16);
-            match vm.call_value_immediate_nb(&callee, &args, None) {
-                Ok(result) => nanboxed_to_jit_bits(&result),
-                Err(_) => TAG_NULL,
-            }
-        }
-    })
+    todo!(
+        "phase-2c §2.7.10/Q11: JIT-side kinded handler ABI rebuild — \
+         dispatch_call_via_trampoline_vm. The trampoline-VM call sites \
+         (jit_trampoline_call_closure, call_value_immediate_nb) now take \
+         &KindedSlot callee + &[KindedSlot] args per ADR-006 §2.7.10/Q11; \
+         JIT lowering must thread the per-arg NativeKind companion through \
+         the call signature per §2.7.5. See \
+         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 /// Dispatch a native module function call through the trampoline VM.
 fn dispatch_module_fn_call(
-    module_fn_id: u32,
-    jit_args: &[u64],
-    ctx: *mut JITContext,
+    _module_fn_id: u32,
+    _jit_args: &[u64],
+    _ctx: *mut JITContext,
 ) -> u64 {
-    TRAMPOLINE_VM.with(|cell| {
-        let vm_ptr = cell.get();
-        if vm_ptr.is_null() {
-            return TAG_NULL;
-        }
-        let vm = unsafe { &mut *vm_ptr };
-        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
-
-        // Convert JIT args to ValueWord
-        let args: Vec<shape_value::ValueWord> = jit_args
-            .iter()
-            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
-            .collect();
-
-        // Build a ValueWord::ModuleFunction callee and call through the VM
-        let callee = shape_value::ValueWord::from_module_function(module_fn_id);
-        match vm.call_value_immediate_nb(&callee, &args, None) {
-            Ok(result) => {
-                if debug {
-                    eprintln!(
-                        "[jit-module-fn] id={} returned {:#x}",
-                        module_fn_id,
-                        result.raw_bits()
-                    );
-                }
-                // Convert VM-format ValueWord to JIT-format using
-                // nanboxed_to_jit_bits which handles Ok/Err wrappers,
-                // TypedObjects, HashMaps etc. by converting to JitAlloc format.
-                nanboxed_to_jit_bits(&result)
-            }
-            Err(e) => {
-                if debug {
-                    eprintln!("[jit-module-fn] id={} ERROR: {}", module_fn_id, e);
-                }
-                // Wrap errors as Result::Err so `?` operator works correctly
-                let err_msg = format!("{}", e);
-                let err_vw = shape_value::ValueWord::from_err(
-                    shape_value::ValueWord::from_string(std::sync::Arc::new(err_msg)),
-                );
-                nanboxed_to_jit_bits(&err_vw)
-            }
-        }
-    })
+    todo!(
+        "phase-2c §2.7.10/Q11: JIT-side kinded handler ABI rebuild — \
+         dispatch_module_fn_call. ModuleFunction callee construction and \
+         the call_value_immediate_nb dispatch shell now take &KindedSlot \
+         per ADR-006 §2.7.10/Q11; the deleted ValueWord::from_module_function \
+         constructor needs a kinded replacement at the producing call \
+         signature per §2.7.5. See \
+         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 /// Call a function by function_id
@@ -255,334 +164,21 @@ pub extern "C" fn jit_call_function(
 /// Call a closure or function value
 /// Stack layout: [callee, arg1, ..., argN, arg_count]
 /// Returns the result of the call
-pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &mut *ctx;
-        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
-
-        if debug {
-            eprintln!(
-                "[jit-call-value] entry: stack_ptr={}, stack[0..4]=[{:#x}, {:#x}, {:#x}, {:#x}]",
-                ctx_ref.stack_ptr,
-                if ctx_ref.stack_ptr > 0 { ctx_ref.stack[0] } else { 0 },
-                if ctx_ref.stack_ptr > 1 { ctx_ref.stack[1] } else { 0 },
-                if ctx_ref.stack_ptr > 2 { ctx_ref.stack[2] } else { 0 },
-                if ctx_ref.stack_ptr > 3 { ctx_ref.stack[3] } else { 0 },
-            );
-        }
-
-        // Pop arg_count.
-        // ABI: the MIR producer stores arg_count as a raw i64 (see
-        // mir_compiler/terminators.rs CallValue lowering). We decode it directly
-        // as usize — do NOT attempt NaN-box decode.
-        if ctx_ref.stack_ptr == 0 {
-            if debug { eprintln!("[jit-call-value] BAIL: stack_ptr=0 at arg_count pop"); }
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
-
-        // Pop args (in reverse order, then we'll reverse)
-        let mut args = Vec::with_capacity(arg_count);
-        for _ in 0..arg_count {
-            if ctx_ref.stack_ptr == 0 {
-                return TAG_NULL;
-            }
-            ctx_ref.stack_ptr -= 1;
-            args.push(ctx_ref.stack[ctx_ref.stack_ptr]);
-        }
-        args.reverse();
-
-        // Pop callee
-        if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
-        }
-        ctx_ref.stack_ptr -= 1;
-        let callee_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-
-        // Check for TAG_MODULE_FN (native module functions like read_text).
-        // These are dispatched through the trampoline VM's invoke_module_fn.
-        if shape_value::tag_bits::is_tagged(callee_bits)
-            && shape_value::tag_bits::get_tag(callee_bits) == shape_value::tag_bits::TAG_MODULE_FN
-        {
-            let module_fn_id = shape_value::tag_bits::get_payload(callee_bits) as u32;
-            return dispatch_module_fn_call(module_fn_id, &args, ctx);
-        }
-
-        // Resolve the function_id and any VM-format closure captures.
-        //
-        // Three callee shapes are supported here:
-        //  1. `TAG_FUNCTION` inline: bare function value (no captures).
-        //  2. Unified heap `HK_CLOSURE`: v2 `JITClosure` block allocated by
-        //     the JIT itself (captures are raw bits in an inline array).
-        //  3. VM-format heap: `HeapValue::Closure` / `HeapValue::ClosureRaw`
-        //     produced by the interpreter's `op_make_closure`. The JIT sees
-        //     these when a bytecode-emitted closure flows into a JIT-compiled
-        //     call site — that's the A.1D.2 / A.1E scenario where the
-        //     closure body runs natively but was allocated by the VM.
-        //
-        // For shape 3 we go through `VmClosureHandle` to read function_id
-        // and capture_execution_bits, mirroring the interpreter's
-        // `op_call_closure`. `capture_execution_bits` returns raw pointer
-        // bits for OwnedMutable / Shared captures — identical to what the
-        // bytecode's Load/StoreOwnedMutableCapture opcodes expect to see in
-        // `frame.upvalues[i]`.
-        let mut vm_captures: Option<Vec<u64>> = None;
-        let function_id = if is_inline_function(callee_bits) {
-            unbox_function_id(callee_bits)
-        } else if is_heap_kind(callee_bits, HK_CLOSURE) {
-            let closure = unified_unbox::<JITClosure>(callee_bits);
-            closure.function_id
-        } else if shape_value::ValueBits::from_raw(callee_bits).is_heap()
-            && !shape_value::ValueBits::from_raw(callee_bits).is_unified_heap()
-        {
-            // VM-format heap pointer: decode through ValueWord. Use
-            // `clone_from_bits` so the refcount is bumped — the original
-            // share on the stack is still live and independent.
-            //
-            // SAFETY: `callee_bits` was produced by the interpreter's
-            // op_make_closure (or a prior VM-format pass) which stores
-            // a live Arc<HeapValue> with refcount ≥ 1. Cloning here
-            // bumps the count; the clone is dropped at function exit.
-            let vw = unsafe { ValueWord::clone_from_bits(callee_bits) };
-            let Some(hv) = vw.as_heap_ref() else {
-                if debug { eprintln!("[jit-call-value] BAIL: VM-format heap but as_heap_ref() returned None: {:#x}", callee_bits); }
-                return TAG_NULL;
-            };
-            let Some(handle) = hv.as_closure_handle() else {
-                if debug { eprintln!("[jit-call-value] BAIL: VM-format heap is not a closure: {:#x}", callee_bits); }
-                return TAG_NULL;
-            };
-            let fid = handle.function_id() as u16;
-            let n = handle.capture_count();
-            let mut caps: Vec<u64> = Vec::with_capacity(n);
-            for i in 0..n {
-                // `capture_execution_bits` returns:
-                //   - Immutable: the widened ValueWord bit pattern (Arc
-                //     refcount already bumped by the handle's live
-                //     closure block — no extra retain needed; the
-                //     receiving JIT frame does not free these).
-                //   - OwnedMutable: raw `*mut ValueWord` pointer bits.
-                //   - Shared: raw `*const SharedCell` pointer bits.
-                //
-                // All three variants are passed straight through to the
-                // callee's frame.upvalues, matching interpreter semantics.
-                caps.push(handle.capture_execution_bits(i));
-            }
-            vm_captures = Some(caps);
-            // Drop the cloned handle — the captures are already copied.
-            // FR.6: real release of the `clone_from_bits` retain (was
-            // no-op drop of Copy u64).
-            shape_value::value_word_drop::vw_drop(vw);
-            fid
-        } else {
-            if debug { eprintln!("[jit-call-value] BAIL: callee is neither function nor closure: {:#x}", callee_bits); }
-            return TAG_NULL;
-        };
-
-        // Look up the function pointer in the function table
-        if ctx_ref.function_table.is_null()
-            || (function_id as usize) >= ctx_ref.function_table_len
-        {
-            if debug { eprintln!("[jit-call-value] BAIL: fn_id={} out of bounds (table_len={}, table_null={})", function_id, ctx_ref.function_table_len, ctx_ref.function_table.is_null()); }
-            return TAG_NULL;
-        }
-        let raw_fn_ptr =
-            *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
-        if raw_fn_ptr.is_null() {
-            // Not JIT-compiled — dispatch through trampoline VM.
-            //
-            // We must pass captures through to the interpreter or the
-            // closure would be invoked as a bare function, returning
-            // `Null` (this was the pre-fix trampoline-null bug).
-            //
-            // Three callee shapes:
-            //   - TAG_FUNCTION inline: no captures — pass `None`.
-            //   - VM-format heap closure: captures live in `vm_captures`
-            //     (populated above via `VmClosureHandle`).
-            //   - Unified-heap `HK_CLOSURE` (JITClosure): captures live
-            //     inline at `closure.captures_ptr` — extract here.
-            let unified_caps_storage: Option<Vec<u64>> =
-                if vm_captures.is_none() && is_heap_kind(callee_bits, HK_CLOSURE) {
-                    let closure = unified_unbox::<JITClosure>(callee_bits);
-                    let count = closure.captures_count as usize;
-                    let mut v: Vec<u64> = Vec::with_capacity(count);
-                    for i in 0..count {
-                        v.push(*closure.captures_ptr.add(i));
-                    }
-                    Some(v)
-                } else {
-                    None
-                };
-            let upvalues: Option<&[u64]> = vm_captures
-                .as_deref()
-                .or_else(|| unified_caps_storage.as_deref());
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                eprintln!(
-                    "[jit-call-value] function {} NOT JIT-compiled, dispatching through trampoline VM (upvalues={})",
-                    function_id,
-                    upvalues.map(|c| c.len() as isize).unwrap_or(-1),
-                );
-            }
-            let result = dispatch_call_via_trampoline_vm(
-                function_id as u32,
-                upvalues,
-                &args,
-                ctx as *const JITContext,
-            );
-            // Drop any VM-format capture storage now that the call
-            // returned. The VmClosureHandle share was released when the
-            // original ValueWord clone went out of scope above.
-            drop(vm_captures);
-            drop(unified_caps_storage);
-            return result;
-        }
-
-        // Reset ctx.stack_ptr before calling — the callee's internal operations
-        // (BuiltinCall, CallForeign, etc.) use ctx.stack and assume it starts
-        // at a consistent state. Without this reset, stale stack_ptr from
-        // previous operations causes writes to wrong positions.
-        ctx_ref.stack_ptr = 0;
-
-        // For closure calls, prepend captured values as leading native args.
-        // The JIT-compiled function signature is (ctx, capture0, ..., captureN, param0, ..., paramM)
-        // matching the VM calling convention where bytecode does LoadLocal/StoreLocal
-        // for captures first, then params.
-        let full_args;
-        let call_args: &[u64] = if let Some(caps) = vm_captures.as_ref() {
-            // Shape 3: VM-format closure. Captures were extracted via
-            // `VmClosureHandle::capture_execution_bits` above.
-            if debug {
-                eprintln!(
-                    "[jit-call-value] vm-closure fn_id={}: prepending {} captures before {} args",
-                    function_id, caps.len(), args.len()
-                );
-            }
-            full_args = {
-                let mut v = Vec::with_capacity(caps.len() + args.len());
-                v.extend_from_slice(caps);
-                v.extend_from_slice(&args);
-                v
-            };
-            &full_args
-        } else if is_heap_kind(callee_bits, HK_CLOSURE) {
-            // Shape 2: unified-heap JITClosure. Captures live inline at
-            // `closure.captures_ptr`; read directly without crossing the
-            // VM-format boundary.
-            let closure = unified_unbox::<JITClosure>(callee_bits);
-            let count = closure.captures_count as usize;
-            if debug {
-                eprintln!(
-                    "[jit-call-value] closure fn_id={}: prepending {} captures before {} args",
-                    closure.function_id, count, args.len()
-                );
-            }
-            full_args = {
-                let mut v = Vec::with_capacity(count + args.len());
-                for i in 0..count {
-                    v.push(*closure.captures_ptr.add(i));
-                }
-                v.extend_from_slice(&args);
-                v
-            };
-            &full_args
-        } else {
-            // Shape 1: inline TAG_FUNCTION — no captures.
-            &args
-        };
-
-        if debug {
-            eprintln!(
-                "[jit-call-value] calling fn_id={} with {} args, fn_ptr={:?}, table_len={}",
-                function_id, call_args.len(), raw_fn_ptr, ctx_ref.function_table_len
-            );
-        }
-        // Call the JIT-compiled function with the correct number of native args.
-        let signal = call_jit_fn_with_args(raw_fn_ptr, ctx, call_args);
-        if debug {
-            eprintln!(
-                "[jit-call-value] returned signal={}, stack_ptr={}",
-                signal, (*ctx).stack_ptr
-            );
-        }
-
-        // Check for deopt signal
-        if signal < 0 {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                eprintln!(
-                    "[jit-call-value] function {} deopted (signal={})",
-                    function_id, signal
-                );
-            }
-            return TAG_NULL;
-        }
-
-        // Read result from ctx.stack[0] (callee stores it there)
-        let raw_result = if ctx_ref.stack_ptr > 0 {
-            ctx_ref.stack_ptr -= 1;
-            ctx_ref.stack[ctx_ref.stack_ptr]
-        } else {
-            ctx_ref.stack[0]
-        };
-
-        // F7: Re-NaN-box native-typed returns.
-        //
-        // JIT-compiled Return terminators write raw native values (I8 bool,
-        // F64, I64) into ctx.stack[0] and set `return_type_tag` to indicate
-        // the encoding. The outer executor decodes this tag directly. But
-        // callers that receive the result through `jit_call_value` (e.g.
-        // higher-order FFI helpers like `jit_control_filter`/`map`/`reduce`
-        // and any MIR-level `CallValue` site) read `ctx.stack[0]` as a
-        // NaN-boxed ValueWord and compare with `TAG_BOOL_TRUE` etc.
-        //
-        // Without this conversion a closure `|x| x % 2 == 0` returns raw
-        // `0`/`1` which never match `TAG_BOOL_TRUE = 0xFFFA_.._01`, so
-        // every filter predicate looks false and the result is empty.
-        //
-        // Reset the tag to NANBOXED (0) so stale raw encodings don't leak
-        // into subsequent calls.
-        let tag = ctx_ref.return_type_tag;
-        ctx_ref.return_type_tag = crate::context::RETURN_TAG_NANBOXED;
-        let result = match tag {
-            crate::context::RETURN_TAG_BOOL => box_bool(raw_result != 0),
-            crate::context::RETURN_TAG_F64 => {
-                // Raw f64 bits → NaN-boxed number (identity in our encoding).
-                raw_result
-            }
-            crate::context::RETURN_TAG_I64 => {
-                // Raw i64 → i48-tagged int if in range, else NaN-boxed number.
-                let as_i64 = raw_result as i64;
-                if (shape_value::tag_bits::I48_MIN..=shape_value::tag_bits::I48_MAX).contains(&as_i64) {
-                    shape_value::ValueBits::make_tagged(
-                        shape_value::tag_bits::TAG_INT,
-                        (as_i64 as u64) & shape_value::tag_bits::PAYLOAD_MASK,
-                    )
-                    .raw()
-                } else {
-                    box_number(as_i64 as f64)
-                }
-            }
-            crate::context::RETURN_TAG_I32 => {
-                let as_i32 = raw_result as i32;
-                shape_value::ValueBits::make_tagged(
-                    shape_value::tag_bits::TAG_INT,
-                    ((as_i32 as i64) as u64) & shape_value::tag_bits::PAYLOAD_MASK,
-                )
-                .raw()
-            }
-            _ => raw_result, // RETURN_TAG_NANBOXED and unknown: already NaN-boxed
-        };
-        if debug {
-            eprintln!(
-                "[jit-call-value] result: stack_ptr={} after pop, tag={} raw={:#x} boxed={:#x}",
-                ctx_ref.stack_ptr, tag, raw_result, result,
-            );
-        }
-        result
-    }
+pub extern "C" fn jit_call_value(_ctx: *mut JITContext) -> u64 {
+    todo!(
+        "phase-2c §2.7.10/Q11 + §2.7.11/Q12: JIT-side kinded value-call ABI \
+         rebuild — jit_call_value. The callee classification (TAG_MODULE_FN \
+         tag-bits probe, VM-format heap detection via ValueBits::is_heap, \
+         VM-format ValueWord::clone_from_bits + as_closure_handle path, \
+         value_word_drop::vw_drop release) and the F7 re-NaN-box i48 \
+         retag (ValueBits::make_tagged(TAG_INT, ...)) all decoded from \
+         deleted tag_bits / ValueWord / ValueBits machinery. Per ADR-006 \
+         §2.7.11/Q12 the value-call ABI is now (callee: KindedSlot, \
+         args: &[KindedSlot]) → Result<KindedSlot, VMError>; the per-arg \
+         and per-callee NativeKind companion must flow through the JIT \
+         lowering site (op_call_value MIR terminator) per §2.7.5. See \
+         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 /// Call a JIT-compiled function pointer with the right number of native arguments.
@@ -910,36 +506,22 @@ pub extern "C" fn jit_control_find(ctx: *mut JITContext) -> u64 {
 }
 
 unsafe fn jit_callable_invoker(
-    ctx: *mut c_void,
-    callable: &ValueWord,
-    args: &[ValueWord],
-) -> Result<ValueWord, String> {
-    if ctx.is_null() {
-        return Err("native callback invoker received null JIT context".to_string());
-    }
-
-    let jit_ctx = unsafe { &mut *(ctx as *mut JITContext) };
-    let base_sp = jit_ctx.stack_ptr;
-    let needed = args.len().saturating_add(2); // callee + args + arg_count
-    if base_sp.saturating_add(needed) > jit_ctx.stack.len() {
-        return Err("native callback exceeded JIT stack capacity".to_string());
-    }
-
-    jit_ctx.stack[jit_ctx.stack_ptr] = nanboxed_to_jit_bits(callable);
-    jit_ctx.stack_ptr += 1;
-    for arg in args {
-        jit_ctx.stack[jit_ctx.stack_ptr] = nanboxed_to_jit_bits(arg);
-        jit_ctx.stack_ptr += 1;
-    }
-    jit_ctx.stack[jit_ctx.stack_ptr] = args.len() as u64; // arg_count (raw i64 ABI)
-    jit_ctx.stack_ptr += 1;
-
-    let result_bits = jit_call_value(jit_ctx as *mut JITContext);
-    jit_ctx.stack_ptr = base_sp;
-    Ok(jit_bits_to_nanboxed_with_ctx(
-        result_bits,
-        jit_ctx as *const JITContext,
-    ))
+    _ctx: *mut c_void,
+    _callable: &u64,
+    _args: &[u64],
+) -> Result<u64, String> {
+    // Phase-2c §2.7.10/Q11 + §2.7.11/Q12: the kinded value-call ABI
+    // rebuild applies here too — the native-callback re-entry path
+    // pushes the callable + args back onto the JIT stack and dispatches
+    // through `jit_call_value`. Both ends are now kinded surfaces; the
+    // RawCallableInvoker signature must thread `KindedSlot` through
+    // once the kinded JIT-FFI consumer waves land. See
+    // docs/cluster-audits/wave-10-jit-playbook.md §5.
+    Err(
+        "phase-2c §2.7.10/Q11: jit_callable_invoker is a kinded-ABI \
+         surface awaiting the value-call kind-companion lowering"
+            .to_string(),
+    )
 }
 
 /// Invoke a linked foreign function from JIT code.
@@ -953,55 +535,20 @@ enum ForeignInvokeMode {
 }
 
 unsafe fn jit_call_foreign_impl(
-    ctx: *mut JITContext,
-    foreign_idx: u32,
-    arg_count: usize,
-    mode: ForeignInvokeMode,
+    _ctx: *mut JITContext,
+    _foreign_idx: u32,
+    _arg_count: usize,
+    _mode: ForeignInvokeMode,
 ) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let ctx_ref = unsafe { &mut *ctx };
-    if ctx_ref.foreign_bridge_ptr.is_null() {
-        return TAG_NULL;
-    }
-    if ctx_ref.stack_ptr < arg_count {
-        return TAG_NULL;
-    }
-
-    let args_start = ctx_ref.stack_ptr - arg_count;
-    let mut args = Vec::with_capacity(arg_count);
-    for idx in args_start..ctx_ref.stack_ptr {
-        args.push(jit_bits_to_nanboxed_with_ctx(
-            ctx_ref.stack[idx],
-            ctx as *const JITContext,
-        ));
-    }
-    ctx_ref.stack_ptr = args_start;
-
-    let bridge = unsafe {
-        &*(ctx_ref.foreign_bridge_ptr as *const crate::foreign_bridge::JitForeignBridgeState)
-    };
-    let raw_invoker = RawCallableInvoker {
-        ctx: ctx as *mut c_void,
-        invoke: jit_callable_invoker,
-    };
-
-    let result = match mode {
-        ForeignInvokeMode::Any => bridge.invoke(foreign_idx as usize, &args, Some(raw_invoker)),
-        ForeignInvokeMode::NativeOnly => {
-            bridge.invoke_native(foreign_idx as usize, &args, Some(raw_invoker))
-        }
-        ForeignInvokeMode::DynamicOnly => bridge.invoke_dynamic(foreign_idx as usize, &args),
-    };
-
-    match result {
-        Ok(result) => nanboxed_to_jit_bits(&result),
-        Err(err) => {
-            let err_nb = ValueWord::from_err(ValueWord::from_string(Arc::new(err)));
-            nanboxed_to_jit_bits(&err_nb)
-        }
-    }
+    todo!(
+        "phase-2c §2.7.10/Q11: JIT-side kinded foreign-call ABI rebuild — \
+         jit_call_foreign_impl. The foreign_bridge invoke / invoke_native / \
+         invoke_dynamic surfaces still take &[ValueWord]; once that crate's \
+         own kinded-ABI migration lands, args flow as &[KindedSlot] per \
+         ADR-006 §2.7.10/Q11 and the Err() arm constructs the Result::Err \
+         carrier through the kinded HeapKind::Err producer per §2.7.6/Q8. \
+         See docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 pub extern "C" fn jit_call_foreign(
@@ -1029,36 +576,19 @@ pub extern "C" fn jit_call_foreign_dynamic(
 }
 
 unsafe fn jit_call_foreign_native_args_fixed<const N: usize>(
-    ctx: *mut JITContext,
-    foreign_idx: u32,
-    args: [u64; N],
+    _ctx: *mut JITContext,
+    _foreign_idx: u32,
+    _args: [u64; N],
 ) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let ctx_ref = unsafe { &mut *ctx };
-    if ctx_ref.foreign_bridge_ptr.is_null() {
-        return TAG_NULL;
-    }
-
-    let bridge = unsafe {
-        &*(ctx_ref.foreign_bridge_ptr as *const crate::foreign_bridge::JitForeignBridgeState)
-    };
-    let raw_invoker = RawCallableInvoker {
-        ctx: ctx as *mut c_void,
-        invoke: jit_callable_invoker,
-    };
-    let boxed_args: [ValueWord; N] = std::array::from_fn(|idx| {
-        jit_bits_to_nanboxed_with_ctx(args[idx], ctx as *const JITContext)
-    });
-
-    match bridge.invoke_native(foreign_idx as usize, &boxed_args, Some(raw_invoker)) {
-        Ok(result) => nanboxed_to_jit_bits(&result),
-        Err(err) => {
-            let err_nb = ValueWord::from_err(ValueWord::from_string(Arc::new(err)));
-            nanboxed_to_jit_bits(&err_nb)
-        }
-    }
+    todo!(
+        "phase-2c §2.7.10/Q11: JIT-side kinded foreign-call ABI rebuild — \
+         jit_call_foreign_native_args_fixed<N>. Same gating as \
+         jit_call_foreign_impl: foreign_bridge invoke_native still takes \
+         &[ValueWord]; once that crate's own kinded-ABI migration lands, \
+         the fixed-arity boxed_args array becomes [KindedSlot; N] per \
+         ADR-006 §2.7.10/Q11. See \
+         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 macro_rules! define_jit_call_foreign_native_fixed {
