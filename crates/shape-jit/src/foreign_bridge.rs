@@ -2,7 +2,7 @@ use shape_runtime::context::ExecutionContext;
 use shape_runtime::module_exports::RawCallableInvoker;
 use shape_runtime::plugins::language_runtime::{CompiledForeignFunction, PluginLanguageRuntime};
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use shape_vm::bytecode::BytecodeProgram;
 use shape_vm::executor::{
     foreign_marshal,
@@ -127,8 +127,8 @@ impl JitForeignBridgeState {
     fn invoke_runtime_entry(
         &self,
         entry: &LinkedForeignEntry,
-        args: &[ValueWord],
-    ) -> Result<ValueWord, String> {
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, String> {
         let LinkedForeignHandle::Runtime { runtime, compiled } = &entry.handle else {
             return Err(format!(
                 "Foreign function '{}' is not a runtime foreign function",
@@ -146,58 +146,69 @@ impl JitForeignBridgeState {
             )
         })?;
 
+        // PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5): pre-rebuild this
+        // path wrapped foreign-runtime results in `ValueWord::from_ok` /
+        // `from_err` (deleted `Result<T,E>` constructors that produced a
+        // tag-bit-encoded `Result` shape). The strict-typing rebuild
+        // target is a `KindedSlot` whose `kind = NativeKind::Ptr(HeapKind::Result)`
+        // (or the per-arm typed-object representation, depending on the
+        // ADR-006 §2.7.13 / Q14 outcome — `HeapKind::Result` is not yet
+        // a HeapKind variant). Until the variant amendment lands, the
+        // body delegates to `unmarshal_result`'s already-§2.7.4-stubbed
+        // implementation, surfacing the rebuild gap at the foreign-bridge
+        // call site rather than fabricating a Bool-default Result encoding.
         if entry.dynamic_errors {
-            match runtime.invoke(compiled, &args_msgpack) {
-                Ok(result_msgpack) => match foreign_marshal::unmarshal_result(
-                    &result_msgpack,
-                    return_type,
-                    entry.return_type_schema_id,
-                    &self.schemas,
-                ) {
-                    Ok(value) => Ok(ValueWord::from_ok(value)),
-                    Err(err) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
-                        format!("Foreign function '{}': {}", entry.name, err),
-                    )))),
-                },
-                Err(err) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
-                    format!("Foreign function '{}': {}", entry.name, err),
-                )))),
-            }
-        } else {
-            let result_msgpack = runtime
-                .invoke(compiled, &args_msgpack)
-                .map_err(|e| format!("Foreign function '{}' error: {}", entry.name, e))?;
-            foreign_marshal::unmarshal_result(
-                &result_msgpack,
-                return_type,
-                entry.return_type_schema_id,
-                &self.schemas,
-            )
-            .map_err(|e| format!("Foreign function '{}': {}", entry.name, e))
+            // dynamic_errors mode wrapped both runtime errors and unmarshal
+            // errors in `Err(...)`; without a kinded `Result` constructor,
+            // the rebuild needs the §2.7.13 amendment first. Surface here
+            // rather than picking a placeholder kind.
+            return Err(format!(
+                "Foreign function '{}': dynamic_errors mode requires a \
+                 kinded `Result<T,E>` carrier (ADR-006 §2.7.4 / §2.7.13 / Q14 \
+                 — HeapKind::Result amendment). See foreign_bridge.rs:invoke_runtime_entry.",
+                entry.name
+            ));
         }
+
+        let result_msgpack = runtime
+            .invoke(compiled, &args_msgpack)
+            .map_err(|e| format!("Foreign function '{}' error: {}", entry.name, e))?;
+        foreign_marshal::unmarshal_result(
+            &result_msgpack,
+            return_type,
+            entry.return_type_schema_id,
+            &self.schemas,
+        )
+        .map_err(|e| format!("Foreign function '{}': {}", entry.name, e))
     }
 
     fn invoke_native_entry(
         &self,
         entry: &LinkedForeignEntry,
-        args: &[ValueWord],
+        args: &[KindedSlot],
         raw_invoker: Option<RawCallableInvoker>,
-    ) -> Result<ValueWord, String> {
+    ) -> Result<KindedSlot, String> {
         let LinkedForeignHandle::Native(linked) = &entry.handle else {
             return Err(format!(
                 "Foreign function '{}' is not a native ABI foreign function",
                 entry.name
             ));
         };
-        native_abi::invoke_linked_function(linked, args, raw_invoker, None)
+        // ADR-006 §2.7.10/Q11 dispatch carrier shape: `&[KindedSlot]` for
+        // args, `KindedSlot` for result. The `vm_stack_data` /
+        // `vm_stack_kinds` writeback pair is not threaded through the
+        // foreign-bridge entry yet (Phase-2c FFI rebuild) — pass `None`
+        // and let `invoke_linked_function`'s §2.7.4 stub surface the
+        // rebuild gap.
+        native_abi::invoke_linked_function(linked, args, raw_invoker, None, None)
             .map_err(|e| format!("Native function '{}' error: {}", entry.name, e))
     }
 
     pub(crate) fn invoke_dynamic(
         &self,
         foreign_idx: usize,
-        args: &[ValueWord],
-    ) -> Result<ValueWord, String> {
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, String> {
         let entry = self.entry(foreign_idx)?;
         self.invoke_runtime_entry(entry, args)
     }
@@ -205,9 +216,9 @@ impl JitForeignBridgeState {
     pub(crate) fn invoke_native(
         &self,
         foreign_idx: usize,
-        args: &[ValueWord],
+        args: &[KindedSlot],
         raw_invoker: Option<RawCallableInvoker>,
-    ) -> Result<ValueWord, String> {
+    ) -> Result<KindedSlot, String> {
         let entry = self.entry(foreign_idx)?;
         self.invoke_native_entry(entry, args, raw_invoker)
     }
@@ -215,9 +226,9 @@ impl JitForeignBridgeState {
     pub(crate) fn invoke(
         &self,
         foreign_idx: usize,
-        args: &[ValueWord],
+        args: &[KindedSlot],
         raw_invoker: Option<RawCallableInvoker>,
-    ) -> Result<ValueWord, String> {
+    ) -> Result<KindedSlot, String> {
         let entry = self.entry(foreign_idx)?;
 
         match &entry.handle {

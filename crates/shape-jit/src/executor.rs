@@ -265,19 +265,43 @@ impl JITExecutor {
                 WireValue::Bool(raw_result != 0)
             }
             _ => {
-                // tag=0 (RETURN_TAG_NANBOXED) or unknown: legacy NaN-boxed path
-                // Use FrameDescriptor hint to preserve integer type identity.
-                // Prefer return_kind when populated; fall back to last slot.
-                let return_hint = bytecode.top_level_frame.as_ref().and_then(|fd| {
-                    if fd.return_kind != shape_vm::type_tracking::NativeKind::Unknown {
-                        Some(fd.return_kind)
-                    } else {
-                        fd.slots.last().copied()
-                    }
+                // tag=0 (RETURN_TAG_NANBOXED) or unknown: per ADR-006
+                // §2.7.5 / §2.7.5.1, the JIT-FFI return path must be
+                // kind-stamped at compile time from the call signature
+                // (`FrameDescriptor::return_kind: Option<NativeKind>`).
+                // The pre-strict-typing fallback decoded `tag_bits` from
+                // `raw_result` to recover a kind at runtime — that path
+                // is the W-series defection-attractor (deleted-runtime
+                // tag-bit dispatch + kind-blind classifier) and is
+                // forbidden per CLAUDE.md "Forbidden Patterns".
+                //
+                // The correct §2.7.5 surface stamps `return_kind` from
+                // the JIT-emitted call signature so the typed return
+                // path (RETURN_TAG_F64 / I64 / I32 / BOOL) handles every
+                // case statically. A `RETURN_TAG_NANBOXED` arrival here
+                // is a kind-source gap — surface-and-stop per W10
+                // jit-playbook §5.
+                //
+                // PHASE_2C / SURFACE: stamp `return_type_tag` to a
+                // typed variant from the FrameDescriptor at JIT-emit
+                // time (rvalue path — W10-mir-compiler territory) so
+                // this arm is unreachable in production bytecode.
+                let return_hint = bytecode
+                    .top_level_frame
+                    .as_ref()
+                    .and_then(|fd| fd.return_kind.or_else(|| fd.slots.last().copied()));
+                let _ = return_hint;
+                return Err(shape_runtime::error::ShapeError::RuntimeError {
+                    message: format!(
+                        "JIT-FFI return path: RETURN_TAG_NANBOXED reached the \
+                         host boundary without a stamped NativeKind (raw_bits={:#x}). \
+                         Per ADR-006 §2.7.5 / §2.7.5.1 the return tag must be a \
+                         typed variant; this is a kind-source gap (W10 jit-playbook \
+                         §5 surface-and-stop). See executor.rs:267 comment.",
+                        raw_result
+                    ),
+                    location: None,
                 });
-                let result_scalar =
-                    crate::ffi::object::conversion::jit_bits_to_typed_scalar(raw_result, return_hint);
-                self.typed_scalar_to_wire(&result_scalar, raw_result)
             }
         };
 
@@ -299,76 +323,18 @@ impl JITExecutor {
         })
     }
 
-    /// Convert a TypedScalar result to WireValue.
-    ///
-    /// For scalar types, the TypedScalar carries enough information. For heap types
-    /// (strings, arrays) that TypedScalar can't represent, we fall back to raw bits.
-    fn typed_scalar_to_wire(&self, ts: &shape_value::TypedScalar, raw_bits: u64) -> WireValue {
-        use shape_value::ScalarKind;
-
-        match ts.kind {
-            ScalarKind::I8
-            | ScalarKind::I16
-            | ScalarKind::I32
-            | ScalarKind::I64
-            | ScalarKind::U8
-            | ScalarKind::U16
-            | ScalarKind::U32
-            | ScalarKind::U64
-            | ScalarKind::I128
-            | ScalarKind::U128 => {
-                // Integer result — preserve as exact integer in WireValue::Number
-                WireValue::Number(ts.payload_lo as i64 as f64)
-            }
-            ScalarKind::F64 | ScalarKind::F32 => WireValue::Number(f64::from_bits(ts.payload_lo)),
-            ScalarKind::Bool => WireValue::Bool(ts.payload_lo != 0),
-            ScalarKind::Unit => WireValue::Null,
-            ScalarKind::None => {
-                // None could also be a fallback for non-scalar heap types.
-                // Check if raw_bits is actually a heap value.
-                self.value_word_to_wire(raw_bits)
-            }
-        }
-    }
-
-    fn value_word_to_wire(&self, bits: u64) -> WireValue {
-        use crate::ffi::value_ffi::{
-            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
-            unbox_number, unbox_string,
-        };
-        use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
-
-        if is_number(bits) {
-            WireValue::Number(unbox_number(bits))
-        } else if bits == TAG_NULL {
-            WireValue::Null
-        } else if bits == TAG_BOOL_TRUE {
-            WireValue::Bool(true)
-        } else if bits == TAG_BOOL_FALSE {
-            WireValue::Bool(false)
-        } else if is_tagged(bits) && get_tag(bits) == TAG_INT {
-            // Tagged i48 integer — sign-extend to i64 and return as integer
-            let int_val = sign_extend_i48(get_payload(bits));
-            WireValue::Integer(int_val)
-        } else if is_heap_kind(bits, HK_STRING) {
-            // `box_string` in the MIR-compile path routes string-literal
-            // constants through `UnifiedString` (unified-heap, bit-47 set),
-            // whereas legacy JIT heap strings use the `JitAlloc<String>`
-            // layout (bit-47 clear). The two have incompatible in-memory
-            // representations — `UnifiedString` carries `data: *const u8 +
-            // len: u64 + cap: u64` starting at offset 8, but
-            // `jit_unbox::<String>` would reinterpret those bytes as a Rust
-            // `String` (Vec<u8>, 3 words) and then `s.clone()` would read
-            // nonsense len/cap fields and segfault on alloc.
-            //
-            // `unbox_string` branches on `ValueBits::is_unified_heap()` and
-            // decodes either format correctly, returning a `&str` we clone
-            // into the WireValue.
-            let s = unsafe { unbox_string(bits) };
-            WireValue::String(s.to_owned())
-        } else {
-            // Default to interpreting as a number for unknown tags
-            WireValue::Number(f64::from_bits(bits))
-        }
-    }
+    // typed_scalar_to_wire and value_word_to_wire removed — both were
+    // kind-blind dispatch paths. The former dispatched on
+    // `ScalarKind::None` to `value_word_to_wire`; the latter decoded
+    // `tag_bits` from a raw u64 to recover a kind. Per ADR-006 §2.7.5
+    // / §2.7.5.1 the JIT-FFI return path stamps a typed `RETURN_TAG_*`
+    // from the JIT-emitted call signature, so the kind-blind fallback
+    // is unreachable in production bytecode (and the surface-and-stop
+    // path on the `_ =>` arm of the `return_type_tag` match documents
+    // any kind-source gap that does land here).
+    //
+    // CLAUDE.md "Forbidden Patterns" forbids `tag_bits` decode in JIT
+    // codegen; the W-series defection-attractor list forbids the
+    // "decode/tag/dispatch helper/bridge/probe" framing these helpers
+    // would need to come back under.
 }

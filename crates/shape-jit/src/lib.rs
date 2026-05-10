@@ -49,7 +49,10 @@ pub use shape_runtime as runtime;
 
 // Re-export JITCompiler and related items from compiler module
 pub use self::compiler::JITCompiler;
-pub use self::compiler::JITKernelCompiler;
+// JITKernelCompiler re-export removed — runtime-side
+// `shape_runtime::simulation` module bulldozed in 2601ba7. See
+// `compiler/setup.rs` comment block. Re-introduction owned by the
+// simulation-kernel-extension-rebuild workstream.
 pub use self::compiler::JitParityEntry;
 pub use self::compiler::JitParityTarget;
 pub use self::compiler::JitPreflightReport;

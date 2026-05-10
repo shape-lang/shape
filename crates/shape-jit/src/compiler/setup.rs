@@ -3,13 +3,10 @@
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
-use crate::context::{JITConfig, SimulationKernelConfig};
+use crate::context::JITConfig;
 use crate::error::JitError;
 use crate::ffi_symbols::{declare_ffi_functions, register_ffi_symbols};
-use shape_runtime::simulation::{KernelCompileConfig, KernelCompiler, SimulationKernelFn};
-use shape_vm::bytecode::BytecodeProgram;
 
 pub struct JITCompiler {
     pub(super) module: JITModule,
@@ -81,102 +78,26 @@ impl JITCompiler {
 }
 
 // ============================================================================
-// KernelCompiler Trait Implementation
+// KernelCompiler Trait Implementation — REMOVED (W11 / Phase-2c)
 // ============================================================================
-
-/// Thread-safe wrapper around JITCompiler for use with ExecutionContext.
-///
-/// This wrapper implements the `KernelCompiler` trait from `shape-runtime`,
-/// enabling JIT kernel compilation to be injected into ExecutionContext without
-/// circular dependencies.
-pub struct JITKernelCompiler {
-    /// Inner JIT compiler protected by mutex for thread safety
-    compiler: Mutex<JITCompiler>,
-}
-
-impl JITKernelCompiler {
-    /// Create a new JIT kernel compiler with default configuration.
-    pub fn new() -> Result<Self, JitError> {
-        Ok(Self {
-            compiler: Mutex::new(JITCompiler::new(JITConfig::default())?),
-        })
-    }
-
-    /// Create a new JIT kernel compiler with custom configuration.
-    pub fn with_config(config: JITConfig) -> Result<Self, JitError> {
-        Ok(Self {
-            compiler: Mutex::new(JITCompiler::new(config)?),
-        })
-    }
-}
-
-impl Default for JITKernelCompiler {
-    fn default() -> Self {
-        Self::new().expect("Failed to create JIT compiler with default config")
-    }
-}
-
-// Safety: JITKernelCompiler is thread-safe because:
-// 1. All access to the inner JITCompiler is protected by a Mutex
-// 2. The raw pointers in JITCompiler are function pointers to compiled code,
-//    which are immutable after compilation
-// 3. We never expose the raw pointers outside the Mutex
-unsafe impl Send for JITKernelCompiler {}
-unsafe impl Sync for JITKernelCompiler {}
-
-impl KernelCompiler for JITKernelCompiler {
-    fn compile_kernel(
-        &self,
-        name: &str,
-        function_bytecode: &[u8],
-        config: &KernelCompileConfig,
-    ) -> Result<SimulationKernelFn, String> {
-        // Deserialize bytecode (wire-native MessagePack first, JSON fallback for compatibility).
-        let program: BytecodeProgram = rmp_serde::from_slice(function_bytecode)
-            .or_else(|mp_err| {
-                serde_json::from_slice(function_bytecode).map_err(|json_err| {
-                    format!(
-                        "Failed to deserialize bytecode as MessagePack ({mp_err}) or JSON ({json_err})"
-                    )
-                })
-            })?;
-
-        // Convert KernelCompileConfig to SimulationKernelConfig
-        let mut jit_config =
-            SimulationKernelConfig::new(config.state_schema_id, config.column_count);
-
-        // Add state field offsets
-        for (field_name, offset) in &config.state_field_offsets {
-            jit_config
-                .state_field_offsets
-                .push((field_name.clone(), *offset));
-        }
-
-        // Add column mappings
-        for (col_name, idx) in &config.column_map {
-            jit_config.column_map.push((col_name.clone(), *idx));
-        }
-
-        // Acquire lock and compile
-        let mut compiler = self
-            .compiler
-            .lock()
-            .map_err(|e| format!("Failed to acquire JIT compiler lock: {}", e))?;
-
-        // Call the JIT compiler's compile_simulation_kernel
-        let kernel_fn = compiler.compile_simulation_kernel(name, &program, &jit_config)?;
-
-        // The function pointer type is the same, just transmute
-        // Safety: SimulationKernelFn in shape-jit has the same signature as in shape-runtime
-        Ok(unsafe { std::mem::transmute(kernel_fn) })
-    }
-
-    fn supports_feature(&self, feature: &str) -> bool {
-        match feature {
-            "typed_object" => true,
-            "closures" => false, // Phase 1: no closure support
-            "multi_table" => true,
-            _ => false,
-        }
-    }
-}
+//
+// The `JITKernelCompiler` wrapper and its `impl KernelCompiler for
+// JITKernelCompiler` block are removed because the runtime-side
+// `shape_runtime::simulation` module (with `KernelCompiler`,
+// `KernelCompileConfig`, `SimulationKernelFn`) was bulldozed in
+// commit `2601ba7` ("phase-2c: bulldoze simulation engine subtree").
+// Per the 2026-05-06 defection entry, the simulation engine subtree
+// is deferred to extensions workstream
+// `simulation-kernel-extension-rebuild`.
+//
+// This is a deleted-runtime-side dependency, classified as W11 /
+// deeper Phase-2c per the wave-10 jit-playbook §6 ("What's NOT in
+// W10"). The JIT-side wrapper has no surviving consumer trait to
+// implement, so the surface-and-stop response is wholesale removal,
+// not a `todo!()` shell — there is no shape to stub.
+//
+// The compile_simulation_kernel entry point on `JITCompiler` itself
+// remains (it is called only via the now-removed wrapper); its body
+// references shape_runtime types that are also gone, so any future
+// re-introduction must come through the simulation-kernel-extension-
+// rebuild workstream.
