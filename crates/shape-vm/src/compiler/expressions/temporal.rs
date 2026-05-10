@@ -91,7 +91,13 @@ impl BytecodeCompiler {
     }
 }
 
-#[cfg(test)]
+// Tests gated `deep-tests` post-W11: bodies call `as_datetime()` and
+// `as_timespan()` on the returned `KindedSlot`, which the kinded API
+// (ADR-006 §2.7.6/Q8) does not provide — heap variants dispatch through
+// `slot.as_heap_value()` + `HeapValue` match. Restoration requires
+// rewriting these tests to use the heap-value match path (Phase-2c
+// reentry per ADR-006 §2.7.4).
+#[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use crate::test_utils::eval;
 

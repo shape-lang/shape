@@ -351,23 +351,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_slot_kind_unknown_falls_back() {
-        use crate::type_tracking::NativeKind;
-        assert_eq!(
-            should_use_typed_array_from_slot_kind(NativeKind::Unknown),
-            None
-        );
-    }
-
-    #[test]
-    fn test_slot_kind_dynamic_falls_back() {
-        use crate::type_tracking::NativeKind;
-        assert_eq!(
-            should_use_typed_array_from_slot_kind(NativeKind::Dynamic),
-            None
-        );
-    }
+    // `NativeKind::Unknown` and `NativeKind::Dynamic` were deleted per
+    // ADR-006 §2.7.5.1 — every NativeKind in compiled bytecode must be
+    // proven. The "falls back to None" tests for those variants were
+    // removed (the variants no longer exist; nothing to fall back from).
 
     #[test]
     fn test_slot_kind_int8_falls_back() {
