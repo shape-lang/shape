@@ -4,16 +4,21 @@
 //! snapshot resume, compilation pipeline, and trait implementations
 //! for `ProgramExecutor` and `ExpressionEvaluator`.
 //!
-//! Phase-2c surface (ADR-006 §2.7.4): every host-boundary path in this file
-//! depends on the deleted `ValueWord` runtime representation and the
-//! deleted `synthesize_value_word_from_raw` / `nb_to_wire` /
-//! `nb_extract_content` / `nb_to_envelope` helpers (forbidden under
-//! CLAUDE.md "Forbidden Patterns"). The kinded rebuild — `KindedSlot`-
-//! backed module-binding persistence, kinded host-boundary completion
-//! values, kinded suspend/resume markers — lands in the Phase-2c snapshot
-//! / host-API revival session per ADR-006 §2.7.4. Until then every
-//! function body surfaces `NotImplemented` / `todo!()` so the deleted
-//! carriers cannot be silently re-stitched.
+//! W12-host-boundary (ADR-006 §2.7.4 / §2.7.5): the program-completion
+//! host boundary now flows the VM's `KindedSlot` completion value
+//! through the kind-threaded `wire_conversion::slot_to_envelope` /
+//! `slot_to_wire` / `slot_extract_content` helpers. The deleted
+//! `nb_to_wire` / `nb_to_envelope` / `nb_extract_content` /
+//! `synthesize_value_word_from_raw` ValueWord-shape host-API surface
+//! does not return; the kinded helpers take `(bits, kind)` directly per
+//! ADR-006 §2.7.5 and the slot's kind is sourced from `KindedSlot::kind`
+//! (compiler-proven via `BytecodeProgram::top_level_frame.return_kind`).
+//!
+//! Snapshot resume / `eval_statements` remain Phase-2c stubs — the
+//! suspend/resume marker rebuild (kinded `Snapshot::Resumed`
+//! constructor + push) and the REPL-binding round-trip
+//! (`save_module_bindings_to_context` / `load_module_bindings_from_context`)
+//! are independent host-boundary workstreams.
 
 use std::sync::Arc;
 
@@ -26,6 +31,7 @@ use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
+use shape_runtime::wire_conversion;
 use shape_value::KindedSlot;
 
 impl BytecodeExecutor {
@@ -251,21 +257,55 @@ impl ProgramExecutor for BytecodeExecutor {
             vm.foreign_fn_handles = handles;
         }
 
-        // Phase 2 — execute. The legacy run-loop returned a tagged
-        // `ValueWord` and routed it through `nb_to_wire` /
-        // `nb_extract_content` / `nb_to_envelope` to build the
-        // `ProgramExecutorResult`. Every one of those helpers was deleted
-        // alongside `ValueWord`. The kinded rebuild flows
-        // `vm.execute_kinded() -> Result<KindedSlot, _>` through a
-        // kinded `wire_conversion::kinded_to_wire` (Phase-2c).
-        Err(shape_runtime::error::ShapeError::RuntimeError {
-            message: "execute_program: host-boundary completion-value path \
-                      depends on the deleted ValueWord carrier + deleted \
-                      `nb_to_wire` / `nb_extract_content` / `nb_to_envelope` \
-                      host-API helpers; the kinded `KindedSlot -> WireValue` \
-                      rebuild is Phase-2c (ADR-006 §2.7.4 / §2.7.5)."
-                .to_string(),
-            location: None,
+        // Phase 2 — execute. `vm.execute(ctx)` returns
+        // `Result<KindedSlot, VMError>` (dispatch.rs:25). The slot's
+        // kind is sourced from `BytecodeProgram::top_level_frame.
+        // return_kind` for typed-producer programs and from the
+        // §2.7.7 stack parallel-kind track when the producer pushed a
+        // post-resolution kind directly. No tag-bit decode, no
+        // ValueWord round-trip.
+        let runtime = engine.get_runtime_mut();
+        let mut owned_ctx_fallback;
+        let ctx_borrow: &mut ExecutionContext = match runtime.persistent_context_mut() {
+            Some(ctx) => ctx,
+            None => {
+                // Programs without a persistent ExecutionContext (the
+                // non-REPL `shape run` path) still need a live context
+                // for stdlib I/O dispatch + wire-conversion lookups.
+                // An empty context exposes no host data but satisfies
+                // the borrow.
+                owned_ctx_fallback = ExecutionContext::new_empty();
+                &mut owned_ctx_fallback
+            }
+        };
+
+        let completion: KindedSlot = vm.execute(Some(ctx_borrow)).map_err(|e| {
+            shape_runtime::error::ShapeError::RuntimeError {
+                message: e.to_string(),
+                location: None,
+            }
+        })?;
+
+        // Phase 3 — host-boundary projection. Pull `(bits, kind)` off
+        // the `KindedSlot` once and feed the kinded
+        // `wire_conversion::slot_*` helpers (ADR-006 §2.7.5). The
+        // KindedSlot owns the strong-count share for the duration of
+        // this scope; the helpers read by-pointer and do not consume
+        // the share.
+        let bits = completion.raw();
+        let kind = completion.kind();
+
+        let envelope = wire_conversion::slot_to_envelope(bits, kind, "", ctx_borrow);
+        let (content_json, content_html, content_terminal) =
+            wire_conversion::slot_extract_content(bits, kind);
+
+        Ok(shape_runtime::engine::ProgramExecutorResult {
+            wire_value: envelope.value,
+            type_info: Some(envelope.type_info),
+            execution_type: ExecutionType::Script,
+            content_json,
+            content_html,
+            content_terminal,
         })
     }
 }
