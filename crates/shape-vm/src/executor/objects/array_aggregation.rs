@@ -2,37 +2,34 @@
 //!
 //! Handles: sum, avg, min, max, count, reduce
 //!
-//! ## Wave-δ MR-array-transform-aggregation migration (playbook §10 / §3 /
-//! ADR-006 §2.7.10 / Q11)
+//! ## W9-array-aggregation closure-callback close (2026-05-10)
 //!
 //! Wave-γ `G-method-fn-v2-abi` flipped `MethodFnV2` to the kinded carrier
 //! slice form (`fn(&mut VM, &[KindedSlot], _) -> Result<KindedSlot, VMError>`).
-//! These bodies dispatch on `args[0].kind == NativeKind::Ptr(HeapKind::TypedArray)`
-//! and reconstruct the receiver's typed share via
-//! `Arc::<TypedArrayData>::from_raw` (cluster A precedent in
-//! `executor/v2_handlers/typed_array_elem.rs:119` — read by reference, then
-//! `Arc::into_raw` restores the share without disturbing the caller's
-//! `KindedSlot` ownership).
+//! Wave 7 closed `call_value_immediate_nb` (`call_convention.rs:767`) per
+//! ADR-006 §2.7.11 / Q12 — kinded callee + kinded args + kinded result.
+//! `count(predicate)` and `reduce`/`fold` now issue per-element closure
+//! callbacks through that path; sum/avg/min/max/count(arity-0) stay on the
+//! per-`TypedArrayData::*` variant numeric reduction path (no callback).
 //!
-//! Per-`TypedArrayData::*` variant numeric reductions go through
-//! `kind_coerce::numeric_domain` for cross-domain dispatch when the variant
-//! itself doesn't pin the result kind (Bool fast-path counts truthies; I*/U*
-//! variants fold to Int64; F32/F64 fold to Float64). Empty-array semantics
-//! match the pre-Wave-6.5 body: `sum`/`count` yield 0 of the appropriate
-//! kind, `avg` yields 0.0, `min`/`max` yield a runtime error.
+//! Receiver dispatches on
+//! `args[0].kind == NativeKind::Ptr(HeapKind::TypedArray)`, reconstructing
+//! the typed share via `Arc::<TypedArrayData>::from_raw` (cluster A
+//! precedent in `executor/v2_handlers/typed_array_elem.rs:119` — read by
+//! reference, then `Arc::into_raw` restores the share without disturbing
+//! the caller's `KindedSlot` ownership).
 //!
-//! ## Phase-2c surfaces
-//!
-//! - `reduce`: requires kinded closure callback through `op_call_value`
-//!   which is itself a `todo!("phase-2c")` stub in `control_flow/mod.rs`
-//!   (call_convention.rs:308). Surface per playbook §8 cross-cluster
-//!   cascade.
-//! - `count(predicate)`: same closure-callback gap; arity-0 form is real.
+//! Per-`TypedArrayData::*` numeric reductions go through
+//! `kind_coerce::numeric_domain` (Bool counts truthies; I*/U* fold to
+//! Int64; F32/F64/FloatSlice fold to Float64). Empty-array semantics match
+//! the pre-Wave-6.5 body: `sum`/`count` yield 0 of the appropriate kind,
+//! `avg` yields 0.0, `min`/`max` yield a runtime error, `reduce` returns
+//! the supplied initial value.
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use crate::executor::builtins::kind_coerce::NumericDomain;
-use shape_value::heap_value::{HeapKind, TypedArrayData};
+use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -144,6 +141,109 @@ where
             )));
         }
     })
+}
+
+/// Read element `idx` of a `TypedArrayData` as a fresh `KindedSlot`,
+/// owning one strong-count share for heap-bearing element kinds. Returns
+/// `Err(IndexOutOfBounds)` when `idx` is past the per-variant length.
+///
+/// This is the per-element carrier-construction site for closure callbacks
+/// (`reduce`, `count(predicate)`) — every kinded payload (Int64, Float64,
+/// Bool, String, heterogeneous heap) gets the matching `KindedSlot`
+/// constructor (ADR-006 §2.7.6 / Q8 carrier-API-bound). Narrow-int /
+/// matrix / float-slice variants surface explicitly per playbook §8.
+fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
+    let len = typed_array_len(arr);
+    if idx >= len {
+        return Err(VMError::IndexOutOfBounds {
+            index: idx as i32,
+            length: len,
+        });
+    }
+    Ok(match arr {
+        TypedArrayData::I64(b) => KindedSlot::from_int(b.data[idx]),
+        TypedArrayData::F64(b) => KindedSlot::from_number(b.data[idx]),
+        TypedArrayData::Bool(b) => KindedSlot::from_bool(b.data[idx] != 0),
+        TypedArrayData::I8(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::I16(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::I32(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::U8(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::U16(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::U32(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::U64(b) => KindedSlot::from_int(b.data[idx] as i64),
+        TypedArrayData::F32(b) => KindedSlot::from_number(b.data[idx] as f64),
+        TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len: _,
+        } => KindedSlot::from_number(parent.data[*offset as usize + idx]),
+        TypedArrayData::String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
+        TypedArrayData::HeapValue(b) => {
+            // Re-wrap the inner `Arc<HeapValue>` arm to a per-FieldType
+            // KindedSlot constructor (ADR-005 §1 single-discriminator —
+            // dispatch through `HeapValue` match).
+            match b.data[idx].as_ref() {
+                HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
+                HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
+                HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+                HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+                HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
+                HeapValue::BigInt(bi) => KindedSlot::from_bigint(Arc::clone(bi)),
+                HeapValue::Char(c) => KindedSlot::from_char(*c),
+                other => {
+                    return Err(VMError::NotImplemented(format!(
+                        "Array.reduce/count(predicate): heterogeneous element \
+                         arm {} needs per-FieldType KindedSlot constructor — \
+                         ADR-006 §2.7.4 / §2.7.6 Q8 carrier-API-bound matrix \
+                         completion (Phase-2c reentry follow-up)",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        TypedArrayData::Matrix(_) => {
+            return Err(VMError::NotImplemented(
+                "Array.reduce/count(predicate): Matrix element extraction \
+                 needs row-shape KindedSlot construction — ADR-006 §2.7.4 \
+                 Phase-2c reentry follow-up"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+/// Test a `KindedSlot` for truthiness — Bool/numeric arms read bits,
+/// heap arms are non-null → truthy. Mirrors the `kinded_truthy` helper in
+/// `executor/logical/mod.rs:43` (private there). Used by `count(predicate)`.
+#[inline]
+fn slot_truthy(slot: &KindedSlot) -> bool {
+    let bits = slot.slot.raw();
+    match slot.kind {
+        NativeKind::Bool => bits != 0,
+        NativeKind::Float64 => f64::from_bits(bits) != 0.0,
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => bits != 0,
+        NativeKind::NullableFloat64
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => bits != 0,
+        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+    }
 }
 
 /// Fold a numeric `TypedArrayData` to `f64` (Float domain). Coerces
@@ -298,58 +398,86 @@ pub(crate) fn handle_max_v2(
     })
 }
 
-/// `arr.count()` — arity-0 form returns `len()` as Int64.
+/// `arr.count()` / `arr.count(predicate)`.
 ///
-/// The arity-1 predicate form (`arr.count(|x| ...)`) needs the closure-
-/// callback dispatch path, which is itself a `todo!("phase-2c")` stub in
-/// `control_flow/mod.rs::op_call_value` (`call_convention.rs:308` —
-/// `call_value_immediate_nb` rebuild pending). Surface per playbook §8.
+/// - Arity-0: returns `len()` as Int64.
+/// - Arity-1: invokes the closure predicate per element via
+///   `vm.call_value_immediate_nb` (ADR-006 §2.7.11 / Q12, W7 close) and
+///   counts truthy results.
 pub(crate) fn handle_count_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    // arity-1 (predicate) → SURFACE on closure dispatch
-    if args.len() >= 2 {
-        return Err(VMError::NotImplemented(
-            "count(predicate) — SURFACE: closure-callback dispatch through \
-             op_call_value is itself a `todo!(\"phase-2c\")` stub \
-             (control_flow/mod.rs::op_call_value, call_convention.rs:308 \
-             call_value_immediate_nb rebuild pending). The kinded callee + \
-             kinded args + kinded result path is unblocked once the \
-             Phase-2c call-convention rebuild lands per ADR-006 §2.7.4 / \
-             §2.7.5."
+    // Arity-0: just return the length.
+    if args.len() < 2 {
+        return with_typed_array(args, "count", |arr| {
+            Ok(KindedSlot::from_int(typed_array_len(arr) as i64))
+        });
+    }
+
+    // Arity-1 predicate path: per-element closure callback. The receiver
+    // is borrowed via `with_typed_array`; element extraction goes through
+    // `element_kinded` which builds a fresh `KindedSlot` carrier per
+    // element with one strong-count share (heap kinds) or scalar bits
+    // (Int/Float/Bool). The predicate is `args[1]` — its carrier still
+    // owns one share; we pass `&args[1]` and let `call_value_immediate_nb`
+    // route through the §2.7.11 closure / function-id arms.
+    let len = with_typed_array(args, "count", |arr| Ok(typed_array_len(arr)))?;
+    let mut total: i64 = 0;
+    for i in 0..len {
+        let elem = with_typed_array(args, "count", |arr| element_kinded(arr, i))?;
+        let call_args = [elem];
+        let result =
+            vm.call_value_immediate_nb(&args[1], &call_args, ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            total += 1;
+        }
+    }
+    Ok(KindedSlot::from_int(total))
+}
+
+/// `arr.reduce(init, |acc, x| ...)` / `arr.fold(init, |acc, x| ...)`.
+///
+/// Walks every element of the receiver array, invoking the closure with
+/// `(acc, elem)` and threading the closure's return value back as the new
+/// accumulator. Empty arrays return `init` unchanged. Per ADR-006 §2.7.11
+/// / Q12 the closure callback flows through `vm.call_value_immediate_nb`
+/// — `args[2]` is the closure, `args[1]` is the initial accumulator, and
+/// `args[0]` is the receiver array.
+pub(crate) fn handle_reduce_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "reduce/fold: requires (init, closure) — got fewer than 2 args"
                 .to_string(),
         ));
     }
-    with_typed_array(args, "count", |arr| {
-        Ok(KindedSlot::from_int(typed_array_len(arr) as i64))
-    })
-}
 
-/// `arr.reduce(init, |acc, x| ...)` / `arr.fold(init, |acc, x| ...)`
-///
-/// SURFACE: the closure-callback dispatch through `op_call_value` is
-/// itself a `todo!("phase-2c")` stub in `control_flow/mod.rs`. The
-/// MethodFnV2 ABI is kinded post-Wave-γ G-method-fn-v2-abi, but the
-/// per-element callback the reducer needs (kinded callee + 2-arg
-/// kinded slice + kinded result) cannot be issued until the
-/// Phase-2c call-convention rebuild lands — see `call_convention.rs`
-/// `call_value_immediate_nb` / `call_closure_with_nb_args_keepalive`
-/// `todo!()` stubs at lines 308-330 (ADR-006 §2.7.4 / §2.7.5).
-pub(crate) fn handle_reduce_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "reduce / fold — SURFACE: closure-callback dispatch through \
-         op_call_value is itself a `todo!(\"phase-2c\")` stub \
-         (control_flow/mod.rs::op_call_value, \
-         call_convention.rs:308 call_value_immediate_nb rebuild pending). \
-         The kinded callee + 2-arg kinded slice + kinded result path is \
-         unblocked once the Phase-2c call-convention rebuild lands per \
-         ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    // Borrow the receiver length up front so the with_typed_array borrow
+    // doesn't span the closure callbacks (which themselves drive the VM
+    // execute loop and must not hold the receiver Arc projection live).
+    let len = with_typed_array(args, "reduce", |arr| Ok(typed_array_len(arr)))?;
+
+    // The accumulator carrier owns one share; we replace it on every
+    // iteration with the closure's return value. `args[1].clone()` bumps
+    // the share so the original `args[1]` carrier (owned by the dispatch
+    // shell) is unaffected.
+    let mut acc = args[1].clone();
+    for i in 0..len {
+        let elem = with_typed_array(args, "reduce", |arr| element_kinded(arr, i))?;
+        // `acc.clone()` bumps the share so the original `acc` survives the
+        // call (it gets replaced by `result` on the next line). Both
+        // `acc.clone()` and `elem` move into `call_args`; their carriers'
+        // Drop runs at end of the inner scope. Same shape as the live
+        // dispatch shell in `control_flow/mod.rs::dispatch_call_value_immediate`.
+        let call_args = [acc.clone(), elem];
+        let result =
+            vm.call_value_immediate_nb(&args[2], &call_args, ctx.as_deref_mut())?;
+        acc = result;
+    }
+    Ok(acc)
 }
