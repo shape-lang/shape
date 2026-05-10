@@ -327,10 +327,10 @@ impl JITCompiler {
             }
 
             {
-                let slot_kinds = func
+                let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = func
                     .frame_descriptor
                     .as_ref()
-                    .map(|fd| fd.slots.clone())
+                    .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
                 // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
                 // The bytecode-program-level side-table is in flux upstream
@@ -446,21 +446,21 @@ impl JITCompiler {
                             );
                             let param_val = entry_params[native_idx];
                             let converted = match kind {
-                                shape_vm::type_tracking::NativeKind::Float64 => mir_compiler
+                                Some(shape_vm::type_tracking::NativeKind::Float64) => mir_compiler
                                     .builder
                                     .ins()
                                     .bitcast(types::F64, MemFlags::new(), param_val),
-                                shape_vm::type_tracking::NativeKind::Int32
-                                | shape_vm::type_tracking::NativeKind::UInt32 => {
+                                Some(shape_vm::type_tracking::NativeKind::Int32)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt32) => {
                                     mir_compiler.builder.ins().ireduce(types::I32, param_val)
                                 }
-                                shape_vm::type_tracking::NativeKind::Bool
-                                | shape_vm::type_tracking::NativeKind::Int8
-                                | shape_vm::type_tracking::NativeKind::UInt8 => {
+                                Some(shape_vm::type_tracking::NativeKind::Bool)
+                                | Some(shape_vm::type_tracking::NativeKind::Int8)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt8) => {
                                     mir_compiler.builder.ins().ireduce(types::I8, param_val)
                                 }
-                                shape_vm::type_tracking::NativeKind::Int16
-                                | shape_vm::type_tracking::NativeKind::UInt16 => {
+                                Some(shape_vm::type_tracking::NativeKind::Int16)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt16) => {
                                     mir_compiler.builder.ins().ireduce(types::I16, param_val)
                                 }
                                 _ => param_val,

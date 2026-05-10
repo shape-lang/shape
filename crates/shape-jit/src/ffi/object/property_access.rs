@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 
 use super::super::super::context::{JITDataReference, JITDuration};
-use super::super::super::jit_array::JitArray;
+// super::super::super::jit_array::JitArray removed — see jit_array.rs
+// SURFACE comment. The HK_ARRAY arms below now route to surface-and-stop
+// per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
@@ -59,34 +61,21 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                 | HK_BOOL_ARRAY | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY
                 | HK_U8_ARRAY | HK_U16_ARRAY | HK_U32_ARRAY | HK_U64_ARRAY
                 | HK_F32_ARRAY => {
-                    let arr = JitArray::from_heap_bits(obj_bits);
-
-                    // Handle array properties
-                    match key_str {
-                        Some("length") | Some("len") => box_number(arr.len() as f64),
-                        Some("first") => arr.first().copied().unwrap_or(TAG_NULL),
-                        Some("last") => arr.last().copied().unwrap_or(TAG_NULL),
-                        _ => {
-                            // Try numeric index (with negative index support)
-                            if is_number(key_bits) {
-                                let idx_f64 = unbox_number(key_bits);
-                                let idx = if idx_f64 < 0.0 {
-                                    let len = arr.len() as i64;
-                                    let neg_idx = idx_f64 as i64;
-                                    let actual_idx = len + neg_idx;
-                                    if actual_idx < 0 {
-                                        return TAG_NULL;
-                                    }
-                                    actual_idx as usize
-                                } else {
-                                    idx_f64 as usize
-                                };
-                                arr.get(idx).copied().unwrap_or(TAG_NULL)
-                            } else {
-                                TAG_NULL
-                            }
-                        }
-                    }
+                    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                    // length / first / last / index decoded the
+                    // deleted `JitArray` heap layout. Kinded rebuild
+                    // reads `Arc<TypedArrayData>` per-element-kind
+                    // (§2.7.6/Q8) and dispatches on the JIT-stamped
+                    // element kind (§2.7.5). Until then, all array
+                    // property reads surface.
+                    let _ = key_str;
+                    todo!(
+                        "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                         JitArray rebuild — jit_get_prop array arm. \
+                         Receiver decode + length/first/last/index \
+                         all block on the kinded TypedArray<T> \
+                         rebuild per ADR-006 §2.7.6/Q8."
+                    )
                 }
                 HK_JIT_OBJECT => {
                     let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
@@ -313,8 +302,13 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
         | Some(HK_I8_ARRAY) | Some(HK_I16_ARRAY) | Some(HK_I32_ARRAY)
         | Some(HK_U8_ARRAY) | Some(HK_U16_ARRAY) | Some(HK_U32_ARRAY)
         | Some(HK_U64_ARRAY) | Some(HK_F32_ARRAY) => {
-            let arr = unsafe { JitArray::from_heap_bits(value_bits) };
-            arr.len()
+            // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): array
+            // length read decoded the deleted JitArray layout. Kinded
+            // rebuild reads `Arc<TypedArrayData>::len` per §2.7.6/Q8.
+            todo!(
+                "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray \
+                 rebuild — jit_length array arm."
+            )
         }
         Some(HK_STRING) => {
             let s = unsafe { unbox_string(value_bits) };

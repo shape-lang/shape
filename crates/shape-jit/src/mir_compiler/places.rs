@@ -1048,7 +1048,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+                let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
                 let var = *self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
                 })?;

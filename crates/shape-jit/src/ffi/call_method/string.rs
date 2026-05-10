@@ -8,7 +8,10 @@
 //!
 //! String method implementations for JIT
 
-use crate::jit_array::JitArray;
+// crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// `.split()` and `.chars()` returned `JitArray`-of-strings results;
+// they now route to surface-and-stop per ADR-006 §2.7.4 / W10
+// jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
@@ -24,22 +27,17 @@ pub fn call_string_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
             "toLowerCase" | "to_lower_case" => box_string(s.to_lowercase()),
             "trim" => box_string(s.trim().to_string()),
             "split" => {
-                let separator = if !args.is_empty() && is_heap_kind(args[0], HK_STRING) {
-                    unbox_string(args[0])
-                } else {
-                    " "
-                };
-
-                // AUDIT(C2): heap island — each split part is jit_box'd into a
-                // JitAlloc<String> and stored as raw u64 in the Vec. These inner
-                // string allocations escape into the JitArray element buffer without
-                // GC tracking. When GC feature enabled, route through gc_allocator.
-                let parts: Vec<u64> = s
-                    .split(separator)
-                    .map(|part| box_string(part.to_string()))
-                    .collect();
-
-                JitArray::from_vec(parts).heap_box()
+                // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                // result allocation went through the deleted
+                // `JitArray::from_vec(...).heap_box()`. Kinded
+                // rebuild allocates a `TypedArray<Arc<String>>` (or
+                // equivalent string-element kind) per §2.7.6/Q8.
+                let _ = args;
+                todo!(
+                    "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                     JitArray rebuild — String.split. Result \
+                     allocation needs `TypedArray<Arc<String>>`."
+                )
             }
             "includes" | "contains" => {
                 if args.is_empty() {
@@ -167,15 +165,16 @@ pub fn call_string_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                 _ => TAG_NULL,
             },
             "chars" => {
-                // AUDIT(C3): heap island — each char is jit_box'd into a
-                // JitAlloc<String> and stored as raw u64 in the Vec. These inner
-                // string allocations escape into the JitArray element buffer without
-                // GC tracking. When GC feature enabled, route through gc_allocator.
-                let chars: Vec<u64> = s
-                    .chars()
-                    .map(|ch| box_string(ch.to_string()))
-                    .collect();
-                JitArray::from_vec(chars).heap_box()
+                // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                // result allocation went through the deleted
+                // `JitArray::from_vec(...).heap_box()`. Kinded
+                // rebuild allocates a `TypedArray<Arc<String>>` per
+                // §2.7.6/Q8.
+                todo!(
+                    "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                     JitArray rebuild — String.chars. Result \
+                     allocation needs `TypedArray<Arc<String>>`."
+                )
             }
             "isEmpty" | "is_empty" => {
                 if s.is_empty() {

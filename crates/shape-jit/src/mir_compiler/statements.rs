@@ -445,18 +445,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         // Determine per-capture Cranelift types + byte offsets.
         // The MIR operand's root slot kind dictates the native storage
-        // width. Unknown / Dynamic captures fall back to I64.
+        // width. Slots with no inferred kind fall back to I64 (same
+        // Cranelift width as the legacy `Unknown`/`Dynamic` arm).
         let mut capture_types: Vec<Type> = Vec::with_capacity(operands.len());
         for op in operands.iter() {
             let kind = match op {
                 Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                     let slot = p.root_local();
                     super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+                        .unwrap_or(NativeKind::Int64)
                 }
                 Operand::Constant(MirConstant::Float(_)) => NativeKind::Float64,
                 Operand::Constant(MirConstant::Int(_)) => NativeKind::Int64,
                 Operand::Constant(MirConstant::Bool(_)) => NativeKind::Bool,
-                _ => NativeKind::Unknown,
+                _ => NativeKind::Int64,
             };
             capture_types.push(super::types::cranelift_type_for_slot(kind));
         }

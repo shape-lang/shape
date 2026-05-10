@@ -383,18 +383,35 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///   `jit_arc_shared_retain` and balanced by `release_typed_closure`
 ///   on closure drop.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64) -> u64 {
-    use shape_value::v2::closure_layout::SharedCell;
-    use std::sync::Arc;
-    let arc: Arc<SharedCell> = Arc::new(SharedCell::new(initial_bits));
-    let ptr = Arc::into_raw(arc) as u64;
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!(
-            "[jit-shared-cell] alloc ptr={:#x} initial_bits={:#x}",
-            ptr, initial_bits
-        );
-    }
-    ptr
+pub unsafe extern "C" fn jit_alloc_shared_cell(_initial_bits: u64) -> u64 {
+    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.8 / Q10):
+    // `SharedCell::new(value, kind)` requires the cell's
+    // `NativeKind` companion at construction (cell-storage parallel
+    // kind track per ADR-006 §2.7.8); the FFI signature here only
+    // carries `initial_bits`, with no source for the kind. Per
+    // §2.7.8 #4 the correct response is surface-and-stop, never a
+    // Bool-default fallback.
+    //
+    // The strict-typing rebuild widens this entry to
+    // `jit_alloc_shared_cell(initial_bits: u64, kind: i32 /* NativeKind */)`
+    // with the kind sourced from the JIT-emitted `AllocSharedLocal`
+    // call signature per §2.7.5; the bytecode-side companion is
+    // already kinded (`shape-vm/src/executor/variables/mod.rs:1510`
+    // builds `SharedCell::new(value_bits, value_kind)`).
+    //
+    // Until the JIT lowering threads a kind through the call site
+    // (W11 / deeper Phase-2c), this entry-point fails loudly so
+    // callers reach this error at the JIT-emitted FFI boundary
+    // rather than silently allocating a kind-less cell.
+    todo!(
+        "phase-2c §2.7.8/Q10 / W10 jit-playbook §5: SharedCell kind \
+         companion — jit_alloc_shared_cell needs a NativeKind \
+         parameter per ADR-006 §2.7.8 (cell parallel-kind track). \
+         The bytecode-side AllocSharedLocal already threads \
+         value_kind (`shape-vm/src/executor/variables/mod.rs:1510`); \
+         the JIT lowering for the same opcode must thread the \
+         matching kind through the FFI signature per §2.7.5."
+    )
 }
 
 /// Release exactly one strong share of an `Arc<SharedCell>` at
