@@ -1576,6 +1576,538 @@ trampoline), no third hybrid. The W7 playbook
 (`docs/cluster-audits/wave-7-cc1-playbook.md`) carries this
 refinement as binding for all 6 sub-clusters.
 
+#### 2.7.13 `RefTarget` kinded redesign — `HeapValue::Reference(Arc<RefTarget>)` (Q14 ruling)
+
+Phase 1.B-vm Wave 8 sub-cluster W8-T26 surfaced that the `MakeRef` /
+`MakeFieldRef` / `MakeIndexRef` / `DerefLoad` / `DerefStore` /
+`SetIndexRef` opcode family in
+`crates/shape-vm/src/executor/variables/mod.rs` cannot rebuild against
+the deleted `nanboxed::RefTarget` / `RefProjection` carrier. The pre-
+strict-typing shape was a `ValueWord`-encoded enum:
+
+```rust
+// Pre-§2.7.13 (deleted with `ValueWord`):
+enum RefTarget {
+    Stack { slot: u16 },
+    ModuleBinding { idx: u16 },
+    Projected { root: Box<RefTarget>, projection: RefProjection },
+}
+enum RefProjection {
+    TypedField { type_id: u16, field_idx: u16, field_type_tag: u16 },
+    Index { index: u64 },
+    MatrixRow { row: u32 },
+}
+// Packed into `ValueWord` via TAG_REF and chained tag-bits dispatch.
+// Both `ValueWord` and the `nanboxed` / `RefProjection` modules are
+// deleted by the strict-typing bulldozer (CLAUDE.md "Forbidden code"
+// #1, #4, #6, the §2.7.7 / §2.7.8 forbidden-shapes list).
+```
+
+The deleted shape carried no `NativeKind` for the projected slot:
+loading and storing through a ref relied on a `ValueWord`-shaped
+discriminator (TAG_REF) and on `tag_bits::*` dispatch chained through
+`RefProjection` to recover the projected slot's type. Both are
+forbidden post-§2.7.7 / §2.7.8 (CLAUDE.md "Forbidden code" #4, #6;
+playbook §3 forbidden #20 / #22).
+
+**Decision (Q14 ruling):** the reference-value carrier becomes a typed-
+`Arc<RefTarget>`-backed `HeapValue` arm, mirroring the §2.3 typed-Arc
+shape every other heap variant uses. `RefTarget` is a kinded enum: each
+variant carries the `NativeKind` of the *projected slot* alongside the
+identifying place data, threaded from the producing-opcode emit per
+§2.7.7. Loading and storing through a ref dispatch on the carried kind
+via the same `clone_with_kind` / `drop_with_kind` tables §2.7.7 /
+§2.7.8 / §2.7.9 / §2.7.10 / §2.7.11 already established — no new
+dispatch surface.
+
+**The kinded carrier (`shape-value/src/heap_variants.rs`):**
+
+```rust
+// New HeapKind variant (next free ordinal — 20 if W8-T25 lands SharedCell
+// at 19 first, otherwise 19 — per §2.3 append-only ordering, paired with
+// W8-T25 to avoid merge collision):
+pub enum HeapKind {
+    // ... String=0 .. HashMap=17 .. FilterExpr=18 ..
+    Reference,    // (Wave 8 W8-T26, 2026-05-10)
+}
+
+// New HeapValue arm carrying typed Arc per §2.3 — provided ONLY for the
+// HeapKind↔HeapValue symmetry property (mirror of §2.7.9 FilterExpr).
+// Reference-labeled slot bits are `Arc::into_raw(Arc<RefTarget>) as u64`
+// directly, NOT a `Box::into_raw(Box<HeapValue>)` wrap; calling
+// `slot.as_heap_value()` on a Reference-labeled slot is undefined
+// behavior, same as FilterExpr per §2.7.9. The `clone_with_kind` /
+// `drop_with_kind` dispatch tables retain/release `Arc<RefTarget>`
+// directly, NOT through `HeapValue`.
+pub enum HeapValue {
+    // ... existing arms ...
+    Reference(std::sync::Arc<crate::reference::RefTarget>),
+}
+
+// New module `shape-value/src/reference.rs`:
+pub enum RefTarget {
+    /// Reference to a local slot in a specific stack frame.
+    /// `kind` is the `NativeKind` of the slot at the time of `MakeRef`,
+    /// sourced from `FrameDescriptor.slots[slot_index]` at emit time.
+    Local { frame_index: u32, slot_index: u32, kind: NativeKind },
+
+    /// Reference to a module binding.
+    /// `kind` is the binding's stored kind from the module-binding
+    /// parallel-kind track (§2.7.8 / Q10).
+    ModuleBinding { binding_idx: u32, kind: NativeKind },
+
+    /// Projected reference into a typed-object field.
+    /// `receiver` is the typed `Arc<TypedObjectStorage>` payload (per
+    /// §2.4 `from_typed_object` constructor — slot bits are
+    /// `Arc::into_raw(Arc<TypedObjectStorage>)`, never wrapped in
+    /// `Box<HeapValue>`); `field_offset` is the slot index inside
+    /// `TypedObjectStorage.slots` (the schema-resolved `field_idx` from
+    /// `Operand::TypedField`); `kind` is the projected slot's
+    /// `NativeKind`, sourced from the emitter's `field_type_tag` via
+    /// the existing `field_tag_to_heap_native_kind` mapping
+    /// (`executor/typed_object_ops.rs:86`) extended to inline scalars.
+    TypedField {
+        receiver: std::sync::Arc<crate::heap_value::TypedObjectStorage>,
+        field_offset: u32,
+        kind: NativeKind,
+    },
+
+    /// Projected reference into a typed-array element.
+    /// `receiver` is the typed `Arc<TypedArrayData>` payload (per §2.4
+    /// `from_typed_array` constructor); `index` is the element index
+    /// (post-bounds-check at construction); `elem_kind` is the element-
+    /// type `NativeKind` recovered from the receiver `TypedArrayData`'s
+    /// variant at emit time (the producing opcode knows what element
+    /// kind it pushed).
+    TypedIndex {
+        receiver: std::sync::Arc<crate::heap_value::TypedArrayData>,
+        index: u64,
+        elem_kind: NativeKind,
+    },
+}
+```
+
+**Why `HeapValue::Reference(Arc<RefTarget>)` rather than a separate
+discriminator:** ADR-005 §1 single-discriminator. Every kind variant
+the runtime/VM sees on a ref-bearing slot dispatches through
+`HeapValue` exactly like every other heap-resident value. The runtime-
+tier carrier at boundaries is `KindedSlot` per §2.7.6 / Q8; for a ref,
+`kind == NativeKind::Ptr(HeapKind::Reference)` and
+`slot.as_heap_value() => HeapValue::Reference(arc)` recovers the
+typed `Arc<RefTarget>`. No parallel sum type, no `Box<RefTarget>`
+slot wrapping (forbidden by §2.3), no `Arc<NativeViewData>`-style
+type-confusion off-label re-use (the §2.7.9 FilterExpr precedent
+applies — the discriminator must match the payload 1:1 at the
+dispatch table).
+
+**Why kind is a field on each `RefTarget` variant rather than fabricated
+at projection time:** §2.7.7 forbidden-shape #4 (tag-bit chains) and
+§2.7.7 / §2.7.8 / §2.7.9 / §2.7.10 / §2.7.11 invariant: the kind
+comes from the producing-opcode emit, never fabricated downstream. At
+`MakeRef` / `MakeFieldRef` / `MakeIndexRef` time, the compiler knows
+which slot it's projecting and what kind that slot has —
+`FrameDescriptor.slots[slot_index]` for `Local`, the module-binding's
+stored kind for `ModuleBinding`, the operand-encoded
+`field_type_tag` (mapped through `field_tag_to_heap_native_kind`) for
+`TypedField`, and the receiver `TypedArrayData`'s element-kind for
+`TypedIndex`. Every kind threads from a kind-source the executor
+already trusts (§2.7.7 stack parallel-kind track, §2.7.8 cell /
+module-binding parallel-kind tracks, `TypedObjectStorage.field_kinds`,
+`TypedArrayData::variant_kind()`).
+
+**The dispatch shape (`op_load_ref` / `op_store_ref` / `op_set_index_ref`):**
+
+```rust
+// op_deref_load — pop a kinded ref slot, recover RefTarget, push the
+// projected slot's value with the carried kind:
+fn op_deref_load(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+    let (ref_bits, ref_kind) = self.pop_kinded()?;
+    debug_assert_eq!(ref_kind, NativeKind::Ptr(HeapKind::Reference));
+    // SAFETY: kind == Ptr(HeapKind::Reference) is sufficient by
+    // ADR-005 §1 single-discriminator + §2.7.9 dispatch-table 1:1
+    // payload-discriminator invariant — `ref_bits` is the
+    // `Arc::into_raw(Arc<HeapValue::Reference(_)>)` pointer, and the
+    // §2.7.7 stack parallel-kind track owns one share for us.
+    let hv = unsafe { ValueSlot::from_raw(ref_bits).as_heap_value() }
+        .ok_or(VMError::InvalidOperand)?;
+    let HeapValue::Reference(rt_arc) = hv else { return Err(...); };
+    let (out_bits, out_kind) = match &**rt_arc {
+        RefTarget::Local { frame_index, slot_index, kind } => {
+            let frame = &self.call_stack[*frame_index as usize];
+            let bits = frame.locals[*slot_index as usize];
+            (bits, *kind)
+        }
+        RefTarget::ModuleBinding { binding_idx, kind } => {
+            let bits = self.module_binding_read_raw(*binding_idx as usize);
+            (bits, *kind)
+        }
+        RefTarget::TypedField { receiver, field_offset, kind } => {
+            // receiver is &Arc<HeapValue::TypedObject(_)>
+            let HeapValue::TypedObject(storage) = &**receiver else { return Err(...); };
+            (storage.slots[*field_offset as usize].raw(), *kind)
+        }
+        RefTarget::TypedIndex { receiver, index, elem_kind } => {
+            let HeapValue::TypedArray(data) = &**receiver else { return Err(...); };
+            (data.read_index_raw(*index as usize)?, *elem_kind)
+        }
+    };
+    // WB2.4 retain-on-read: the projected source keeps its share
+    // (the place is borrowed, not consumed); the pushed slot needs
+    // an independent share.
+    crate::executor::vm_impl::stack::clone_with_kind(out_bits, out_kind);
+    self.push_kinded(out_bits, out_kind)?;
+    // Drop our share of the ref carrier — the §2.7.7 pop transferred
+    // one share to us; release it via the kinded dispatch table.
+    crate::executor::vm_impl::stack::drop_with_kind(ref_bits, ref_kind);
+    Ok(())
+}
+
+// op_deref_store — pop value (kinded), pop ref (kinded), write value
+// into the projected slot via the carried kind:
+fn op_deref_store(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+    let (val_bits, val_kind) = self.pop_kinded()?;
+    let (ref_bits, ref_kind) = self.pop_kinded()?;
+    debug_assert_eq!(ref_kind, NativeKind::Ptr(HeapKind::Reference));
+    // ... recover RefTarget, dispatch on variant ...
+    // For each variant, the write path:
+    //   1. Read the prior occupant's bits via the projected place.
+    //   2. drop_with_kind(prior_bits, target.kind) — the place owned
+    //      a share that's about to be replaced.
+    //   3. Write val_bits to the place.
+    //   4. The pushed val owns a share; the place now owns it
+    //      (transfer of ownership; no clone_with_kind, no
+    //      drop_with_kind on val_bits).
+    //   5. drop_with_kind(ref_bits, ref_kind) — release the ref carrier
+    //      share we popped.
+    //   6. Cross-check `val_kind == target.kind` (debug_assert) —
+    //      the producing opcode pushed a value of the kind the place
+    //      expects, by ADR-006 §2.7.5.1 "stack contents are post-proof".
+    Ok(())
+}
+```
+
+**`MakeRef` / `MakeFieldRef` / `MakeIndexRef` construction:**
+
+```rust
+// op_make_ref — operand is Operand::Local(slot) or
+// Operand::ModuleBinding(idx). Source kind from the corresponding
+// parallel-kind track:
+fn op_make_ref(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+    let rt = match instruction.operand {
+        Some(Operand::Local(slot)) => {
+            let kind = self.current_frame_descriptor()?
+                .slot(slot as usize)
+                .ok_or(VMError::InvalidOperand)?;
+            let frame_index = (self.call_stack.len() - 1) as u32;
+            RefTarget::Local { frame_index, slot_index: slot as u32, kind }
+        }
+        Some(Operand::ModuleBinding(idx)) => {
+            let (_, kind) = self.module_binding_read_kinded_raw(idx as usize);
+            RefTarget::ModuleBinding { binding_idx: idx as u32, kind }
+        }
+        _ => return Err(VMError::InvalidOperand),
+    };
+    let arc = std::sync::Arc::new(HeapValue::Reference(std::sync::Arc::new(rt)));
+    let bits = std::sync::Arc::into_raw(arc) as u64;
+    self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+}
+
+// op_make_field_ref — operand is Operand::TypedField{type_id, field_idx,
+// field_type_tag}. Pops a base-ref carrier, projects through the field:
+fn op_make_field_ref(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+    let Some(Operand::TypedField { field_idx, field_type_tag, .. }) =
+        instruction.operand else { return Err(VMError::InvalidOperand); };
+    let (base_bits, base_kind) = self.pop_kinded()?;
+    debug_assert_eq!(base_kind, NativeKind::Ptr(HeapKind::Reference));
+    // Recover the base RefTarget; resolve the receiver Arc<HeapValue>
+    // (TypedObject) by chasing the base ref through one DerefLoad-equivalent
+    // step, then build a TypedField projection. Kind sourced from
+    // field_type_tag via field_tag_to_native_kind (extended to scalars).
+    let receiver: std::sync::Arc<HeapValue> = ...;  // resolved per base RefTarget
+    let kind = field_tag_to_native_kind(field_type_tag)?;
+    let rt = RefTarget::TypedField { receiver, field_offset: field_idx as u32, kind };
+    let arc = std::sync::Arc::new(HeapValue::Reference(std::sync::Arc::new(rt)));
+    let bits = std::sync::Arc::into_raw(arc) as u64;
+    // Release the base-ref carrier we popped.
+    crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+    self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+}
+
+// op_make_index_ref — pops [base_ref, index] kinded; index is Int64.
+// Resolves receiver to Arc<HeapValue::TypedArray(_)>; reads element
+// kind from `TypedArrayData::variant_kind()`:
+fn op_make_index_ref(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+    let (idx_bits, idx_kind) = self.pop_kinded()?;
+    debug_assert_eq!(idx_kind, NativeKind::Int64);
+    let (base_bits, base_kind) = self.pop_kinded()?;
+    debug_assert_eq!(base_kind, NativeKind::Ptr(HeapKind::Reference));
+    // Recover receiver; bounds-check; build TypedIndex projection.
+    let receiver: std::sync::Arc<HeapValue> = ...;
+    let HeapValue::TypedArray(arr) = &*receiver else { return Err(...); };
+    let elem_kind = arr.variant_kind();
+    let rt = RefTarget::TypedIndex { receiver: receiver.clone(), index: idx_bits, elem_kind };
+    let arc = std::sync::Arc::new(HeapValue::Reference(std::sync::Arc::new(rt)));
+    let bits = std::sync::Arc::into_raw(arc) as u64;
+    crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+    self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+}
+```
+
+**Lockstep dispatch-table updates (the new variant fans out to the same
+6 dispatch sites §2.7.9 enumerated for `FilterExpr` — every Q8/Q10
+retain/release table):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::Reference`
+   ordinal 19 + `HeapValue::Reference(Arc<RefTarget>)` arm + `kind()`
+   / `is_truthy()` / `type_name()` / `Display` updates.
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm via the standard
+   `Box<HeapValue>` path (the slot bits are
+   `Arc::into_raw(Arc<HeapValue>)`; the inner
+   `Arc<RefTarget>` is owned by the `HeapValue::Reference` arm and
+   the standard `Drop` impl on `HeapValue` decrements its
+   strong-count). This is the **same dispatch as every other typed-
+   `Arc<HeapValue>` arm** — no new arm in the per-`HeapKind`
+   dispatch tables, because the discriminator's payload is
+   `Arc<HeapValue>` (single ADR-005 §1 discriminator), not a custom
+   `Arc<RefTarget>` payload escaping the `HeapValue` shape.
+3. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror via the same `HeapValue`-arm path.
+4. `crates/shape-value/src/heap_value.rs` — `TypedObjectStorage::drop`
+   §2.7.8 mirror handles `HeapKind::Reference`-kinded fields
+   (TypedObject can hold a ref-typed field; the destructor
+   dispatches `Arc::decrement_strong_count::<HeapValue>` on the
+   slot's `Arc<HeapValue>`, same as every other heap-kinded field).
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror, same `HeapValue`-arm path.
+6. `crates/shape-vm/src/executor/variables/mod.rs` — `op_make_ref`
+   family bodies (Phase 2 of W8-T26).
+7. Knock-on exhaustive-match additions in `printing.rs`,
+   `comparison/mod.rs`, `arithmetic/mod.rs`,
+   `objects/typed_access.rs` (kind→type-name maps);
+   `wire_conversion.rs`, `json_value.rs` (HeapValue serialization
+   rejection arms — `Reference` does not cross the wire boundary;
+   refs are within-program data, like `FilterExpr`).
+
+**Cardinality cost:** `HeapKind` grows from 19 variants to 20; the
+§2.7.6 / Q8 carrier-API bound is unchanged because `Reference` does
+not need a new `KindedSlot` constructor or accessor — the existing
+`Ptr(HeapKind::*)` constructor generic shape applies, and heap
+dispatch is `slot.as_heap_value()` + `HeapValue::Reference` match
+per ADR-005 §1.
+
+**Why receiver is `Arc<HeapValue>` rather than a stack-frame pointer
+or a raw `*mut TypedObjectStorage`:** the receiver share keeps the
+heap object alive while the ref exists (a ref outliving its
+receiver would be dangling — same lifetime contract as every other
+heap reference). `Arc<HeapValue>` is the §2.3 typed-Arc shape; the
+projection variant carries one strong-count for the receiver; the
+ref's `Arc<RefTarget>` carries its own strong-count via the
+enclosing `HeapValue::Reference` arm. Stack-frame `Local`-flavored
+refs do **not** carry an `Arc<HeapValue>` — they carry a
+`(frame_index, slot_index, kind)` triple and rely on
+**ref-escape analysis** (`mir/lowering/mod.rs`, ADR-006 §3.1)
+to prevent a `Local`-shaped ref from escaping its frame. Storing a
+`Local`-shaped ref into a closure capture or returning it from a
+function is rejected at compile time by the existing escape
+analysis (the §3.1 boundary the MIR audit Item #4 names as the
+highest-priority follow-up); this ruling does not relax that
+boundary. A future ruling that loosens ref-escape analysis would
+require either promoting `Local` to a frame-`Arc`-shared cell
+(SharedCell variant per §2.7.8 / W8-T25 amendment) or rejecting
+the escaping path at the MIR level.
+
+**Forbidden shapes this rules out (mirror of §2.7.9 / §2.7.10 /
+§2.7.11 forbidden lists, applied to the ref carrier):**
+
+- **`ValueWord` revival.** The pre-§2.7.13 `nanboxed::RefTarget`
+  packed into a TAG_REF `ValueWord` is the deleted shape (CLAUDE.md
+  "Forbidden code" #1, "Forbidden rationalizations" #2). No
+  resurrection, not as a "serialization helper", not as a
+  "compatibility layer".
+- **Tag-bit chains for `RefProjection`.** The deleted
+  `RefProjection` enum dispatched through chained `tag_bits::*`
+  decoding to recover the projected slot's type at deref time.
+  Forbidden by §2.7.7 #4 / #7. The kinded redesign carries the
+  projected slot's `NativeKind` as a field on each variant,
+  threaded from the producing-opcode emit; deref reads the field,
+  no decoding.
+- **Kind fabrication at projection time** ("the projection knows
+  the parent's kind, derive the child's at deref"). Forbidden by
+  §2.7.7 / §2.7.8 / §2.7.9 / §2.7.10 / §2.7.11 invariant: kind
+  comes from the producing-opcode emit, never fabricated
+  downstream. `MakeFieldRef` knows `field_type_tag`;
+  `MakeIndexRef` knows the receiver's element kind; `MakeRef`
+  knows the slot's kind from the parallel-kind track. The
+  emitter is the kind-source.
+- **`Box<dyn RefTrait>` or any non-`Arc<HeapValue>` discriminator.**
+  ADR-005 §1 single-discriminator. Layers above HeapValue dispatch
+  through `HeapValue::kind()`; introducing a parallel sum type
+  whose variants project 1:1 to `RefTarget` variants is the
+  defection ADR-005 enumerates as "every parallel discriminator
+  has eventually drifted".
+- **`HeapKind::Reference` as a pure-discriminator variant** (mirror
+  of §2.7.9 FilterExpr) — rejected. FilterExpr's pure-discriminator
+  shape is justified by the §2.7.9 ruling because filter-expression
+  payloads are emitted directly as `Arc::into_raw(Arc<FilterNode>)`
+  to the kinded stack and never wrapped in `HeapValue`. Refs do
+  not have that justification: refs flow through the same opcodes
+  as every other heap value (`LoadLocal` / `StoreLocal` /
+  `MakeFieldRef` / closure capture), can be stored in
+  `TypedObjectStorage` slots and `TypedArrayData::HeapValue`
+  buffers, and need `slot.as_heap_value()` to return a
+  `HeapValue::Reference(_)` for downstream deref. Pure-
+  discriminator status would re-introduce the §2.7.9 type-confusion
+  pattern at a different layer.
+- **`RefTarget::Projected { root: Box<RefTarget>, projection: ... }`
+  (recursive nesting).** The deleted shape allowed arbitrary
+  projection-of-projection chains decoded at deref time. The
+  kinded redesign flattens to a single projection level per
+  `RefTarget` variant (`TypedField` and `TypedIndex` carry a
+  *resolved* `Arc<HeapValue>` receiver, not a nested ref). Chained
+  property access (`&a.b.c`) is built as a sequence of
+  `MakeFieldRef` opcodes that collapse the chain at construction
+  time — the emitter resolves nested `TypedFieldPlace` paths in
+  `helpers_reference.rs:collect_property_access_chain`, and each
+  `MakeFieldRef` step projects from the resolved parent receiver.
+  Recursive `RefTarget` would re-introduce nested-decoding
+  dispatch at deref time, the deleted §2.7.7 #4 pattern.
+- **`KindedSlot::as_ref_target()` per-heap-variant accessor on
+  `KindedSlot`.** §2.7.6 / Q8 carrier-API bound: heap dispatch
+  goes through `slot.as_heap_value()` + `HeapValue::Reference`
+  match. No parallel discrimination on `HeapKind` at the carrier.
+- **Transitional shims preserving deleted RefTarget-shape names**
+  (`RefTargetLegacy` / `nanboxed::as_ref_target` /
+  `decode_ref_target_bits` / `pack_ref_into_value_word` /
+  `read_ref_target` / `write_ref_target`). Same §2.7.7 #1 rule —
+  the W-series "borrowed bits with call-pattern invariants"
+  defection-attractor at the ref-carrier layer. Migrate every
+  `op_make_ref` family entry in-wave; do not preserve a kind-blind
+  variant as a transitional layer. The B6 SURFACE messages (the
+  current `op_make_ref` body text) cite the deleted shape by name
+  (`nanboxed::RefTarget` / `RefProjection`) per CLAUDE.md
+  "describe deleted code by name".
+- **Defection-attractor descriptors** — "ref-target bridge",
+  "ref-projection translator", "deref probe", "place-resolution
+  helper", "ref-decode hop", "boundary adapter for ref carrier".
+  Per the 2026-05-09 user ruling broadening the W-series rename
+  family + playbook §3 forbidden #20, any descriptor of the
+  deleted ref carrier that uses bridge / probe / helper / hop /
+  translator / adapter framing belongs to the same defection-
+  attractor family CLAUDE.md "Renames to refuse on sight"
+  enumerates. Describe the deleted carrier by name (the pre-
+  §2.7.13 `nanboxed::RefTarget` / `RefProjection` ValueWord
+  encoding) or by deletion-fate (the kind-blind `ValueWord`-
+  shape ref carrier), never by hypothetical role.
+
+**Performance characteristics:**
+
+- `MakeRef` cost: one `Arc::new(HeapValue::Reference(Arc::new(rt)))`
+  allocation pair (two atomic refcount initializations) +
+  `push_kinded` (1 word + 1 byte to the parallel tracks). The
+  double-Arc shape (outer `Arc<HeapValue>`, inner `Arc<RefTarget>`)
+  is canonical for typed-Arc heap variants per §2.3 — every
+  `HeapValue::TypedArray(Arc<TypedArrayData>)` /
+  `HeapValue::TypedObject(Arc<TypedObjectStorage>)` arm is the same
+  shape. **No new dispatch surface; the cost is one allocation
+  pair plus the kinded push, the same as constructing any other
+  `HeapValue` arm.**
+- `MakeFieldRef` / `MakeIndexRef`: pop the base-ref carrier (1
+  word + 1 byte read), recover the inner `RefTarget` (one `Arc`
+  deref), build a new `RefTarget::TypedField` /
+  `RefTarget::TypedIndex` (an `Arc::clone` on the receiver — one
+  atomic refcount bump), wrap in `Arc<HeapValue>` (one
+  allocation), push (1 word + 1 byte). Dropping the popped
+  base-ref releases its share via the standard `HeapValue` Drop.
+- `DerefLoad` / `DerefStore`: pop the ref carrier (1 word + 1
+  byte read), recover `RefTarget` (one `Arc` deref + match),
+  read/write the projected slot's `u64` (one indexed read/write
+  on the receiver's slot/element buffer), `clone_with_kind` /
+  `drop_with_kind` for the loaded/stored value (1 byte cmpxchg
+  target + matching `Arc::increment/decrement_strong_count`),
+  push the loaded value or release the stored value's prior
+  occupant. **Strictly the same work the deleted `RefProjection`
+  dispatch did, minus the chained `tag_bits` decode the strict-
+  typing bulldozer removed.**
+- Memory: `RefTarget` enum is at most `{ tag: u8, payload: max(u32+u32+kind,
+  Arc<HeapValue> + u64 + kind, Arc<HeapValue> + u64 + kind) }`
+  ≈ 24-32 bytes. Wrapped in `Arc<RefTarget>` (24 bytes inner +
+  8 bytes refcount-prefix), wrapped in `Arc<HeapValue>` (the
+  enclosing slot pointer). Total per-ref allocation: ~64 bytes,
+  one per `MakeRef`. References are short-lived in typical Shape
+  programs (immediate borrow into a builtin's `&` parameter, or
+  field-mutation via `&obj.field = value`); the allocation cost
+  amortizes against the immediate consumption.
+- IC fast path: refs flow through the standard `LoadLocal` /
+  `StoreLocal` paths via their `NativeKind::Ptr(HeapKind::Reference)`
+  kind label. No special IC entry; the per-receiver-kind IC
+  caching in `ic_fast_paths.rs` already handles
+  `NativeKind::Ptr(_)` receivers uniformly.
+
+**Cross-check on debug builds:** at every `op_make_ref` /
+`op_make_field_ref` / `op_make_index_ref` site, the kind written into
+the new `RefTarget` variant should match the kind-source's emitter
+intent. `debug_assert_eq!(rt.kind, expected_kind)` at construction
+catches kind drift during development; `debug_assert_eq!(val_kind,
+target.kind)` at `op_deref_store` catches store-side kind drift; in
+release builds these compile out.
+
+**Migration scope (Wave 8 sub-cluster W8-T26 territory, Phase 2):**
+
+1. Add `HeapKind::Reference` ordinal 19 +
+   `HeapValue::Reference(Arc<RefTarget>)` arm in
+   `crates/shape-value/src/heap_variants.rs`. Update `kind()` /
+   `is_truthy()` / `type_name()` / `Display`.
+2. Add `crates/shape-value/src/reference.rs` defining
+   `RefTarget` enum with the four variants
+   (`Local` / `ModuleBinding` / `TypedField` / `TypedIndex`).
+3. Lockstep dispatch-table updates (#1-#5 in the lockstep list above)
+   — every new `HeapValue` arm follows the same Q8/Q10 mirror
+   pattern. The dispatch is the standard `Arc<HeapValue>` path,
+   not a new kind-specific arm; the lockstep work is exhaustive-
+   match additions, not new dispatch logic.
+4. Migrate `op_make_ref` / `op_make_field_ref` / `op_make_index_ref`
+   / `op_deref_load` / `op_deref_store` / `op_set_index_ref` in
+   `crates/shape-vm/src/executor/variables/mod.rs` from the current
+   `NotImplemented(SURFACE)` stubs to real bodies per the dispatch
+   shapes above. Bodies use only kinded-API primitives
+   (`pop_kinded` / `push_kinded` / `clone_with_kind` /
+   `drop_with_kind`) — no fabrication, no tag decode, no
+   `is_heap()` probe, no Bool-default fallback.
+5. Add `field_tag_to_native_kind` (extension of
+   `field_tag_to_heap_native_kind` in
+   `executor/typed_object_ops.rs:86` that handles inline scalars
+   for `MakeFieldRef`'s kind-source). The function takes a
+   `field_type_tag` and returns `NativeKind` — `FIELD_TAG_F64
+   => NativeKind::Float64`, `FIELD_TAG_I64 => NativeKind::Int64`,
+   etc.
+6. JIT codegen (Wave 10) emits the kinded `RefTarget`
+   construction at `MakeRef` / `MakeFieldRef` / `MakeIndexRef`
+   sites — same lockstep discipline as the stack-side §2.7.7
+   codegen.
+
+**Out-of-scope this ruling:**
+
+- Snapshot/restore of in-flight ref-bearing slots crossing a §2.7.4
+  Phase-2c snapshot boundary. Refs are short-lived and typically do
+  not cross suspension boundaries; if a future async value-call
+  suspends with a live ref on the stack, the persisted shape gets
+  its own follow-up amendment.
+- Cross-task ref sharing. Refs are not `Send` by construction
+  (the `Local` variant carries a frame index that's only
+  meaningful within the originating task); cross-task ref escape
+  is rejected by `B0014 NonSendableAcrossTaskBoundary`, the same
+  boundary §3.3 enforces for non-`Send` values.
+- Wire-format serialization of ref-bearing values. Refs do not
+  cross the wire boundary (same as `FilterExpr` — within-program
+  data only); `wire_conversion.rs` / `json_value.rs` reject the
+  arm with a clear error per the §2.7.5.1 stable-FFI boundary
+  rule.
+- Loosening of ref-escape analysis (the MIR audit Item #4 boundary
+  CLAUDE.md "MIR Audit Status" names as the highest-priority
+  follow-up). This ruling preserves the existing escape boundary;
+  loosening it would be a separate ADR amendment with measurement.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure

@@ -229,6 +229,10 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // FilterExpr trees are transient query-DSL values; they don't
         // cross the wire boundary today. Surface as an opaque tag.
         HeapValue::FilterExpr(_) => WireValue::String("<filter_expr>".to_string()),
+        // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10): Reference
+        // values are within-program data and never cross the wire
+        // boundary. Surface as an opaque tag, same as FilterExpr.
+        HeapValue::Reference(_) => WireValue::String("<ref>".to_string()),
     }
 }
 

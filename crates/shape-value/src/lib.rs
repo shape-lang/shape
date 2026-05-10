@@ -25,6 +25,7 @@ pub mod ids;
 pub mod kinded_slot;
 pub mod method_id;
 pub mod native_kind;
+pub mod reference;
 pub mod scalar;
 pub mod string_intern;
 pub mod shape_graph;
@@ -48,6 +49,7 @@ pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use kinded_slot::KindedSlot;
 pub use method_id::MethodId;
 pub use native_kind::NativeKind;
+pub use reference::RefTarget;
 pub use scalar::{ScalarKind, TypedScalar};
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

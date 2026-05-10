@@ -45,6 +45,7 @@ use crate::heap_value::{
     TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
+use crate::reference::RefTarget;
 use crate::slot::ValueSlot;
 use crate::value::FilterNode;
 use std::sync::Arc;
@@ -343,6 +344,19 @@ impl Drop for KindedSlot {
                     HeapKind::FilterExpr => {
                         Arc::decrement_strong_count(bits as *const FilterNode);
                     }
+                    // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                    // mirror of `vm_impl/stack.rs:drop_with_kind` Reference
+                    // arm. Slot bits are `Arc::into_raw(Arc<RefTarget>)`
+                    // directly per §2.7.13's pure-discriminator-style
+                    // dispatch (NOT a `Box<HeapValue>` wrap); retire one
+                    // `Arc<RefTarget>` strong-count share. At refcount=0
+                    // the inner `RefTarget` Drop releases its `receiver`
+                    // typed-Arc share for `TypedField` / `TypedIndex`
+                    // variants — `Local` / `ModuleBinding` variants hold
+                    // no Arc.
+                    HeapKind::Reference => {
+                        Arc::decrement_strong_count(bits as *const RefTarget);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -498,6 +512,14 @@ impl Clone for KindedSlot {
                     // the Drop arm above.
                     HeapKind::FilterExpr => {
                         Arc::increment_strong_count(bits as *const FilterNode);
+                    }
+                    // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                    // mirror of the Drop Reference arm above. Bumps one
+                    // `Arc<RefTarget>` strong-count share — slot bits are
+                    // `Arc::into_raw(Arc<RefTarget>)` directly per
+                    // §2.7.13's pure-discriminator-style dispatch.
+                    HeapKind::Reference => {
+                        Arc::increment_strong_count(bits as *const RefTarget);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).
