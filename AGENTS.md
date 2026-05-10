@@ -39,6 +39,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-datatable` | `../shape-w9-datatable` | W9-datatable — kinded datatable method bodies | — | `crates/shape-vm/src/executor/objects/datatable_methods/{joins,query,aggregation,simulation,rolling,indexing}.rs` (~12 sites) | idle (W9-datatable close pending; closure-callback bodies migrated for filter/orderBy/forEach/sum/mean/min/max/sort closure forms via vm.call_value_immediate_nb (W7 §2.7.11/Q12); innerJoin / leftJoin / simulate / aggregate / group_by / map remain SURFACE per playbook §4 — gated on property-access cluster (TypedObject row construction, HashMap spec parsing); shape-vm --lib clean; check-no-dynamic exit 0) | 2026-05-10 |
 
 ## Status values
 
