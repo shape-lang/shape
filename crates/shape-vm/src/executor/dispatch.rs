@@ -244,14 +244,14 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    // Construct the exception payload as an `Arc<String>`
-                    // pointer per ADR-006 §2.7 / Q7 carrier shape — the
-                    // raw bits are the `Arc::into_raw` pointer; the kind
-                    // is `NativeKind::String`. `handle_exception_nb`
-                    // takes ownership of the share.
-                    let error_arc = Arc::new(err.to_string());
-                    let error_bits = Arc::into_raw(error_arc) as u64;
-                    self.handle_exception_nb(error_bits, NativeKind::String)?;
+                    // W8-EX: construct the exception payload as a
+                    // `KindedSlot` carrier per §2.7.6 / Q8. The
+                    // underlying `Arc<String>` strong-count share
+                    // transfers from `Arc::into_raw` into the carrier
+                    // via `KindedSlot::from_string_arc`; ownership
+                    // passes to `handle_exception` on the call.
+                    let payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    self.handle_exception(payload)?;
                 } else {
                     // Enrich error with source location before returning
                     return Err(self.enrich_error_with_location(err, error_ip));
@@ -381,12 +381,12 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    // Construct the exception payload as an `Arc<String>`
-                    // pointer (raw bits + `NativeKind::String`); ownership
-                    // transfers to `handle_exception_nb`.
-                    let error_arc = Arc::new(err.to_string());
-                    let error_bits = Arc::into_raw(error_arc) as u64;
-                    self.handle_exception_nb(error_bits, NativeKind::String)?;
+                    // W8-EX: see the matching call site above —
+                    // `Arc<String>` payload built into a `KindedSlot`
+                    // carrier per §2.7.6 / Q8; ownership transfers to
+                    // `handle_exception`.
+                    let payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    self.handle_exception(payload)?;
                 } else {
                     return Err(self.enrich_error_with_location(err, ip));
                 }

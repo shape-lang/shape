@@ -1,15 +1,23 @@
-//! ValueWord <-> MessagePack marshaling for foreign function calls.
+//! Shape-value <-> MessagePack marshaling for foreign function calls.
 //!
-//! ADR-006 §2.7.4 / §2.7.5 SURFACE: this module crosses the cross-crate
-//! ABI boundary — extension contracts stay on raw u64 per §2.7.5, but
-//! every internal Rust dispatch path (rmpv encoding/decoding, msgpack
-//! schema population, typed-object field write) consumed the deleted
-//! `ValueWord` / `tag_bits` / `as_heap_ref` / `vmarray_from_vec` /
-//! `ArgVec` surfaces. Per the B11-control-flow-heap dispatch (ADR-006
-//! §2.7.4 cross-crate ABI consumer-side migration policy), the body is
-//! stubbed pending phase-2c rebuild: thread `&[KindedSlot]` through the
-//! marshal sites with raw u64 retained only at the §2.7.5 FFI extension
-//! contract surface.
+//! ADR-006 §2.7.4 / §2.7.5 / §2.7.6 SURFACE: this module is the
+//! Rust-side carrier shape for foreign function (extern C / Python /
+//! TypeScript) call args and results, sitting between the byte-level
+//! msgpack wire and the runtime-tier `KindedSlot` carrier. Per
+//! §2.7.5, the extension contract via `*mut c_void` stays on raw u64
+//! (the `RawCallableInvoker.invoke` signature in `module_exports.rs`
+//! is the stable-ABI surface); the conversion to/from `KindedSlot`
+//! happens **inside shape-vm at this boundary**, not at the
+//! extension call frame.
+//!
+//! W8-EX status: signatures speak the §2.7.6 / Q8 carrier
+//! (`&[KindedSlot]` for args, `Result<KindedSlot, VMError>` for
+//! results) — same vocabulary the project speaks at every other
+//! internal Rust dispatch boundary (§2.7.10 method dispatch,
+//! §2.7.11 value-call dispatch, exception payload). Bodies remain
+//! Phase-2c per §2.7.4 because they depend on the rmpv ↔
+//! `KindedSlot::from_<v>` per-NativeKind dispatch + per-FieldType
+//! TypedObject construction landing — both Phase-2c surface areas.
 //!
 //! The pre-rebuild body (now deleted) handled four input shapes:
 //!
