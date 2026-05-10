@@ -448,37 +448,184 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        // ADR-006 §2.7.8 / §2.7.11 / Q10 / Q12 — closure-producer side
+        // (W12-op-make-closure rebuild). Symmetric mirror of W7's consumer
+        // `call_closure_with_nb_args_keepalive` (`call_convention.rs`):
+        // the consumer reads each capture via
+        // `OwnedClosureBlock::read_capture_kinded(idx) -> (bits, kind)`
+        // where the kind comes from `layout.capture_native_kinds[idx]` set
+        // here at construction. No fabrication, no Bool-default fallback
+        // (§2.7.8 #4 forbidden) — the kind track is single-sourced from
+        // the layout descriptor (which the compiler set at closure-literal
+        // lowering time).
+        //
+        // Stack contract: captures live on the kinded stack at
+        // `[sp - capture_count .. sp]` from the producing `LoadLocal` /
+        // `AllocSharedLocal` / `LoadModuleBinding` opcodes (per
+        // `compile_expr_closure` in `compiler/expressions/closures.rs`).
+        // Each `pop_kinded` transfers one strong-count share out of the
+        // slot (WB2.4 retain-on-read installed it via `clone_with_kind`),
+        // and the share moves into the closure block's capture slot —
+        // no extra retain/release pair at the producer site.
+        //
+        // Slot tier (§2.7.11 / Q12): the produced closure value is
+        // `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(OwnedClosureBlock)))`
+        // pushed with `NativeKind::Ptr(HeapKind::Closure)`. The W7
+        // Round-2.5 close `5fa4b19` wired
+        // `clone_with_kind` / `drop_with_kind` for `HeapKind::Closure` to
+        // `Arc::increment/decrement_strong_count(bits as *const HeapValue)`
+        // — this push must produce that exact shape so the consumer's
+        // `callee.slot.as_heap_value()` -> `HeapValue::ClosureRaw(block)`
+        // pattern in `call_value_immediate_nb` succeeds.
+        //
         // Closure spec H5: `MakeClosure` accepts two operand shapes:
         //   - `Operand::Function(fid)`            — non-escaping closure.
         //   - `Operand::ClosureAlloc { fid, .. }` — compiler-tagged with
         //     escape status (the VM path is identical; the JIT's MIR
         //     lowering reads `escapes` to pick stack vs. heap codegen).
-        let func_id_opt = match instruction.operand {
-            Some(Operand::Function(fid)) => Some(fid),
-            Some(Operand::ClosureAlloc { fid, .. }) => Some(fid),
-            _ => None,
+        use shape_value::HeapKind;
+        use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_layout::CaptureKind;
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, alloc_owned_mutable_bool, alloc_owned_mutable_f64,
+            alloc_owned_mutable_i8, alloc_owned_mutable_i16, alloc_owned_mutable_i32,
+            alloc_owned_mutable_i64, alloc_owned_mutable_ptr, alloc_owned_mutable_u8,
+            alloc_owned_mutable_u16, alloc_owned_mutable_u32, alloc_owned_mutable_u64,
+            alloc_typed_closure, write_capture_raw_u64,
         };
-        let Some(func_id) = func_id_opt else {
-            return Err(VMError::InvalidOperand);
+        use shape_value::v2::struct_layout::FieldKind;
+        use std::sync::Arc;
+
+        let func_id = match instruction.operand {
+            Some(Operand::Function(fid)) => fid,
+            Some(Operand::ClosureAlloc { fid, .. }) => fid,
+            _ => return Err(VMError::InvalidOperand),
         };
-        // ADR-006 §2.7.4 / §2.7.5 SURFACE: closure construction populates
-        // a typed `TypedClosureHeader` block per `ClosureLayout` —
-        // immutable captures via `write_capture_typed` with refcount
-        // retain on heap arms, OwnedMutable captures via per-FieldKind
-        // `Box<T>` allocators (`alloc_owned_mutable_<kind>`), and Shared
-        // captures via `Arc::increment_strong_count` on a pre-existing
-        // `*const SharedCell` pointer. The pre-rebuild shape consumed
-        // the deleted ValueWord-shape capture surface (raw-bits clone +
-        // `from_heap_value` push). Rebuild needs kinded capture reads
-        // (per-slot `NativeKind` driving `clone_with_kind` on heap arms),
-        // §2.7.8 closure-cell parallel-track recording, and a kinded
-        // push of the resulting closure block — coordinated with the
-        // shape-jit FFI side. Surface and stop.
-        let _ = func_id;
-        Err(VMError::NotImplemented(format!(
-            "op_make_closure: {}",
-            PHASE_2C_CALL_REBUILD_SURFACE
-        )))
+
+        // Source the closure layout from the program's per-function
+        // side-table. A missing entry is a compile/link-time bug — every
+        // `MakeClosure` emission must register a layout (Track A.5
+        // retired the legacy fallback path).
+        let layout: Arc<shape_value::v2::closure_layout::ClosureLayout> = self
+            .program
+            .closure_function_layouts
+            .get(func_id.index())
+            .and_then(|opt| opt.clone())
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "op_make_closure: no ClosureLayout registered for function {} \
+                     (compile/link-time bug — every MakeClosure emission must \
+                     register a layout)",
+                    func_id.0
+                ))
+            })?;
+
+        let capture_count = layout.capture_count();
+
+        // Pop captures in reverse push order. Each `pop_kinded` transfers
+        // one strong-count share (heap-bearing kinds) out of the stack
+        // slot via the WB2.4 lockstep contract. We collect into a
+        // `Vec<(bits, kind)>` and reverse so `popped[0]` aligns with
+        // capture slot 0, etc.
+        let mut popped: Vec<(u64, NativeKind)> = Vec::with_capacity(capture_count);
+        for _ in 0..capture_count {
+            popped.push(self.pop_kinded()?);
+        }
+        popped.reverse();
+
+        // Allocate a freshly-zeroed `TypedClosureHeader` block (refcount=1)
+        // and write each capture into its typed offset based on the
+        // layout's per-capture `CaptureKind`. The three branches mirror
+        // `release_typed_closure`'s drop dispatch (closure_raw.rs:376) so
+        // every share installed here is released exactly once on the
+        // block's last refcount drop.
+        //
+        // SAFETY: `alloc_typed_closure` returns a non-null pointer to a
+        // block sized for `layout.total_heap_size()` with the
+        // `TypedClosureHeader` prefix initialised. `write_capture_raw_u64`
+        // writes the 8-byte slot at `layout.heap_capture_offset(i)` —
+        // in-bounds for every `i < capture_count`.
+        let owned = unsafe {
+            let ptr = alloc_typed_closure(func_id.0, 0, &layout);
+            for (i, (bits, _kind)) in popped.iter().enumerate() {
+                match layout.capture_storage_kind(i) {
+                    CaptureKind::Immutable => {
+                        // Write the popped bits verbatim. For `Ptr`
+                        // captures the popped share transfers into the
+                        // block's slot; `release_typed_closure` walks
+                        // `heap_capture_mask` and drops via
+                        // `drop_with_kind(bits, layout.capture_native_kind(i))`
+                        // (closure_raw.rs:412-418). For non-Ptr scalars
+                        // the slot is value-only — no refcount semantics
+                        // apply.
+                        write_capture_raw_u64(ptr, &layout, i, *bits);
+                    }
+                    CaptureKind::OwnedMutable => {
+                        // Allocate a typed `Box<T>` matching the layout's
+                        // `capture_inner_kind(i)` and store the box ptr
+                        // bits in the closure slot. `release_typed_closure`
+                        // walks `owned_mutable_capture_mask` and reclaims
+                        // each typed box via `drop_owned_mutable_capture`
+                        // (closure_raw.rs:421-429).
+                        //
+                        // For `FieldKind::Ptr` the popped `*bits` already
+                        // carries the heap refcount share verbatim — the
+                        // box swallows that share, so no retain/release
+                        // pair at this site.
+                        let inner = layout.capture_inner_kind(i);
+                        let cell_ptr_bits: u64 = match inner {
+                            FieldKind::I64 => alloc_owned_mutable_i64(*bits as i64) as u64,
+                            FieldKind::F64 => {
+                                alloc_owned_mutable_f64(f64::from_bits(*bits)) as u64
+                            }
+                            FieldKind::I32 => alloc_owned_mutable_i32(*bits as i64 as i32) as u64,
+                            FieldKind::I16 => alloc_owned_mutable_i16(*bits as i64 as i16) as u64,
+                            FieldKind::I8 => alloc_owned_mutable_i8(*bits as i64 as i8) as u64,
+                            FieldKind::U64 => alloc_owned_mutable_u64(*bits) as u64,
+                            FieldKind::U32 => alloc_owned_mutable_u32(*bits as u32) as u64,
+                            FieldKind::U16 => alloc_owned_mutable_u16(*bits as u16) as u64,
+                            FieldKind::U8 => alloc_owned_mutable_u8(*bits as u8) as u64,
+                            FieldKind::Bool => alloc_owned_mutable_bool(*bits != 0) as u64,
+                            FieldKind::Ptr => alloc_owned_mutable_ptr(*bits) as u64,
+                        };
+                        write_capture_raw_u64(ptr, &layout, i, cell_ptr_bits);
+                    }
+                    CaptureKind::Shared => {
+                        // The popped bits are `*const SharedCell` (from
+                        // `Arc::into_raw`) produced by an upstream
+                        // `AllocSharedLocal` / `AllocSharedModuleBinding`
+                        // and pushed via `LoadLocal` / `LoadModuleBinding`,
+                        // which already cloned the share through
+                        // `clone_with_kind` (HeapKind::SharedCell arm —
+                        // `Arc::increment_strong_count`). The popped
+                        // share transfers into the closure block's slot;
+                        // `release_typed_closure` walks
+                        // `shared_capture_mask` and reclaims via
+                        // `drop_shared_capture` (closure_raw.rs:430-437) —
+                        // reconstructs `Arc::<SharedCell>::from_raw` to
+                        // reclaim that share.
+                        // No additional retain at this site.
+                        write_capture_raw_u64(ptr, &layout, i, *bits);
+                    }
+                }
+            }
+            // Take ownership of the block's single refcount share via the
+            // owning `OwnedClosureBlock` wrapper.
+            OwnedClosureBlock::from_raw(ptr as *const u8, layout)
+        };
+
+        // Wrap the owned block in `Arc<HeapValue>` per the §2.7.11 / Q12
+        // slot-tier convention (W7 Round-2.5 close `5fa4b19`): the slot
+        // bits for `NativeKind::Ptr(HeapKind::Closure)` are
+        // `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(...)))`, and the
+        // matching `clone_with_kind` / `drop_with_kind` arm for
+        // `HeapKind::Closure` operates on `Arc<HeapValue>` directly. The
+        // inner `OwnedClosureBlock` manages its own typed-closure-header
+        // refcount on its own Clone/Drop — invoked transitively via
+        // `Arc<HeapValue>`'s drop when the slot share count hits zero.
+        let arc = Arc::new(HeapValue::ClosureRaw(owned));
+        let bits = Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Closure))
     }
 
 
