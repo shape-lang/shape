@@ -2270,6 +2270,223 @@ release builds these compile out.
   follow-up). This ruling preserves the existing escape boundary;
   loosening it would be a separate ADR amendment with measurement.
 
+#### 2.7.14 JIT array FFI rebuild — `JitArray` deletion and kinded `TypedArray<T>` re-introduction (Q15 deferral)
+
+W10-misc (close `4b978a4`, 2026-05-10) deleted the `JitArray = UnifiedArray`
+type alias in `crates/shape-jit/src/jit_array.rs` after
+`shape_value::unified_array::UnifiedArray` (1,134 LoC) was bulldozed in
+commit `0270dd4`. W10-cascade (close `60f9b7c`, 2026-05-10) followed by
+surface-and-stop'ing every `shape-jit` consumer that walked the deleted
+heap layout — 19 production sites across `ffi/control/mod.rs` (8),
+`ffi/call_method/{array,matrix}.rs` (5), `ffi/object/{object_ops,
+property_access}.rs` (3), `ffi/references.rs`, `ffi_symbols/intrinsics/
+mod.rs`, `ffi_symbols/data_access/mod.rs` — bringing `shape-jit --lib`
+to a clean build (`51 → 0` errors). The full array-FFI registration
+surface (`ffi_symbols/array_symbols.rs::register_array_symbols` /
+`declare_array_functions`) is a no-op pending this ruling.
+
+W12-jit-array (audit `9bd19f8`, 2026-05-10) confirmed the rebuild
+crosses Cranelift codegen, FFI registration, method-dispatch ABI
+threading, and consumer-site translation in lockstep — multi-week
+work that exceeds any single-wave budget. Q15 formalizes the
+deferral and the architectural decisions the rebuild must make
+before re-introducing array codegen in the JIT.
+
+**The deleted shape was kind-on-heap.** Pre-strict-typing `UnifiedArray`
+packed an `ArrayElementKind` byte and a typed-mirror pointer into the
+`#[repr(C)]` heap object alongside the `Vec<u64>` data buffer (offsets
+DATA=0, LEN=8, CAP=16, TYPED_DATA=24, ELEMENT_KIND=32, relative to the
+post-header data field). Element kind was recovered at runtime by
+loading the byte at offset 32. Every JIT-FFI consumer (`jit_new_array`,
+`jit_array_get/push/pop`, `jit_array_first/last/min/max`, `jit_slice`,
+`jit_range`, `jit_make_range`, `jit_array_filled`, `jit_array_reverse`,
+`jit_array_push_*`, `jit_array_zip`, `jit_hof_array_alloc/push`,
+`jit_array_info`) consumed this kind byte to dispatch element
+operations. This is the §2.7.7 #4 / #7 forbidden pattern — kind
+recovered at runtime via heap-byte decode rather than threaded from
+the producing call signature. The deletion was correct under §2.7.5
+("kind stamped at JIT compile time from the call signature, not on
+the heap object").
+
+**The two architecturally-distinct rebuild routes** (no ruling between
+them yet — Q15-A is the open question this deferral parks):
+
+1. **Route A — monomorphized `Arc<TypedArrayData>` per element kind.**
+   Match `shape_value::v2::typed_array::TypedArray<T>` (24-byte header,
+   one allocation per concrete element type, `HEAP_KIND_V2_TYPED_ARRAY`
+   discriminator). Each call signature variant of `jit_new_array_*` /
+   `jit_array_get_*` / etc. monomorphizes on a single `NativeKind` per
+   array (Float64 / Int64 / Int32 / Bool / String / Ptr(_)).
+   Cranelift offsets are derived against the `TypedArray<T>` layout
+   (data=8, len=16, cap=20). Element-kind threading is per-call-site
+   from the JIT's `FrameDescriptor.slots` and the `Operand::TypedArray`
+   element type tag at the producing opcode. Compatible with §2.7.6 /
+   Q8 cardinality bound: heap dispatch goes through
+   `slot.as_heap_value()` → `HeapValue::TypedArray(arc)` →
+   `arc.element_kind()`, no parallel-kind side track on the heap
+   object.
+
+   *Cost:* ~10–14 monomorphized variants of every array-FFI entry
+   point (one per `NativeKind` arm); FFI symbol registration grows
+   ~10× by line count but each entry is small. No new heap kind.
+
+   *Compatibility:* Direct match for the existing v2-runtime
+   `TypedArray<T>` (`shape_value/src/v2/typed_array.rs`), already
+   used by VM-side typed-opcode array handlers
+   (`crates/shape-vm/src/executor/objects/array_*.rs`). VM↔JIT slot
+   ABI parity preserved (§4.1 uniform slot ABI).
+
+2. **Route B — unified `Vec<u64>` data + parallel `Vec<NativeKind>`
+   element-kind track per §2.7.7 / §2.7.8 cell-storage pattern.** A
+   single heap kind (`HEAP_KIND_JIT_ARRAY`) carries `(Vec<u64> data,
+   Vec<NativeKind> elem_kinds, len, cap)`. Element-kind threading is
+   per-element on the heap, but lookup is via the parallel-track
+   pattern §2.7.7 stack ABI / §2.7.8 cell ABI established —
+   `clone_with_kind` / `drop_with_kind` dispatch the per-element
+   retain/release without tag decode.
+
+   *Cost:* No multiplication of FFI entries. Heap object grows by
+   ~16 bytes (parallel `Vec<NativeKind>`). Per-element push/pop
+   touches two vectors (lockstep §2.7.7 invariant).
+
+   *Incompatibility:* Diverges from `TypedArray<T>` — the JIT and VM
+   would carry distinct array shapes, breaking the §4.1 uniform slot
+   ABI. Also requires a new `HeapKind` variant (Q8 cardinality
+   amendment process per §2.7.6 / Wave-γ G-heap-filter-expr / W8-T25
+   SharedCell). The §2.7.7 parallel-`Vec<NativeKind>` pattern was
+   designed for the stack and for cells with a small fixed slot
+   count — extending to heap arrays with unbounded element count
+   keeps the lockstep invariant but doubles the per-element memory
+   bandwidth on push/pop.
+
+**Default expectation: Route A.** §2.7.5 cross-crate ABI policy and
+§4.1 uniform slot ABI both push toward monomorphization on
+`TypedArray<T>`. Route B is preserved here only because the
+multiplication cost (~10–14× FFI entries) crosses the boundary
+where "small" rebuild work becomes "redesign FFI registration".
+A measured comparison is required before committing.
+
+**The four lockstep dependencies** the rebuild must thread (none of
+which can land independently — they must close in a single wave to
+keep `shape-jit --lib` clean):
+
+1. **`jit_array.rs` layout decision** — Route A (per-element-kind
+   monomorphization, no public type alias; `TypedArray<T>` is the
+   carrier) or Route B (single `JitArrayKinded` type with parallel
+   `Vec<NativeKind>`). Either way the existing
+   `pub const {DATA,LEN,CAP,TYPED_DATA,ELEMENT_KIND}_OFFSET` constants
+   in `jit_array.rs` are replaced — Route A maps to
+   `TypedArray<T>`'s offsets (DATA=8, LEN=16, CAP=20, no
+   ELEMENT_KIND on the heap), Route B re-derives all five plus an
+   ELEM_KINDS_OFFSET pointer to the parallel `Vec<NativeKind>`
+   buffer.
+
+2. **`ffi/array.rs` body re-introduction.** All entry points
+   (currently surfaced) re-emit, kind-threaded per the chosen route.
+   Route A monomorphizes per-`NativeKind`; Route B threads element
+   kind explicitly via a `NativeKind` parameter at each entry.
+
+3. **`ffi_symbols/array_symbols.rs` registration.** No-op stubs
+   replaced with the per-route registration. Route A registers
+   ~10–14 monomorphized symbols per entry; Route B registers a
+   single kinded symbol per entry. The same applies to the cascade
+   sites in `ffi_symbols/intrinsics/mod.rs` and
+   `ffi_symbols/data_access/mod.rs`.
+
+4. **Method-dispatch ABI integration (§2.7.10 / Q11).** The
+   `MethodFnV2` shape `fn(&mut VM, &[KindedSlot], ctx) -> Result<KindedSlot, _>`
+   already lands for VM-side method dispatch. The JIT-side method-call
+   FFI shims (`ffi/call_method/array.rs::call_array_method` and the
+   matrix/string variants) wrap this contract. Route A naturally
+   extends — each monomorphized array entry produces a `KindedSlot`
+   with the matching arm; Route B requires the parallel-kind track
+   to be readable through the §2.7.10 carrier.
+
+**Forbidden under any rebuild** (mirrors §2.7.7 / §2.7.8 / §2.7.10
+forbidden lists, applied to the array carrier):
+
+- **`JitArray` revival under any renamed shape.** The deleted
+  `UnifiedArray` heap layout with the on-heap `ELEMENT_KIND` byte at
+  offset 32 is the §2.7.7 #4 / #7 pattern. CLAUDE.md "Renames to
+  refuse on sight" extends to this carrier — "JitArray bridge",
+  "UnifiedArray shim", "tag-bit array carrier", "boundary array
+  view", "element-kind helper", "array-decode probe", "array
+  translator" framing all belong to the broader defection-attractor
+  family rule (deleted `(decode|tag|kind|dispatch|...) (bridge|
+  probe|helper|hop|translator|adapter|shim)` regex). Describe the
+  deleted code by name (`UnifiedArray`, `ArrayElementKind`,
+  `JitArray::from_heap_bits`, `JitArray::heap_box`,
+  `JitArray::from_vec`) or by deletion-fate (the W10-misc-deleted
+  kind-on-heap array carrier), never by hypothetical role.
+
+- **Bool-default fallback for unknown element kinds.** §2.7.7 #9 /
+  W10 jit-playbook §3 / §5 surface-and-stop instead. Every consumer
+  that lacks a kind source is a kind-source gap, not a Bool-default
+  arm.
+
+- **`tag_bits`-based element decoder.** The deleted
+  `tag_bits::HEAP_KIND_ARRAY` literal is forbidden by CLAUDE.md
+  "Forbidden Patterns" #4 ("Runtime tag_bits dispatch"). The
+  discriminator now lives on `HeapKind::TypedArray` (Route A) or on
+  the new `HeapKind` variant (Route B), read from the heap header
+  through the §2.7.6 / Q8 dispatch tables — never reconstructed from
+  a bit pattern.
+
+- **Mixed-route incrementalism.** Closing some array-FFI entries
+  Route A and others Route B inside the same wave breaks
+  `shape-jit --lib` symbol-resolution coherence: every consumer's
+  call signature has to match the route the FFI symbol expects. The
+  rebuild is single-route; the route is decided once before the
+  wave opens.
+
+**State at deferral (W12-jit-array audit, 2026-05-10):**
+
+- `crates/shape-jit/src/jit_array.rs` — 71 lines, surface-and-stop
+  module docs + 5 offset constants kept under `#[allow(dead_code)]`
+  pending the route decision (Route A drops them; Route B re-derives
+  them).
+- `crates/shape-jit/src/ffi/array.rs` — 83 lines, all entry-point
+  bodies removed; `ArrayInfo #[repr(C)]` carrier struct and
+  `is_inline_bool` helper preserved (downstream symbol-table
+  compatibility / non-array consumers).
+- `crates/shape-jit/src/ffi_symbols/array_symbols.rs` — 41 lines,
+  both `register_array_symbols` and `declare_array_functions`
+  no-op'd.
+- 19 production surface-and-stop sites named above carry the
+  `"phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild"`
+  marker.
+- `cargo check -p shape-jit --lib` passes clean (215 warnings,
+  zero errors).
+- `shape-jit` test build is broken in unrelated ways (unresolved
+  `shape_value::ValueWord` / `tag_bits` / `NativeKind::Unknown`
+  imports across `differential_fuzz` / mir_compiler tests / etc.) —
+  out of scope for Q15 deferral; the W10-cascade close gate was
+  `--lib` only.
+
+**Hot-path question answer (W12-jit-array charter):** the JIT
+*can* compile-and-execute simple programs end-to-end on
+`bulldozer-strictly-typed` for **scalar-typed paths** —
+`executor.rs::execute_with_jit` decodes typed return tags
+(`RETURN_TAG_F64` / `I64` / `I32` / `BOOL`) per §2.7.5.1 stable-FFI
+boundary, and the JIT compile + execute pipeline works for any
+program whose top-level frame returns a scalar `NativeKind`. Programs
+that touch array operations (`Array<T>` construction, indexing,
+`.push` / `.pop` / `.map` / `.filter` / etc.) hit one of the 19
+surface-and-stop sites and panic with the `"JitArray rebuild"` marker
+at JIT-FFI dispatch — not at JIT compile, not at VM-fallback
+boundary. The JIT pipeline is alive; the array-FFI surface area is
+the deferred work.
+
+**Closure trigger:** Q15 closes when the route decision (Route A
+vs. Route B) is made, the `jit_array.rs` layout lands, and a single
+wave migrates all 19 surface-and-stop sites + the FFI symbol
+registrations + the method-dispatch ABI threading in lockstep.
+Estimated scope: 2–4 days for Route A (preferred), 4–7 days for
+Route B (FFI registration multiplication and HeapKind cardinality
+amendment add overhead). Either way it's an explicit Phase-2c wave,
+not a maintenance follow-up; the W12-jit-array audit was the
+boundary check.
+
 ## 3. Lifetime, ownership, and storage planning
 
 ### 3.1 Reuse the existing infrastructure
