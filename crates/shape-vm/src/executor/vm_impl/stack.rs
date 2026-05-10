@@ -28,8 +28,9 @@ use super::super::*;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-        TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+        PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
+        TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -152,6 +153,17 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // tier).
                 HeapKind::Iterator => {
                     Arc::increment_strong_count(bits as *const IteratorState);
+                }
+                // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                // 2026-05-10): mirror of the HashSet arm. Slot bits are
+                // `Arc::into_raw(Arc<PriorityQueueData>) as u64` with
+                // kind `NativeKind::Ptr(HeapKind::PriorityQueue)`. Bumps
+                // one `Arc<PriorityQueueData>` strong-count share —
+                // PriorityQueue is a HashSet sibling per §2.7.18,
+                // full-`HeapValue` arm (NOT pure-discriminator like
+                // FilterExpr / SharedCell).
+                HeapKind::PriorityQueue => {
+                    Arc::increment_strong_count(bits as *const PriorityQueueData);
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
@@ -346,6 +358,13 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<HeapValue>` (closure) shares transitively.
                 HeapKind::Iterator => {
                     Arc::decrement_strong_count(bits as *const IteratorState);
+                }
+                // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                // 2026-05-10): mirror of the HashSet arm. Retires one
+                // `Arc<PriorityQueueData>` strong-count share — same
+                // dispatch shape per the §2.7.18 amendment.
+                HeapKind::PriorityQueue => {
+                    Arc::decrement_strong_count(bits as *const PriorityQueueData);
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}

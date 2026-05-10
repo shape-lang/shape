@@ -3283,6 +3283,189 @@ must be materialized via a terminal (`collect` / `forEach` / etc.)
 before any cross-process boundary. The wire/JSON arms reject Iterator
 slots in the same shape as FilterExpr / Reference.
 
+#### 2.7.18 `HeapKind::PriorityQueue` — Q19 cardinality amendment (Wave 15 W15-priority-queue, 2026-05-10)
+
+W15-priority-queue (close 2026-05-10) lands the kinded i64-priority
+min-heap carrier, replacing the deleted pre-bulldozer
+`HeapValue::PriorityQueue { state, ... }` `ValueWord`-shaped struct
+variant (Phase-1.A bulldozed alongside the `HashMap` / `Set` / `Deque`
+heterogeneous-element collection family). Pre-strict-typing the
+PriorityQueue pushed `ValueWord::from_priority_queue(...)` slots with
+heterogeneous per-element `ValueWord` payloads and dispatched per-method
+via `tag_bits` on the receiver — both forbidden post-§2.7.7 / §2.7.8
+(CLAUDE.md "Forbidden code" #1, #4, #6). The pre-W15-priority-queue
+scope was the `PRIORITY_QUEUE_METHODS` PHF in
+`executor/objects/method_registry.rs` (7 entries — `push` / `pop` /
+`peek` / `size` / `isEmpty` / `toArray` / `toSortedArray`) plus the
+`BuiltinFunction::PriorityQueueCtor` ctor body in
+`vm_impl/builtins.rs` — 7 distinct method handler bodies plus 1 ctor
+body surfacing as `NotImplemented(SURFACE: §2.7.4)`.
+
+**Decision (Q19 ruling):** the priority-queue carrier rebuilds on a
+typed `Arc<PriorityQueueData>` payload carried by a fresh `HeapKind`
+arm, mirroring the §2.7.15 HashSet precedent (typed-Arc dispatch with
+a parallel `HeapValue` arm for ADR-005 §1 single-discriminator
+recovery — full HeapValue arm, NOT pure-discriminator like FilterExpr
+/ SharedCell). Storage at landing is a binary min-heap over a single
+`Arc<TypedBuffer<i64>>` priorities buffer — i.e. **i64-priority-only**.
+The audit-time alternative — typed-payload `PriorityQueue<T, K>` with
+key-extractor (`Arc<HeapValue>` payload + `Arc<HeapValue>` comparator
+closure per §2.7.11/Q12) — is rejected at landing for the same
+cardinality-cost reason §2.7.15 / Q16 rejected `TypedSet<T>` per
+element kind, plus an additional reason: the smoke target
+(`pq.push(3); pq.push(1); pq.push(2); pq.pop() == 1`) is exercised
+end-to-end on the simpler i64-only shape, and the typed-payload
+rebuild is a follow-up Phase-2c amendment with measurement (the same
+"future Phase-2c amendment" boundary the §2.7.15 ruling drew for
+non-string keysets). The Wave 15 playbook explicitly called out
+i64-priority-only as a valid audit choice — this ruling formalises it.
+
+**The kinded carrier (`shape-value/src/heap_value.rs`):**
+
+```rust
+pub struct PriorityQueueData {
+    /// Heap-ordered i64 priorities. Index 0 is the current min.
+    /// Backed by `Arc<TypedBuffer<i64>>` so a HeapValue clone is a
+    /// single atomic refcount bump and `Arc::make_mut` is the
+    /// canonical clone-on-write entry.
+    pub heap: Arc<TypedBuffer<i64>>,
+}
+```
+
+Operations: `push(value)` does sift-up after `Vec::push`; `pop()` does
+sift-down after the root↔last swap + `Vec::pop`; `peek()` reads index
+0 without mutation; `to_vec()` / `to_sorted_vec()` project the heap
+contents (heap-array order vs ascending sort) for the `toArray` /
+`toSortedArray` methods. Mutation goes through `Arc::make_mut` per the
+W13-hashmap-mutation precedent (commit `d8ec8c2`) — clone-on-write
+when the receiver `Arc<PriorityQueueData>` has multiple shares;
+single-share fast-path otherwise.
+
+**The new `HeapKind` arm:**
+
+```rust
+pub enum HeapKind {
+    // ... String=0 .. SharedCell=20, HashSet=21, Iterator=22 ..
+    PriorityQueue,    // 25  (W15-priority-queue, 2026-05-10)
+}
+
+pub enum HeapValue {
+    // ... existing arms ...
+    PriorityQueue(Arc<PriorityQueueData>),
+}
+```
+
+Slot bits for a `PriorityQueue`-kinded slot are
+`Arc::into_raw(Arc<PriorityQueueData>) as u64` directly (mirror of the
+§2.7.15 HashSet shape). Like Iterator, **`as_heap_value()` IS valid on
+PriorityQueue-labeled bits**: the priority-queue method handlers
+recover the typed `Arc<PriorityQueueData>` via the canonical
+`slot.as_heap_value()` → `HeapValue::PriorityQueue(arc)` match,
+preserving ADR-005 §1 single-discriminator. The shape is the same as
+existing typed-Arc heap variants (`HeapValue::TypedArray`,
+`HeapValue::HashMap`, `HeapValue::HashSet`, ...) — typed `Arc<T>`
+payload, dispatch goes through both the kind label (for refcount
+discipline at the §2.7.7 / §2.7.8 dispatch tables) and through
+`HeapValue` (for handler-body recovery).
+
+**Pre-assigned ordinal:** 25 per the wave-14-15-16 playbook §0 table.
+No bump needed at landing (W14 took 23/24 for Result/Option; HashSet
+=21, Iterator=22 are the §2.7.15 / §2.7.16 amendments; SharedCell=20,
+Reference=19, FilterExpr=18 are the prior pure-discriminator
+additions). If a concurrent amendment claims 25 first at merge time,
+the bump-and-comment rule applies (same precedent as W8-T25/T26
+19↔20).
+
+**Mechanical lockstep updates** (4 dispatch tables — every Q8/Q10
+retain/release table — plus knock-on exhaustive matches):
+
+1. `shape-value/heap_variants.rs` — `HeapKind::PriorityQueue` ordinal
+   25 + `HeapValue::PriorityQueue(Arc<PriorityQueueData>)` arm +
+   `kind()` / `is_truthy()` / `type_name()` / Clone / Display.
+2. `shape-vm/.../vm_impl/stack.rs` — `clone_with_kind` /
+   `drop_with_kind` dispatch the PriorityQueue arm to
+   `Arc::increment/decrement_strong_count::<PriorityQueueData>`.
+3. `shape-value/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror; `from_priority_queue(Arc<
+   PriorityQueueData>)` constructor.
+4. `shape-value/heap_value.rs::TypedObjectStorage::drop` —
+   PriorityQueue-typed field arm.
+5. `shape-value/v2/closure_layout.rs::SharedCell::drop` —
+   PriorityQueue-typed cell arm.
+6. Knock-on exhaustive matches: `arithmetic/mod.rs`,
+   `comparison/mod.rs`, `typed_access.rs` (kind→type-name maps);
+   `printing.rs` (HeapKind + HeapValue arms — `format_priority_queue`
+   renders as `PriorityQueue[v1, v2, ...]` in heap-array order);
+   `wire_conversion.rs`, `json_value.rs` (PriorityQueue projects to a
+   wire/JSON array of i64 priorities — i64-priority-only at landing).
+
+**Migration of 7 NotImplemented sites** in
+`executor/objects/priority_queue_methods.rs` plus 1 ctor in
+`vm_impl/builtins.rs`:
+
+```
+Mutation handlers (Arc::make_mut clone-on-write):
+  v2_push    -> push(value), returns the post-mutation Arc
+  v2_pop     -> pop() unwrap_or(0), returns popped i64
+
+Read-only handlers:
+  v2_peek            -> peek() unwrap_or(0)
+  v2_size            -> len() as i64
+  v2_is_empty        -> is_empty() as bool
+  v2_to_array        -> heap-array-order Vec<int>
+  v2_to_sorted_array -> ascending Vec<int>
+
+Ctor body (vm_impl/builtins.rs):
+  PriorityQueueCtor  -> Arc::new(PriorityQueueData::new())
+                        + KindedSlot::from_priority_queue
+```
+
+The `peek` / `pop` empty-queue convention is "return 0" at landing,
+matching the deleted pre-bulldozer behavior shape; the
+`Option<int>`-typed return is W14-variant-codegen territory and will
+be re-amended once `OptionCtor` lands (the variant-codegen close is
+the upstream §2.7.4 dependency).
+
+**Forbidden alternatives considered and rejected:**
+
+- "`HeapValue::PriorityQueue { values: Vec<KindedSlot>, comparator:
+  Arc<HeapValue> }` — heterogeneous-payload + closure comparator from
+  day one." Rejected for cardinality-cost reasons (the same shape
+  §2.7.15 / Q16 rejected for HashSet's `TypedSet<T>` alternative). The
+  i64-only shape lands the smoke target end-to-end and the
+  typed-payload rebuild is a measured follow-up.
+- "Re-use the existing `HeapValue::TypedArray(Arc<TypedArrayData::I64
+  >)` carrier and stash heap-invariant invariant-respecting bits via a
+  side-table." Rejected — would conflate two distinct receiver kinds
+  (a generic `Vec<int>` vs a min-heap-laid-out `Vec<int>`) at the
+  method dispatch layer, breaking §2.7.6/Q8 cardinality and ADR-005
+  §1 single-discriminator. The receiver kind classifier MUST be able
+  to distinguish a `[3, 1, 2]` `Vec<int>` (which has no `.push`/`.pop`
+  heap semantics) from a `pq.heap = [1, 3, 2]` `PriorityQueue` (which
+  does).
+- "Surface PriorityQueue under the `HeapKind::HashSet` discriminator
+  with a side-tag, on the basis that the storage shape is similar."
+  Forbidden under §2.3 / Q8: each new HeapKind discriminator is an
+  amendment in its own right. Off-label re-use of an existing variant
+  is the precise W-series defection-attractor (CLAUDE.md "Forbidden
+  rationalizations" #6 / #8: "Rename to a less suspicious name." /
+  "Document it as out-of-scope.").
+- "Render PriorityQueue as `[1, 2, 3, ...]` (sort order) in Display
+  to match user mental model." Rejected — Display reflects storage
+  order (heap-array layout); users who want sort-order output use
+  `pq.toSortedArray()` (the explicit projection method). Rendering as
+  sorted at the Display surface would compute on every print, which
+  is both expensive and surprising (reads-have-side-effects in the
+  monadic-purity sense).
+
+**Out-of-scope this amendment:** typed-payload `PriorityQueue<T, K>`
+(arbitrary `T` payloads + `K`-extractor closure); custom comparator
+closures (max-heap or arbitrary ordering — the i64 min-heap is the
+fixed shape at landing); stable-priority semantics (insertion-order
+preservation among equal priorities). All three are future Phase-2c
+amendments with measurement; all three would require an §-level
+amendment of their own.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-

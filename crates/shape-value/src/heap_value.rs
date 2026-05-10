@@ -861,6 +861,164 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── PriorityQueue storage (Wave 15 W15-priority-queue, 2026-05-10) ──────────
+
+/// PriorityQueue storage — i64-priority min-heap.
+///
+/// ADR-006 §2.7.18 / Q19 amendment (mirror of §2.7.15 HashSet precedent
+/// for the cardinality-amendment shape). Storage is a binary min-heap
+/// laid out in a single `Vec<i64>` over an `Arc<TypedBuffer<i64>>`
+/// so the buffer-Arc pattern matches the rest of the typed-Arc heap
+/// family (clone-on-write via `Arc::make_mut`, single atomic refcount
+/// at slot drop).
+///
+/// **i64-priority-only at landing** (per the Wave 15 audit and the
+/// §2.7.18 Q19 ruling). Heterogeneous-payload priority queues
+/// (TypedObject-payload, payload-with-comparator-closure) are
+/// explicitly out-of-scope; the playbook called out the i64-priority-
+/// only design as the simpler valid path, and the smoke target
+/// (`pq.push(3); pq.push(1); pq.push(2); pq.pop() == 1`) is exercised
+/// end-to-end on this shape. A typed-payload rebuild (`PriorityQueue
+/// <T, K>` with key-extractor and arbitrary `T` payloads) is a future
+/// Phase-2c amendment with measurement.
+///
+/// The heap invariant is "min-heap": the minimum priority sits at
+/// index 0 (`peek()` / `pop()` return it). Standard
+/// sift-up-on-push / sift-down-on-pop maintenance, `O(log n)` per
+/// push/pop.
+#[derive(Debug)]
+pub struct PriorityQueueData {
+    /// Heap-ordered i64 priorities. Index 0 is the current min.
+    /// Backed by an `Arc<TypedBuffer<i64>>` so a HeapValue clone is a
+    /// single atomic refcount bump and `Arc::make_mut` is the
+    /// canonical clone-on-write entry per the W13-hashmap-mutation
+    /// precedent.
+    pub heap: Arc<crate::typed_buffer::TypedBuffer<i64>>,
+}
+
+impl PriorityQueueData {
+    /// Build an empty PriorityQueueData with no entries.
+    pub fn new() -> Self {
+        Self {
+            heap: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+        }
+    }
+
+    /// Number of entries.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.heap.data.len()
+    }
+
+    /// Whether the queue is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.heap.data.is_empty()
+    }
+
+    /// Peek at the minimum (root) without removing it. Returns `None`
+    /// for an empty queue.
+    pub fn peek(&self) -> Option<i64> {
+        self.heap.data.first().copied()
+    }
+
+    /// Push a value, restoring the min-heap invariant via sift-up.
+    /// Mirror of W13-hashmap-mutation `insert`: `Arc::make_mut`
+    /// clone-on-write over the inner `Arc<TypedBuffer<i64>>`.
+    pub fn push(&mut self, value: i64) {
+        let buf = Arc::make_mut(&mut self.heap);
+        buf.data.push(value);
+        let last = buf.data.len() - 1;
+        sift_up(&mut buf.data, last);
+    }
+
+    /// Pop the minimum value, restoring the min-heap invariant via
+    /// sift-down. Returns `None` for an empty queue. Mirror of
+    /// W13-hashmap-mutation `remove`: `Arc::make_mut` clone-on-write.
+    pub fn pop(&mut self) -> Option<i64> {
+        let buf = Arc::make_mut(&mut self.heap);
+        if buf.data.is_empty() {
+            return None;
+        }
+        let last = buf.data.len() - 1;
+        buf.data.swap(0, last);
+        let min = buf.data.pop();
+        if !buf.data.is_empty() {
+            sift_down(&mut buf.data, 0);
+        }
+        min
+    }
+
+    /// Return the heap contents as a flat `Vec<i64>` in heap-array
+    /// order (NOT sorted). Used for the `toArray` method's `Vec<int>`
+    /// projection; for the sorted form see `to_sorted_vec`.
+    pub fn to_vec(&self) -> Vec<i64> {
+        self.heap.data.clone()
+    }
+
+    /// Return the heap contents as a sorted `Vec<i64>` (ascending —
+    /// pop-order). Used for the `toSortedArray` method.
+    pub fn to_sorted_vec(&self) -> Vec<i64> {
+        let mut v = self.heap.data.clone();
+        v.sort_unstable();
+        v
+    }
+}
+
+impl Default for PriorityQueueData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for PriorityQueueData {
+    fn clone(&self) -> Self {
+        Self {
+            heap: Arc::clone(&self.heap),
+        }
+    }
+}
+
+/// Sift up: restore the min-heap invariant after a push at index `i`
+/// by walking parent links upward, swapping while the child is less
+/// than its parent.
+#[inline]
+fn sift_up(data: &mut [i64], mut i: usize) {
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        if data[i] < data[parent] {
+            data.swap(i, parent);
+            i = parent;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Sift down: restore the min-heap invariant after a pop-replacement
+/// at index `i` by walking down the smaller child link, swapping
+/// while a child is less than the current node.
+#[inline]
+fn sift_down(data: &mut [i64], mut i: usize) {
+    let n = data.len();
+    loop {
+        let left = 2 * i + 1;
+        let right = 2 * i + 2;
+        let mut smallest = i;
+        if left < n && data[left] < data[smallest] {
+            smallest = left;
+        }
+        if right < n && data[right] < data[smallest] {
+            smallest = right;
+        }
+        if smallest == i {
+            break;
+        }
+        data.swap(i, smallest);
+        i = smallest;
+    }
+}
+
 // ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
 
 /// Task-group payload. Extracted from the inline
@@ -1163,6 +1321,20 @@ impl Drop for TypedObjectStorage {
                         HeapKind::Iterator => {
                             std::sync::Arc::decrement_strong_count(
                                 bits as *const crate::iterator_state::IteratorState,
+                            );
+                        }
+                        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
+                        // Q19, 2026-05-10): a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::PriorityQueue)` holds
+                        // slot bits = `Arc::into_raw(Arc<
+                        // PriorityQueueData>)`. Same dispatch shape as
+                        // the HashSet arm above (PriorityQueue is a
+                        // HashSet sibling per §2.7.18) — retire one
+                        // `Arc<PriorityQueueData>` strong-count share at
+                        // storage drop.
+                        HeapKind::PriorityQueue => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const PriorityQueueData,
                             );
                         }
                         // Round 2.5b W7-closure-retain-parallel (ADR-006
@@ -1671,6 +1843,10 @@ impl Clone for HeapValue {
             // every field), but the outer `Arc` bump is the canonical
             // shared-receiver path.
             HeapValue::Iterator(v) => HeapValue::Iterator(Arc::clone(v)),
+            // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+            // 2026-05-10): mirror of HashSet — single strong-count bump
+            // on the shared `Arc<PriorityQueueData>`, no payload copy.
+            HeapValue::PriorityQueue(v) => HeapValue::PriorityQueue(Arc::clone(v)),
         }
     }
 }
@@ -1850,6 +2026,21 @@ impl fmt::Display for HeapValue {
             // reaching the Display surface is "still lazy" by
             // construction.
             HeapValue::Iterator(_) => write!(f, "<iterator>"),
+            // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+            // 2026-05-10): one-keyspace mirror of HashSet's Display
+            // shape — bracketed comma-separated values in heap-array
+            // order. NOTE: heap-array order is not sort-order; for
+            // sorted output the user must call `pq.toSortedArray()`.
+            HeapValue::PriorityQueue(d) => {
+                write!(f, "PriorityQueue[")?;
+                for (i, v) in d.heap.data.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -2459,5 +2650,89 @@ mod hashset_mutation {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains("a"));
         assert!(!snapshot.contains("b"));
+    }
+}
+
+#[cfg(test)]
+mod priority_queue_mutation {
+    //! W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10): pin the
+    //! `push` / `pop` / `peek` / heap-invariant API contracts on
+    //! `PriorityQueueData`. Mirror of `hashset_mutation` for the
+    //! cardinality-amendment shape, with i64-priority-only payload
+    //! semantics per the §2.7.18 ruling.
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn empty_pq_has_zero_len_and_is_empty() {
+        let pq = PriorityQueueData::new();
+        assert_eq!(pq.len(), 0);
+        assert!(pq.is_empty());
+        assert_eq!(pq.peek(), None);
+    }
+
+    #[test]
+    fn push_increases_len_and_pop_returns_min() {
+        // Storage-layer counterpart of the W15-priority-queue smoke
+        // target: `pq.push(3); pq.push(1); pq.push(2); pq.pop() == 1`.
+        let mut pq = PriorityQueueData::new();
+        pq.push(3);
+        pq.push(1);
+        pq.push(2);
+        assert_eq!(pq.len(), 3);
+        assert_eq!(pq.peek(), Some(1));
+        assert_eq!(pq.pop(), Some(1));
+        assert_eq!(pq.len(), 2);
+    }
+
+    #[test]
+    fn pop_returns_none_on_empty() {
+        let mut pq = PriorityQueueData::new();
+        assert_eq!(pq.pop(), None);
+    }
+
+    #[test]
+    fn pop_yields_ascending_order() {
+        // Pin the min-heap invariant: repeated `pop()` yields keys
+        // in ascending order regardless of insertion order.
+        let mut pq = PriorityQueueData::new();
+        for v in [5, 3, 7, 1, 9, 4, 2, 8, 6] {
+            pq.push(v);
+        }
+        let mut out = Vec::new();
+        while let Some(v) = pq.pop() {
+            out.push(v);
+        }
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn to_sorted_vec_returns_ascending_without_consuming() {
+        let mut pq = PriorityQueueData::new();
+        for v in [3, 1, 4, 1, 5, 9, 2, 6] {
+            pq.push(v);
+        }
+        let sorted = pq.to_sorted_vec();
+        assert_eq!(sorted, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+        // Original PQ is undisturbed.
+        assert_eq!(pq.len(), 8);
+    }
+
+    #[test]
+    fn arc_make_mut_clone_on_write_preserves_other_share() {
+        // Pin the §2.7.4 / playbook clone-on-write invariant: when
+        // `Arc<PriorityQueueData>` has multiple shares, `Arc::make_mut`
+        // clones the inner data so the other share stays immutable.
+        // Mirror of `hashset_mutation`'s clone-on-write test.
+        let mut a = Arc::new(PriorityQueueData::new());
+        Arc::make_mut(&mut a).push(5);
+        let snapshot = Arc::clone(&a);
+        // After the snapshot, mutating `a` clones the inner data.
+        Arc::make_mut(&mut a).push(1);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.peek(), Some(1));
+        // Snapshot retains the pre-mutation state.
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.peek(), Some(5));
     }
 }

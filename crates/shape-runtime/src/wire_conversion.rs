@@ -244,6 +244,17 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // forEach / etc. before serialisation). Surface as an opaque
         // tag, same as FilterExpr / Reference.
         HeapValue::Iterator(_) => WireValue::String("<iterator>".to_string()),
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+        // 2026-05-10): PriorityQueue wire serialisation projects to a
+        // `WireValue::Array` of i64 priorities in heap-array order
+        // (mirror of the JSON shape — i64-priority-only at landing).
+        HeapValue::PriorityQueue(d) => WireValue::Array(
+            d.heap
+                .data
+                .iter()
+                .map(|v| WireValue::Integer(*v))
+                .collect(),
+        ),
     }
 }
 

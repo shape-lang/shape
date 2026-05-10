@@ -17,8 +17,8 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
-    TypedObjectStorage,
+    HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, PriorityQueueData,
+    TypedArrayData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -155,6 +155,14 @@ impl ValueSlot {
     /// sibling, full-`HeapValue` arm shape.
     pub fn from_hashset(h: Arc<HashSetData>) -> Self {
         Self(Arc::into_raw(h) as u64)
+    }
+
+    /// Store an `Arc<PriorityQueueData>` directly. Mirrors
+    /// `HeapValue::PriorityQueue(Arc<PriorityQueueData>)`. ADR-006
+    /// §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue) —
+    /// PriorityQueue is a HashSet sibling, full-`HeapValue` arm shape.
+    pub fn from_priority_queue(p: Arc<PriorityQueueData>) -> Self {
+        Self(Arc::into_raw(p) as u64)
     }
 
     /// Store an `Arc<DataTable>` directly. Mirrors

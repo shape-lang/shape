@@ -41,8 +41,9 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+    PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
+    TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -131,6 +132,9 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashset(h),
             NativeKind::Ptr(HeapKind::HashSet),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).
@@ -140,6 +144,19 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_raw(bits),
             NativeKind::Ptr(HeapKind::Iterator),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::PriorityQueue)`-kind slot. Mirror
+    /// of `from_hashset` per ADR-006 §2.7.18 / Q19 amendment (Wave 15
+    /// W15-priority-queue). PriorityQueue is a HashSet sibling — full
+    /// `HeapValue::PriorityQueue(Arc<PriorityQueueData>)` arm, not
+    /// pure-discriminator.
+    #[inline]
+    pub fn from_priority_queue(p: Arc<PriorityQueueData>) -> Self {
+        Self::new(
+            ValueSlot::from_priority_queue(p),
+            NativeKind::Ptr(HeapKind::PriorityQueue),
         )
     }
 
@@ -395,6 +412,14 @@ impl Drop for KindedSlot {
                     HeapKind::Iterator => {
                         Arc::decrement_strong_count(bits as *const IteratorState);
                     }
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                    // 2026-05-10): mirror of the HashSet arm. Retires
+                    // one `Arc<PriorityQueueData>` strong-count share —
+                    // PriorityQueue is a HashSet sibling per §2.7.18,
+                    // full-`HeapValue` arm.
+                    HeapKind::PriorityQueue => {
+                        Arc::decrement_strong_count(bits as *const PriorityQueueData);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -588,6 +613,14 @@ impl Clone for KindedSlot {
                     // §2.7.16's typed-Arc dispatch.
                     HeapKind::Iterator => {
                         Arc::increment_strong_count(bits as *const IteratorState);
+                    }
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                    // 2026-05-10): mirror of the HashSet arm. Bumps one
+                    // `Arc<PriorityQueueData>` strong-count share —
+                    // PriorityQueue is a HashSet sibling per §2.7.18,
+                    // full-`HeapValue` arm.
+                    HeapKind::PriorityQueue => {
+                        Arc::increment_strong_count(bits as *const PriorityQueueData);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).

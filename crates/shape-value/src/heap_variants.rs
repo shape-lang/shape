@@ -148,6 +148,20 @@ macro_rules! define_heap_types {
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
             Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // ADR-006 §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue,
+            // 2026-05-10): i64-priority min-heap carrier, structurally
+            // a mirror of the §2.7.15 HashSet shape with the keys
+            // buffer carrying i64 priorities instead of `Arc<String>`.
+            // Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            // / SharedCell): PriorityQueue values flow through
+            // `slot.as_heap_value()` for receiver classification at
+            // method dispatch (`pq.push(...)` / `pq.pop()` /
+            // `pq.peek()`). See `$crate::heap_value::PriorityQueueData`
+            // for the storage shape and §2.7.18 for the full
+            // justification + the rejected typed-payload alternative.
+            // Pre-assigned ordinal 25 per the wave-14-15-16 playbook
+            // (no bump needed at landing).
+            PriorityQueue, // 25  (Wave 15 W15-priority-queue, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -313,6 +327,26 @@ macro_rules! define_heap_types {
             /// cursor triple is opaque at the dispatch shell —
             /// terminals walk `arc.transforms` and dispatch per stage).
             Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+            // 2026-05-10) =====
+            /// Min-heap-backed PriorityQueue carrier. Mirror of
+            /// `HeapValue::HashSet(Arc<HashSetData>)` with the keys
+            /// buffer carrying i64 priorities instead of `Arc<String>`:
+            /// `Arc<TypedBuffer<i64>>` heap-ordered values (root = min).
+            /// See `$crate::heap_value::PriorityQueueData` for the
+            /// storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): PriorityQueue values flow through
+            /// `as_heap_value()` for method-receiver classification per
+            /// the §2.7.18 amendment.
+            ///
+            /// **i64-priority-only at landing** per the §2.7.18 Q19
+            /// ruling (typed-payload `PriorityQueue<T, K>` with
+            /// key-extractor is a future Phase-2c amendment with
+            /// measurement; the smoke target is exercised on this
+            /// shape).
+            PriorityQueue(std::sync::Arc<$crate::heap_value::PriorityQueueData>),
         }
 
         impl HeapValue {
@@ -342,6 +376,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                     HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
                 }
             }
 
@@ -378,6 +413,10 @@ macro_rules! define_heap_types {
                     // if its terminal evaluation will yield zero
                     // elements after filter / take 0 etc.).
                     HeapValue::Iterator(_) => true,
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                    // 2026-05-10): empty PQ is falsy, non-empty is
+                    // truthy — mirror of the HashSet / HashMap shape.
+                    HeapValue::PriorityQueue(d) => !d.is_empty(),
                 }
             }
 
@@ -413,6 +452,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                     HeapValue::Iterator(_) => "iterator",
+                    HeapValue::PriorityQueue(_) => "priority_queue",
                 }
             }
         }

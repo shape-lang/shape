@@ -452,6 +452,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<IteratorState>` lazy-iterator carriers emitted by the
         // iterator-method PHF.
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+        // 2026-05-10): `Arc<PriorityQueueData>` min-heap carriers
+        // emitted by the `PriorityQueueCtor` ctor.
+        NativeKind::Ptr(HeapKind::PriorityQueue) => "priority_queue",
     }
 }
 

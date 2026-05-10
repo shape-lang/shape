@@ -559,6 +559,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::HashSet) => "set",
         // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10).
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10).
+        NativeKind::Ptr(HeapKind::PriorityQueue) => "priority_queue",
     }
 }
 
