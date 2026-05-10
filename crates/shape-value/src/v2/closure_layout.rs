@@ -39,13 +39,8 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
-    ChannelData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
+    ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
+    NativeViewData, PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
     TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
@@ -387,6 +382,7 @@ impl Drop for SharedCell {
                     // drop. Deque is a HashSet sibling per §2.7.19.
                     HeapKind::Deque => {
                         Arc::decrement_strong_count(bits as *const DequeData);
+                    }
                     // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                     // 2026-05-10): mirror of the HashSet arm. A
                     // `SharedCell` whose single-slot payload is a

@@ -969,6 +969,11 @@ impl DequeData {
 }
 
 impl Default for DequeData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Channel storage (Wave 15 W15-channel, ADR-006 §2.7.20 / Q21,
 // 2026-05-10) ──────────────────────────────────────────────────────────────
 
@@ -1095,6 +1100,11 @@ impl ChannelData {
 }
 
 impl Default for ChannelData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── PriorityQueue storage (Wave 15 W15-priority-queue, 2026-05-10) ──────────
 
 /// PriorityQueue storage — i64-priority min-heap.
@@ -1214,6 +1224,10 @@ impl Clone for DequeData {
         // (the per-element `Arc<HeapValue>` already provides the share).
         Self {
             items: self.items.iter().map(Arc::clone).collect(),
+        }
+    }
+}
+
 impl Clone for PriorityQueueData {
     fn clone(&self) -> Self {
         Self {
@@ -2330,6 +2344,7 @@ impl fmt::Display for HeapValue {
                 let len = c.len();
                 let state = if c.is_closed() { "closed" } else { "open" };
                 write!(f, "<channel:{}:{}>", state, len)
+            }
             // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
             // 2026-05-10): one-keyspace mirror of HashSet's Display
             // shape — bracketed comma-separated values in heap-array
@@ -3060,6 +3075,9 @@ mod deque_mutation {
         assert!(matches!(d.get(0).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "a"));
         assert!(matches!(d.get(1).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "b"));
         assert!(matches!(d.get(2).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "c"));
+    }
+}
+
 mod priority_queue_mutation {
     //! W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10): pin the
     //! `push` / `pop` / `peek` / heap-invariant API contracts on
@@ -3138,6 +3156,9 @@ mod priority_queue_mutation {
         assert_eq!(a.len(), 2);
         // Snapshot retains the pre-mutation length.
         assert_eq!(snapshot.len(), 1);
+    }
+}
+
 mod channel_storage {
     //! W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10): pin the
     //! `send` / `try_recv` / `close` / `is_closed` / `len` / `is_empty`

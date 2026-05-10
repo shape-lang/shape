@@ -28,12 +28,9 @@ use super::super::*;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-        ChannelData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-        TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
-        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-        PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
-        TypedObjectStorage,
+        ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
+        NativeViewData, PriorityQueueData, TableViewData, TaskGroupData, TemporalData,
+        TypedArrayData, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -98,6 +95,7 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // arm.
                 HeapKind::Deque => {
                     Arc::increment_strong_count(bits as *const DequeData);
+                }
                 // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                 // 2026-05-10): mirror of the HashSet arm. Slot bits are
                 // `Arc::into_raw(Arc<ChannelData>) as u64` with kind
@@ -325,6 +323,7 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // one `Arc<DequeData>` strong-count share.
                 HeapKind::Deque => {
                     Arc::decrement_strong_count(bits as *const DequeData);
+                }
                 // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                 // 2026-05-10): mirror of the HashSet arm above. Retires
                 // one `Arc<ChannelData>` strong-count share. At

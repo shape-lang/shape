@@ -41,11 +41,8 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    ChannelData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
-    PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
+    ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
+    NativeViewData, PriorityQueueData, TableViewData, TaskGroupData, TemporalData, TypedArrayData,
     TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
@@ -381,6 +378,7 @@ impl Drop for KindedSlot {
                     // one `Arc<DequeData>` strong-count share.
                     HeapKind::Deque => {
                         Arc::decrement_strong_count(bits as *const DequeData);
+                    }
                     // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                     // 2026-05-10): mirror of the HashSet arm. Slot bits
                     // are `Arc::into_raw(Arc<ChannelData>) as u64`.
@@ -606,6 +604,7 @@ impl Clone for KindedSlot {
                     // one `Arc<DequeData>` strong-count share.
                     HeapKind::Deque => {
                         Arc::increment_strong_count(bits as *const DequeData);
+                    }
                     // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                     // 2026-05-10): mirror of the HashSet arm above. Bumps
                     // one `Arc<ChannelData>` strong-count share — the

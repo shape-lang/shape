@@ -17,11 +17,8 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
-    ChannelData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
-    TypedObjectStorage,
-    HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, PriorityQueueData,
-    TypedArrayData, TypedObjectStorage,
+    ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData,
+    PriorityQueueData, TypedArrayData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -166,6 +163,8 @@ impl ValueSlot {
     /// full-`HeapValue` arm shape.
     pub fn from_deque(d: Arc<DequeData>) -> Self {
         Self(Arc::into_raw(d) as u64)
+    }
+
     /// Store an `Arc<ChannelData>` directly. Mirrors
     /// `HeapValue::Channel(Arc<ChannelData>)`. ADR-006 §2.7.20 / Q21
     /// amendment (Wave 15 W15-channel-rebuild). Channel is a
@@ -174,6 +173,8 @@ impl ValueSlot {
     /// same channel observe each other's `send` / `recv`.
     pub fn from_channel(c: Arc<ChannelData>) -> Self {
         Self(Arc::into_raw(c) as u64)
+    }
+
     /// Store an `Arc<PriorityQueueData>` directly. Mirrors
     /// `HeapValue::PriorityQueue(Arc<PriorityQueueData>)`. ADR-006
     /// §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue) —

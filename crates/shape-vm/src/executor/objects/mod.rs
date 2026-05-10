@@ -565,14 +565,15 @@ impl VirtualMachine {
                 HeapKind::TableView => method_registry::DATATABLE_METHODS
                     .get(method_name)
                     .copied(),
-                // `HeapKind::Channel` does not exist yet — W15-channel
-                // (playbook §2 row) lands the `HeapKind::Channel = 27`
-                // ordinal + `HeapValue::Channel(Arc<ChannelData>)` arm
-                // alongside the `CHANNEL_METHODS` registry. Until that
-                // wave merges, channel receivers cannot be pushed onto
-                // the kinded stack — there is no `NativeKind::Ptr(
-                // HeapKind::Channel)` to classify here.
-                //
+                // Wave 15 W15-deque / W15-channel / W15-priority-queue
+                // closes (ADR-006 §2.7.19/Q20, §2.7.20/Q21, §2.7.18/Q19)
+                // — the new HeapKind ordinals 23/24/25 with their
+                // `*_METHODS` registries.
+                HeapKind::Deque => method_registry::DEQUE_METHODS.get(method_name).copied(),
+                HeapKind::Channel => method_registry::CHANNEL_METHODS.get(method_name).copied(),
+                HeapKind::PriorityQueue => method_registry::PRIORITY_QUEUE_METHODS
+                    .get(method_name)
+                    .copied(),
                 // ADR-006 §2.7.10 explicitly excludes the closure /
                 // future / reference / shared-cell / filter-expr
                 // discriminators from method-call dispatch — these are

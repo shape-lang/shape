@@ -577,19 +577,6 @@ impl VirtualMachine {
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::PriorityQueueCtor => {
-                    // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
-                    // rebuild required. PriorityQueue lost its HeapKind
-                    // / HeapValue arms in the strict-typing Phase-2 pass;
-                    // it is the W15-priority-queue sub-cluster's
-                    // territory per the W14-15-16 playbook §2.
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(format!(
-                        "{:?} — SURFACE: Stage C HeapKind family rebuild \
-                         required. PriorityQueue has no HeapKind variant \
-                         after the strict-typing Phase-2 deletion. Tracked \
-                         as W15-priority-queue per the W14-15-16 playbook \
-                         §2. ADR-006 §2.7.4.",
-                BuiltinFunction::PriorityQueueCtor => {
                     // Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
                     // Q19, 2026-05-10): empty PriorityQueue ctor —
                     // discard any args (the surface form

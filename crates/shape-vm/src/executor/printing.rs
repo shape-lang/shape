@@ -387,6 +387,7 @@ impl<'a> ValueFormatter<'a> {
                 let deque: &shape_value::heap_value::DequeData =
                     unsafe { &*(bits as *const shape_value::heap_value::DequeData) };
                 self.format_deque(deque, depth)
+            }
             HeapKind::Channel => {
                 // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
                 // 2026-05-10): channels are concurrency primitives
@@ -400,6 +401,7 @@ impl<'a> ValueFormatter<'a> {
                     unsafe { &*(bits as *const shape_value::heap_value::ChannelData) };
                 let state = if ch.is_closed() { "closed" } else { "open" };
                 format!("<channel:{}:{}>", state, ch.len())
+            }
             HeapKind::PriorityQueue => {
                 // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
                 // 2026-05-10): PriorityQueueData stores i64
