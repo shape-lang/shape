@@ -28,13 +28,15 @@
 //! ## `distinctBy` — closure-discriminator path
 //!
 //! `distinctBy(arr, keyFn)` calls `keyFn(elem)` per element and deduplicates
-//! by the resulting key. The closure callback path
-//! (`executor/call_convention.rs::call_value_immediate_*` and
-//! `executor/control_flow/mod.rs::op_call_value`) is itself
-//! `NotImplemented(SURFACE)` post-§2.7.10 (the kinded callee dispatch +
-//! `&[KindedSlot]` arg slice on the runtime side has not landed in
-//! Wave-γ); without it the handler cannot invoke the user's closure.
-//! Surface per playbook §7.4 REVISED.
+//! by the resulting key. The kinded value-call path
+//! (`call_value_immediate_nb` in `call_convention.rs:767`,
+//! `dispatch_call_value_immediate` in `control_flow/mod.rs:389`) is live
+//! post-W7 (ADR-006 §2.7.11 / Q12). The upstream gate is `op_make_closure`
+//! in `control_flow/mod.rs:447`, still
+//! `NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE)` pending the kinded
+//! capture-read + closure-block construction rebuild (ADR-006 §2.7.4 /
+//! §2.7.5 / §2.7.8). Without it no user closure `KindedSlot` carrier
+//! reaches `args[1]`. Surface per playbook §7.4 REVISED.
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
@@ -517,14 +519,16 @@ pub(crate) fn handle_distinct_v2(
 ///
 /// args: [array, key_fn]
 ///
-/// **SURFACE — Wave-δ closure-callback dependency.** Per playbook §7.4
-/// REVISED, the kinded closure-callback path
-/// (`call_value_immediate_*` / `op_call_value` in
-/// `executor/control_flow/mod.rs` and `executor/call_convention.rs`) is
-/// itself an unmigrated `NotImplemented(SURFACE)` post-§2.7.10: the
-/// kinded-callee dispatch + `&[KindedSlot]` arg-slice on the runtime side
-/// is Phase-2c rebuild territory. Without it, the handler cannot invoke
-/// the user's `key_fn`. The body shape would otherwise mirror
+/// **SURFACE — `op_make_closure` upstream gate.** Per playbook §7.4
+/// REVISED, the kinded value-call path (`call_value_immediate_nb` in
+/// `call_convention.rs:767`, `dispatch_call_value_immediate` in
+/// `control_flow/mod.rs:389`) is live post-W7 (ADR-006 §2.7.11 / Q12).
+/// The upstream gate is `op_make_closure` in
+/// `control_flow/mod.rs:447`, still
+/// `NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE)` pending the kinded
+/// capture-read + closure-block construction rebuild (ADR-006 §2.7.4 /
+/// §2.7.5 / §2.7.8). Without it, no user `key_fn` `KindedSlot` carrier
+/// reaches `args[1]`. The body shape would otherwise mirror
 /// `handle_unique_v2` with a per-element `key_fn(elem)` callback driving
 /// a stable dedup over computed keys.
 pub(crate) fn handle_distinct_by_v2(
@@ -533,14 +537,17 @@ pub(crate) fn handle_distinct_by_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(
-        "distinctBy — SURFACE: closure-callback path unmigrated. \
-         The kinded MethodFnV2 ABI landed (ADR-006 §2.7.10 / Q11), but \
-         `call_value_immediate_*` / `op_call_value` (executor/call_convention.rs, \
-         executor/control_flow/mod.rs) still return NotImplemented(SURFACE) \
-         pending the kinded callee dispatch + `&[KindedSlot]` arg-slice rebuild \
-         per ADR-006 §2.7.4 / §2.7.8. Body shape would mirror handle_unique_v2 \
-         with a per-element `key_fn(elem)` callback driving a stable dedup over \
-         computed keys."
+        "distinctBy — SURFACE: op_make_closure upstream gate. \
+         The kinded MethodFnV2 ABI landed (ADR-006 §2.7.10 / Q11), \
+         and the kinded value-call path `call_value_immediate_nb` / \
+         `dispatch_call_value_immediate` is live post-W7 (ADR-006 \
+         §2.7.11 / Q12). The upstream gate is `op_make_closure` in \
+         executor/control_flow/mod.rs:447, still \
+         NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE) per ADR-006 \
+         §2.7.4 / §2.7.5 / §2.7.8 — without it no user closure \
+         KindedSlot reaches args[1]. Body shape would mirror \
+         handle_unique_v2 with a per-element `key_fn(elem)` callback \
+         driving a stable dedup over computed keys."
             .to_string(),
     ))
 }
