@@ -1,39 +1,71 @@
 //! ARC reference counting FFI for JIT-compiled code.
 //!
-//! When JIT code operates on heap-allocated values (String, Array, HashMap, etc.),
-//! it needs to increment/decrement reference counts at ownership boundaries.
-//! These functions provide the FFI entry points for that.
+//! ## Status: SURFACE (ADR-006 §2.7.4 / W10 jit-playbook §5)
 //!
-//! The implementation uses ValueWord's Clone/Drop to manage refcounts correctly.
-
-/// Increment the reference count of a NaN-boxed heap value.
-///
-/// For inline values (int, number, bool, none), this is a no-op (Clone is free).
-/// For heap values, Clone increments the Arc refcount.
-///
-/// Returns the same bits (pass-through for convenience in JIT call sequences).
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_arc_retain(bits: u64) -> u64 {
-    // FR.6: `ValueWord = u64` is Copy — `vw.clone()` is a bit copy, not
-    // a refcount bump, and `std::mem::forget` on a Copy u64 is a no-op.
-    // Call the real retain helper which bumps the Arc/unified refcount
-    // for heap-tagged bits (no-op for scalars). Returns the same bits
-    // for non-owned heap values; returns a new bit pattern for owned
-    // Box-backed values (deep-cloned). JIT callers must use the
-    // returned value — historically always a pass-through, still
-    // correct for the Arc-backed hot path.
-    shape_value::value_word_drop::vw_clone(bits)
-}
-
-/// Decrement the reference count of a NaN-boxed heap value and free if last reference.
-///
-/// For inline values (int, number, bool, none), this is a no-op (Drop is free).
-/// For heap values, Drop decrements the Arc refcount and frees if zero.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_arc_release(bits: u64) {
-    // FR.6: `ValueWord = u64` is Copy — the prior `let _vw = transmute(...)`
-    // Drop was a silent no-op (refcount never decremented). Call the
-    // real release helper, which decrements Arc/unified refcount for
-    // heap-tagged bits and is a no-op for scalars.
-    shape_value::value_word_drop::vw_drop(bits);
-}
+//! The pre-strict-typing entry points were:
+//!
+//! ```ignore
+//! pub extern "C" fn jit_arc_retain(bits: u64) -> u64
+//! pub extern "C" fn jit_arc_release(bits: u64)
+//! ```
+//!
+//! Both delegated to the deleted `shape_value::value_word_drop`
+//! `vw_clone` / `vw_drop` kind-blind W-series helpers that decoded
+//! `tag_bits` from the raw `u64` to recover a kind for Arc
+//! retain/release dispatch. CLAUDE.md "Forbidden Patterns" lists
+//! this exact shape under the deleted runtime tag-bit dispatch entry.
+//! The W-series defection-attractor family forbids any
+//! "decode/tag/dispatch helper/bridge/probe" framing these helpers
+//! would need to come back under.
+//!
+//! ## Strict-typing rebuild target
+//!
+//! Per ADR-006 §2.7.5, the JIT-FFI boundary carries `(u64 bits,
+//! NativeKind kind)` with `kind` stamped at JIT compile time from the
+//! call signature. The kind-aware retain/release entry points have to
+//! take the kind as a stable-FFI companion (e.g. a `u32` packed
+//! discriminator the JIT codegen and the FFI shim agree on) and
+//! dispatch on it via the canonical kind-aware retain/release —
+//! `shape_value::KindedSlot::clone()` / `Drop` (which mirror
+//! `shape-vm/src/executor/vm_impl/stack.rs::clone_with_kind` /
+//! `drop_with_kind`).
+//!
+//! ## Why this is W11 / deeper Phase-2c, not a W10 mechanical fix
+//!
+//! 1. **Stable-FFI kind encoding is not yet defined**: `NativeKind`
+//!    is not `#[repr(C)]` and there is no canonical `u8`/`u32`
+//!    packed-discriminator encoding for the JIT-FFI boundary. Picking
+//!    one is an architectural decision — the same choice the W10
+//!    Band 1 close-out flagged as the §2.7.5 "stamped at JIT compile
+//!    time from the call signature" surface.
+//!
+//! 2. **Caller-side codegen change**: every Cranelift `call` site that
+//!    emits `arc_retain(val)` / `arc_release(val)` (the principal
+//!    user is `mir_compiler/rvalues.rs::Rvalue::Clone` and the
+//!    matching `Rvalue::Drop` lowering) has to start emitting a
+//!    second i32/i64 argument carrying the kind. That work lives in
+//!    W10-mir-compiler's territory and is the upstream blocker for
+//!    this module's body.
+//!
+//! 3. **`KindedSlot::clone()` is the right body, but the caller
+//!    contract does not yet supply `kind`**: writing the body now
+//!    would need either a Bool-default kind (CLAUDE.md "Forbidden
+//!    rationalizations") or a `tag_bits`-decode (CLAUDE.md "Forbidden
+//!    Patterns"), so the body has to wait for the kind to flow in.
+//!
+//! Until those land, the public entry points are removed: every JIT
+//! call site that referenced `jit_arc_retain` / `jit_arc_release`
+//! now fails to link with a clear "unresolved symbol" error pointing
+//! back to this module — the deletion-fate signal the playbook §5
+//! calls for.
+//!
+//! ## Forbidden under any rebuild
+//!
+//! - Bool-default for unknown kind at the FFI boundary (W10 jit-
+//!   playbook §3 / §5 surface-and-stop, CLAUDE.md "Bool-default
+//!   fallback").
+//! - `tag_bits` decode in the body to recover a kind from `bits`
+//!   (CLAUDE.md "Forbidden Patterns" / "tag_bits restoration").
+//! - Any "ARC bridge" / "retain helper" / "kind-injection adapter"
+//!   framing for the kind-supplying shim (CLAUDE.md "Renames to
+//!   refuse on sight" — broader family rule).

@@ -6,10 +6,10 @@
 
 pub mod typed_map;
 
-pub use typed_map::{
-    jit_v2_map_get_str_f64, jit_v2_map_get_str_i64, jit_v2_map_has_str, jit_v2_map_len,
-    jit_v2_map_set_str_i64,
-};
+// jit_v2_map_* re-exports removed — see typed_map.rs SURFACE comment.
+// The kind-blind ValueWord-shape map FFI is gone; the strict-typing
+// rebuild routes through `Arc<HashMapData>` + `KindedSlot` per ADR-006
+// §2.7.5 / §2.7.6 / Q8.
 
 use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::typed_array::TypedArray;
@@ -408,7 +408,6 @@ unsafe fn load_f64x4(data: *const f64, base: usize) -> wide::f64x4 {
 /// `data` must point to at least `len` valid `f64` values.
 #[inline]
 unsafe fn contains_nan_f64(data: *const f64, len: usize) -> bool {
-    use wide::f64x4;
     if len < SIMD_SUM_THRESHOLD {
         for i in 0..len {
             if unsafe { *data.add(i) }.is_nan() {
@@ -438,7 +437,6 @@ unsafe fn contains_nan_f64(data: *const f64, len: usize) -> bool {
 
 #[inline]
 unsafe fn simd_min_f64_inner(data: *const f64, len: usize) -> f64 {
-    use wide::f64x4;
     // Hardware `min_pd` does NOT reliably propagate NaN (it returns the
     // non-NaN operand in whichever slot based on the comparison order).
     // Do a cheap SIMD NaN scan first — if present, short-circuit to NaN
@@ -480,7 +478,6 @@ unsafe fn simd_min_f64_inner(data: *const f64, len: usize) -> f64 {
 
 #[inline]
 unsafe fn simd_max_f64_inner(data: *const f64, len: usize) -> f64 {
-    use wide::f64x4;
     if unsafe { contains_nan_f64(data, len) } {
         return f64::NAN;
     }

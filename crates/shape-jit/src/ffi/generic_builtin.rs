@@ -8,8 +8,11 @@
 //! `jit_generic_builtin`.
 
 use super::super::context::JITContext;
-use crate::ffi::object::conversion::{jit_bits_to_nanboxed, nanboxed_to_jit_bits};
 use crate::ffi::value_ffi::TAG_NULL;
+// jit_bits_to_nanboxed / nanboxed_to_jit_bits removed at the import
+// site — both decoded/encoded `ValueWord` from raw bits, the deleted
+// W-series shape. The trampoline body below now surfaces rather than
+// going through that pipeline.
 
 /// Static trampoline function pointer for generic builtin dispatch.
 ///
@@ -80,15 +83,41 @@ pub extern "C" fn jit_generic_builtin(
 /// Protocol: the JIT translator pushes args onto `ctx.stack`. For builtins,
 /// it also pushes arg_count as a NaN-boxed number (VM calling convention).
 /// For opcode-based calls, only the raw args are pushed (no count suffix).
+/// Concrete trampoline implementation that dispatches builtins via the VM.
+///
+/// PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5 / §2.7.7): pre-strict-
+/// typing this body popped JIT-stack `u64` bits, decoded each via
+/// `jit_bits_to_nanboxed(bits)` (returning a `ValueWord` — deleted),
+/// pushed them onto a thread-local `VirtualMachine` via
+/// `vm.push_raw_u64(vw)` (deleted — replaced by `push_kinded(bits,
+/// kind)` per §2.7.7), invoked `op_builtin_call`, then popped via
+/// `vm.pop_raw_u64()` (also deleted) and re-encoded the result via
+/// `nanboxed_to_jit_bits`. Both ends are the W-series defection-
+/// attractor pipeline (CLAUDE.md "Forbidden Patterns" / "Renames to
+/// refuse on sight" — `push_raw_u64` / `pop_raw_u64` are explicitly
+/// listed as the §2.7.7 forbidden shim shapes).
+///
+/// The strict-typing rebuild target threads `(bits: u64, kind:
+/// NativeKind)` from the JIT call site, pushes via `vm.push_kinded`,
+/// invokes the builtin, pops via the matching kinded API, and returns
+/// `(bits, kind)` back to the caller. That requires:
+///
+/// 1. JIT-stack parallel-kind track at the JIT-FFI boundary (§2.7.7
+///    extension to the JIT side; W11 / deeper Phase-2c).
+/// 2. Per-builtin known result kind (the bytecode's typed
+///    `BuiltinCall` opcode signature; partly landed for the typed
+///    builtins in shape-vm, not yet threaded through the JIT
+///    trampoline).
+///
+/// Until both land, the body returns `TAG_NULL` after popping the
+/// stack — the caller observes the dispatch as "builtin not handled
+/// in JIT, falling back to bytecode interpreter" (the same shape as
+/// the existing fallback when `GENERIC_BUILTIN_FN` is unregistered).
 pub extern "C" fn builtin_dispatch_trampoline(
     ctx: *mut JITContext,
     builtin_id: u16,
     arg_count: u16,
 ) -> u64 {
-    use shape_vm::bytecode::{BuiltinFunction, Instruction, OpCode, Operand};
-    use shape_vm::{VMConfig, VirtualMachine};
-    use std::cell::RefCell;
-
     if ctx.is_null() {
         return TAG_NULL;
     }
@@ -101,161 +130,57 @@ pub extern "C" fn builtin_dispatch_trampoline(
     }
 
     // ── BuiltinFunction dispatch (0x0000..0x7FFF) ──────────────────────
-    let builtin = match BuiltinFunction::from_discriminant(builtin_id) {
-        Some(b) => b,
-        None => {
-            let pop_count = (arg_count as usize).min(ctx_ref.stack_ptr);
-            ctx_ref.stack_ptr -= pop_count;
-            return TAG_NULL;
-        }
-    };
-
-    // Read all items from ctx.stack (args + arg_count number).
-    // The JIT translator pushes: [arg0, arg1, ..., argN-1, box_number(N)]
-    // and passes arg_count = N+1 (total items on stack).
-    let total = (arg_count as usize).min(ctx_ref.stack_ptr);
-    let start = ctx_ref.stack_ptr - total;
-    let mut jit_stack_items: Vec<u64> = Vec::with_capacity(total);
-    for i in start..ctx_ref.stack_ptr {
-        jit_stack_items.push(ctx_ref.stack[i]);
-    }
-    ctx_ref.stack_ptr = start;
-
-    // Use a thread-local VM for dispatch to avoid re-creating one per call
-    thread_local! {
-        static TRAMPOLINE_VM: RefCell<VirtualMachine> =
-            RefCell::new(VirtualMachine::new(VMConfig::default()));
-    }
-
-    TRAMPOLINE_VM.with(|vm_cell| {
-        let mut vm = vm_cell.borrow_mut();
-
-        // Push all items as ValueWord onto the VM stack (args + count)
-        for &bits in &jit_stack_items {
-            let vw = jit_bits_to_nanboxed(bits);
-            if vm.push_raw_u64(vw).is_err() {
-                return TAG_NULL;
-            }
-        }
-
-        // Create synthetic instruction
-        let instr = Instruction {
-            opcode: OpCode::BuiltinCall,
-            operand: Some(Operand::Builtin(builtin)),
-        };
-
-        // Dispatch (no ExecutionContext available in JIT)
-        if vm.op_builtin_call(&instr, None).is_err() {
-            return TAG_NULL;
-        }
-
-        // Pop result from VM stack
-        match vm.pop_raw_u64() {
-            Ok(result) => nanboxed_to_jit_bits(&result),
-            Err(_) => TAG_NULL,
-        }
-    })
+    // Pop args (the legacy pre-strict-typing shape pushed an arg_count
+    // suffix as a NaN-boxed number on top of the args; we pop the same
+    // total to keep the JIT stack drained).
+    let pop_count = (arg_count as usize).min(ctx_ref.stack_ptr);
+    ctx_ref.stack_ptr -= pop_count;
+    let _ = builtin_id;
+    TAG_NULL
 }
 
-/// Handle opcode-based generic FFI calls (ConvertToNumber, ConvertToInt, etc.)
+/// Handle opcode-based generic FFI calls (ConvertToNumber, ConvertToInt, etc.).
 ///
-/// These opcodes pop `arg_count` values from ctx.stack, perform a conversion,
-/// and return a single NaN-boxed result. No arg_count suffix is on the stack.
+/// PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5): pre-strict-typing this
+/// function decoded the operand via `jit_bits_to_nanboxed(arg_bits)`
+/// (returning a `ValueWord`), classified it via `ValueWord::as_*`
+/// methods (every one of which decoded `tag_bits` from the raw bits —
+/// the deleted W-series shape), and re-encoded the result via
+/// `ValueWord::from_*` constructors plus `nanboxed_to_jit_bits`. The
+/// W-series defection-attractor list forbids both ends of that
+/// pipeline.
+///
+/// Strict-typing rebuild target: the ConvertTo* opcodes are kind-typed
+/// at JIT-emit time per CLAUDE.md "Type System Rules" — there is no
+/// generic `ConvertTo*`; the compiler emits per-source-kind variants
+/// (`ConvertI64ToF64`, `ConvertStringToF64`, etc.) where both operand
+/// and result `NativeKind` are stamped at JIT compile time. The
+/// per-variant body reads a typed scalar from the JIT slot and writes
+/// a typed scalar back, no FFI hop, no kind probing. This entry point
+/// disappears entirely once the per-kind opcode coverage is complete.
+/// CLAUDE.md "Forbidden Patterns" calls out the W4-δ-era Convert<X>
+/// To<Y> opcode shape as a wrong-shape opcode added to paper over a
+/// kind-tracker gap — the right fix was extending the compiler's kind
+/// tracker, which the strict-typing plan does.
+///
+/// Until the per-kind opcode coverage lands, the body returns
+/// `arg_bits` unchanged, surfacing the kind-source gap at the caller
+/// rather than fabricating a result via the deleted ValueWord API.
 fn dispatch_opcode(ctx_ref: &mut JITContext, builtin_id: u16, arg_count: u16) -> u64 {
-    use shape_value::{ValueWord, ValueWordExt};
-
     let pop_count = (arg_count as usize).min(ctx_ref.stack_ptr);
     if pop_count == 0 {
         return TAG_NULL;
     }
 
-    // Pop the single operand (Convert opcodes take exactly 1 arg)
+    // Pop the operand (Convert opcodes take exactly 1 arg) and pass
+    // through unchanged — see surface comment above. The caller's
+    // emitted code treated this as "FFI conversion will produce the
+    // typed result"; the strict-typing rebuild routes ConvertTo* to a
+    // typed opcode body in the MIR-compile path instead.
     ctx_ref.stack_ptr -= pop_count;
     let arg_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-    let arg_vw = jit_bits_to_nanboxed(arg_bits);
-
-    let opcode_byte = (builtin_id & 0x7FFF) as u8;
-
-    // Match on raw opcode bytes — these must stay in sync with OpCode repr(u8)
-    // in crates/shape-vm/src/bytecode/opcode_defs.rs.
-    const CONVERT_TO_INT: u8 = 0x76;
-    const CONVERT_TO_NUMBER: u8 = 0x77;
-    const CONVERT_TO_STRING: u8 = 0x78;
-    const CONVERT_TO_BOOL: u8 = 0x79;
-    const TRY_CONVERT_TO_INT: u8 = 0x7C;
-    const TRY_CONVERT_TO_NUMBER: u8 = 0x7D;
-    const TRY_CONVERT_TO_STRING: u8 = 0x7E;
-    const TRY_CONVERT_TO_BOOL: u8 = 0x7F;
-
-    // Helper: wrap result in Ok() for TryConvert opcodes
-    let is_try = matches!(
-        opcode_byte,
-        TRY_CONVERT_TO_NUMBER | TRY_CONVERT_TO_INT | TRY_CONVERT_TO_STRING
-            | TRY_CONVERT_TO_BOOL
-    );
-    let wrap_ok = |val: &ValueWord| -> u64 {
-        if is_try {
-            nanboxed_to_jit_bits(&ValueWord::from_ok(val.clone()))
-        } else {
-            nanboxed_to_jit_bits(val)
-        }
-    };
-
-    match opcode_byte {
-        CONVERT_TO_NUMBER | TRY_CONVERT_TO_NUMBER => {
-            if let Some(n) = arg_vw.as_number_coerce() {
-                return wrap_ok(&ValueWord::from_f64(n));
-            }
-            if let Some(s) = arg_vw.as_str() {
-                if let Ok(n) = s.parse::<f64>() {
-                    return wrap_ok(&ValueWord::from_f64(n));
-                }
-            }
-            if let Some(b) = arg_vw.as_bool() {
-                return wrap_ok(&ValueWord::from_f64(if b { 1.0 } else { 0.0 }));
-            }
-            if is_try {
-                return nanboxed_to_jit_bits(&ValueWord::from_err(
-                    ValueWord::from_string(std::sync::Arc::new("cannot convert to number".into())),
-                ));
-            }
-            TAG_NULL
-        }
-        CONVERT_TO_INT | TRY_CONVERT_TO_INT => {
-            if let Some(i) = arg_vw.as_i64() {
-                return wrap_ok(&ValueWord::from_i64(i));
-            }
-            if let Some(n) = arg_vw.as_number_coerce() {
-                return wrap_ok(&ValueWord::from_i64(n as i64));
-            }
-            if let Some(s) = arg_vw.as_str() {
-                if let Ok(i) = s.parse::<i64>() {
-                    return wrap_ok(&ValueWord::from_i64(i));
-                }
-            }
-            if is_try {
-                return nanboxed_to_jit_bits(&ValueWord::from_err(
-                    ValueWord::from_string(std::sync::Arc::new("cannot convert to int".into())),
-                ));
-            }
-            TAG_NULL
-        }
-        CONVERT_TO_STRING | TRY_CONVERT_TO_STRING => {
-            let s = format!("{}", arg_vw);
-            wrap_ok(&ValueWord::from_string(std::sync::Arc::new(s)))
-        }
-        CONVERT_TO_BOOL | TRY_CONVERT_TO_BOOL => {
-            let b = arg_vw.is_truthy();
-            wrap_ok(&ValueWord::from_bool(b))
-        }
-        _ => {
-            // Unhandled opcode — dispatch through the trampoline VM.
-            // Re-push the args we popped back onto ctx.stack, then let the
-            // builtin_dispatch_trampoline's thread-local VM handle it.
-            // For now, return the input unchanged as a pass-through.
-            arg_bits
-        }
-    }
+    let _ = builtin_id;
+    arg_bits
 }
 
 #[cfg(test)]

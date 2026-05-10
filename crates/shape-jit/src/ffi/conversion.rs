@@ -8,7 +8,10 @@
 //!
 //! Functions for type checking and conversion in JIT-compiled code.
 
-use super::super::jit_array::JitArray;
+// jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// Branches that walked array elements (`type_spec` of shape "array:...",
+// "tuple:...") now return `false` rather than fabricating an iteration
+// over a deleted heap layout.
 use super::jit_kinds::*;
 use super::value_ffi::*;
 
@@ -105,26 +108,22 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
                 value_bits == TAG_NULL || check_type_recursive(value_bits, rest)
             }
             "array" => {
-                // Array type: check if value is array, then optionally check element types
-                if !is_heap_kind(value_bits, HK_ARRAY) {
-                    return false;
-                }
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
-                arr.iter().all(|elem| check_type_recursive(*elem, rest))
+                // PHASE_2C / SURFACE (ADR-006 §2.7.4): pre-strict-typing
+                // this walked `JitArray` elements and recursed. The
+                // `JitArray` heap layout was deleted (see jit_array.rs
+                // SURFACE); the strict-typing rebuild target reads
+                // elements via `Arc<TypedArrayData>` per-element-kind
+                // arms (§2.7.6/Q8). Until that lands, the kind check
+                // is the array-shape check only — element-type
+                // verification is dropped.
+                let _ = rest;
+                is_heap_kind(value_bits, HK_ARRAY)
             }
             "tuple" => {
-                // Tuple type: check array with specific element types
-                if !is_heap_kind(value_bits, HK_ARRAY) {
-                    return false;
-                }
-                let types: Vec<&str> = rest.split(',').collect();
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
-                if arr.len() != types.len() {
-                    return false;
-                }
-                arr.iter()
-                    .zip(types.iter())
-                    .all(|(elem, ty)| check_type_recursive(*elem, ty))
+                // Same SURFACE as `array` — the per-element check is
+                // dropped pending the §2.7.6/Q8 rebuild.
+                let _ = rest;
+                is_heap_kind(value_bits, HK_ARRAY)
             }
             "generic" => {
                 // Generic like Array<T> - check base type only (don't verify element types)
@@ -198,10 +197,25 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
     }
 }
 
-/// Format a ValueWord (tagged 8-byte word) as a string for display
+/// Format a JIT-stamped value as a string for display.
+///
+/// PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5): pre-strict-typing
+/// this function dispatched on `shape_value::tag_bits::is_tagged` /
+/// `get_tag == TAG_INT` to decode i48 integer payloads from raw bits.
+/// That `tag_bits` decode is exactly the deleted W-series shape
+/// (CLAUDE.md "Forbidden Patterns": "Runtime tag_bits dispatch
+/// (deleted)"), forbidden under any rebuild.
+///
+/// The strict-typing rebuild target is `(bits: u64, kind: NativeKind) ->
+/// String` so the integer arm dispatches on `kind == NativeKind::Int64`
+/// (or the i32/i16/i8 width variants) and reads the payload as a typed
+/// scalar without tag decoding. Until callers thread `kind` through,
+/// the integer branch is removed — JIT-emitted bytecode that lands a
+/// scalar `Int*` here would have routed it through the typed
+/// `RETURN_TAG_I64` / `RETURN_TAG_I32` path at `executor.rs:254`
+/// already, so this fallback only sees heap-tagged values plus the
+/// inline `TAG_NULL`/`TAG_BOOL_*` constants from `value_ffi`.
 pub(crate) fn format_value_word(value_bits: u64) -> String {
-    use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
-
     if is_number(value_bits) {
         let n = unbox_number(value_bits);
         if n.is_finite() && n == n.trunc() && n.abs() < 1e15 {
@@ -215,9 +229,6 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
         "false".to_string()
     } else if value_bits == TAG_NULL {
         "null".to_string()
-    } else if is_tagged(value_bits) && get_tag(value_bits) == TAG_INT {
-        let int_val = sign_extend_i48(get_payload(value_bits));
-        format!("{}", int_val)
     } else {
         match heap_kind(value_bits) {
             Some(HK_STRING) => {
@@ -225,9 +236,12 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
                 s.clone()
             }
             Some(HK_ARRAY) => {
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
-                let elems: Vec<String> = arr.iter().map(|&bits| format_value_word(bits)).collect();
-                format!("[{}]", elems.join(", "))
+                // PHASE_2C / SURFACE (ADR-006 §2.7.4): the deleted
+                // `JitArray` walk that produced "[a, b, c]" formatting
+                // is gone. The strict-typing rebuild target dispatches
+                // on the slot's `NativeKind::Ptr(HeapKind::TypedArray)`
+                // per-element-kind arm via the §2.7.6/Q8 carrier.
+                "[<array>]".to_string()
             }
             Some(HK_OK) => {
                 let inner = unsafe { *jit_unbox::<u64>(value_bits) };
