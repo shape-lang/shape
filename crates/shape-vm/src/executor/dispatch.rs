@@ -248,9 +248,19 @@ impl VirtualMachine {
                     // `KindedSlot` carrier per §2.7.6 / Q8. The
                     // underlying `Arc<String>` strong-count share
                     // transfers from `Arc::into_raw` into the carrier
-                    // via `KindedSlot::from_string_arc`; ownership
-                    // passes to `handle_exception` on the call.
-                    let payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    // via `KindedSlot::from_string_arc`.
+                    //
+                    // W13-anyerror (close, 2026-05-10): wrap the
+                    // String-kinded payload into an AnyError
+                    // TypedObject via `normalize_err_payload` per
+                    // playbook §10 E-exceptions row, so the catch
+                    // block sees `NativeKind::Ptr(HeapKind::TypedObject)`
+                    // and `e.message` reads back via the existing
+                    // `op_get_prop` TypedObject path. Ownership of
+                    // the String share transfers into the AnyError's
+                    // payload/message field slots.
+                    let raw_payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    let payload = self.normalize_err_payload(raw_payload)?;
                     self.handle_exception(payload)?;
                 } else {
                     // Enrich error with source location before returning
@@ -383,9 +393,15 @@ impl VirtualMachine {
                 if !self.exception_handlers.is_empty() {
                     // W8-EX: see the matching call site above —
                     // `Arc<String>` payload built into a `KindedSlot`
-                    // carrier per §2.7.6 / Q8; ownership transfers to
-                    // `handle_exception`.
-                    let payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    // carrier per §2.7.6 / Q8.
+                    //
+                    // W13-anyerror (close, 2026-05-10): wrap into
+                    // AnyError TypedObject via `normalize_err_payload`
+                    // so the catch block sees the canonical
+                    // `Ptr(HeapKind::TypedObject)` payload kind per
+                    // playbook §10 E-exceptions row.
+                    let raw_payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    let payload = self.normalize_err_payload(raw_payload)?;
                     self.handle_exception(payload)?;
                 } else {
                     return Err(self.enrich_error_with_location(err, ip));
