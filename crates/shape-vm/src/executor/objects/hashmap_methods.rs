@@ -330,54 +330,89 @@ fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// HashMap.set(key, value) -> HashMap
+///
+/// W13-hashmap-mutation (2026-05-10) close: routes through
+/// `HashMapData::insert(Arc<String>, Arc<HeapValue>)`. The receiver
+/// `Arc<HashMapData>` is cloned up-front so `Arc::make_mut` clones the
+/// underlying data only when other shares exist (clone-on-write per
+/// ADR-006 §2.7.4 / playbook). Returns the (possibly newly-cloned)
+/// `Arc<HashMapData>` as the result so chained `m.set(...).set(...)`
+/// continues to flow through the post-mutation share.
 pub fn v2_set(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.set — SURFACE: phase-2c — HashMapData typed-buffer mutation \
-         API rebuild. The post-§2.7.4 HashMapData (Arc<TypedBuffer<Arc<String>>> \
-         keys + Arc<TypedBuffer<Arc<HeapValue>>> values + eager bucket-index) \
-         deliberately dropped the legacy `Arc::make_mut`-driven `keys.push` / \
-         `values.push` / shape-id transition path. Buffer-aware insert is a \
-         phase-2c workstream tracked under ADR-006 §2.7.4 alongside the \
-         homogeneous-typed HashMap workstream — see \
-         `executor/objects/typed_access.rs:202` (MapSetStrI64) for the \
-         canonical SURFACE referencing the same gap."
-            .into(),
-    ))
+    if args.len() != 3 {
+        return Err(type_error(
+            "HashMap.set() requires exactly 2 arguments (key, value)",
+        ));
+    }
+    // Project the key arg into an owned `Arc<String>`. `result_slot_to_string_arc`
+    // is the construction-side projection used by `groupBy`; same encoding
+    // contract for both `NativeKind::String` and `NativeKind::Ptr(HeapKind::String)`
+    // (per the constructor doc in `kinded_slot.rs:474..480`).
+    let key_arc: Arc<String> = result_slot_to_string_arc(&args[1]).ok_or_else(|| {
+        type_error(format!(
+            "HashMap.set(): key must be a string (got kind {:?})",
+            args[1].kind()
+        ))
+    })?;
+    // Project the value arg into an `Arc<HeapValue>` matching the
+    // `HashMapData::values` storage shape. Same projection as
+    // `HashMap.map()`'s closure result re-pack.
+    let value_arc: Arc<HeapValue> = result_slot_to_heap_value_arc(&args[2])?;
+    // Take an owned share of the receiver Arc, then `Arc::make_mut` to
+    // mutate without disturbing other live shares. Clone-on-write per
+    // ADR-006 §2.7.4 (the same shape as `typed_array_elem.rs:255`).
+    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    Arc::make_mut(&mut hm).insert(key_arc, value_arc);
+    Ok(KindedSlot::from_hashmap(hm))
 }
 
 /// HashMap.delete(key) -> HashMap
+///
+/// W13-hashmap-mutation close: routes through `HashMapData::remove(&str)`.
+/// Returns the (possibly newly-cloned) `Arc<HashMapData>` post-removal —
+/// missing-key removals are a no-op at the `HashMapData` layer (the
+/// `bool` return is ignored at this surface; the result still carries the
+/// receiver share for chaining).
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.delete — SURFACE: phase-2c — HashMapData typed-buffer \
-         mutation API rebuild. Same buffer-aware mutation gap as set(): the \
-         post-§2.7.4 HashMapData has no remove path on Arc<TypedBuffer<…>>. \
-         Tracked alongside the homogeneous-typed HashMap workstream under \
-         ADR-006 §2.7.4."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.delete() requires exactly 1 argument (key)",
+        ));
+    }
+    let key = as_string_key(&args[1])?;
+    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    Arc::make_mut(&mut hm).remove(key);
+    Ok(KindedSlot::from_hashmap(hm))
 }
 
 /// HashMap.merge(other) -> HashMap
+///
+/// W13-hashmap-mutation close: routes through `HashMapData::merge(&other)`.
+/// Last-write-wins on key collision (matches `Object.assign` /
+/// `dict.update` semantics). The `other` receiver is borrowed via
+/// `as_hashmap` and never has its share decremented at this surface.
 pub fn v2_merge(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.merge — SURFACE: phase-2c — HashMapData typed-buffer \
-         mutation API rebuild. Merge is a bulk insert; same buffer-aware \
-         mutation gap as set() / delete(). Tracked alongside the \
-         homogeneous-typed HashMap workstream under ADR-006 §2.7.4."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.merge() requires exactly 1 argument (other)",
+        ));
+    }
+    let other: &Arc<HashMapData> = as_hashmap(&args[1])?;
+    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    Arc::make_mut(&mut hm).merge(other);
+    Ok(KindedSlot::from_hashmap(hm))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

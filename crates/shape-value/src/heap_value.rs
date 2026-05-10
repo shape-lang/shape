@@ -563,6 +563,112 @@ impl HashMapData {
     pub fn contains_key(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
+
+    // ── Mutation API (W13-hashmap-mutation, 2026-05-10) ─────────────────────
+    //
+    // The post-§2.7.4 storage shape (`Arc<TypedBuffer<Arc<String>>>` keys +
+    // `Arc<TypedBuffer<Arc<HeapValue>>>` values + eager bucket-index)
+    // already has refcount-aware payload types: `Arc<String>` keys and
+    // `Arc<HeapValue>` values both clone via a single atomic refcount bump
+    // and drop via `Arc::decrement_strong_count` — no parallel `NativeKind`
+    // track is needed at this layer (§2.7.7's parallel-kind invariant
+    // applies to the kinded stack, not to typed `Arc<HeapValue>` payloads,
+    // which carry their own discriminator via `HeapValue::kind()`).
+    //
+    // The mutation entry-points therefore take `Arc<String>` / `Arc<HeapValue>`
+    // directly. The `shape-vm`-side handlers (`v2_set` / `v2_delete` /
+    // `v2_merge` in `executor/objects/hashmap_methods.rs`) project the
+    // `KindedSlot` carrier args into these typed Arcs via the existing
+    // `result_slot_to_heap_value_arc` / `as_string_key` helpers, then
+    // `Arc::make_mut` the receiver `Arc<HashMapData>` so that shared
+    // references stay immutable (clone-on-write).
+
+    /// Insert or overwrite a key/value entry. If the key already exists,
+    /// the value is replaced in-place (the old `Arc<HeapValue>` is dropped,
+    /// releasing its refcount). Otherwise the entry is appended to the
+    /// insertion-ordered buffers and registered in the bucket index.
+    pub fn insert(&mut self, key: Arc<String>, value: Arc<HeapValue>) {
+        let hash = fnv1a_hash(key.as_bytes());
+        // Look for an existing entry under the same hash bucket.
+        if let Some(bucket) = self.index.get(&hash) {
+            for &idx in bucket {
+                let i = idx as usize;
+                if self.keys.data[i].as_str() == key.as_str() {
+                    // Overwrite in place. `Arc::make_mut` on the values
+                    // buffer is the §2.7.4 / playbook clone-on-write path:
+                    // a shared buffer is cloned (cheap — element-wise Arc
+                    // bumps), a uniquely-owned buffer is mutated directly.
+                    let values_buf = Arc::make_mut(&mut self.values);
+                    values_buf.data[i] = value;
+                    return;
+                }
+            }
+        }
+        // New entry: append to keys + values, then register in the index.
+        let new_idx = self.keys.data.len();
+        Arc::make_mut(&mut self.keys).data.push(key);
+        Arc::make_mut(&mut self.values).data.push(value);
+        self.index.entry(hash).or_default().push(new_idx as u32);
+    }
+
+    /// Remove the entry under `key`. Returns `true` if the key was present
+    /// (and removed), `false` if no entry existed. The bucket index is
+    /// updated to reflect the buffer's post-removal indices: every entry
+    /// after the removed slot shifts down by one position.
+    pub fn remove(&mut self, key: &str) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        // Locate the position within the bucket whose stored key matches.
+        let removed_idx: usize = {
+            let Some(bucket) = self.index.get(&hash) else {
+                return false;
+            };
+            let mut found: Option<usize> = None;
+            for (bucket_pos, &idx) in bucket.iter().enumerate() {
+                if self.keys.data[idx as usize].as_str() == key {
+                    found = Some(bucket_pos);
+                    break;
+                }
+            }
+            let bucket_pos = match found {
+                Some(p) => p,
+                None => return false,
+            };
+            // Take the index, drop the bucket borrow before re-borrowing
+            // the index mutably below.
+            let bucket = self.index.get_mut(&hash).expect("bucket present");
+            let removed_idx = bucket.swap_remove(bucket_pos) as usize;
+            if bucket.is_empty() {
+                self.index.remove(&hash);
+            }
+            removed_idx
+        };
+        // Remove from the parallel buffers via Arc::make_mut.
+        Arc::make_mut(&mut self.keys).data.remove(removed_idx);
+        Arc::make_mut(&mut self.values).data.remove(removed_idx);
+        // Shift down every index in the bucket map that pointed at a
+        // position past `removed_idx`.
+        for bucket in self.index.values_mut() {
+            for slot in bucket.iter_mut() {
+                if (*slot as usize) > removed_idx {
+                    *slot -= 1;
+                }
+            }
+        }
+        true
+    }
+
+    /// Merge entries from `other` into `self`. Keys present in both maps
+    /// take the value from `other` (last-write-wins, matching `Object.assign`
+    /// / `dict.update` semantics). Per-entry insert path — the bucket index
+    /// is maintained incrementally.
+    pub fn merge(&mut self, other: &HashMapData) {
+        let n = other.len();
+        for i in 0..n {
+            let key = Arc::clone(&other.keys.data[i]);
+            let value = Arc::clone(&other.values.data[i]);
+            self.insert(key, value);
+        }
+    }
 }
 
 impl Default for HashMapData {
@@ -1881,5 +1987,168 @@ mod typed_object_storage_drop {
 
         drop(outer);
         assert_eq!(Arc::strong_count(&inner_witness), 1);
+    }
+}
+
+#[cfg(test)]
+mod hashmap_mutation {
+    //! W13-hashmap-mutation (2026-05-10): pin the `insert` / `remove` /
+    //! `merge` API contracts on `HashMapData`. The mutation entry-points
+    //! are the storage-layer counterparts of `v2_set` / `v2_delete` /
+    //! `v2_merge` in `shape-vm/executor/objects/hashmap_methods.rs` (the
+    //! handlers project `KindedSlot` carriers into typed Arcs and route
+    //! through these methods via `Arc::make_mut` clone-on-write).
+    use super::*;
+    use std::sync::Arc;
+    fn k(s: &str) -> Arc<String> {
+        Arc::new(s.to_string())
+    }
+    fn v_i(i: i64) -> Arc<HeapValue> {
+        Arc::new(HeapValue::BigInt(Arc::new(i)))
+    }
+
+    #[test]
+    fn insert_appends_new_entry_and_grows_index() {
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v_i(1));
+        m.insert(k("b"), v_i(2));
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.keys.data[0].as_str(), "a");
+        assert_eq!(m.keys.data[1].as_str(), "b");
+        // Bucket index has registrations for both keys' hashes.
+        let h_a = fnv1a_hash(b"a");
+        let h_b = fnv1a_hash(b"b");
+        assert!(m.index.get(&h_a).is_some());
+        assert!(m.index.get(&h_b).is_some());
+    }
+
+    #[test]
+    fn insert_overwrites_existing_value_and_keeps_len() {
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v_i(1));
+        m.insert(k("a"), v_i(99));
+        assert_eq!(m.len(), 1);
+        // get() returns the new value (BigInt(99), per v_i).
+        let got = m.get("a").expect("present");
+        match got.as_ref() {
+            HeapValue::BigInt(b) => assert_eq!(**b, 99),
+            other => panic!("unexpected value arm: {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn insert_overwrite_releases_old_value_share() {
+        // Pin the in-place overwrite path drops the old Arc<HeapValue> share.
+        let old: Arc<HeapValue> = v_i(1);
+        let witness = Arc::clone(&old);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let mut m = HashMapData::new();
+        m.insert(k("a"), old);
+        assert_eq!(Arc::strong_count(&witness), 2);
+        m.insert(k("a"), v_i(99));
+        // Map no longer holds the original value's share; only the witness remains.
+        assert_eq!(Arc::strong_count(&witness), 1);
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn remove_present_key_drops_entry_returns_true() {
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v_i(1));
+        m.insert(k("b"), v_i(2));
+        assert!(m.remove("a"));
+        assert_eq!(m.len(), 1);
+        assert!(m.get("a").is_none());
+        // "b" should still be reachable — bucket index was updated.
+        let got = m.get("b").expect("b present");
+        match got.as_ref() {
+            HeapValue::BigInt(bi) => assert_eq!(**bi, 2),
+            _ => panic!("expected BigInt(2)"),
+        }
+    }
+
+    #[test]
+    fn remove_missing_key_returns_false_and_is_noop() {
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v_i(1));
+        assert!(!m.remove("nope"));
+        assert_eq!(m.len(), 1);
+        assert!(m.get("a").is_some());
+    }
+
+    #[test]
+    fn remove_releases_value_share() {
+        let v: Arc<HeapValue> = v_i(42);
+        let witness = Arc::clone(&v);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v);
+        assert_eq!(Arc::strong_count(&witness), 2);
+        assert!(m.remove("a"));
+        assert_eq!(Arc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn merge_copies_other_entries_with_last_write_wins() {
+        let mut a = HashMapData::new();
+        a.insert(k("x"), v_i(1));
+        a.insert(k("shared"), v_i(10));
+
+        let mut b = HashMapData::new();
+        b.insert(k("y"), v_i(2));
+        b.insert(k("shared"), v_i(99));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 3);
+        // x preserved
+        match a.get("x").expect("x").as_ref() {
+            HeapValue::BigInt(bi) => assert_eq!(**bi, 1),
+            _ => panic!(),
+        }
+        // y added
+        match a.get("y").expect("y").as_ref() {
+            HeapValue::BigInt(bi) => assert_eq!(**bi, 2),
+            _ => panic!(),
+        }
+        // shared overwritten by b's value
+        match a.get("shared").expect("shared").as_ref() {
+            HeapValue::BigInt(bi) => assert_eq!(**bi, 99),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn smoke_set_set_delete_size() {
+        // Mirrors the W13-hashmap-mutation smoke goal at the storage layer:
+        //   let m = HashMap()
+        //   m.set("a", 1); m.set("b", 2); m.delete("a"); m.size() == 1
+        let mut m = HashMapData::new();
+        m.insert(k("a"), v_i(1));
+        m.insert(k("b"), v_i(2));
+        assert!(m.remove("a"));
+        assert_eq!(m.len(), 1);
+        assert!(m.get("a").is_none());
+        assert!(m.get("b").is_some());
+    }
+
+    #[test]
+    fn arc_make_mut_clone_on_write_does_not_disturb_shared_handle() {
+        // The shape-vm-side handlers `Arc::make_mut` the receiver share —
+        // this tests that the underlying `HashMapData::clone()` (which
+        // Arc::clone()s the inner buffers + clones the bucket-index
+        // HashMap) preserves the pre-mutation observer's view.
+        let mut owned = Arc::new(HashMapData::new());
+        Arc::make_mut(&mut owned).insert(k("a"), v_i(1));
+        // Snapshot share — second observer.
+        let snapshot = Arc::clone(&owned);
+        // Mutate via the local share — should clone-on-write.
+        Arc::make_mut(&mut owned).insert(k("b"), v_i(2));
+        assert_eq!(owned.len(), 2);
+        // Snapshot is undisturbed.
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.get("a").is_some());
+        assert!(snapshot.get("b").is_none());
     }
 }
