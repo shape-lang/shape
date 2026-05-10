@@ -52,7 +52,6 @@ before it's coded.
 | `bulldozer-strictly-typed-w9-builtins-type-ops` | `../shape-w9-builtins-type-ops` | W9-builtins-type-ops | — | builtins/type_ops.rs | idle (close `f17a0cb` merged at `e3e14f9` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-hashmap-methods` | `../shape-w9-hashmap-methods` | W9-hashmap-methods | — | objects/hashmap_methods.rs | idle (close `ab260a8` 2026-05-10; 5 closure-callback handlers migrated; set/delete/merge remain Phase-2c HashMapData mutation API; iter remains Phase-2c IteratorState) | 2026-05-10 |
 | `bulldozer-strictly-typed-w10-jit-kinds` | `../shape-w10-jit-kinds` | W10-jit-kinds (Band 1) | — | ffi/jit_kinds.rs | idle (close `da9b2a5` merged at `51102d6` 2026-05-10; 12/12 errors closed; jit 213→201) | 2026-05-10 |
-<<<<<<< HEAD
 | `bulldozer-strictly-typed-w10-ffi-symbols` | `../shape-w10-ffi-symbols` | W10-ffi-symbols | — | ffi_symbols/{vector,data_access,object_symbols} | idle (close `be2abab` merged at `01bca38` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w10-value-ffi` | `../shape-w10-value-ffi` | W10-value-ffi | — | ffi/value_ffi.rs | idle (close `fc655bb` merged at `d5fe341` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w10-mir-compiler` | `../shape-w10-mir-compiler` | W10-mir-compiler | — | mir_compiler/{rvalues,places,v2_int,ownership,blocks,conversions}.rs | idle (close `b9eaff4` merged at `5162a25` 2026-05-10) | 2026-05-10 |
