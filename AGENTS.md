@@ -39,7 +39,6 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
-<<<<<<< HEAD
 | `bulldozer-strictly-typed-w9-string-methods` | `../shape-w9-string-methods` | W9-string-methods | — | string_methods.rs | idle (close `0fc52ba` merged at `f363482`) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-set-methods` | `../shape-w9-set-methods` | W9-set-methods (surface-only) | — | set_methods.rs | idle (close `4c81e54` merged at `23cf618`) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-iterator-methods` | `../shape-w9-iterator-methods` | W9-iterator-methods (surface-only) | — | iterator_methods.rs | idle (close `6670ff4` merged at `22eddb3`) | 2026-05-10 |
@@ -50,7 +49,8 @@ before it's coded.
 | `bulldozer-strictly-typed-w9-misc-methods` | `../shape-w9-misc-methods` | W9-misc-methods | — | objects/{13 misc files} | idle (close `23ecf2a` merged at `66b987c` 2026-05-10; number_methods.rs 23 stubs migrated; 12/13 already Stage C SURFACE) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-datatable` | `../shape-w9-datatable` | W9-datatable | — | objects/datatable_methods/{joins,query,aggregation,simulation,rolling,indexing}.rs | idle (close `b62f798` 2026-05-10; 6 closure-callback bodies migrated for filter/orderBy/forEach/sum/mean/min/max/sort; 5 SURFACE on TypedObject construction) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-array-transform` | `../shape-w9-array-transform` | W9-array-transform | — | objects/array_transform.rs | idle (close `3db88f4` merged at `3ffd235` 2026-05-10) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-builtins-type-ops` | `../shape-w9-builtins-type-ops` | W9-builtins-type-ops | — | builtins/type_ops.rs | idle (close `f17a0cb` 2026-05-10; 13 cast-opcode bodies migrated; op_convert + heterogeneous heap-string arm remain Phase-2c) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-builtins-type-ops` | `../shape-w9-builtins-type-ops` | W9-builtins-type-ops | — | builtins/type_ops.rs | idle (close `f17a0cb` merged at `e3e14f9` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-hashmap-methods` | `../shape-w9-hashmap-methods` | W9-hashmap-methods | — | objects/hashmap_methods.rs | idle (close `ab260a8` 2026-05-10; 5 closure-callback handlers migrated; set/delete/merge remain Phase-2c HashMapData mutation API; iter remains Phase-2c IteratorState) | 2026-05-10 |
 
 ## Status values
 

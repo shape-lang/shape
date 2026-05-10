@@ -1,13 +1,13 @@
 //! HashMap method handlers for the PHF method registry.
 //!
-//! ## Wave-δ MR-hashmap-readonly migration (2026-05-09)
+//! ## W9-hashmap-methods migration (2026-05-10)
 //!
 //! Per ADR-006 §2.7.10 / Q11 (Wave-γ G-method-fn-v2-abi close commit
 //! `5091cba`) the `MethodFnV2` ABI is kinded: handlers take
-//! `args: &[KindedSlot]` and return `Result<KindedSlot, VMError>`. This
-//! Wave-δ pass migrates the 9 read-only handlers (`get`, `has`, `keys`,
-//! `values`, `entries`, `len`, `isEmpty`, `getOrDefault`, `toArray`) to
-//! real bodies on top of the post-§2.7.4 `HashMapData` shape
+//! `args: &[KindedSlot]` and return `Result<KindedSlot, VMError>`. The
+//! preceding Wave-δ pass migrated the 9 read-only handlers (`get`, `has`,
+//! `keys`, `values`, `entries`, `len`, `isEmpty`, `getOrDefault`,
+//! `toArray`) to real bodies on top of the post-§2.7.4 `HashMapData` shape
 //! (`Arc<TypedBuffer<Arc<String>>>` keys + `Arc<TypedBuffer<Arc<HeapValue>>>`
 //! values + eager bucket-index for O(1) lookup; see
 //! `shape_value::heap_value::HashMapData`).
@@ -34,7 +34,25 @@
 //!   `Arc::new(HeapValue::TypedArray(Arc::new(TypedArrayData::HeapValue(
 //!   ..))))` — same shape as `array_ops::builtin_zip` at line 376.
 //!
-//! ## Still-surfaced handlers (3 mutation + 1 iter + 5 closure-callback)
+//! ## Wave-9 closure-callback migration
+//!
+//! `forEach`, `map`, `filter`, `reduce`, and `groupBy` route the per-entry
+//! callback through `vm.call_value_immediate_nb(&closure, &[key, value, …],
+//! ctx.as_deref_mut())` (the W7-cv-static §2.7.11 / Q12 dispatch shell at
+//! `executor/call_convention.rs:767`). The receiver `Arc<HashMapData>` is
+//! cloned once up-front so the iteration borrow is independent of the
+//! `&mut VirtualMachine` reborrow on each call. Per-entry key carriers are
+//! `KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]))`; value
+//! carriers go through `heap_value_arc_to_slot` (per-FieldType constructors
+//! per ADR-005 §3 / ADR-006 single-discriminator). The closure result
+//! `KindedSlot` is consumed by the body — `forEach` drops it, `map` /
+//! `reduce` thread its `Arc<HeapValue>`-projected payload as the new
+//! value / accumulator, `filter` reads its `as_bool()`, and `groupBy`
+//! requires its kind to be `String` (the new `HashMapData` invariant
+//! constrains keys to `Arc<String>`; non-string group keys surface as a
+//! `RuntimeError`).
+//!
+//! ## Still-surfaced handlers (3 mutation + 1 iter)
 //!
 //! - **`set` / `delete` / `merge`** remain `NotImplemented(SURFACE: phase-2c
 //!   — HashMapData typed-buffer mutation API rebuild)`. The post-§2.7.4
@@ -51,22 +69,8 @@
 //!   (per-entry key + value kind dispatch over the typed buffers) is a
 //!   phase-2c follow-up under ADR-006 §2.7.4.
 //!
-//! - **`forEach` / `filter` / `map` / `reduce` / `groupBy`** remain
-//!   `NotImplemented(SURFACE: phase-2c — closure-call kinded dispatch
-//!   rebuild)`. Same architectural blocker as the M-datatable Wave-β
-//!   `joins.rs` handlers (commit `eb78699`): the closure-callback path
-//!   would need `vm.call_value_immediate_*` to thread `&[KindedSlot]` /
-//!   return `KindedSlot`, but every entry point in `call_convention.rs`
-//!   (`call_value_immediate_nb`, `call_value_immediate_raw`,
-//!   `call_function_with_raw_args`, `call_closure_with_raw_args`,
-//!   `call_function_from_stack`, `call_closure_with_nb_args`,
-//!   `call_closure_with_nb_args_keepalive`, `jit_trampoline_call_closure`)
-//!   is itself a `todo!("phase-2c — ADR-006 §2.7.8 cluster B-round-2: …
-//!   kinded-arg + kinded-cell rebuild pending")`. Surface and stop per
-//!   playbook §8 cross-cluster cascade — do not paper over with a
-//!   forbidden-pattern call path.
-//!
-//! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / Q8 / Q11 + playbook §3 / §7 / §10.
+//! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / §2.7.11 / Q8 / Q11 / Q12 + playbook
+//! §1 / §3.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -377,103 +381,301 @@ pub fn v2_merge(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Closure-based handlers — phase-2c closure-call kinded dispatch rebuild
+// Closure-based handlers — Wave-9 W9-hashmap-methods migration
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// The closure-callback path needs `vm.call_value_immediate_*` to thread
-// `&[KindedSlot]` / return `KindedSlot`, but every entry point in
-// `call_convention.rs` is itself a phase-2c `todo!()` (see
-// `call_value_immediate_nb`, `call_value_immediate_raw`,
-// `call_function_with_raw_args`, `call_closure_with_raw_args`,
-// `call_function_from_stack`, `call_closure_with_nb_args`,
-// `call_closure_with_nb_args_keepalive`, `jit_trampoline_call_closure`).
-// Surface and stop per playbook §8 cross-cluster cascade — same precedent
-// as the M-datatable Wave-β `joins.rs` close (commit `eb78699`).
+// Each handler clones the receiver `Arc<HashMapData>` up-front so the
+// iteration borrow is independent of the `&mut VirtualMachine` reborrow on
+// each `call_value_immediate_nb` call. Per-entry key carriers are
+// `KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]))`; value
+// carriers go through `heap_value_arc_to_slot`. The closure carrier
+// (`args[1]`) is borrowed positionally — `call_value_immediate_nb`
+// dispatches on `callee.kind` (Closure / UInt64), no kind fabrication.
+//
+// Result construction for `map` / `filter` / `groupBy` uses
+// `HashMapData::from_pairs(Vec<Arc<String>>, Vec<Arc<HeapValue>>)` —
+// the construction-only path that the §2.7.4 buffer rebuild deliberately
+// preserved (the mutation gap is at `set` / `delete` / `merge`, where an
+// existing buffer must be appended to / removed from in place; building a
+// fresh `HashMapData` is free of that constraint).
 
 /// HashMap.forEach(fn(key, value)) -> unit
+///
+/// Iterates entries in insertion order, invoking the closure with
+/// `(key, value)` per entry. The callback's return is dropped (its share
+/// is released as the `KindedSlot` carrier goes out of scope).
 pub fn v2_for_each(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.forEach — SURFACE: phase-2c — closure-call kinded dispatch \
-         rebuild (ADR-006 §2.7.8 cluster B-round-2). The callback path needs \
-         `vm.call_value_immediate_*` to thread `&[KindedSlot]` / return \
-         `KindedSlot`, but every call_convention.rs entry point is itself a \
-         phase-2c `todo!()`. Same architectural blocker as the M-datatable \
-         Wave-β `joins.rs` close (commit `eb78699`)."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.forEach() requires exactly 1 argument (callback)",
+        ));
+    }
+    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let closure = &args[1];
+    let n = map.len();
+    for i in 0..n {
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
+        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        // Result share released via `KindedSlot::drop` at end of scope.
+        let _ = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }
 
 /// HashMap.filter(fn(key, value) -> bool) -> HashMap
+///
+/// Keeps entries for which the closure returns `true`. The result kind on
+/// the predicate is required to be `Bool`; other kinds surface as a
+/// `RuntimeError` (per playbook §6 — no Bool-default fallback).
 pub fn v2_filter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.filter — SURFACE: phase-2c — closure-call kinded dispatch \
-         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
-         forEach: the predicate-callback path depends on the kinded \
-         call_value rebuild plus the buffer-aware HashMapData construction \
-         path that the mutation handlers also need (the filter result is a \
-         new HashMap built from a subset of the entries). Surface and stop \
-         per playbook §8."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.filter() requires exactly 1 argument (predicate)",
+        ));
+    }
+    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let closure = &args[1];
+    let n = map.len();
+    let mut out_keys: Vec<Arc<String>> = Vec::new();
+    let mut out_values: Vec<Arc<HeapValue>> = Vec::new();
+    for i in 0..n {
+        let key_arc = Arc::clone(&map.keys.data[i]);
+        let value_arc = Arc::clone(&map.values.data[i]);
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
+        let value_slot = heap_value_arc_to_slot(&value_arc);
+        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
+        let keep = result
+            .as_bool()
+            .ok_or_else(|| type_error(format!(
+                "HashMap.filter(): predicate must return bool (got kind {:?})",
+                result.kind()
+            )))?;
+        if keep {
+            out_keys.push(key_arc);
+            out_values.push(value_arc);
+        }
+    }
+    let new_map = HashMapData::from_pairs(out_keys, out_values);
+    Ok(KindedSlot::from_hashmap(Arc::new(new_map)))
 }
 
 /// HashMap.map(fn(key, value) -> new_value) -> HashMap
+///
+/// Builds a new `HashMap` with the same keys, replacing each value with
+/// the closure's return. Result-side kinds re-pack into
+/// `Arc<HeapValue>` via `result_slot_to_heap_value_arc`.
 pub fn v2_map(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.map — SURFACE: phase-2c — closure-call kinded dispatch \
-         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
-         forEach/filter: closure-callback path + buffer-aware HashMapData \
-         construction (transformed-values map) both pending. Surface and \
-         stop per playbook §8."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.map() requires exactly 1 argument (mapper)",
+        ));
+    }
+    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let closure = &args[1];
+    let n = map.len();
+    let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
+    let mut out_values: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let key_arc = Arc::clone(&map.keys.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
+        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
+        let new_value = result_slot_to_heap_value_arc(&result)?;
+        out_keys.push(key_arc);
+        out_values.push(new_value);
+    }
+    let new_map = HashMapData::from_pairs(out_keys, out_values);
+    Ok(KindedSlot::from_hashmap(Arc::new(new_map)))
 }
 
 /// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value
+///
+/// Threads the accumulator through the per-entry callback. Initial value
+/// is `args[2]`; final accumulator is the result.
 pub fn v2_reduce(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.reduce — SURFACE: phase-2c — closure-call kinded dispatch \
-         rebuild (ADR-006 §2.7.8 cluster B-round-2). Same blocker as \
-         forEach: the accumulator-callback path depends on the kinded \
-         call_value rebuild — the result is a single accumulated value, no \
-         HashMap construction needed, but the per-entry callback still \
-         routes through the deleted `call_value_immediate_*` path. Surface \
-         and stop per playbook §8."
-            .into(),
-    ))
+    if args.len() != 3 {
+        return Err(type_error(
+            "HashMap.reduce() requires exactly 2 arguments (reducer, initial)",
+        ));
+    }
+    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let closure = &args[1];
+    let mut acc: KindedSlot = args[2].clone();
+    let n = map.len();
+    for i in 0..n {
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
+        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        acc = vm.call_value_immediate_nb(
+            closure,
+            &[acc, key_slot, value_slot],
+            ctx.as_deref_mut(),
+        )?;
+    }
+    Ok(acc)
 }
 
 /// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap>
+///
+/// Buckets entries by the closure's returned `group_key`. The new
+/// `HashMapData` invariant constrains keys to `Arc<String>`; a non-string
+/// group_key kind surfaces as a `RuntimeError` (no fallback coercion per
+/// playbook §6 — kind soundness is preserved at the construction site).
 pub fn v2_group_by(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.groupBy — SURFACE: phase-2c — closure-call kinded dispatch \
-         rebuild (ADR-006 §2.7.8 cluster B-round-2). Compounds the \
-         forEach/filter blocker: groupBy needs both the kinded call_value \
-         rebuild AND the buffer-aware HashMapData construction path (it \
-         produces nested HashMaps grouped by the key-extractor's return \
-         value). Surface and stop per playbook §8."
-            .into(),
-    ))
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.groupBy() requires exactly 1 argument (key-extractor)",
+        ));
+    }
+    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let closure = &args[1];
+    let n = map.len();
+
+    // Insertion-ordered list of group_keys plus a parallel pair of
+    // (group_keys-collected, group_values-collected). A side hash maps
+    // group_key string → index into `groups` for O(1) lookup.
+    let mut groups: Vec<(Arc<String>, Vec<Arc<String>>, Vec<Arc<HeapValue>>)> = Vec::new();
+    let mut group_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for i in 0..n {
+        let key_arc = Arc::clone(&map.keys.data[i]);
+        let value_arc = Arc::clone(&map.values.data[i]);
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
+        let value_slot = heap_value_arc_to_slot(&value_arc);
+        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
+        let group_key_arc: Arc<String> = result_slot_to_string_arc(&result).ok_or_else(|| {
+            type_error(format!(
+                "HashMap.groupBy(): key-extractor must return a string (got kind {:?})",
+                result.kind()
+            ))
+        })?;
+
+        let gi = match group_index.get(group_key_arc.as_str()) {
+            Some(&idx) => idx,
+            None => {
+                let idx = groups.len();
+                group_index.insert((*group_key_arc).clone(), idx);
+                groups.push((Arc::clone(&group_key_arc), Vec::new(), Vec::new()));
+                idx
+            }
+        };
+        groups[gi].1.push(key_arc);
+        groups[gi].2.push(value_arc);
+    }
+
+    // Build outer HashMap: group_key -> inner HashMap (as Arc<HeapValue>).
+    let mut outer_keys: Vec<Arc<String>> = Vec::with_capacity(groups.len());
+    let mut outer_values: Vec<Arc<HeapValue>> = Vec::with_capacity(groups.len());
+    for (gk, inner_keys, inner_values) in groups {
+        outer_keys.push(gk);
+        let inner_map = HashMapData::from_pairs(inner_keys, inner_values);
+        outer_values.push(Arc::new(HeapValue::HashMap(Arc::new(inner_map))));
+    }
+    let outer = HashMapData::from_pairs(outer_keys, outer_values);
+    Ok(KindedSlot::from_hashmap(Arc::new(outer)))
+}
+
+/// Project a callback-return `KindedSlot` to an `Arc<HeapValue>` suitable
+/// for `HashMapData::values` storage. Mirrors
+/// `executor/builtins/array_ops::slot_to_heap_arc` — Int64 round-trips
+/// through `BigInt(Arc<i64>)`; Float64 / Bool reject (no matching heap
+/// arm in the post-§2.3 `HeapValue`); String / heap-pointer kinds clone
+/// through `as_heap_value()` per ADR-005 §1 single-discriminator.
+fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
+    match result.kind {
+        NativeKind::Int64 => {
+            let i = result.as_i64().ok_or_else(|| {
+                type_error("HashMap.map(): Int64 slot bits not a valid integer")
+            })?;
+            Ok(Arc::new(HeapValue::BigInt(Arc::new(i))))
+        }
+        NativeKind::Float64 => Err(type_error(
+            "HashMap.map(): Float64 result cannot be heap-wrapped (no HeapValue::Number arm)",
+        )),
+        NativeKind::Bool => Err(type_error(
+            "HashMap.map(): Bool result cannot be heap-wrapped (no HeapValue::Bool arm)",
+        )),
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            // Both string kinds store `Arc::into_raw::<String>` (no
+            // `Box<HeapValue>` wrapper); recover via raw-pointer Arc
+            // resurrection then re-wrap in the canonical
+            // `HeapValue::String(Arc<String>)` arm. Same shape as
+            // `result_slot_to_string_arc` below.
+            let bits = result.slot.raw();
+            if bits == 0 {
+                return Err(type_error("HashMap.map(): String slot bits null"));
+            }
+            // SAFETY: see `result_slot_to_string_arc` — bits are
+            // `Arc::into_raw::<String>`, carrier owns one share.
+            let arc = unsafe {
+                Arc::increment_strong_count(bits as *const String);
+                Arc::from_raw(bits as *const String)
+            };
+            Ok(Arc::new(HeapValue::String(arc)))
+        }
+        NativeKind::Ptr(_) => {
+            // True heap pointer: bits point at a `Box<HeapValue>`-style
+            // payload via `Arc<T>` per the per-FieldType slot constructors.
+            // Clone the underlying HeapValue. The result slot already owns
+            // one strong-count share; the clone bumps it.
+            let hv: &HeapValue = result.slot.as_heap_value();
+            Ok(Arc::new(hv.clone()))
+        }
+        other => Err(type_error(format!(
+            "HashMap.map(): result kind {:?} cannot be stored in a HashMap value",
+            other
+        ))),
+    }
+}
+
+/// Project a callback-return `KindedSlot` to an `Arc<String>` for use as a
+/// `HashMapData` key. Returns `None` for non-string kinds — caller surfaces
+/// the kind mismatch as a `RuntimeError`. Both `NativeKind::String` and
+/// `NativeKind::Ptr(HeapKind::String)` slot encodings store an
+/// `Arc::into_raw::<String>` payload (per the `ValueSlot::from_string_arc`
+/// constructor + `KindedSlot::clone`'s string arm at
+/// `kinded_slot.rs:474..480`), so the recovery path is the same for both.
+fn result_slot_to_string_arc(result: &KindedSlot) -> Option<Arc<String>> {
+    match result.kind {
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            let bits = result.slot.raw();
+            if bits == 0 {
+                return None;
+            }
+            // SAFETY: per the construction-side contract for both string
+            // kinds, the slot bits are `Arc::into_raw::<String>` and the
+            // result `KindedSlot` carrier owns one strong-count share.
+            // We bump the count once via `increment_strong_count` and
+            // reconstruct an owned `Arc<String>` via `Arc::from_raw`; the
+            // result Arc is the new share and the carrier's drop will
+            // release the original share.
+            unsafe {
+                Arc::increment_strong_count(bits as *const String);
+                Some(Arc::from_raw(bits as *const String))
+            }
+        }
+        _ => None,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
