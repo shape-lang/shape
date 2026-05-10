@@ -44,6 +44,7 @@ use crate::heap_value::{
     HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
     TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
+use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
 use crate::reference::RefTarget;
 use crate::slot::ValueSlot;
@@ -130,6 +131,15 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashset(h),
             NativeKind::Ptr(HeapKind::HashSet),
+    /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
+    /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
+    /// iterator-state).
+    #[inline]
+    pub fn from_iterator(it: Arc<IteratorState>) -> Self {
+        let bits = Arc::into_raw(it) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Iterator),
         )
     }
 
@@ -375,6 +385,16 @@ impl Drop for KindedSlot {
                     HeapKind::Reference => {
                         Arc::decrement_strong_count(bits as *const RefTarget);
                     }
+                    // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                    // 2026-05-10): mirror of `vm_impl/stack.rs::
+                    // drop_with_kind` Iterator arm. Slot bits are
+                    // `Arc::into_raw(Arc<IteratorState>)` directly
+                    // (mirror of FilterExpr / Reference's typed-Arc
+                    // dispatch — NOT a `Box<HeapValue>` wrap); retire
+                    // one `Arc<IteratorState>` strong-count share.
+                    HeapKind::Iterator => {
+                        Arc::decrement_strong_count(bits as *const IteratorState);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
@@ -559,6 +579,15 @@ impl Clone for KindedSlot {
                     // §2.7.13's pure-discriminator-style dispatch.
                     HeapKind::Reference => {
                         Arc::increment_strong_count(bits as *const RefTarget);
+                    }
+                    // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                    // 2026-05-10): mirror of the Drop Iterator arm
+                    // above. Bumps one `Arc<IteratorState>`
+                    // strong-count share — slot bits are
+                    // `Arc::into_raw(Arc<IteratorState>)` directly per
+                    // §2.7.16's typed-Arc dispatch.
+                    HeapKind::Iterator => {
+                        Arc::increment_strong_count(bits as *const IteratorState);
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).

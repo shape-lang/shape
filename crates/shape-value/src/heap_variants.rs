@@ -132,6 +132,22 @@ macro_rules! define_heap_types {
             // See §2.7.15 for the full justification + the rejected Path
             // B (`TypedSet<T>` per element kind) alternative.
             HashSet,       // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
+            // ADR-006 §2.7.16 / Q17 (W13-iterator-state, 2026-05-10):
+            // Lazy-iterator carrier — replaces the deleted
+            // `heap_value::IteratorState` / `IteratorTransform`
+            // `ValueWord`-shaped enums. Slot bits are
+            // `Arc::into_raw(Arc<IteratorState>) as u64`; unlike
+            // FilterExpr / Reference / SharedCell, the matching
+            // `HeapValue::Iterator(Arc<IteratorState>)` arm IS used at
+            // runtime — iterator method handlers recover the typed Arc
+            // via `slot.as_heap_value()` per ADR-005 §1
+            // single-discriminator. The `clone_with_kind` /
+            // `drop_with_kind` dispatch tables retain/release
+            // `Arc<IteratorState>` directly, NOT through the
+            // `HeapValue` arm (mirror of other typed-Arc
+            // refcount-dispatch arms — refcount discipline goes
+            // through the kind label).
+            Iterator,      // 22  (W13-iterator-state, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -283,6 +299,20 @@ macro_rules! define_heap_types {
             /// undefined behavior; the canonical recovery is
             /// `Arc::from_raw::<RefTarget>(bits)`.
             Reference(std::sync::Arc<$crate::reference::RefTarget>),
+            // ===== W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10) =====
+            /// Lazy iterator pipeline carrier (`Arc<IteratorState>`).
+            /// Used by `Array.iter` / `String.iter` / `HashMap.iter` /
+            /// `Range.iter` factories and the `ITERATOR_METHODS` PHF
+            /// (`map` / `filter` / `take` / `skip` / `flatMap` /
+            /// `enumerate` / `chain` / `collect` / `forEach` /
+            /// `reduce` / `count` / `any` / `all` / `find`). Slot bits
+            /// are `Arc::into_raw(Arc<IteratorState>) as u64`; recovery
+            /// goes through `slot.as_heap_value()` →
+            /// `HeapValue::Iterator(arc)` per ADR-005 §1
+            /// single-discriminator (the lazy-transforms / source /
+            /// cursor triple is opaque at the dispatch shell —
+            /// terminals walk `arc.transforms` and dispatch per stage).
+            Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
         }
 
         impl HeapValue {
@@ -311,6 +341,7 @@ macro_rules! define_heap_types {
                     HeapValue::HashSet(..) => HeapKind::HashSet,
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
+                    HeapValue::Iterator(..) => HeapKind::Iterator,
                 }
             }
 
@@ -342,6 +373,11 @@ macro_rules! define_heap_types {
                     // Reference values are always truthy when present
                     // (a live ref points at a reachable place).
                     HeapValue::Reference(_) => true,
+                    // Iterator values are always truthy when present
+                    // (a live iterator is a usable pipeline value, even
+                    // if its terminal evaluation will yield zero
+                    // elements after filter / take 0 etc.).
+                    HeapValue::Iterator(_) => true,
                 }
             }
 
@@ -376,6 +412,7 @@ macro_rules! define_heap_types {
                     HeapValue::HashSet(_) => "hashset",
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
+                    HeapValue::Iterator(_) => "iterator",
                 }
             }
         }

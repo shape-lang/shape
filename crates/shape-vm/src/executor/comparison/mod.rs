@@ -448,6 +448,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
         // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16, 2026-05-10).
         NativeKind::Ptr(HeapKind::HashSet) => "set",
+        // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+        // `Arc<IteratorState>` lazy-iterator carriers emitted by the
+        // iterator-method PHF.
+        NativeKind::Ptr(HeapKind::Iterator) => "iterator",
     }
 }
 

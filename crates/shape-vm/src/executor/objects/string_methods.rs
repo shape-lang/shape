@@ -625,22 +625,17 @@ pub fn v2_string_normalize(
 
 /// iter
 ///
-/// SURFACE: the legacy `IteratorState` carrier is deleted (playbook
-/// §2.7.7 / ADR-006 §2.7). The post-§2.7.4 iterator representation lives
-/// in the iterator cluster (Phase-2c surface); `M-string` cannot
-/// reconstruct it.
+/// W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10): forwards to
+/// the iterator cluster's `handle_string_iter` factory. Constructs a
+/// fresh `IteratorState { source: IteratorSource::String(arc),
+/// transforms: vec![], cursor: 0 }` and wraps it as
+/// `KindedSlot::from_iterator(Arc::new(state))`.
 pub fn v2_string_iter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "iter — SURFACE: legacy IteratorState carrier deleted (ADR-006 \
-         §2.7). Post-§2.7.4 iterator representation owned by iterator \
-         cluster; out of M-string territory. Phase-2c follow-up: kinded \
-         iterator state + element-kind track."
-            .to_string(),
-    ))
+    crate::executor::objects::iterator_methods::handle_string_iter(vm, args, ctx)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

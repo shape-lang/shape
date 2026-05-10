@@ -3120,6 +3120,169 @@ ADR-005 §5 future optimizations roadmap — folded into this ADR's §12.
 The `// ADR-005` marker comments at five source sites stay; new code may
 add `// ADR-006` markers for v3-specific concerns.
 
+#### 2.7.16 Lazy iterator carrier — `HeapValue::Iterator(Arc<IteratorState>)` (Q17 ruling)
+
+W13-iterator-state (close 2026-05-10) lands the kinded lazy-iterator
+pipeline carrier, replacing the deleted `heap_value::IteratorState` /
+`IteratorTransform` `ValueWord`-shaped enums (Phase-1.A bulldozed).
+Pre-strict-typing the lazy-iterator pipeline pushed
+`ValueWord::from_heap_value(HeapValue::Iterator { state, transforms })`
+slots and dispatched per-element via `tag_bits` on the per-stage closure
+payloads — both forbidden post-§2.7.7 / §2.7.8 (CLAUDE.md "Forbidden
+code" #1, #4, #6). The pre-W13-iterator-state scope was the
+`ITERATOR_METHODS` PHF in `executor/objects/method_registry.rs` (14
+entries) plus the four receiver-bound `iter()` factories
+(`Array.iter` / `String.iter` / `HashMap.iter` / `Range.iter`) — 18
+distinct handler bodies surfacing as `NotImplemented(SURFACE: §2.7.4)`.
+
+**Decision (Q17 ruling):** the lazy-iterator pipeline rebuilds on a
+typed `Arc<IteratorState>` payload carried by a fresh `HeapKind` arm,
+mirroring the §2.7.13 `Reference` precedent (typed-Arc dispatch with a
+parallel `HeapValue` arm for ADR-005 §1 single-discriminator
+recovery).
+
+**The kinded carrier (`shape-value/src/iterator_state.rs`):**
+
+```rust
+pub struct IteratorState {
+    pub source: IteratorSource,
+    pub transforms: Vec<IteratorTransform>,
+    pub cursor: usize,
+}
+
+pub enum IteratorSource {
+    Array(Arc<TypedArrayData>),
+    String(Arc<String>),
+    Range { start: i64, end: i64, step: i64 },
+    HashMap(Arc<HashMapData>),
+}
+
+pub enum IteratorTransform {
+    Map(Arc<HeapValue>),       // closure carrier per §2.7.11/Q12
+    Filter(Arc<HeapValue>),    // closure carrier per §2.7.11/Q12
+    Take(usize),
+    Skip(usize),
+    FlatMap(Arc<HeapValue>),   // closure carrier per §2.7.11/Q12
+    Enumerate,
+    Chain(Arc<IteratorState>),
+}
+```
+
+**The new `HeapKind` arm:**
+
+```rust
+pub enum HeapKind {
+    // ... String=0 .. SharedCell=20 ..
+    Iterator,    // 21  (W13-iterator-state, 2026-05-10)
+}
+
+pub enum HeapValue {
+    // ... existing arms ...
+    Iterator(Arc<IteratorState>),
+}
+```
+
+Slot bits for an `Iterator`-kinded slot are
+`Arc::into_raw(Arc<IteratorState>) as u64` directly. Unlike the §2.7.9
+FilterExpr / §2.7.13 Reference precedents — where the parallel
+`HeapValue` arm exists only for `HeapKind`↔`HeapValue` symmetry and
+`as_heap_value()` is undefined behavior on those slot bits —
+**`as_heap_value()` IS valid on Iterator-labeled bits**: the iterator
+method handlers recover the typed `Arc<IteratorState>` via the
+canonical `slot.as_heap_value()` → `HeapValue::Iterator(arc)` match,
+preserving ADR-005 §1 single-discriminator. The shape is the same as
+existing typed-Arc heap variants (`HeapValue::TypedArray`,
+`HeapValue::HashMap`, etc.) — typed `Arc<T>` payload, dispatch goes
+through both the kind label (for refcount discipline at the §2.7.7 /
+§2.7.8 dispatch tables) and through `HeapValue` (for handler-body
+recovery).
+
+**Why kind is on the carrier rather than fabricated at terminal time:**
+§2.7.7 forbidden-shape #4 (tag-bit chains) and §2.7.7 / §2.7.8 / §2.7.9
+/ §2.7.10 / §2.7.11 invariant — the kind comes from the producing-
+opcode emit, never fabricated downstream. Iterator factories
+(`Array.iter` / `String.iter` / `HashMap.iter` / `Range.iter`) are the
+producing sites; they construct `IteratorState` from a typed receiver
+`Arc<T>` and label the resulting slot with
+`NativeKind::Ptr(HeapKind::Iterator)` directly. Lazy transforms append
+new stages without touching the kind label. Eager terminals walk the
+state and dispatch per-stage on the `IteratorTransform` arm — no
+runtime kind decode, no `is_heap()` probe.
+
+**Mechanical lockstep updates (4 dispatch tables — every Q8/Q10
+retain/release table — plus the knock-on exhaustive matches):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::Iterator`
+   ordinal 21 + `HeapValue::Iterator(Arc<IteratorState>)` arm + `kind()`
+   / `is_truthy()` / `type_name()` / `Clone` / `Display` updates.
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm to
+   `Arc::increment/decrement_strong_count::<IteratorState>`.
+3. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arm; `from_iterator(Arc<IteratorState>)`
+   constructor.
+4. `crates/shape-value/src/heap_value.rs` — `TypedObjectStorage::drop`
+   §2.7.8 mirror.
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror.
+6. `crates/shape-vm/src/executor/objects/iterator_methods.rs` — 18
+   handler bodies migrated from `NotImplemented(SURFACE)` to live
+   bodies. Source-side factories construct `IteratorState`; lazy
+   transforms append via `IteratorState::with_transform`; eager
+   terminals walk via the `iterate_to_vec` driver (Vec-collect-then-
+   terminate pattern — closure invocations during Map/Filter/FlatMap
+   stages happen during the walk, but the terminator's per-element
+   side effects (forEach / reduce / any / all / find) iterate the
+   collected `Vec<KindedSlot>` after the walk, sidestepping the
+   `&mut VirtualMachine` ↔ closure-capture borrow conflict).
+
+Plus knock-on exhaustive-match additions in `printing.rs`,
+`comparison/mod.rs`, `arithmetic/mod.rs`, `objects/typed_access.rs`
+(kind→type-name maps); `wire_conversion.rs`, `json_value.rs` (Iterator
+does not cross the wire boundary — same as FilterExpr / Reference).
+
+**Cardinality cost:** `HeapKind` grows from 20 variants to 21; the
+§2.7.6 Q8 bound (~25 constructors / ~5-10 scalar accessors max on
+`KindedSlot`) is unchanged — `from_iterator` is the matching constructor
+addition.
+
+**Range.iter remains a SURFACE.** The kinded Range receiver carrier
+itself is phase-2c (`HeapValue::Range` was deleted; `op_make_range`
+surfaces in `executor/objects/mod.rs`). The W13-iterator-state carrier
+provides `IteratorSource::Range { start, end, step }` for forward
+compatibility, but the `Range.iter` factory cannot construct one
+without a live Range receiver kind labeling Range slots. Re-entry once
+the upstream Range carrier lands.
+
+**Forbidden alternatives this rules out:**
+
+- "Re-introduce `IteratorState` in the deleted `ValueWord`-encoded
+  shape under a less-suspicious name." This is the W-series
+  defection-attractor (CLAUDE.md "Renames to refuse on sight"); the
+  kind dispatch must go through the `HeapKind::Iterator` arm and the
+  payload must be a typed `Arc<T>`, never a `Box<HeapValue>` wrapper
+  or a tag-bit-decoded carrier.
+- "Store closure transforms as raw `u64` bits in
+  `IteratorTransform::Map(u64)` to avoid the extra `Arc<HeapValue>`
+  bump." Forbidden by §2.7.11/Q12: closure carriers cross the
+  abstraction boundary as `Arc<HeapValue>` shares (the `HeapKind::Closure`
+  retain/release dispatch matches that share). Storing raw bits would
+  bypass the share-counting discipline at the transform-stash tier.
+- "Skip the `HeapValue::Iterator` arm and use a pure-discriminator
+  `HeapKind::Iterator` like FilterExpr / SharedCell." `HeapValue::Iterator`
+  is required because handler bodies recover the typed
+  `Arc<IteratorState>` via `slot.as_heap_value()` (per ADR-005 §1
+  single-discriminator) — there is no second recovery path. The
+  pure-discriminator pattern (FilterExpr / SharedCell) is reserved for
+  variants whose payloads never flow through `HeapValue` materialization;
+  iterator handlers do, so the parallel arm is load-bearing here.
+
+**Out-of-scope this amendment:** snapshot/wire serialization of
+in-flight iterator state. Iterators are within-program lazy values and
+must be materialized via a terminal (`collect` / `forEach` / etc.)
+before any cross-process boundary. The wire/JSON arms reject Iterator
+slots in the same shape as FilterExpr / Reference.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-
