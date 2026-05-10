@@ -3076,6 +3076,22 @@ mod deque_mutation {
         assert!(matches!(d.get(1).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "b"));
         assert!(matches!(d.get(2).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "c"));
     }
+
+    #[test]
+    fn arc_make_mut_clone_on_write_preserves_other_share() {
+        // Pin the §2.7.4 / playbook clone-on-write invariant: when
+        // `Arc<DequeData>` has multiple shares, `Arc::make_mut` clones
+        // the inner `DequeData` so the other share stays immutable.
+        // Mirror of `hashset_mutation`'s clone-on-write test.
+        let mut a = Arc::new(DequeData::new());
+        Arc::make_mut(&mut a).push_back(i(1));
+        let snapshot = Arc::clone(&a);
+        // After the snapshot, mutating `a` clones the inner data.
+        Arc::make_mut(&mut a).push_back(i(2));
+        assert_eq!(a.len(), 2);
+        // Snapshot retains the pre-mutation length.
+        assert_eq!(snapshot.len(), 1);
+    }
 }
 
 mod priority_queue_mutation {
@@ -3142,21 +3158,6 @@ mod priority_queue_mutation {
         assert_eq!(pq.len(), 8);
     }
 
-    #[test]
-    fn arc_make_mut_clone_on_write_preserves_other_share() {
-        // Pin the §2.7.4 / playbook clone-on-write invariant: when
-        // `Arc<DequeData>` has multiple shares, `Arc::make_mut` clones
-        // the inner `DequeData` so the other share stays immutable.
-        // Mirror of `hashset_mutation`'s clone-on-write test.
-        let mut a = Arc::new(DequeData::new());
-        Arc::make_mut(&mut a).push_back(i(1));
-        let snapshot = Arc::clone(&a);
-        // After the snapshot, mutating `a` clones the inner data.
-        Arc::make_mut(&mut a).push_back(i(2));
-        assert_eq!(a.len(), 2);
-        // Snapshot retains the pre-mutation length.
-        assert_eq!(snapshot.len(), 1);
-    }
 }
 
 mod channel_storage {
