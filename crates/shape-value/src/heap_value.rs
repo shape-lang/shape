@@ -895,6 +895,21 @@ impl Drop for TypedObjectStorage {
                         // payload). See `async_ops/mod.rs` §"Wave 6.5 /
                         // E-async migration" docstring.
                         HeapKind::Future => {}
+                        // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                        // 2026-05-10): when a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::SharedCell)` is dropped
+                        // along with the storage, slot bits are
+                        // `Arc::into_raw(Arc<SharedCell>)`. Retires one
+                        // `Arc<SharedCell>` strong-count share — the inner
+                        // `SharedCell::Drop` then runs, releasing its
+                        // interior payload via its persistent `kind`
+                        // companion (§2.7.8 / Q10 lockstep). Same dispatch
+                        // shape as the FilterExpr §2.7.9 amendment.
+                        HeapKind::SharedCell => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::v2::closure_layout::SharedCell,
+                            );
+                        }
                         // `HeapKind::Char` carries codepoint bits inline.
                         // A heap_mask bit set on a Char field is a
                         // construction-side bug per the original soundness

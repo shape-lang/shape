@@ -442,6 +442,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26): Reference carriers
         // (`Arc<RefTarget>`) emitted by the `MakeRef` family.
         NativeKind::Ptr(HeapKind::Reference) => "ref",
+        // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment, 2026-05-10):
+        // `Arc<SharedCell>` cell-pointer slots emitted by
+        // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
+        NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
     }
 }
 

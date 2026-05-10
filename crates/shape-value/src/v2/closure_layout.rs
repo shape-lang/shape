@@ -438,6 +438,21 @@ impl Drop for SharedCell {
                     // E-async migration" docstring. Same shape as
                     // `HeapKind::Char`.
                     HeapKind::Future => {}
+                    // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                    // 2026-05-10): a `SharedCell` whose `kind` companion
+                    // is `NativeKind::Ptr(HeapKind::SharedCell)` carries
+                    // an inner `Arc::into_raw(Arc<SharedCell>) as u64`
+                    // pointer — the closure-capture shape where one
+                    // shared-mutable variable is itself captured shared
+                    // into another closure (the inner SharedCell wraps
+                    // an outer SharedCell cell-pointer). Retires one
+                    // `Arc<SharedCell>` strong-count share. Same dispatch
+                    // shape as the `HeapKind::FilterExpr` §2.7.9 amendment
+                    // (one variant, one matching `Arc<T>` retire at the
+                    // cell-storage tier).
+                    HeapKind::SharedCell => {
+                        Arc::decrement_strong_count(bits as *const SharedCell);
+                    }
                     // `HeapKind::NativeScalar` has no kinded `Arc<T>`
                     // carrier yet — the redesign is the phase-2c
                     // surface tracked in ADR-006 §2.7.4. When the

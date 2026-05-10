@@ -104,6 +104,22 @@ macro_rules! define_heap_types {
             // symmetry property; no caller materializes a `Reference`
             // through `HeapValue` pattern matching.
             Reference,     // 19  (Wave 8 W8-T26, 2026-05-10)
+            // Pure-discriminator variant — no corresponding `HeapValue` arm
+            // (`Arc<SharedCell>` cell-pointer slots live as
+            // `Arc::into_raw(Arc<SharedCell>) as u64` directly in the
+            // kinded stack / module-binding store / cell-storage slots,
+            // never wrapped in `HeapValue`). Added so the §2.7.7 / §2.7.8
+            // parallel-kind tracks can label `*const SharedCell` slots
+            // distinctly — the precondition for unblocking
+            // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
+            // Same pure-discriminator role as `HeapKind::FilterExpr`:
+            // `as_heap_value()` is unsound on `SharedCell`-labeled bits;
+            // heap dispatch goes through the kind label, not through
+            // `HeapValue` materialisation. ADR-006 §2.7.12 / Q13 amendment
+            // (Wave 8 W8-T25, mirror of §2.7.9 FilterExpr precedent).
+            // NOTE: ordinal 20 (not the originally drafted 19) — T26 took
+            // 19 first at merge time.
+            SharedCell,    // 20  (Wave 8 W8-T25, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
