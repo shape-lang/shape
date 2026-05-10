@@ -301,22 +301,52 @@ impl VirtualMachine {
                     };
                     std::process::exit(code);
                 }
-                BuiltinFunction::Print
-                | BuiltinFunction::Format
-                | BuiltinFunction::FormatValueWithMeta
-                | BuiltinFunction::FormatValueWithSpec => {
-                    // Print/Format machinery touches the formatter
-                    // (`executor/printing.rs`), Content rendering, and the
-                    // OutputAdapter — all explicitly Wave 5e scope per the
-                    // dispatch comment. Wave 5b deliberately leaves these
-                    // bodies unmigrated and surfaces a clean runtime error
-                    // when invoked, rather than panicking.
-                    let _args = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(format!(
-                        "{:?} body migration deferred to Wave 5e (formatter \
-                         lives in executor/printing.rs)",
-                        builtin
-                    )));
+                BuiltinFunction::Print => {
+                    // ADR-006 §2.7.4 — pop the kinded args, format each
+                    // through `ValueFormatter::format_kinded` (top-level
+                    // unquoted-string rendering, nested quotes inside
+                    // containers), join with spaces, surface to the
+                    // `OutputAdapter::print` of the active
+                    // `ExecutionContext`. Returns the unit/null sentinel
+                    // per the §2.7.4 GENERIC_CARRIER ABI.
+                    //
+                    // The pushed result is a `Ptr(HeapKind::String)`-kind
+                    // null slot rather than `KindedSlot::none()`'s
+                    // `Bool=0` shape: `wire_conversion::slot_to_wire`
+                    // projects `Ptr(_)` with bits=0 to `WireValue::Null`,
+                    // which the script runner suppresses when printing
+                    // the program's final value (`script_cmd.rs:1353`).
+                    // The `Bool=0` sentinel would otherwise surface as a
+                    // spurious `false` line after every `print()`.
+                    let args = self.pop_builtin_args()?;
+                    self.builtin_print(&args, _ctx)?;
+                    let null_slot = KindedSlot::new(
+                        ValueSlot::from_raw(0),
+                        shape_value::NativeKind::Ptr(
+                            shape_value::HeapKind::String,
+                        ),
+                    );
+                    self.push_kinded_slot(null_slot)?;
+                }
+                BuiltinFunction::Format
+                | BuiltinFunction::FormatValueWithMeta => {
+                    // Universal value-to-string. `Format` joins multiple
+                    // args without separator (Shape's `format("a", "b")`
+                    // → `"ab"` legacy semantics); `FormatValueWithMeta`
+                    // is the single-arg `expr.to_string()` /
+                    // `f"{expr}"` interpolation path.
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_format(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::FormatValueWithSpec => {
+                    // Args: [value, spec_tag, …spec-payload]. Currently
+                    // routes the basic FORMAT_SPEC_FIXED path; richer
+                    // spec arms (Table, ContentStyle) surface as
+                    // `NotImplemented` per W13 playbook §7.4 surface-and-stop.
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_format_with_spec(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
 
                 // ── Wave 5c: type-introspection + conversion + native-interop ──
@@ -687,6 +717,148 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         }
         Ok(())
+    }
+
+    // ===== Print / Format helpers (ADR-006 §2.7.4) =====
+
+    /// Format every arg via `ValueFormatter::format_kinded`, join the
+    /// rendered fragments with a space, then route through the active
+    /// `ExecutionContext`'s [`OutputAdapter::print`] (or fall back to
+    /// stdout when no context is plumbed — e.g. the bytecode-level
+    /// `eval_*` helpers used by tests).
+    pub(crate) fn builtin_print(
+        &mut self,
+        args: &[KindedSlot],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        // The TypedObject schema names live on `self.program.type_schema_registry`
+        // (the BytecodeProgram-bound registry that `lookup_schema` reads).
+        // The ExecutionContext's registry is the runtime-tier copy populated
+        // via stdlib loading; both are searched so user-defined types and
+        // stdlib types both resolve.
+        let rendered = {
+            let formatter =
+                super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
+            args.iter()
+                .map(|a| formatter.format_kinded(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        let result = shape_runtime::print_result::PrintResult {
+            rendered,
+            spans: Vec::new(),
+        };
+        if let Some(ctx_mut) = ctx {
+            // Drop the returned KindedSlot — `print()` always yields the
+            // GENERIC_CARRIER none-slot per §2.7.4. The dispatch shell
+            // re-pushes the null sentinel itself.
+            let _ = ctx_mut.output_adapter_mut().print(result);
+        } else {
+            // No execution context — write directly to stdout. Mirrors
+            // the `StdoutAdapter` default so REPL/test harnesses without
+            // explicit ctx setup still see output.
+            println!("{}", result.rendered);
+        }
+        Ok(())
+    }
+
+    /// Format every arg via `ValueFormatter::format_kinded` and
+    /// concatenate (no separator). Returns the rendered text wrapped in
+    /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg
+    /// concat) and by `FormatValueWithMeta` (single-arg
+    /// `expr.to_string()` / interpolation).
+    pub(crate) fn builtin_format(
+        &mut self,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        let formatter =
+            super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
+        let mut out = String::new();
+        for a in args {
+            out.push_str(&formatter.format_kinded(a));
+        }
+        Ok(KindedSlot::from_string_arc(std::sync::Arc::new(out)))
+    }
+
+    /// `FormatValueWithSpec`: `[value, spec_tag, …spec-payload]`. Routes
+    /// the FORMAT_SPEC_FIXED arm (precision-controlled f64 rendering);
+    /// the Table and ContentStyle arms surface per W13 playbook §7.4
+    /// surface-and-stop.
+    pub(crate) fn builtin_format_with_spec(
+        &mut self,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        const FORMAT_SPEC_FIXED: i64 = 1;
+        const FORMAT_SPEC_TABLE: i64 = 2;
+
+        if args.is_empty() {
+            return Err(VMError::RuntimeError(
+                "FormatValueWithSpec requires at least 1 argument".to_string(),
+            ));
+        }
+
+        // The spec_tag arrives as an `int` constant (`PushConst(Constant::Int(_))`)
+        // — kind `Int64` in the post-§2.7.7 stack ABI. Read defensively:
+        // kind-mismatch falls through to the meta path so a malformed
+        // dispatch still produces a string rather than crashing.
+        let spec_tag = args.get(1).and_then(|s| match s.kind {
+            shape_value::NativeKind::Int64
+            | shape_value::NativeKind::Int32
+            | shape_value::NativeKind::Int16
+            | shape_value::NativeKind::Int8
+            | shape_value::NativeKind::IntSize => Some(s.slot.as_i64()),
+            _ => None,
+        });
+
+        match spec_tag {
+            Some(tag) if tag == FORMAT_SPEC_FIXED => {
+                let precision = args.get(2).and_then(|s| match s.kind {
+                    shape_value::NativeKind::Int64
+                    | shape_value::NativeKind::Int32
+                    | shape_value::NativeKind::Int16
+                    | shape_value::NativeKind::Int8
+                    | shape_value::NativeKind::IntSize => Some(s.slot.as_i64()),
+                    _ => None,
+                });
+                let v = &args[0];
+                // Coerce numeric kinds; non-numeric fall back to default
+                // formatting so the spec is a no-op rather than an error.
+                let f = match v.kind {
+                    shape_value::NativeKind::Float64
+                    | shape_value::NativeKind::NullableFloat64 => Some(v.slot.as_f64()),
+                    shape_value::NativeKind::Int64
+                    | shape_value::NativeKind::Int32
+                    | shape_value::NativeKind::Int16
+                    | shape_value::NativeKind::Int8
+                    | shape_value::NativeKind::IntSize => Some(v.slot.as_i64() as f64),
+                    shape_value::NativeKind::UInt64
+                    | shape_value::NativeKind::UInt32
+                    | shape_value::NativeKind::UInt16
+                    | shape_value::NativeKind::UInt8
+                    | shape_value::NativeKind::UIntSize => Some(v.slot.as_u64() as f64),
+                    _ => None,
+                };
+                let rendered = match (f, precision) {
+                    (Some(f), Some(p)) if p >= 0 => {
+                        format!("{:.*}", p as usize, f)
+                    }
+                    _ => self.builtin_format(&args[..1])?.as_str().unwrap_or("").to_string(),
+                };
+                Ok(KindedSlot::from_string_arc(std::sync::Arc::new(rendered)))
+            }
+            Some(tag) if tag == FORMAT_SPEC_TABLE => {
+                Err(VMError::NotImplemented(
+                    "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
+                     W13-print-formatter scope is the FORMAT_SPEC_FIXED + \
+                     no-spec path. Table rendering reuses the DataTable / \
+                     TableView Display impls; surface-and-stop pending the \
+                     next pass per W13 playbook §7.4."
+                        .to_string(),
+                ))
+            }
+            _ => self.builtin_format(&args[..1]),
+        }
     }
 
     // Runtime bridge functions (pop_builtin_args impl, eval_runtime_*)
