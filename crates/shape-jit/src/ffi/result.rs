@@ -67,15 +67,15 @@ pub extern "C" fn jit_is_result(bits: u64) -> u64 {
 /// If not Ok, returns TAG_NULL.
 pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
     if is_ok_tag(bits) {
+        // Read the inner u64 payload from the `UnifiedValue<u64>` wrapper
+        // before freeing the wrapper. The wrapper carries a single inner
+        // u64 (per `box_ok` in `value_ffi.rs`); freeing the `UnifiedValue<u64>`
+        // does not touch the inner payload — the caller owns it on return.
         let inner = unsafe { unbox_result_inner(bits) };
-        // Free the Ok wrapper. Zero the inner field first so the Drop impl
-        // doesn't try to free the inner value (caller now owns it).
-        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
-            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        let ptr = unbox_heap_pointer(bits);
         if !ptr.is_null() {
             unsafe {
-                (*ptr).inner = 0;
-                drop(Box::from_raw(ptr));
+                UnifiedValue::<u64>::heap_drop(ptr as u64);
             }
         }
         inner
@@ -90,12 +90,10 @@ pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
 pub extern "C" fn jit_unwrap_err(bits: u64) -> u64 {
     if is_err_tag(bits) {
         let inner = unsafe { unbox_result_inner(bits) };
-        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
-            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        let ptr = unbox_heap_pointer(bits);
         if !ptr.is_null() {
             unsafe {
-                (*ptr).inner = 0;
-                drop(Box::from_raw(ptr));
+                UnifiedValue::<u64>::heap_drop(ptr as u64);
             }
         }
         inner
@@ -162,12 +160,10 @@ pub extern "C" fn jit_is_none(bits: u64) -> u64 {
 pub extern "C" fn jit_unwrap_some(bits: u64) -> u64 {
     if is_some_tag(bits) {
         let inner = unsafe { unbox_some_inner(bits) };
-        let ptr = shape_value::ValueBits::from_raw(bits).unified_heap_ptr()
-            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        let ptr = unbox_heap_pointer(bits);
         if !ptr.is_null() {
             unsafe {
-                (*ptr).inner = 0;
-                drop(Box::from_raw(ptr));
+                UnifiedValue::<u64>::heap_drop(ptr as u64);
             }
         }
         inner

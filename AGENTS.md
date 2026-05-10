@@ -56,6 +56,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w10-value-ffi` | `../shape-w10-value-ffi` | W10-value-ffi | — | ffi/value_ffi.rs | idle (close `fc655bb` merged at `d5fe341` 2026-05-10; 33/33 errors closed) | 2026-05-10 |
 | `bulldozer-strictly-typed-w10-mir-compiler` | `../shape-w10-mir-compiler` | W10-mir-compiler | — | mir_compiler/{rvalues,places,v2_int,ownership,blocks,conversions}.rs | idle (close `b9eaff4` merged at `5162a25` 2026-05-10; 38/38 errors closed) | 2026-05-10 |
 | `bulldozer-strictly-typed-w10-ffi-object` | `../shape-w10-ffi-object` | W10-ffi-object | — | ffi/object/{conversion,property_access,closure}.rs + ffi/typed_object/allocation.rs | idle (close `06e8a15` 2026-05-10; 43 errors closed; jit_finalize_heap_closure flipped to Arc<HeapValue::ClosureRaw> per W7 closure-retain) | 2026-05-10 |
+| `bulldozer-strictly-typed-w10-ffi-control` | `../shape-w10-ffi-control` | W10-ffi-control | — | ffi/{control,call_method}/mod.rs + ffi/result.rs | idle (close pending; 41/41 errors closed; jit_call_value / jit_callable_invoker / jit_call_foreign_impl / jit_call_foreign_native_args_fixed / dispatch_call_via_trampoline_vm / dispatch_module_fn_call / dispatch_method_via_trampoline + VM-format-heap probe at jit_call_method all surface-and-stop per §2.7.10/Q11 + §2.7.11/Q12 — kinded MethodFnV2/value-call ABI rebuild gated on JIT lowering threading NativeKind through the call signature) | 2026-05-10 |
 
 ## Status values
 

@@ -16,7 +16,6 @@ use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
 use std::collections::HashMap;
-use shape_value::ValueWordExt;
 
 // Module declarations
 pub mod array;
@@ -176,146 +175,25 @@ unsafe fn try_call_user_method(
 /// that the JIT's built-in method dispatch doesn't handle (VM-format
 /// HashMaps, TypedObjects, etc.).
 fn dispatch_method_via_trampoline(
-    receiver_bits: u64,
-    method_name: &str,
-    args: &[u64],
-    ctx: *mut JITContext,
+    _receiver_bits: u64,
+    _method_name: &str,
+    _args: &[u64],
+    _ctx: *mut JITContext,
 ) -> Option<u64> {
-    use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
-
-    crate::ffi::control::with_trampoline_vm_mut(|vm| {
-        // Guard: only dispatch VM-format heap values through the trampoline.
-        // Unified heap values (bit-47 set) are JIT-native objects that should have
-        // been handled by the built-in dispatch above.
-        if shape_value::ValueBits::from_raw(receiver_bits).is_unified_heap() {
-            return TAG_NULL; // JIT object without a matching method
-        }
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            let hk = heap_kind(receiver_bits);
-            eprintln!("[trampoline-method] receiver={:#x} heap_kind={:?} method={}", receiver_bits, hk, method_name);
-        }
-        let receiver_vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
-
-        // Args come from JIT-compiled code and might be JIT or VM format.
-        // Use jit_bits_to_nanboxed for conversion.
-        let args_vw: Vec<shape_value::ValueWord> = args
-            .iter()
-            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
-            .collect();
-
-        // Handle common methods on VM-allocated types directly.
-        if let Some(hm) = receiver_vw.as_hashmap_data() {
-            return match method_name {
-                "get" => {
-                    if let Some(key) = args_vw.first() {
-                        if let Some(idx) = hm.find_key(key) {
-                            nanboxed_to_jit_bits(&hm.values[idx])
-                        } else {
-                            TAG_NULL
-                        }
-                    } else {
-                        TAG_NULL
-                    }
-                }
-                "set" => {
-                    if args_vw.len() >= 2 {
-                        let key = args_vw[0].clone();
-                        let val = args_vw[1].clone();
-                        let mut new_keys = hm.keys.clone();
-                        let mut new_values = hm.values.clone();
-                        if let Some(idx) = hm.find_key(&key) {
-                            new_values[idx] = val;
-                        } else {
-                            new_keys.push(key);
-                            new_values.push(val);
-                        }
-                        let new_hm = shape_value::ValueWord::from_hashmap_pairs(
-                            new_keys, new_values,
-                        );
-                        nanboxed_to_jit_bits(&new_hm)
-                    } else {
-                        TAG_NULL
-                    }
-                }
-                "has" => {
-                    if let Some(key) = args_vw.first() {
-                        if hm.find_key(key).is_some() {
-                            crate::ffi::value_ffi::TAG_BOOL_TRUE
-                        } else {
-                            crate::ffi::value_ffi::TAG_BOOL_FALSE
-                        }
-                    } else {
-                        crate::ffi::value_ffi::TAG_BOOL_FALSE
-                    }
-                }
-                "keys" => {
-                    nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
-                        shape_value::vmarray_from_vec(hm.keys.clone()),
-                    ))
-                }
-                "values" => {
-                    nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
-                        shape_value::vmarray_from_vec(hm.values.clone()),
-                    ))
-                }
-                "length" | "len" | "size" => {
-                    crate::ffi::value_ffi::box_number(hm.keys.len() as f64)
-                }
-                _ => TAG_NULL,
-            };
-        }
-
-        // TypedObject methods
-        if let Some((_schema_id, _slots, _heap_mask)) = receiver_vw.as_typed_object() {
-            // TypedObject methods are dispatched through the VM
-            // TODO: add common method handling
-        }
-
-        // Generic fallback: dispatch through the trampoline VM's method dispatch.
-        // This handles DataTable.column(), .toArray(), and any other VM-format
-        // object methods not explicitly handled above.
-        {
-            // Push: [receiver, arg0, ..., argN, method_name, arg_count]
-            if vm.push_raw_u64(receiver_vw.clone()).is_ok() {
-                let mut push_ok = true;
-                for arg in &args_vw {
-                    if vm.push_raw_u64(arg.clone()).is_err() {
-                        push_ok = false;
-                        break;
-                    }
-                }
-                if push_ok {
-                    let method_vw = shape_value::ValueWord::from_string(
-                        std::sync::Arc::new(method_name.to_string()),
-                    );
-                    let arg_count_vw = shape_value::ValueWord::from_f64(args_vw.len() as f64);
-                    if vm.push_raw_u64(method_vw).is_ok() && vm.push_raw_u64(arg_count_vw).is_ok() {
-                        // Use legacy stack-based calling convention (operand: None)
-                        // so method name is read from the stack, not the trampoline VM's
-                        // string table.
-                        let instr = shape_vm::bytecode::Instruction {
-                            opcode: shape_vm::bytecode::OpCode::CallMethod,
-                            operand: None,
-                        };
-                        match vm.op_call_method(&instr, None) {
-                            Ok(()) => {
-                                if let Ok(result) = vm.pop_raw_u64() {
-                                    return nanboxed_to_jit_bits(&result);
-                                }
-                            }
-                            Err(e) => {
-                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                                    eprintln!("[trampoline-method-vm] op_call_method FAILED: {} method={}", e, method_name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        TAG_NULL
-    })
+    todo!(
+        "phase-2c §2.7.10/Q11: JIT-side kinded MethodFnV2 ABI rebuild — \
+         dispatch_method_via_trampoline. The trampoline VM's op_call_method \
+         is now driven by the kinded MethodFnV2 ABI ({{args: &[KindedSlot]}} \
+         carrier with per-arg NativeKind from the §2.7.7 stack parallel-kind \
+         track) per ADR-006 §2.7.10/Q11. The deleted machinery (ValueBits \
+         is_unified_heap probe, ValueWord::clone_from_bits receiver decode, \
+         as_hashmap_data / as_typed_object accessors, push_raw_u64 / \
+         pop_raw_u64 stack ABI, vmarray_from_vec, ValueWord::from_string / \
+         from_hashmap_pairs / from_array constructors) was the kind-blind \
+         pre-§2.7.10 dispatch shell. Reconstruction must thread NativeKind \
+         through the JIT call signature per §2.7.5. See \
+         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    )
 }
 
 pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u64 {
@@ -483,50 +361,16 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             }
         }
 
-        // Try VM-allocated object methods first (HashMap.get, TypedObject methods, etc.)
-        // These are Arc<HeapValue> values that the JIT's heap_kind check misidentifies.
-        // Check before built-in dispatch to avoid reading garbage from non-JitAlloc headers.
-        if shape_value::tag_bits::is_tagged(receiver_bits)
-            && shape_value::tag_bits::get_tag(receiver_bits) == shape_value::tag_bits::TAG_HEAP
-            && !shape_value::ValueBits::from_raw(receiver_bits).is_unified_heap()
-        {
-            let vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
-            if let Some(hm) = vw.as_hashmap_data() {
-                match method_name.as_str() {
-                    "get" => {
-                        if let Some(key) = args.first() {
-                            // Convert key from JIT format (unified heap) to VM format
-                            let key_vw = super::object::conversion::jit_bits_to_nanboxed(*key);
-                            if let Some(idx) = hm.find_key(&key_vw) {
-                                let result = super::object::conversion::nanboxed_to_jit_bits(&hm.values[idx]);
-                                return result;
-                            }
-                        }
-                        return TAG_NULL;
-                    }
-                    "keys" => {
-                        return super::object::conversion::nanboxed_to_jit_bits(
-                            &shape_value::ValueWord::from_array(shape_value::vmarray_from_vec(hm.keys.clone())),
-                        );
-                    }
-                    "length" | "len" | "size" => {
-                        return box_number(hm.keys.len() as f64);
-                    }
-                    // For other methods (set, has, values, entries, etc.),
-                    // fall through to the trampoline VM dispatch below.
-                    _ => {}
-                }
-            }
-            // VM-format heap value that's not a handled HashMap method.
-            // Skip built-in dispatch (heap_kind reads garbage for Arc<HeapValue>)
-            // and go directly to the trampoline VM dispatch.
-            if let Some(result) = dispatch_method_via_trampoline(
-                receiver_bits, &method_name, &args, ctx,
-            ) {
-                return result;
-            }
-            return TAG_NULL;
-        }
+        // Phase-2c §2.7.10/Q11: VM-format-heap probe and HashMap fast-path
+        // are gated on the kinded MethodFnV2 ABI rebuild — the deleted
+        // machinery (tag_bits::TAG_HEAP discriminator, ValueBits is_unified_heap
+        // probe, ValueWord::clone_from_bits, as_hashmap_data accessor,
+        // vmarray_from_vec) flowed kind-blind from raw bits in violation of
+        // §2.7.7 #4 / #7. The receiver's NativeKind must come from the JIT
+        // call signature per §2.7.5; until the lowering site threads it
+        // through, the VM-format-heap branch is unreachable from JIT code
+        // and the receiver falls through to built-in JIT-format dispatch
+        // below. See docs/cluster-audits/wave-10-jit-playbook.md §5.
 
         // Try built-in methods first
         // Check for Result types (Ok/Err) before the heap kind match since they use sub-tags
