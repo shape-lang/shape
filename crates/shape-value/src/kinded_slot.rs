@@ -41,8 +41,8 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -131,6 +131,21 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_hashset(h),
             NativeKind::Ptr(HeapKind::HashSet),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Deque)`-kind slot. Mirror of
+    /// `from_hashset` per ADR-006 §2.7.19 / Q20 amendment (Wave 15
+    /// W15-deque). Deque is a HashSet sibling — full
+    /// `HeapValue::Deque(Arc<DequeData>)` arm, not pure-discriminator.
+    #[inline]
+    pub fn from_deque(d: Arc<DequeData>) -> Self {
+        Self::new(
+            ValueSlot::from_deque(d),
+            NativeKind::Ptr(HeapKind::Deque),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).
@@ -328,6 +343,12 @@ impl Drop for KindedSlot {
                     // one `Arc<HashSetData>` strong-count share.
                     HeapKind::HashSet => {
                         Arc::decrement_strong_count(bits as *const HashSetData);
+                    }
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                    // 2026-05-10): mirror of the HashSet arm. Retires
+                    // one `Arc<DequeData>` strong-count share.
+                    HeapKind::Deque => {
+                        Arc::decrement_strong_count(bits as *const DequeData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
@@ -530,6 +551,12 @@ impl Clone for KindedSlot {
                     // `Arc<HashSetData>` strong-count share.
                     HeapKind::HashSet => {
                         Arc::increment_strong_count(bits as *const HashSetData);
+                    }
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                    // 2026-05-10): mirror of the HashSet arm. Bumps
+                    // one `Arc<DequeData>` strong-count share.
+                    HeapKind::Deque => {
+                        Arc::increment_strong_count(bits as *const DequeData);
                     }
                     HeapKind::Decimal => {
                         Arc::increment_strong_count(bits as *const rust_decimal::Decimal);

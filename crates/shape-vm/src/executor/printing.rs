@@ -377,6 +377,17 @@ impl<'a> ValueFormatter<'a> {
                 let _ = bits;
                 "<iterator>".to_string()
             }
+            HeapKind::Deque => {
+                // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                // 2026-05-10): DequeData stores a single
+                // `VecDeque<Arc<HeapValue>>` items buffer. Render as
+                // `Deque[elem1, elem2, ...]` front-to-back. SAFETY:
+                // construction-side contract on `KindedSlot::from_deque`
+                // — slot bits are `Arc::into_raw(Arc<DequeData>)`.
+                let deque: &shape_value::heap_value::DequeData =
+                    unsafe { &*(bits as *const shape_value::heap_value::DequeData) };
+                self.format_deque(deque, depth)
+            }
         }
     }
 
@@ -591,6 +602,24 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
+    /// Format a `DequeData` as `Deque[elem1, elem2, ...]` front-to-back.
+    /// Wave 15 W15-deque (ADR-006 §2.7.19) — heterogeneous-element mirror
+    /// of HashSet's render shape, dispatching per element through the
+    /// canonical ADR-005 §1 single-discriminator `HeapValue` Display.
+    fn format_deque(&self, deque: &shape_value::heap_value::DequeData, depth: usize) -> String {
+        let n = deque.items.len();
+        let mut out = String::with_capacity(8 + n * 4);
+        out.push_str("Deque[");
+        for (i, v) in deque.items.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&self.format_heap_value(v, depth + 1));
+        }
+        out.push(']');
+        out
+    }
+
     /// Format a `HashMapData` as `{key1: val1, key2: val2}`.
     ///
     /// Each value is an `Arc<HeapValue>` — dispatched through the
@@ -630,6 +659,7 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::TypedObject(o) => self.format_typed_object(o.as_ref(), depth),
             HeapValue::HashMap(m) => self.format_hashmap(m.as_ref(), depth),
             HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
+            HeapValue::Deque(d) => self.format_deque(d.as_ref(), depth),
             HeapValue::DataTable(t) => format!("{}", t),
             HeapValue::Content(n) => format!("{}", n),
             HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),

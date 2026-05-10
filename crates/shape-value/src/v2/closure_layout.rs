@@ -39,8 +39,8 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -371,6 +371,16 @@ impl Drop for SharedCell {
                     // a HashMap sibling per §2.7.15).
                     HeapKind::HashSet => {
                         Arc::decrement_strong_count(bits as *const HashSetData);
+                    }
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                    // 2026-05-10): mirror of the HashSet arm. A
+                    // SharedCell whose single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::Deque)` carries
+                    // `Arc::into_raw(Arc<DequeData>) as u64`. Retire
+                    // one `Arc<DequeData>` strong-count share at cell
+                    // drop. Deque is a HashSet sibling per §2.7.19.
+                    HeapKind::Deque => {
+                        Arc::decrement_strong_count(bits as *const DequeData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

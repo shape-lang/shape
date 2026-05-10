@@ -3283,6 +3283,186 @@ must be materialized via a terminal (`collect` / `forEach` / etc.)
 before any cross-process boundary. The wire/JSON arms reject Iterator
 slots in the same shape as FilterExpr / Reference.
 
+#### 2.7.19 `HeapKind::Deque` — Q20 cardinality amendment (Wave 15 W15-deque, 2026-05-10)
+
+W15-deque (close 2026-05-10) lands the kinded double-ended-queue
+carrier, replacing the deleted `HeapValue::Deque` /
+`heap_value::DequeData` `ValueWord`-shaped enums (Phase-1.A
+bulldozed). Pre-strict-typing the deque used a
+`Vec<ValueWord>`-backed payload and dispatched per-element via the
+deleted `tag_bits` machinery — both forbidden post-§2.7.7 / §2.7.8
+(CLAUDE.md "Forbidden code" #1, #4, #6). The pre-W15-deque scope was
+the `DEQUE_METHODS` PHF in `executor/objects/method_registry.rs` (10
+entries) plus the `Deque()` ctor in `vm_impl/builtins.rs` — all
+surfacing as `NotImplemented(SURFACE: §2.7.4)`.
+
+**Decision (Q20 ruling):** the deque rebuilds on a typed
+`Arc<DequeData>` payload carried by a fresh `HeapKind` arm, mirroring
+the §2.7.15 HashSet precedent (full `HeapValue::Deque` arm, NOT
+pure-discriminator like FilterExpr / SharedCell — Deque values flow
+through `slot.as_heap_value()` for receiver classification at method
+dispatch).
+
+**The kinded carrier (`shape-value/src/heap_value.rs`):**
+
+```rust
+pub struct DequeData {
+    /// Insertion-ordered double-ended queue of heap-allocated element
+    /// payloads. Element kinds are recovered via the canonical
+    /// ADR-005 §1 single-discriminator `HeapValue` match at the read
+    /// site.
+    pub items: std::collections::VecDeque<Arc<HeapValue>>,
+}
+```
+
+**The new `HeapKind` arm:**
+
+```rust
+pub enum HeapKind {
+    // ... String=0 .. Iterator=22 ..
+    Deque,    // 26 (Wave 15 W15-deque, 2026-05-10) — ordinal-bumped to
+              // 23 at branch landing (W14 / W15-priority-queue not yet
+              // merged; merge-time playbook §4 ordering restores 26)
+}
+
+pub enum HeapValue {
+    // ... existing arms ...
+    Deque(Arc<DequeData>),
+}
+```
+
+Slot bits for a `Deque`-kinded slot are
+`Arc::into_raw(Arc<DequeData>) as u64` directly. **Full HeapValue
+arm** (NOT pure-discriminator like §2.7.9 FilterExpr / §2.7.13
+Reference / §2.7.12 SharedCell): handler bodies recover the typed
+`Arc<DequeData>` via `slot.as_heap_value()` →
+`HeapValue::Deque(arc)`, preserving ADR-005 §1
+single-discriminator. Same shape as §2.7.15 HashSet and §2.7.16
+Iterator — typed `Arc<T>` payload, dispatch goes through both the
+kind label (refcount discipline at the §2.7.7 / §2.7.8 dispatch
+tables) and through `HeapValue` (handler-body recovery).
+
+**Why `VecDeque<Arc<HeapValue>>` rather than the §2.7.7
+parallel-kind track shape:**
+
+- **Heterogeneous-element semantics.** Deque is element-kind-agnostic
+  at landing, mirroring `HashMapData::values`. Storing
+  `Arc<HeapValue>` per element collapses the (bits, kind) pair into a
+  single payload at the element tier, matching the Stage C P1(b)
+  HashMap precedent verbatim.
+- **§2.7.7 parallel-kind (`Vec<u64>` + `Vec<NativeKind>`) is for the
+  STACK ABI** — its hot-path role is opcode dispatch where every
+  push/pop is on the call site. A heap-resident deque is a
+  GENERIC_CARRIER (§2.7.1) where each element pushed/popped already
+  pays the construction cost; threading kinds through the deque API
+  forces every caller to source kinds from outside the data
+  structure.
+- **No HashSet-style dedup needed.** Deque is order-preserving
+  without deduplication, so the bucket-index that distinguishes
+  HashSet from a plain typed buffer doesn't apply.
+
+Path B alternatives considered and rejected at landing:
+
+- **`TypedDeque<T>` per element kind** — same cardinality cost as the
+  §2.7.15 Path B rejection: 12+ monomorphized variants × the §2.7.7
+  / §2.7.8 / §2.7.10 dispatch tables each. Future amendment with
+  measurement.
+- **`Vec<u64>` + parallel `Vec<NativeKind>` element track** —
+  rejected per the bullet above. Reserved for the case where
+  measurement shows `Arc<HeapValue>` per element is the bottleneck on
+  scalar-heavy workloads.
+
+**Mechanical lockstep updates (4 dispatch tables — every Q8/Q10
+retain/release table — plus the knock-on exhaustive matches):**
+
+1. `crates/shape-value/src/heap_variants.rs` — `HeapKind::Deque`
+   ordinal 23 + `HeapValue::Deque(Arc<DequeData>)` arm + `kind()` /
+   `is_truthy()` / `type_name()` updates. Display impl renders
+   `Deque[elem1, elem2, ...]`.
+2. `crates/shape-value/src/heap_value.rs` — `DequeData` struct +
+   `new()` / `from_items()` / `len()` / `is_empty()` / `peek_front()`
+   / `peek_back()` / `get()` / `push_back()` / `push_front()` /
+   `pop_back()` / `pop_front()` API. Plus the Clone arm in
+   `HeapValue::clone()` (single Arc bump; no payload copy) and the
+   `TypedObjectStorage::Drop` §2.7.8 mirror — a TypedObject field of
+   kind `NativeKind::Ptr(HeapKind::Deque)` retires one
+   `Arc<DequeData>` strong-count share.
+3. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` dispatch the new arm to
+   `Arc::increment/decrement_strong_count::<DequeData>`.
+4. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::clone` /
+   `KindedSlot::drop` mirror the same arm; new
+   `KindedSlot::from_deque(Arc<DequeData>)` constructor.
+5. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   §2.7.8 mirror.
+6. `crates/shape-value/src/slot.rs` — `ValueSlot::from_deque(Arc<
+   DequeData>)` constructor (mirror of `from_hashset`).
+7. `crates/shape-vm/src/executor/objects/deque_methods.rs` — all 10
+   handlers (`pushBack` / `pushFront` / `popBack` / `popFront` /
+   `peekBack` / `peekFront` / `size` / `isEmpty` / `toArray` /
+   `get`) flipped from `NotImplemented(SURFACE)` to live bodies on
+   top of `DequeData`. Receiver projects via `as_deque` (kind gate
+   + `as_heap_value()` Q8 single-discriminator path); element
+   conversion via `arg_slot_to_heap_value_arc` /
+   `heap_value_arc_to_slot` mirrors the §2.7.15 hashmap-mutation
+   pattern.
+8. `crates/shape-vm/src/executor/vm_impl/builtins.rs` —
+   `BuiltinFunction::DequeCtor` body builds an empty
+   `Arc::new(DequeData::new())` and pushes a
+   `KindedSlot::from_deque` slot.
+
+Plus knock-on exhaustive-match additions in `printing.rs`
+(`format_deque` helper rendering `Deque[...]` front-to-back),
+`comparison/mod.rs`, `arithmetic/mod.rs`,
+`objects/typed_access.rs` (kind→type-name maps);
+`shape-runtime/json_value.rs` (Deque serializes as a JSON array of
+elements, dispatching per element through the canonical
+`heap_to_json_value` recursion); `shape-runtime/wire_conversion.rs`
+(opaque `<deque:phase-2c>` tag — same phase-2c marshal-rebuild
+deferral as HashMap / HashSet).
+
+**Cardinality cost:** `HeapKind` grows from 22 variants to 23 (or to
+26 post-merge once W14 / PriorityQueue land per playbook §4); the
+§2.7.6 Q8 bound (~25 constructors / ~5-10 scalar accessors max on
+`KindedSlot`) is unchanged — `from_deque` is the matching constructor
+addition.
+
+**Forbidden alternatives this rules out:**
+
+- "Re-introduce `DequeData` in the deleted `Vec<ValueWord>`-encoded
+  shape under a less-suspicious name." This is the W-series
+  defection-attractor (CLAUDE.md "Renames to refuse on sight"); the
+  kind dispatch must go through the `HeapKind::Deque` arm and the
+  payload must be a typed `Arc<T>`, never a `Vec<ValueWord>` or a
+  tag-bit-decoded carrier.
+- "Off-label re-use of an existing HeapKind variant
+  (`HeapKind::HashSet` / `HeapKind::TypedArray`) to label
+  `Arc<DequeData>` payloads." This was the Wave-α D-raw-helpers
+  type-confusion gap (commit `a27c0e4`) generalized to deque labels
+  — wrong-type retain/release at every push site.
+- "Bool-default fallback at the receiver-kind mismatch site."
+  Forbidden #9 (CLAUDE.md "Forbidden Patterns"). The `as_deque`
+  receiver projector returns `RuntimeError` on mismatch.
+- "Skip the `HeapValue::Deque` arm and use a pure-discriminator
+  `HeapKind::Deque` like FilterExpr / SharedCell."
+  `HeapValue::Deque` is required because handler bodies recover the
+  typed `Arc<DequeData>` via `slot.as_heap_value()` (per ADR-005 §1
+  single-discriminator) — there is no second recovery path. The
+  pure-discriminator pattern is reserved for variants whose payloads
+  never flow through `HeapValue` materialization; deque handlers do,
+  so the parallel arm is load-bearing here.
+- "Transitional shims preserving deleted Deque-shape names
+  (`deque_legacy_push`, `vw_pop_front`, `extract_deque`)." This is
+  the W-series "borrowed-bits with call-pattern invariants"
+  defection-attractor at the deque-API layer — refuse on sight,
+  migrate every caller to the kinded API in-wave.
+
+**Out-of-scope this amendment:** snapshot/wire serialization of
+in-flight Deque state (the §2.7.4 phase-2c marshal rebuild covers
+this for HashMap / HashSet / Deque uniformly); element-kind
+specialisation (Path B `TypedDeque<T>` per kind, future
+amendment).
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-
