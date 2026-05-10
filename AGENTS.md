@@ -39,6 +39,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-transform` | `../shape-w9-array-transform` | W9 — array-transform method bodies | — | `crates/shape-vm/src/executor/objects/array_transform.rs` (handle_map_v2, handle_filter_v2, handle_sort_v2, handle_flat_map_v2, handle_group_by_v2 + helpers) | idle (close — 5 closure-callback handler bodies migrated to live `vm.call_value_immediate_nb` per W9 playbook §1; element_kinded/kinded_to_bucket_key/project_indices/collect_homogeneous_results/sort_natural helpers added; HeapValue / Matrix arms surface per ADR-006 §2.7.4 per-element kind metadata gap; shape-vm --lib builds; check-no-dynamic exit 0) | 2026-05-10 |
 
 ## Status values
 
