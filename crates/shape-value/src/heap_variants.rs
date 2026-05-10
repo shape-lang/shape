@@ -148,6 +148,25 @@ macro_rules! define_heap_types {
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
             Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range value
+            // carrier — `start..end` and `start..=end` surface syntax build
+            // `Arc<RangeData>` slots. Distinct from `HeapKind::Iterator`
+            // (which models the post-`.iter()` stateful pipeline): Range is
+            // a value with identity (`r.start`, `r.contains(x)`, prints as
+            // `0..10`), Iterator is a cursor-bearing pipeline. The
+            // `Range.iter()` receiver method converts `RangeData` to
+            // `IteratorState { source: IteratorSource::Range { start, end,
+            // step } }`, where `IteratorSource::Range` was already provided
+            // by W13-iterator-state for forward compatibility. Full
+            // HeapValue arm (NOT pure-discriminator like FilterExpr /
+            // SharedCell): Range values flow through `slot.as_heap_value()`
+            // for receiver classification at method dispatch.
+            //
+            // Ordinal 30 chosen at W14-15-16 fan-out per the playbook
+            // §0 "Pre-assigned HeapKind ordinals" table. Slots 23 (Result),
+            // 24 (Option), 25 (PriorityQueue), 26 (Deque), 27 (Channel),
+            // 28 (Column), 29 (Matrix) reserved for W14/W15 sibling agents.
+            Range,         // 30  (W15-range, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -313,6 +332,19 @@ macro_rules! define_heap_types {
             /// cursor triple is opaque at the dispatch shell —
             /// terminals walk `arc.transforms` and dispatch per stage).
             Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10) =====
+            /// Range value carrier (`Arc<RangeData>`). Built by
+            /// `MakeRange` from the `start..end` / `start..=end` surface
+            /// syntax. Slot bits are `Arc::into_raw(Arc<RangeData>) as
+            /// u64` (typed-Arc shape, mirror of HashMap / HashSet /
+            /// Iterator). Recovery goes through `slot.as_heap_value()`
+            /// → `HeapValue::Range(arc)` for receiver classification at
+            /// method dispatch (`r.contains(x)` / `r.toArray()` /
+            /// `r.iter()`). Same dispatch shape as the FilterExpr §2.7.9
+            /// amendment for refcount discipline (clone_with_kind /
+            /// drop_with_kind retain/release `Arc<RangeData>` directly,
+            /// NOT through `HeapValue`).
+            Range(std::sync::Arc<$crate::heap_value::RangeData>),
         }
 
         impl HeapValue {
@@ -342,6 +374,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                     HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::Range(..) => HeapKind::Range,
                 }
             }
 
@@ -378,6 +411,11 @@ macro_rules! define_heap_types {
                     // if its terminal evaluation will yield zero
                     // elements after filter / take 0 etc.).
                     HeapValue::Iterator(_) => true,
+                    // Empty range (zero elements) is falsy; non-empty is
+                    // truthy. Mirrors the HashSet/HashMap "empty is
+                    // falsy" pattern at §2.7.15. Cheap O(1) check via
+                    // `RangeData::is_empty()`.
+                    HeapValue::Range(r) => !r.is_empty(),
                 }
             }
 
@@ -413,6 +451,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                     HeapValue::Iterator(_) => "iterator",
+                    HeapValue::Range(_) => "range",
                 }
             }
         }

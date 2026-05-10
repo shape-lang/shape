@@ -452,6 +452,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<IteratorState>` lazy-iterator carriers emitted by the
         // iterator-method PHF.
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
+        // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+        // `Arc<RangeData>` range-value carriers emitted by `MakeRange`.
+        NativeKind::Ptr(HeapKind::Range) => "range",
     }
 }
 

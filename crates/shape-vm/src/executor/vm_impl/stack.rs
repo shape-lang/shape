@@ -28,8 +28,8 @@ use super::super::*;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
-        TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+        HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, RangeData,
+        TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -152,6 +152,16 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // tier).
                 HeapKind::Iterator => {
                     Arc::increment_strong_count(bits as *const IteratorState);
+                }
+                // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                // Range-kinded slots own one
+                // `Arc::into_raw(Arc<RangeData>)` strong-count share.
+                // Slot bits are typed-Arc directly (mirror of HashMap /
+                // HashSet / Iterator). Same dispatch shape as the
+                // `HeapKind::FilterExpr` §2.7.9 amendment (one variant,
+                // one matching `Arc<T>` retain at the slot tier).
+                HeapKind::Range => {
+                    Arc::increment_strong_count(bits as *const RangeData);
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
@@ -346,6 +356,14 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<HeapValue>` (closure) shares transitively.
                 HeapKind::Iterator => {
                     Arc::decrement_strong_count(bits as *const IteratorState);
+                }
+                // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): mirror
+                // of the `clone_with_kind` Range arm. Retires one
+                // `Arc<RangeData>` strong-count share. RangeData is
+                // `Copy`-shaped (no inner Arcs); refcount=0 just
+                // deallocates the small heap block.
+                HeapKind::Range => {
+                    Arc::decrement_strong_count(bits as *const RangeData);
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}

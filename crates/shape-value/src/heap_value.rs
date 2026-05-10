@@ -861,6 +861,137 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── Range storage (W15-range, ADR-006 §2.7.23 / Q24, 2026-05-10) ────────────
+
+/// Range value carrier — an inclusive-or-exclusive integer interval with
+/// step. Built by `MakeRange` from the surface syntax `start..end` (exclusive)
+/// and `start..=end` (inclusive); produced as a typed `Arc<RangeData>` slot
+/// labeled `NativeKind::Ptr(HeapKind::Range)`.
+///
+/// **Distinct from `IteratorState`.** Range is a value with identity
+/// (`r.start`, `r.end`, `r.contains(x)`, `print(r)` -> `0..10`) — an
+/// `IteratorState` is a stateful pipeline with a cursor. The `.iter()`
+/// receiver method on Range converts a `RangeData` into a fresh
+/// `IteratorState` with `IteratorSource::Range { start, end_exclusive,
+/// step }`, where `end_exclusive` is `end + step` for inclusive ranges
+/// (so `0..=10` step 1 produces values 0..11). `IteratorSource::Range`
+/// already models the post-conversion shape (W13-iterator-state, ADR-006
+/// §2.7.16); `RangeData` is the pre-iter receiver value.
+///
+/// **Bounds storage.** Today only `i64` integer ranges are representable.
+/// The `Option<i64>` shape used by the deleted pre-bulldozer Range payload
+/// (open ranges `..end`, `start..`, `..`) is deliberately NOT modeled here:
+/// the surface syntax for open ranges still compiles via `op_make_range`
+/// pushing a `PushNull` for the missing side, but the SURFACE handler
+/// rejects them per the playbook's surface-and-stop discipline (open
+/// ranges need an iterator-tier semantic for `for i in 0..` infinite
+/// loops which is its own ADR follow-up). `step` is always positive —
+/// matching the pre-strict-typing `0..n` Rust-shape semantics.
+#[derive(Debug, Clone)]
+pub struct RangeData {
+    /// Inclusive lower bound.
+    pub start: i64,
+    /// Upper bound. When `inclusive == true`, the value `end` itself is
+    /// reachable; when `inclusive == false`, `end` is exclusive (the
+    /// surface-syntax `start..end` shape).
+    pub end: i64,
+    /// Per-iteration increment. Always positive; defaults to 1 from the
+    /// `MakeRange` opcode (the surface syntax has no step suffix today).
+    pub step: i64,
+    /// Whether the upper bound is reachable (`start..=end` shape).
+    pub inclusive: bool,
+}
+
+impl RangeData {
+    /// Construct a fresh range with the given bounds and step.
+    #[inline]
+    pub fn new(start: i64, end: i64, step: i64, inclusive: bool) -> Self {
+        Self {
+            start,
+            end,
+            step,
+            inclusive,
+        }
+    }
+
+    /// Construct an exclusive range `start..end` with step 1 (matching
+    /// the surface-syntax `0..n` shape).
+    #[inline]
+    pub fn exclusive(start: i64, end: i64) -> Self {
+        Self::new(start, end, 1, false)
+    }
+
+    /// Construct an inclusive range `start..=end` with step 1.
+    #[inline]
+    pub fn inclusive(start: i64, end: i64) -> Self {
+        Self::new(start, end, 1, true)
+    }
+
+    /// Effective exclusive end — `end + step` for inclusive ranges,
+    /// `end` for exclusive ranges. Matches the upper bound used by
+    /// `IteratorSource::Range`'s `end` field (which is exclusive by
+    /// W13-iterator-state's contract).
+    #[inline]
+    pub fn end_exclusive(&self) -> i64 {
+        if self.inclusive {
+            self.end.saturating_add(self.step)
+        } else {
+            self.end
+        }
+    }
+
+    /// Element count. Mirrors `IteratorSource::Range::len` so a range
+    /// and its post-`.iter()` IteratorState report the same count. For
+    /// non-positive step or an empty interval, returns 0.
+    #[inline]
+    pub fn len(&self) -> usize {
+        let end = self.end_exclusive();
+        if self.step <= 0 || end <= self.start {
+            return 0;
+        }
+        let span = (end - self.start) as u64;
+        let step = self.step as u64;
+        ((span + step - 1) / step) as usize
+    }
+
+    /// Whether the range yields zero elements.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether `value` falls within the range. The check is bound-aware
+    /// (inclusive vs exclusive end) but does NOT enforce step alignment
+    /// — `(0..10).contains(5)` is true regardless of step. This matches
+    /// the pre-bulldozer surface-syntax shape: `range.contains` is a
+    /// bound test, not a "would .iter() yield this exact value" probe.
+    #[inline]
+    pub fn contains(&self, value: i64) -> bool {
+        if value < self.start {
+            return false;
+        }
+        if self.inclusive {
+            value <= self.end
+        } else {
+            value < self.end
+        }
+    }
+
+    /// Materialize the range into a `Vec<i64>` of every yielded value
+    /// (mirror of `.iter().collect()` for the pre-bulldozer
+    /// `range.toArray()` method shape). Empty range -> empty vec.
+    pub fn to_vec_i64(&self) -> Vec<i64> {
+        let n = self.len();
+        let mut out = Vec::with_capacity(n);
+        let mut v = self.start;
+        for _ in 0..n {
+            out.push(v);
+            v += self.step;
+        }
+        out
+    }
+}
+
 // ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
 
 /// Task-group payload. Extracted from the inline
@@ -1164,6 +1295,16 @@ impl Drop for TypedObjectStorage {
                             std::sync::Arc::decrement_strong_count(
                                 bits as *const crate::iterator_state::IteratorState,
                             );
+                        }
+                        // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                        // a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Range)` holds slot
+                        // bits = `Arc::into_raw(Arc<RangeData>)` directly
+                        // (typed-Arc shape, mirror of HashMap / HashSet
+                        // / Iterator). At storage drop, retire one
+                        // `Arc<RangeData>` strong-count share.
+                        HeapKind::Range => {
+                            std::sync::Arc::decrement_strong_count(bits as *const RangeData);
                         }
                         // Round 2.5b W7-closure-retain-parallel (ADR-006
                         // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
@@ -1671,6 +1812,13 @@ impl Clone for HeapValue {
             // every field), but the outer `Arc` bump is the canonical
             // shared-receiver path.
             HeapValue::Iterator(v) => HeapValue::Iterator(Arc::clone(v)),
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range Arcs
+            // share the typed-Arc clone shape — single strong-count bump
+            // on the shared `Arc<RangeData>`, no payload copy. RangeData
+            // is small ({i64, i64, i64, bool}) so copies would be cheap,
+            // but the shared-Arc shape matches the dispatch pattern of
+            // every other heap arm.
+            HeapValue::Range(v) => HeapValue::Range(Arc::clone(v)),
         }
     }
 }
@@ -1850,6 +1998,19 @@ impl fmt::Display for HeapValue {
             // reaching the Display surface is "still lazy" by
             // construction.
             HeapValue::Iterator(_) => write!(f, "<iterator>"),
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): user-visible
+            // literal form — `start..end` for exclusive, `start..=end`
+            // for inclusive. Step is not part of the surface syntax (no
+            // explicit step suffix) so it's not rendered. This matches
+            // the pre-strict-typing print format and the `0..10` /
+            // `0..=10` source syntax round-trip.
+            HeapValue::Range(r) => {
+                if r.inclusive {
+                    write!(f, "{}..={}", r.start, r.end)
+                } else {
+                    write!(f, "{}..{}", r.start, r.end)
+                }
+            }
         }
     }
 }

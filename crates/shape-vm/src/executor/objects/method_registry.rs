@@ -826,7 +826,20 @@ pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "yLabel" => crate::executor::objects::content_methods::v2_content_y_label_camel,
 };
 
-/// PHF registry for Range methods
+/// PHF registry for Range methods (W15-range, ADR-006 §2.7.23 / Q24).
+///
+/// **Conversion:** iter, toArray
+/// **Bound test:** contains
+/// **Accessors:** start, end, step, length, size, len, isEmpty
 pub static RANGE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "iter" => crate::executor::objects::iterator_methods::v2_range_iter,
+    "iter" => crate::executor::objects::range_methods::range_iter,
+    "toArray" => crate::executor::objects::range_methods::range_to_array,
+    "contains" => crate::executor::objects::range_methods::range_contains,
+    "start" => crate::executor::objects::range_methods::range_start,
+    "end" => crate::executor::objects::range_methods::range_end,
+    "step" => crate::executor::objects::range_methods::range_step,
+    "length" => crate::executor::objects::range_methods::range_length,
+    "size" => crate::executor::objects::range_methods::range_length,
+    "len" => crate::executor::objects::range_methods::range_length,
+    "isEmpty" => crate::executor::objects::range_methods::range_is_empty,
 };
