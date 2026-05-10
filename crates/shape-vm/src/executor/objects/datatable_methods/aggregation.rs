@@ -24,12 +24,70 @@
 
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{DataTable, KindedSlot, NativeKind, VMError, heap_value::HeapKind};
+use shape_value::{
+    DataTable, KindedSlot, NativeKind, TableViewData, ValueSlot, VMError,
+    heap_value::HeapKind,
+};
 use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
 
 use super::common::borrow_data_table;
+
+/// Borrow `args[0]` as `Arc<DataTable>` for closure-driven handlers
+/// (mirrors `query.rs::borrow_dt_arc`; see §2.7.6 / Q8 contract).
+fn borrow_dt_arc(args: &[KindedSlot], method: &str) -> Result<Arc<DataTable>, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: missing receiver",
+            method
+        )));
+    }
+    let recv = &args[0];
+    let bits = recv.slot.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: null receiver",
+            method
+        )));
+    }
+    match recv.kind {
+        NativeKind::Ptr(HeapKind::DataTable) => unsafe {
+            Arc::increment_strong_count(bits as *const DataTable);
+            Ok(Arc::from_raw(bits as *const DataTable))
+        },
+        NativeKind::Ptr(HeapKind::TableView) => {
+            let tv: &TableViewData = unsafe { &*(bits as *const TableViewData) };
+            let inner = match tv {
+                TableViewData::TypedTable { table, .. }
+                | TableViewData::IndexedTable { table, .. }
+                | TableViewData::RowView { table, .. }
+                | TableViewData::ColumnRef { table, .. } => Arc::clone(table),
+            };
+            Ok(inner)
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "datatable.{}: expected DataTable/TableView receiver, got {:?}",
+            method, other
+        ))),
+    }
+}
+
+/// Build a per-row `KindedSlot` carrying an `Arc<TableViewData::RowView>`
+/// (mirrors `query.rs::make_row_view_slot`).
+fn make_row_view_slot(table: Arc<DataTable>, row_idx: usize) -> KindedSlot {
+    let schema_id = table.schema_id().unwrap_or(0) as u64;
+    let tv = TableViewData::RowView {
+        schema_id,
+        table,
+        row_idx,
+    };
+    let bits = Arc::into_raw(Arc::new(tv)) as u64;
+    KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::TableView),
+    )
+}
 
 /// Per-column numeric aggregation, dispatched on Arrow `DataType` of the
 /// referenced column. Kept module-local so each handler can call it
@@ -179,95 +237,148 @@ enum AggOp {
 }
 
 fn dispatch_agg(
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     method: &str,
     op: AggOp,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let dt = borrow_data_table(args, method)?;
     if args.len() < 2 {
         return Err(VMError::RuntimeError(format!(
-            "datatable.{}: column name required (closure form is SURFACE — see module docs)",
+            "datatable.{}: column name or closure required",
             method
         )));
     }
     let arg = &args[1];
+    if matches!(arg.kind, NativeKind::Ptr(HeapKind::Closure)) {
+        return closure_form_agg(vm, args, method, op, ctx);
+    }
     if let Some(name) = arg.as_str() {
+        let dt = borrow_data_table(args, method)?;
         return col_numeric_agg(dt, name, method, op);
     }
-    if matches!(arg.kind, NativeKind::Ptr(HeapKind::Closure)) {
-        return Err(VMError::NotImplemented(format!(
-            "datatable.{} (closure form) — SURFACE: depends on op_call_value rebuild \
-             (executor/control_flow/mod.rs PHASE_2C_CALL_REBUILD_SURFACE).",
-            method
-        )));
-    }
     Err(VMError::RuntimeError(format!(
-        "datatable.{}: arg 1 must be a column-name string, got {:?}",
+        "datatable.{}: arg 1 must be a column-name string or closure, got {:?}",
         method, arg.kind
     )))
 }
 
-/// `dt.sum()` / `dt.sum(col)` / `dt.sum(closure)` — column-name form has a
-/// real body; closure form surfaces.
-pub(crate) fn handle_sum(
-    _vm: &mut VirtualMachine,
+/// Closure form of sum/mean/min/max: invoke the closure once per row,
+/// reduce the numeric results to a single scalar. ADR-006 §2.7.11/Q12
+/// closure-callback dispatch through `vm.call_value_immediate_nb`.
+fn closure_form_agg(
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    method: &str,
+    op: AggOp,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    dispatch_agg(args, "sum", AggOp::Sum)
+    let dt_arc = borrow_dt_arc(args, method)?;
+    let closure = &args[1];
+    let n = dt_arc.row_count();
+    if n == 0 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: empty table",
+            method
+        )));
+    }
+    // Reduce in f64-domain (mirrors col_numeric_agg's Float64 arm). Int
+    // closure returns widen.
+    let mut count = 0usize;
+    let mut acc = 0.0f64;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for i in 0..n {
+        let row_slot = make_row_view_slot(Arc::clone(&dt_arc), i);
+        let result = vm.call_value_immediate_nb(
+            closure,
+            std::slice::from_ref(&row_slot),
+            ctx.as_deref_mut(),
+        )?;
+        let v = match result.kind {
+            NativeKind::Float64 => result.as_f64().unwrap(),
+            NativeKind::Int64 => result.as_i64().unwrap() as f64,
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.{}: closure returned non-numeric kind {:?}",
+                    method, other
+                )));
+            }
+        };
+        acc += v;
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        count += 1;
+    }
+    let result = match op {
+        AggOp::Sum => acc,
+        AggOp::Mean => acc / (count as f64),
+        AggOp::Min => min,
+        AggOp::Max => max,
+    };
+    Ok(KindedSlot::from_number(result))
+}
+
+/// `dt.sum()` / `dt.sum(col)` / `dt.sum(closure)`.
+pub(crate) fn handle_sum(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    dispatch_agg(vm, args, "sum", AggOp::Sum, ctx)
 }
 
 /// `dt.mean()` / `dt.mean(col)` / `dt.mean(closure)`.
 pub(crate) fn handle_mean(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    dispatch_agg(args, "mean", AggOp::Mean)
+    dispatch_agg(vm, args, "mean", AggOp::Mean, ctx)
 }
 
 /// `dt.min()` / `dt.min(col)` / `dt.min(closure)`.
 pub(crate) fn handle_min(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    dispatch_agg(args, "min", AggOp::Min)
+    dispatch_agg(vm, args, "min", AggOp::Min, ctx)
 }
 
 /// `dt.max()` / `dt.max(col)` / `dt.max(closure)`.
 pub(crate) fn handle_max(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    dispatch_agg(args, "max", AggOp::Max)
+    dispatch_agg(vm, args, "max", AggOp::Max, ctx)
 }
 
-/// `dt.sort(col)` / `dt.sort(col, asc)` — sort rows by column.
-///
-/// Real body: dispatches on the column's Arrow `DataType` and produces
-/// a permutation of the underlying RecordBatch via `arrow_select::take`.
-/// The two-arg form (`asc` flag) is supported; closure forms surface.
+/// `dt.sort(col)` / `dt.sort(col, asc)` / `dt.sort(|row| key)` — sort
+/// rows by column or by closure-extracted key. Two-arg form is `(col,
+/// asc: bool)`; closure form sorts by the closure's per-row return
+/// (numeric / string / bool keys, heterogeneous-kind total order).
 pub(crate) fn handle_sort(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     use arrow_array::StringArray;
-    let dt = borrow_data_table(args, "sort")?;
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
-            "datatable.sort: column name required".to_string(),
+            "datatable.sort: column name or closure required".to_string(),
         ));
     }
     let arg1 = &args[1];
     if matches!(arg1.kind, NativeKind::Ptr(HeapKind::Closure)) {
-        return Err(VMError::NotImplemented(
-            "datatable.sort (closure form) — SURFACE: depends on op_call_value rebuild."
-                .to_string(),
-        ));
+        return super::query::sort_by_closure_form(vm, args, ctx);
     }
+    let dt = borrow_data_table(args, "sort")?;
     let col_name = arg1.as_str().ok_or_else(|| {
         VMError::RuntimeError(format!(
             "datatable.sort: arg 1 must be column-name string, got {:?}",

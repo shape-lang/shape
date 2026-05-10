@@ -46,7 +46,8 @@ before it's coded.
 | `bulldozer-strictly-typed-w9-array-query` | `../shape-w9-array-query` | W9-array-query | — | array_query.rs | idle (close `eac4ee8` merged at `1db0fe5` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-typed-array-methods` | `../shape-w9-typed-array-methods` | W9-typed-array-methods | — | objects/typed_array_methods.rs (+typed_number/int) | idle (close `a49a749` merged at `d88a80c` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-array-aggregation` | `../shape-w9-array-aggregation` | W9-array-aggregation | — | objects/array_aggregation.rs | idle (close `f4bf0bd` merged at `e681df8` 2026-05-10) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-misc-methods` | `../shape-w9-misc-methods` | W9-misc-methods | — | objects/{13 misc files} | idle (close `23ecf2a` 2026-05-10; number_methods.rs 23 stubs migrated; 12/13 files already Stage C SURFACE — deleted HeapKind variants need Phase-2c Stage C typed-Arc replacements) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-misc-methods` | `../shape-w9-misc-methods` | W9-misc-methods | — | objects/{13 misc files} | idle (close `23ecf2a` merged at `66b987c` 2026-05-10; number_methods.rs 23 stubs migrated; 12/13 already Stage C SURFACE) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-datatable` | `../shape-w9-datatable` | W9-datatable | — | objects/datatable_methods/{joins,query,aggregation,simulation,rolling,indexing}.rs | idle (close `b62f798` 2026-05-10; 6 closure-callback bodies migrated for filter/orderBy/forEach/sum/mean/min/max/sort; 5 SURFACE on TypedObject construction) | 2026-05-10 |
 
 ## Status values
 
