@@ -1,36 +1,87 @@
 //! Method handlers for the Set collection type.
 //!
-//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
-//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
-//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//! W9-set-methods (Phase 1.B-vm Wave 9): bodies remain
+//! `NotImplemented(SURFACE)` per Wave 9 playbook §4 surface-and-stop
+//! triggers — `Set` has no live heap representation so no method body has
+//! a kinded receiver to dispatch on. ADR-006 §2.7.4 (Phase-2c deferral)
+//! applies to every entry in this file.
 //!
-//! `Set` is **not** a surviving `HeapKind` variant per ADR-006 §2.3 trim
-//! (`crates/shape-value/src/heap_variants.rs`); the heterogeneous-element
-//! `SetData` payload depended on the deleted `ValueWord` per-element
-//! representation. Re-introducing Set requires a typed-Arc replacement —
-//! either a monomorphized `TypedSet<T>` per element kind (mirroring
-//! `TypedArrayData`) or a kinded `Arc<HashSetData>` adjacent to the new
-//! `HashMapData` shape (Stage C P1(b), 2026-05-07). Either path is a
-//! Phase 2c Stage C item, not a Wave-β migration.
+//! ## Audit findings (W9 cluster owner, 2026-05-10)
 //!
-//! The pre-Wave-6 implementation used the deleted `ValueWord::from_set`,
-//! `as_set_mut`, `raw_helpers::extract_set` (deleted in cluster
-//! D-raw-helpers), `value_word_drop::vw_drop` / `vw_clone`,
-//! `vmarray_from_vec`, plus the kindless MethodHandler ABI. Per playbook
-//! §4 #1 / #9 a Bool-default kinded shim is forbidden; per §7.4 the
-//! correct response is `NotImplemented(SURFACE)`.
+//! 1. `HeapKind` enumeration has no `Set` variant
+//!    (`crates/shape-value/src/heap_variants.rs`). `HeapValue` likewise
+//!    has no `Set` arm. The Phase-2 ValueWord bulldozer removed the
+//!    pre-existing `HeapValue::Set { items: Vec<ValueWord> }` payload
+//!    along with the rest of the heterogeneous-element collections.
+//! 2. `BuiltinFunction::SetCtor` exists in the bytecode opcode table
+//!    (`bytecode/opcode_defs.rs:2268`) but the executor body in
+//!    `vm_impl/builtins.rs:491` is itself a `todo!()` ("phase-1b-vm
+//!    wave 5e — collection ctor body migration pending"). Set values
+//!    cannot reach a method handler from any execution path today, so
+//!    even the `args[0]` receiver is unreachable.
+//! 3. The Wave 9 playbook (§1 recipe) prescribes `args[0].slot
+//!    .as_heap_value()` receiver classification followed by
+//!    `vm.call_value_immediate_nb` for closure-callback ops
+//!    (`forEach` / `map` / `filter`); the precondition for both is a
+//!    surviving `HeapValue::Set` arm.
+//!
+//! ## Replacement design space (out of W9 scope)
+//!
+//! Two paths are coherent with ADR-006 §2.3 typed-Arc and ADR-005 §1
+//! single-discriminator discipline:
+//!
+//! - **Path A — `Arc<HashSetData>` adjacent to Stage C P1(b)
+//!   `HashMapData`.** Same insertion-ordered `TypedBuffer<Arc<String>>`
+//!   keys + bucket-index hash store, no values buffer. Closure-callback
+//!   ops (`map` / `filter` / `forEach`) iterate the keys buffer and
+//!   dispatch via `call_value_immediate_nb`. Mutation ops (`add` /
+//!   `delete`) need the **HashMapData typed-buffer mutation API**
+//!   follow-up: `Arc::make_mut` over the inner
+//!   `TypedBuffer<Arc<String>>` plus a parallel rebuild of the
+//!   bucket index — neither HashMap nor Set has a mutation entry-point
+//!   today (`HashMapData` is documented as immutable at the marshal
+//!   boundary, see `heap_value.rs:577`). This is the cluster of work
+//!   tracked as "HashMapData typed-buffer mutation API" in the Phase-2c
+//!   backlog.
+//! - **Path B — Monomorphized `TypedSet<T>` per element kind.** Mirrors
+//!   `TypedArrayData::*` arms with a hash-side index for O(1) `has`.
+//!   Wider surface (one variant per element kind) but cleaner kind
+//!   discipline for non-string element types.
+//!
+//! Either choice is a Phase-2c Stage C decision and an ADR-006
+//! amendment, not a Wave-β / Wave 9 migration.
+//!
+//! Per Wave 9 playbook §3 (forbidden) #6, every entry in this file
+//! carries an explicit ADR-006 §2.7.4 surface comment plus the
+//! "HashMapData typed-buffer mutation API" follow-up reference (see
+//! `surface()` below).
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{KindedSlot, VMError};
 
+/// Build the canonical SURFACE error for every entry-point in this file.
+///
+/// ADR-006 §2.7.4 deferral: no live `HeapKind::Set` /
+/// `HeapValue::Set` arm exists, so receiver classification (Wave 9
+/// playbook §1 step 1) cannot run. Reintroduction is gated on the
+/// "HashMapData typed-buffer mutation API" follow-up plus an ADR-006
+/// amendment selecting between Path A (`Arc<HashSetData>`) and Path B
+/// (`TypedSet<T>` per element kind) — see file-level comment.
 #[inline]
 fn surface(method: &str) -> VMError {
     VMError::NotImplemented(format!(
-        "phase-2c — Set.{}(): Set is not a surviving HeapKind variant per \
-         ADR-006 §2.3 trim; needs typed-Arc replacement (TypedSet<T> or \
-         Arc<HashSetData> per Stage C model). MethodHandler ABI also needs \
-         kinded migration (cluster E-builtins-backlog, Wave 5b template).",
+        "phase-2c — Set.{}(): no surviving HeapKind::Set / HeapValue::Set \
+         arm (ADR-006 §2.3 trim, §2.7.4 deferral). Reintroducing Set \
+         requires (1) a typed-Arc heap variant — Path A `Arc<HashSetData>` \
+         adjacent to Stage C P1(b) HashMapData, or Path B `TypedSet<T>` \
+         per element kind — and (2) the \"HashMapData typed-buffer \
+         mutation API\" follow-up so add/delete/etc. can reach the inner \
+         `TypedBuffer` via `Arc::make_mut` and rebuild the bucket index. \
+         Closure-callback ops (forEach/map/filter) additionally need a \
+         live receiver to dispatch through `call_value_immediate_nb` per \
+         ADR-006 §2.7.11. Tracked as Phase-2c Stage C, not a Wave-9 \
+         migration; see `set_methods.rs` file-level audit.",
         method
     ))
 }
