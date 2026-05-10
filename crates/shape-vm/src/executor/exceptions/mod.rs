@@ -103,6 +103,7 @@ use shape_runtime::type_schema::builtin_schemas::{
 use shape_value::{
     HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot,
 };
+use shape_value::heap_value::{OptionData, ResultData};
 use std::sync::Arc;
 
 /// Phase-2c surface message used by every helper body that depends on
@@ -170,6 +171,7 @@ const PHASE_2C_EXCEPTION_OBJECT_SURFACE: &str =
 /// register `__Result` / `__Option` schema OR amend
 /// `HeapKind::Result` / `HeapKind::Option` per Q8 carrier-API-bound,
 /// then close all 8 ops here in a single follow-up.
+#[allow(dead_code)]
 const PHASE_2C_VARIANT_CODEGEN_SURFACE: &str =
     "phase-2c — Result/Option variant-discriminator pending upstream \
      codegen migration. BuiltinFunction::OkCtor / ErrCtor / SomeCtor \
@@ -302,11 +304,7 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         let (value_bits, value_kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(value_bits), value_kind);
-        // Validate the operand carries a type-annotation constant so
-        // callers see the same `InvalidOperand` shape they always
-        // have. We don't actually consult the annotation — the runtime
-        // matcher is part of the Phase-2c surface.
-        let _annotation = match instruction.operand {
+        let annotation = match instruction.operand {
             Some(Operand::Const(idx)) => match self.program.constants.get(idx as usize) {
                 Some(crate::bytecode::Constant::TypeAnnotation(annotation)) => annotation.clone(),
                 _ => {
@@ -322,11 +320,20 @@ impl VirtualMachine {
             }
         };
 
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+        // 2026-05-10): match the kinded carrier against the
+        // TypeAnnotation. Basic-scalar arms (int / number / bool /
+        // string) match the kind tag; Result/Option Generic arms
+        // match via the carrier kind. The semi-bounded matcher below
+        // covers the common emit sites; richer match (Union /
+        // Intersection / Reference / structural Object / Tuple /
+        // Function) lands as a follow-up — for now they conservatively
+        // reject (push false), preserving the surface-and-stop
+        // refusal-to-fabricate discipline at the cost of false
+        // negatives on those forms.
+        let matches = type_check_kinded(&annotation, &value);
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_type_check: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(KindedSlot::from_bool(matches))
     }
 
     pub(in crate::executor) fn op_setup_try(
@@ -558,12 +565,63 @@ impl VirtualMachine {
         let (value_bits, value_kind) = self.pop_kinded()?;
         let context = KindedSlot::new(ValueSlot::from_raw(context_bits), context_kind);
         let value = KindedSlot::new(ValueSlot::from_raw(value_bits), value_kind);
-        drop(context);
-        drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_error_context: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+        // 2026-05-10): the `!!` operator pattern:
+        //   Ok(v)  =>  v   (unwrap on success — same as `op_unwrap_ok`)
+        //   Err(e) =>  AnyError(payload=e, cause=context)  +  throw
+        //   Some(v) => v
+        //   None   =>  AnyError(payload="None", cause=context) + throw
+        //   bare value => v (null-coding pass-through)
+        // The inner-discriminate path mirrors `op_try_unwrap` but the
+        // failure leg builds an AnyError + handle_exception (not a
+        // frame return) — `!!` is a runtime assertion, not a fallible
+        // function return.
+        if let Some(rd) = read_result(&value)? {
+            if rd.is_ok {
+                let inner = rd.payload.clone();
+                drop(value);
+                drop(context);
+                self.push_kinded_slot(inner)
+            } else {
+                // Err(e) — wrap in AnyError with the context as the
+                // cause; the `e` payload becomes the AnyError's
+                // payload field (stringified per build_any_error's
+                // contract).
+                let inner = rd.payload.clone();
+                drop(value);
+                let trace = self.trace_info_full()?;
+                let any_err = self.build_any_error(inner, Some(context), trace, None)?;
+                self.handle_exception(any_err)
+            }
+        } else if let Some(od) = read_option(&value)? {
+            if od.is_some {
+                let inner = od.payload.clone();
+                drop(value);
+                drop(context);
+                self.push_kinded_slot(inner)
+            } else {
+                drop(value);
+                let none_payload = KindedSlot::from_string_arc(Arc::new("None".to_string()));
+                let trace = self.trace_info_full()?;
+                let any_err = self.build_any_error(none_payload, Some(context), trace, None)?;
+                self.handle_exception(any_err)
+            }
+        } else if is_null_sentinel(&value) {
+            drop(value);
+            let none_payload = KindedSlot::from_string_arc(Arc::new("None".to_string()));
+            let trace = self.trace_info_full()?;
+            let any_err = self.build_any_error(none_payload, Some(context), trace, None)?;
+            self.handle_exception(any_err)
+        } else {
+            // Bare non-null value — pass through (null-coding's
+            // `Some(x) ≡ x`); context is discarded. Transfer the
+            // share verbatim via mem::forget.
+            drop(context);
+            let kind = value.kind();
+            let bits = value.slot().raw();
+            std::mem::forget(value);
+            self.push_kinded(bits, kind)
+        }
     }
 
     /// `TryUnwrap` (`?` operator) for unified Result/Option propagation.
@@ -601,11 +659,64 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_try_unwrap(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_try_unwrap: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+        // 2026-05-10):
+        //   Ok(v)   => unwrap to v
+        //   Err(e)  => early-return Err(e) to caller
+        //   Some(v) => unwrap to v
+        //   None    => early-return None to caller (wrapped as
+        //              AnyError-compatible Err in caller's Result<T> by
+        //              type inference; here we just propagate the None
+        //              carrier verbatim, matching the docstring's
+        //              "AnyError-wrapped OPTION_NONE" intent — the
+        //              wrapping is downstream of this opcode in
+        //              fallible-fn return position)
+        //   bare non-null => pass through (null-coding fallback)
+        if let Some(rd) = read_result(&value)? {
+            if rd.is_ok {
+                let inner = rd.payload.clone();
+                drop(value);
+                self.push_kinded_slot(inner)
+            } else {
+                // Err(e) — early-return Err(e) to caller. We need to
+                // re-emit the wrapper carrier as the call frame's
+                // return value, NOT unwrap the inner — `?` on Err
+                // propagates the wrapper, not the inner.
+                let result_kind = value.kind();
+                let result_bits = value.slot().raw();
+                std::mem::forget(value);
+                self.return_value_inner(result_bits, result_kind)
+            }
+        } else if let Some(od) = read_option(&value)? {
+            if od.is_some {
+                let inner = od.payload.clone();
+                drop(value);
+                self.push_kinded_slot(inner)
+            } else {
+                // None — early-return None to caller. Same shape as
+                // Err propagation; the option_none-as-error wrapping
+                // is part of the broader fallible-fn protocol layered
+                // on top of this opcode.
+                let opt_kind = value.kind();
+                let opt_bits = value.slot().raw();
+                std::mem::forget(value);
+                self.return_value_inner(opt_bits, opt_kind)
+            }
+        } else if is_null_sentinel(&value) {
+            // null-coded None — same early-return shape.
+            let null_kind = value.kind();
+            let null_bits = value.slot().raw();
+            std::mem::forget(value);
+            self.return_value_inner(null_bits, null_kind)
+        } else {
+            // Bare non-null value — null-coded Some(x) ≡ x. Pass
+            // through the share verbatim via mem::forget (no
+            // clone+drop pair).
+            let kind = value.kind();
+            let bits = value.slot().raw();
+            std::mem::forget(value);
+            self.push_kinded(bits, kind)
+        }
     }
 
     /// `UnwrapOption` (`opt!`-style): pop a `T?` and unwrap to `T`,
@@ -634,87 +745,292 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+        // 2026-05-10): the canonical Option<T> representation is
+        // `Ptr(HeapKind::Option)` with `Arc<OptionData>` payload. The
+        // legacy null-coding path (where `Some(x) ≡ x` and `None ≡ null
+        // sentinel`) is preserved as a fallback for compiler emit
+        // sites that haven't migrated to the kinded ctor yet — the
+        // pattern-checking phase still emits `LoadLocal; IsNull;
+        // JumpIfTrue fail` for `None`. Both forms surface the inner
+        // value on success.
+        let inner = match read_option(&value)? {
+            Some(od) if od.is_some => od.payload.clone(),
+            Some(_) => {
+                drop(value);
+                return Err(VMError::RuntimeError(
+                    "called UnwrapOption on None value".to_string(),
+                ));
+            }
+            None => {
+                // Not an Option-kinded slot — apply null-coding fallback.
+                if is_null_sentinel(&value) {
+                    drop(value);
+                    return Err(VMError::RuntimeError(
+                        "called UnwrapOption on null/None value".to_string(),
+                    ));
+                }
+                // Bare non-null value — pass through (null-coding's
+                // `Some(x) ≡ x` shape). Transfer the share verbatim
+                // via mem::forget (no clone+drop pair).
+                let kind = value.kind();
+                let bits = value.slot().raw();
+                std::mem::forget(value);
+                return self.push_kinded(bits, kind);
+            }
+        };
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_unwrap_option: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(inner)
     }
 
     /// `IsOk`: pop a `Result<_,_>`, push `Bool` indicating Ok variant.
     ///
-    /// SURFACE: variant-codegen producer (`OkCtor` / `ErrCtor`) not
-    /// migrated; no determined runtime representation to dispatch on.
-    /// See PHASE_2C_VARIANT_CODEGEN_SURFACE.
+    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+    /// the kinded payload arrives as `NativeKind::Ptr(HeapKind::Result)`
+    /// with bits = `Arc::into_raw(Arc<ResultData>)`. Recovery via
+    /// `slot.as_heap_value()` → `HeapValue::Result(arc)` per ADR-005 §1
+    /// single-discriminator; the `is_ok` discriminator drives the
+    /// pushed Bool. The popped carrier's `Drop` retires the wrapper
+    /// share (kind-dispatched per Q8) — the inner payload's share
+    /// stays held by the wrapper via `ResultData::Drop` cascade.
     #[inline(always)]
     pub(in crate::executor) fn op_is_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let is_ok = match read_result(&value)? {
+            Some(rd) => rd.is_ok,
+            None => false,
+        };
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_is_ok: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(KindedSlot::from_bool(is_ok))
     }
 
     /// `IsErr`: pop a `Result<_,_>`, push `Bool` indicating Err variant.
     ///
-    /// SURFACE: same upstream gap as `op_is_ok`. See
-    /// PHASE_2C_VARIANT_CODEGEN_SURFACE.
+    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+    /// mirror of `op_is_ok` with inverted discriminator.
     #[inline(always)]
     pub(in crate::executor) fn op_is_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let is_err = match read_result(&value)? {
+            Some(rd) => !rd.is_ok,
+            None => false,
+        };
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_is_err: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(KindedSlot::from_bool(is_err))
     }
 
     /// `UnwrapOk`: pop an `Ok(_)`, push the inner value.
     ///
-    /// At Phase-2c re-emission the retain-on-extract pattern (per
-    /// WB2.4 / ADR-006 §2.7.7) constructs an inner-value `KindedSlot`
-    /// that retains the underlying `Arc<T>` share, drops the outer
-    /// wrapper carrier (kind-dispatched refcount retire via
-    /// `KindedSlot::Drop`), and re-pushes via `push_kinded_slot`.
-    /// The unit-test regression docs in this module's tail (preserved
-    /// as `#[ignore]` for Phase-2c) name the exact aliasing class.
-    ///
-    /// SURFACE: variant-codegen producer (`OkCtor`) not migrated; no
-    /// determined runtime representation to extract from. See
-    /// PHASE_2C_VARIANT_CODEGEN_SURFACE.
+    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+    /// retain-on-extract per WB2.4 / §2.7.7. The wrapper carrier's
+    /// share is owned by `value`; the inner payload's share is owned
+    /// by the wrapper via `ResultData::payload`. To extract the inner
+    /// value as a fresh top-of-stack `KindedSlot`, we (a) clone the
+    /// inner `KindedSlot` (`KindedSlot::Clone` bumps the inner share
+    /// per Q8), (b) push the clone (transferring its share onto the
+    /// stack), (c) drop the wrapper carrier (`KindedSlot::Drop`
+    /// retires the wrapper share, which transitively retires the
+    /// inner share if the wrapper's refcount reaches zero — the
+    /// per-bump on (a) is what survives onto the stack).
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let inner = match read_result(&value)? {
+            Some(rd) if rd.is_ok => rd.payload.clone(),
+            Some(_) => {
+                drop(value);
+                return Err(VMError::RuntimeError(
+                    "called UnwrapOk on Err value".to_string(),
+                ));
+            }
+            None => {
+                drop(value);
+                return Err(VMError::RuntimeError(format!(
+                    "UnwrapOk: expected Result, got kind {:?}",
+                    kind
+                )));
+            }
+        };
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_unwrap_ok: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(inner)
     }
 
-    /// `UnwrapErr`: pop an `Err(_)`, push the inner error value
-    /// (unwrapping the AnyError wrapper if the inner is itself an
-    /// AnyError TypedObject).
+    /// `UnwrapErr`: pop an `Err(_)`, push the inner error value.
     ///
-    /// SURFACE: same upstream gap as `op_unwrap_ok` —
-    /// `BuiltinFunction::ErrCtor` is still `todo!()`. The AnyError-
-    /// unwrap path's downstream half is now buildable on top of
-    /// W13-anyerror's `build_any_error`/`normalize_err_payload` (close
-    /// `e9c7260`), but until the variant producer lands there is no
-    /// `Err(_)` value to unwrap. See PHASE_2C_VARIANT_CODEGEN_SURFACE.
+    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+    /// mirror of `op_unwrap_ok` with the inverted variant gate.
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let inner = match read_result(&value)? {
+            Some(rd) if !rd.is_ok => rd.payload.clone(),
+            Some(_) => {
+                drop(value);
+                return Err(VMError::RuntimeError(
+                    "called UnwrapErr on Ok value".to_string(),
+                ));
+            }
+            None => {
+                drop(value);
+                return Err(VMError::RuntimeError(format!(
+                    "UnwrapErr: expected Result, got kind {:?}",
+                    kind
+                )));
+            }
+        };
         drop(value);
-        Err(VMError::NotImplemented(format!(
-            "op_unwrap_err: {}",
-            PHASE_2C_VARIANT_CODEGEN_SURFACE
-        )))
+        self.push_kinded_slot(inner)
+    }
+}
+
+// =========================================================================
+// W14-variant-codegen helpers — Result/Option payload recovery
+//
+// These free functions implement the kinded recovery shape per ADR-006
+// §2.7.10 / Q11 carrier-API-bound: classify the carrier kind, route
+// through `slot.as_heap_value()` for the heap arm, return a borrowed
+// reference to the typed payload struct. The receiver retains its
+// strong-count share — the caller borrows through `&Arc<…>` and never
+// decrements (mirror of `iterator_methods.rs::as_iterator`).
+// =========================================================================
+
+/// Recover the `ResultData` from a kinded carrier. Returns `Ok(None)` if
+/// the carrier is not a Result-kinded slot (the upstream caller decides
+/// whether that's an error).
+///
+/// W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10): Result-kind
+/// slot bits are `Arc::into_raw(Arc<ResultData>) as u64` — pointer to a
+/// `ResultData` directly, NOT a `Box<HeapValue>` wrapper. Recovery casts
+/// `bits as *const ResultData` and borrows; the receiver retains its
+/// strong-count share for the borrow's lifetime.
+#[inline]
+fn read_result(slot: &KindedSlot) -> Result<Option<&ResultData>, VMError> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Result)) {
+        return Ok(None);
+    }
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(
+            "Result-kind slot has null payload bits".to_string(),
+        ));
+    }
+    // SAFETY: per the construction-side contract on
+    // `KindedSlot::from_result`, when `kind` is `Ptr(HeapKind::Result)`
+    // the slot bits are `Arc::into_raw(Arc<ResultData>) as u64`. The
+    // slot owns one strong-count share; we borrow `&ResultData` for
+    // the slot's lifetime.
+    let r: &ResultData = unsafe { &*(bits as *const ResultData) };
+    Ok(Some(r))
+}
+
+/// Recover the `OptionData` from a kinded carrier. Returns `Ok(None)` if
+/// the carrier is not an Option-kinded slot.
+#[inline]
+fn read_option(slot: &KindedSlot) -> Result<Option<&OptionData>, VMError> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Option)) {
+        return Ok(None);
+    }
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(
+            "Option-kind slot has null payload bits".to_string(),
+        ));
+    }
+    // SAFETY: per the construction-side contract on
+    // `KindedSlot::from_option`, when `kind` is `Ptr(HeapKind::Option)`
+    // the slot bits are `Arc::into_raw(Arc<OptionData>) as u64`.
+    let o: &OptionData = unsafe { &*(bits as *const OptionData) };
+    Ok(Some(o))
+}
+
+/// Whether a kinded carrier represents the `null` sentinel — used by
+/// `op_unwrap_option` and `op_try_unwrap` to recognise the legacy
+/// null-coded Option half (`compile_pattern_check_local` at
+/// `compiler/patterns/checking.rs:213` still emits `LoadLocal; IsNull;
+/// JumpIfTrue fail` for `None`, so a bare null sentinel reaching the
+/// discriminator must be treated as None).
+///
+/// Mirrors `comparison/mod.rs::is_null_kinded` exactly — only nullable
+/// kinds with zero bits / NaN bits qualify; non-nullable scalars
+/// (including `0i64` and `false`) are never null.
+#[inline]
+fn is_null_sentinel(slot: &KindedSlot) -> bool {
+    let bits = slot.slot.raw();
+    let kind = slot.kind;
+    match kind {
+        NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+        NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
+        NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => bits == 0,
+        _ => false,
+    }
+}
+
+/// Match a kinded carrier against a TypeAnnotation. Covers the common
+/// emit sites for `op_type_check` per the W14-variant-codegen close —
+/// Basic scalars + Result/Option generics. Other forms conservatively
+/// return `false` rather than fabricate a match contract.
+fn type_check_kinded(
+    annotation: &shape_ast::ast::TypeAnnotation,
+    value: &KindedSlot,
+) -> bool {
+    use shape_ast::ast::TypeAnnotation;
+    match annotation {
+        TypeAnnotation::Basic(name) => match name.as_str() {
+            "int" => matches!(
+                value.kind,
+                NativeKind::Int8
+                    | NativeKind::Int16
+                    | NativeKind::Int32
+                    | NativeKind::Int64
+                    | NativeKind::IntSize
+                    | NativeKind::UInt8
+                    | NativeKind::UInt16
+                    | NativeKind::UInt32
+                    | NativeKind::UInt64
+                    | NativeKind::UIntSize
+            ),
+            "number" | "float" => matches!(value.kind, NativeKind::Float64),
+            "bool" => matches!(value.kind, NativeKind::Bool) && value.slot.raw() != 0
+                || matches!(value.kind, NativeKind::Bool),
+            "string" => matches!(
+                value.kind,
+                NativeKind::String | NativeKind::Ptr(HeapKind::String)
+            ),
+            "char" => matches!(value.kind, NativeKind::Ptr(HeapKind::Char)),
+            _ => false,
+        },
+        TypeAnnotation::Null => value.slot.raw() == 0,
+        TypeAnnotation::Generic { name, .. } => match name.as_str() {
+            "Result" => matches!(value.kind, NativeKind::Ptr(HeapKind::Result)),
+            "Option" => {
+                matches!(value.kind, NativeKind::Ptr(HeapKind::Option))
+                    || value.slot.raw() == 0
+            }
+            "Array" | "Vec" => matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray)),
+            "HashMap" | "Map" => matches!(value.kind, NativeKind::Ptr(HeapKind::HashMap)),
+            "HashSet" | "Set" => matches!(value.kind, NativeKind::Ptr(HeapKind::HashSet)),
+            "Iterator" => matches!(value.kind, NativeKind::Ptr(HeapKind::Iterator)),
+            _ => false,
+        },
+        // Other forms: structural Object / Tuple / Function / Union /
+        // Intersection / Reference / Dyn — these need richer runtime
+        // matching against schema_id / TypedObject layout, which is
+        // its own follow-up. Return false rather than fabricate a
+        // match (forbidden patterns: Bool-default fallback).
+        _ => false,
     }
 }
 
@@ -936,6 +1252,190 @@ mod build_any_error_tests {
         assert_eq!(again.slot().raw(), first_bits);
         assert_eq!(again.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         drop(again);
+    }
+}
+
+// =========================================================================
+// W14-variant-codegen unit tests — Result/Option op_* dispatch
+//
+// These exercise the kinded recovery path (read_result / read_option)
+// directly, validating the smoke target:
+// `let r = Ok(42); if r.is_ok() { print(r.unwrap_ok()) }` outputs `42`.
+// At the storage tier this is `ResultData::ok(KindedSlot::from_int(42))`
+// + `r.is_ok` + `r.payload.as_i64()`. The op_* handler bodies exercise
+// the same path but go through pop_kinded / push_kinded for stack
+// transit.
+// =========================================================================
+
+#[cfg(test)]
+mod variant_codegen_tests {
+    use super::*;
+    use crate::executor::VMConfig;
+
+    /// Smoke target: `Ok(42)` → is_ok() → unwrap_ok() yields 42.
+    #[test]
+    fn smoke_ok_int_is_ok_then_unwrap() {
+        // Build Ok(42) directly via the storage-tier ctor (mirrors
+        // what BuiltinFunction::OkCtor does at runtime).
+        let inner = KindedSlot::from_int(42);
+        let result_data = Arc::new(shape_value::heap_value::ResultData::ok(inner));
+        let ok_carrier = KindedSlot::from_result(result_data);
+
+        // op_is_ok: classify Ok carrier → true.
+        let is_ok_value = match read_result(&ok_carrier).unwrap() {
+            Some(rd) => rd.is_ok,
+            None => panic!("Result kind read failed"),
+        };
+        assert!(is_ok_value);
+
+        // op_unwrap_ok: extract the inner i64 via KindedSlot::Clone
+        // (retain-on-extract per WB2.4).
+        let unwrapped = match read_result(&ok_carrier).unwrap() {
+            Some(rd) if rd.is_ok => rd.payload.clone(),
+            _ => panic!("Ok unwrap failed"),
+        };
+        assert_eq!(unwrapped.as_i64(), Some(42));
+
+        // Wrapper carrier is still alive (its share retained the
+        // ResultData); when we drop it here, ResultData::Drop cascades
+        // through the embedded KindedSlot's Drop. The cloned `unwrapped`
+        // owns its own (Int64-kinded) share — Int64 is inline-scalar
+        // so its drop is a no-op.
+        drop(ok_carrier);
+        drop(unwrapped);
+    }
+
+    /// `Err("oops")` → is_err() yields true; unwrap_err yields "oops".
+    #[test]
+    fn err_string_is_err_then_unwrap() {
+        let inner = KindedSlot::from_string_arc(Arc::new("oops".to_string()));
+        let result_data = Arc::new(shape_value::heap_value::ResultData::err(inner));
+        let err_carrier = KindedSlot::from_result(result_data);
+
+        let is_ok_value = match read_result(&err_carrier).unwrap() {
+            Some(rd) => rd.is_ok,
+            None => panic!("Result kind read failed"),
+        };
+        assert!(!is_ok_value);
+
+        let unwrapped = match read_result(&err_carrier).unwrap() {
+            Some(rd) if !rd.is_ok => rd.payload.clone(),
+            _ => panic!("Err unwrap failed"),
+        };
+        assert_eq!(unwrapped.as_str(), Some("oops"));
+
+        drop(err_carrier);
+        drop(unwrapped);
+    }
+
+    /// `Some(42)` → unwrap_option yields 42.
+    #[test]
+    fn some_int_unwrap_option() {
+        let inner = KindedSlot::from_int(42);
+        let opt_data = Arc::new(shape_value::heap_value::OptionData::some(inner));
+        let some_carrier = KindedSlot::from_option(opt_data);
+
+        let unwrapped = match read_option(&some_carrier).unwrap() {
+            Some(od) if od.is_some => od.payload.clone(),
+            _ => panic!("Some unwrap failed"),
+        };
+        assert_eq!(unwrapped.as_i64(), Some(42));
+
+        drop(some_carrier);
+        drop(unwrapped);
+    }
+
+    /// `None` → is_some is false.
+    #[test]
+    fn none_carrier_is_some_false() {
+        let opt_data = Arc::new(shape_value::heap_value::OptionData::none());
+        let none_carrier = KindedSlot::from_option(opt_data);
+
+        let is_some_value = match read_option(&none_carrier).unwrap() {
+            Some(od) => od.is_some,
+            None => panic!("Option kind read failed"),
+        };
+        assert!(!is_some_value);
+
+        drop(none_carrier);
+    }
+
+    /// `op_throw` fast-path: an Err carrier flows through the
+    /// exception machinery. Verifies the dispatch tables (clone/drop)
+    /// don't double-free or leak the inner share.
+    #[test]
+    fn err_carrier_drop_is_balanced() {
+        // Build an Err with an Arc<String> payload to make the share
+        // count observable.
+        let inner_arc = Arc::new("oops".to_string());
+        let strong_before = Arc::strong_count(&inner_arc);
+        let payload = KindedSlot::from_string_arc(Arc::clone(&inner_arc));
+        // payload now owns one share; outer Arc<String> has 2.
+        assert_eq!(Arc::strong_count(&inner_arc), strong_before + 1);
+
+        let result_data = Arc::new(shape_value::heap_value::ResultData::err(payload));
+        let err_carrier = KindedSlot::from_result(result_data);
+        // Wrapper retained the inner share; same count as after payload.
+        assert_eq!(Arc::strong_count(&inner_arc), strong_before + 1);
+
+        // Drop the outer wrapper — share count returns to baseline.
+        drop(err_carrier);
+        assert_eq!(Arc::strong_count(&inner_arc), strong_before);
+    }
+
+    /// Smoke: `op_type_check` against `Result<int, string>` matches
+    /// an `Ok(_)` carrier.
+    #[test]
+    fn type_check_result_matches_ok_carrier() {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_ast::ast::TypePath;
+        let result_data = Arc::new(shape_value::heap_value::ResultData::ok(
+            KindedSlot::from_int(42),
+        ));
+        let carrier = KindedSlot::from_result(result_data);
+        let annotation = TypeAnnotation::Generic {
+            name: TypePath::simple("Result"),
+            args: vec![
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ],
+        };
+        assert!(type_check_kinded(&annotation, &carrier));
+        drop(carrier);
+    }
+
+    /// `op_type_check` against `Option<int>` matches a `Some(_)`
+    /// carrier and a null sentinel both.
+    #[test]
+    fn type_check_option_matches_some_and_null() {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_ast::ast::TypePath;
+        let some_carrier = KindedSlot::from_option(Arc::new(
+            shape_value::heap_value::OptionData::some(KindedSlot::from_int(7)),
+        ));
+        let annotation = TypeAnnotation::Generic {
+            name: TypePath::simple("Option"),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        };
+        assert!(type_check_kinded(&annotation, &some_carrier));
+
+        // Null sentinel (zero-bits Bool slot) matches Option per
+        // null-coding fallback.
+        let null_carrier = KindedSlot::none();
+        assert!(type_check_kinded(&annotation, &null_carrier));
+
+        drop(some_carrier);
+        drop(null_carrier);
+    }
+
+    /// Variant-bypass: passing a non-Result kind to read_result returns
+    /// None (lets the caller decide whether that's an error).
+    #[test]
+    fn read_result_on_non_result_returns_none() {
+        let int_carrier = KindedSlot::from_int(42);
+        let result = read_result(&int_carrier).unwrap();
+        assert!(result.is_none());
+        drop(int_carrier);
     }
 }
 

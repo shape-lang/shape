@@ -221,6 +221,13 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
                 .map(JsonValue::Int)
                 .collect(),
         )),
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+        // Result/Option carriers are within-program control-flow values;
+        // serialisation policy is deferred to the AnyError marshal /
+        // unwrapped-inner-value path. Reject in the same shape as
+        // Iterator until the policy is decided.
+        HeapValue::Result(_) => Err("cannot serialize: Result".into()),
+        HeapValue::Option(_) => Err("cannot serialize: Option".into()),
     }
 }
 

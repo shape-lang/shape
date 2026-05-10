@@ -567,6 +567,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::PriorityQueue) => "priority_queue",
         // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10).
         NativeKind::Ptr(HeapKind::Range) => "range",
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10).
+        NativeKind::Ptr(HeapKind::Result) => "result",
+        NativeKind::Ptr(HeapKind::Option) => "option",
     }
 }
 

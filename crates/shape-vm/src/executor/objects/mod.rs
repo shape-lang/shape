@@ -580,6 +580,12 @@ impl VirtualMachine {
                 // W15-range close (ADR-006 §2.7.23/Q24): Range receivers
                 // route to the RANGE_METHODS PHF.
                 HeapKind::Range => method_registry::RANGE_METHODS.get(method_name).copied(),
+                // W14-variant-codegen close (ADR-006 §2.7.17/Q18):
+                // Result/Option are typed-Arc carriers; method-call
+                // dispatch goes through op_is_ok / op_unwrap_ok / etc.
+                // typed opcodes, not through the generic method PHF.
+                // No method-PHF arm; falls through to UFCS / unknown.
+                HeapKind::Result | HeapKind::Option => None,
                 // ADR-006 §2.7.10 explicitly excludes the closure /
                 // future / reference / shared-cell / filter-expr
                 // discriminators from method-call dispatch — these are

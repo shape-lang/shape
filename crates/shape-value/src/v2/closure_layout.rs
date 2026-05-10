@@ -481,6 +481,24 @@ impl Drop for SharedCell {
                     HeapKind::Range => {
                         Arc::decrement_strong_count(bits as *const RangeData);
                     }
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): a `SharedCell` whose single-slot
+                    // payload is `NativeKind::Ptr(HeapKind::Result)` /
+                    // `NativeKind::Ptr(HeapKind::Option)` carries
+                    // `Arc::into_raw(Arc<ResultData>) as u64` /
+                    // `Arc::into_raw(Arc<OptionData>) as u64` directly
+                    // (mirror of Iterator typed-Arc dispatch). Retire
+                    // one matching strong-count share at cell drop.
+                    HeapKind::Result => {
+                        Arc::decrement_strong_count(
+                            bits as *const crate::heap_value::ResultData,
+                        );
+                    }
+                    HeapKind::Option => {
+                        Arc::decrement_strong_count(
+                            bits as *const crate::heap_value::OptionData,
+                        );
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
                     HeapKind::Char => {}

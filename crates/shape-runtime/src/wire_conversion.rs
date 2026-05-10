@@ -283,6 +283,14 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             };
             WireValue::String(s)
         }
+        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
+        // Result/Option carriers are within-program control-flow values;
+        // wire serialisation goes through the AnyError schema for thrown
+        // errors and the unwrapped inner value for `Ok(_)` / `Some(_)`.
+        // Until those marshal paths land, surface as an opaque tag —
+        // same Phase-2c deferral shape as HashMap / HashSet / Iterator.
+        HeapValue::Result(_) => WireValue::String("<result:phase-2c>".to_string()),
+        HeapValue::Option(_) => WireValue::String("<option:phase-2c>".to_string()),
     }
 }
 

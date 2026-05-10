@@ -432,6 +432,37 @@ impl<'a> ValueFormatter<'a> {
                     format!("{}..{}", r.start, r.end)
                 }
             }
+            HeapKind::Result => {
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): render as `Ok(<inner>)` /
+                // `Err(<inner>)`. The inner-value formatter recurses
+                // through the kinded value-formatter on the payload's
+                // `KindedSlot`. SAFETY: construction-side contract on
+                // `KindedSlot::from_result` — Result-kind bits are
+                // `Arc::into_raw(Arc<ResultData>)`.
+                let r: &shape_value::heap_value::ResultData =
+                    unsafe { &*(bits as *const shape_value::heap_value::ResultData) };
+                let inner = self.format_kinded_inner(&r.payload, depth + 1, true);
+                if r.is_ok {
+                    format!("Ok({})", inner)
+                } else {
+                    format!("Err({})", inner)
+                }
+            }
+            HeapKind::Option => {
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): render as `Some(<inner>)` / `None`.
+                // SAFETY: construction-side contract on
+                // `KindedSlot::from_option`.
+                let o: &shape_value::heap_value::OptionData =
+                    unsafe { &*(bits as *const shape_value::heap_value::OptionData) };
+                if o.is_some {
+                    let inner = self.format_kinded_inner(&o.payload, depth + 1, true);
+                    format!("Some({})", inner)
+                } else {
+                    "None".to_string()
+                }
+            }
         }
     }
 
@@ -769,6 +800,25 @@ impl<'a> ValueFormatter<'a> {
                     format!("{}..={}", r.start, r.end)
                 } else {
                     format!("{}..{}", r.start, r.end)
+                }
+            }
+            // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10): Result/Option carriers — render as
+            // Ok/Err/Some/None tags. Inner is opaque at this fallback
+            // path (the kinded formatter at the format_heap_kind site
+            // handles full pretty-print).
+            HeapValue::Result(r) => {
+                if r.is_ok {
+                    "Ok(<...>)".to_string()
+                } else {
+                    "Err(<...>)".to_string()
+                }
+            }
+            HeapValue::Option(o) => {
+                if o.is_some {
+                    "Some(<...>)".to_string()
+                } else {
+                    "None".to_string()
                 }
             }
         }
