@@ -40,11 +40,13 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
 <<<<<<< HEAD
+<<<<<<< HEAD
 | `bulldozer-strictly-typed-w9-string-methods` | `../shape-w9-string-methods` | W9-string-methods | — | string_methods.rs | idle (close `0fc52ba` merged at `f363482`) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-set-methods` | `../shape-w9-set-methods` | W9-set-methods (surface-only) | — | set_methods.rs | idle (close `4c81e54` merged at `23cf618`; Set arm deleted in Phase-2 bulldozer) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-iterator-methods` | `../shape-w9-iterator-methods` | W9-iterator-methods (surface-only) | — | iterator_methods.rs | idle (close `6670ff4` merged at `22eddb3`; IteratorState substrate deleted in Phase-1.A) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-array-basic` | `../shape-w9-array-basic` | W9-array-basic | — | objects/{array_basic,array_operations,array_joins,array_sets}.rs | idle (close `beb5906` merged at `cb7071f` 2026-05-10) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-array-query` | `../shape-w9-array-query` | W9-array-query | — | array_query.rs | idle (close `eac4ee8` 2026-05-10; 8 real bodies via call_value_immediate_nb (find/findIndex/some/every/any/all/single/forEach); 4 typed-Array-builder sites left SURFACE per W9-array-transform sibling cluster) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-query` | `../shape-w9-array-query` | W9-array-query | — | array_query.rs | idle (close `eac4ee8` merged at `1db0fe5` 2026-05-10; 8 real bodies; 4 SURFACE) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-typed-array-methods` | `../shape-w9-typed-array-methods` | W9-typed-array-methods | — | objects/{typed_array_methods,typed_number_array_methods,typed_int_array_methods}.rs | idle (close `a49a749` 2026-05-10; 14 closure-callback handlers migrated; 19→1 stubs in typed_array_methods.rs; toArray SURFACE retained per §2.7.4) | 2026-05-10 |
 
 ## Status values
 
