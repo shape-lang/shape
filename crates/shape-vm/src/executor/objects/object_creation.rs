@@ -440,14 +440,56 @@ impl VirtualMachine {
                 let bits = Arc::into_raw(arr) as u64;
                 self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
             }
-            // String-kind / heap-kind arrays would require the
-            // TypedArrayData::String / TypedArrayData::HeapValue
-            // construction path. Strings are kinded as
-            // NativeKind::String — feasible to project into
-            // TypedArrayData::String, but the typical emitter already
-            // routes strings through the per-kind NewTypedArray* opcodes
-            // or through the kind-aware compiler emitter. Surface here
-            // pending an explicit emit-path partition.
+            // String element kind: each popped slot's bits are
+            // `Arc::into_raw::<String>` per `pop_kinded` + the
+            // `NativeKind::String` shape. Reconstruct each `Arc<String>`
+            // (consuming the strong-count share) and assemble into
+            // `TypedArrayData::String`. W9 MR-string-misc fill (mirrors
+            // the per-element-kind retain pattern in
+            // `concat.rs::concat_typed_arrays` for the `String` arm).
+            NativeKind::String => {
+                let mut data: Vec<Arc<String>> = Vec::with_capacity(count);
+                for (bits, _kind) in popped.iter() {
+                    if *bits == 0 {
+                        // Defensive: a zero-bits String slot would mean a
+                        // construction-side bug. Release any successful
+                        // shares + surface.
+                        for (b, k) in popped.drain(..) {
+                            drop_with_kind(b, k);
+                        }
+                        return Err(VMError::RuntimeError(
+                            "op_new_typed_array: zero String bits — \
+                             construction-side invariant violated"
+                                .to_string(),
+                        ));
+                    }
+                    // SAFETY: kind is `NativeKind::String`; bits are
+                    // `Arc::into_raw::<String>`; popped slot owns one
+                    // strong-count share. `from_raw` transfers that
+                    // share into the new typed buffer (where the
+                    // resulting `TypedArrayData::String` Arc owns it).
+                    let s: Arc<String> =
+                        unsafe { Arc::from_raw(*bits as *const String) };
+                    data.push(s);
+                }
+                // The popped shares were consumed by `Arc::from_raw`
+                // above; clear `popped` without `drop_with_kind` (the
+                // slots are now owned by the typed buffer).
+                popped.clear();
+                let buf =
+                    shape_value::typed_buffer::TypedBuffer::from_vec(data);
+                let arr = Arc::new(
+                    shape_value::heap_value::TypedArrayData::String(Arc::new(buf)),
+                );
+                let bits = Arc::into_raw(arr) as u64;
+                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+            }
+            // Other heap-kind / scalar-kind element-arrays (Char,
+            // Decimal, BigInt, TypedObject, …) require the
+            // `TypedArrayData::HeapValue` projection — same Phase-2c
+            // dependency as `op_new_array`'s heterogeneous case (the
+            // `Arc<HeapValue>`-arm wrapper that today's emit path
+            // doesn't supply per-`(bits, kind)`).
             other => {
                 for (b, k) in popped.drain(..) {
                     drop_with_kind(b, k);
