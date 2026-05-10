@@ -2309,98 +2309,746 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    /// `MakeRef`, `MakeFieldRef`, `MakeIndexRef` — SURFACE per ADR-006
-    /// §2.7.4 / Phase-2c.
-    ///
-    /// The reference-value carrier was the deleted `nanboxed::RefTarget`
-    /// / `RefProjection` enum, packed into a `ValueWord` via
-    /// `ValueWord::from_ref` / `from_module_binding_ref` /
-    /// `from_projected_ref`. Both `ValueWord` and the `nanboxed` /
-    /// `RefProjection` modules are deleted (CLAUDE.md "Forbidden code"
-    /// #1, the strict-typing bulldozer). The ref-construction +
-    /// deref-load + deref-store paths need a kinded redesign — likely
-    /// a `KindedSlot` runtime-tier carrier where `slot` holds a
-    /// `RefTarget`-shaped enum and `kind` is `NativeKind::Ptr(HeapKind::Ref)`
-    /// or similar (out of B6 territory; needs an ADR-006 §2.7 amendment).
+    // ────────────────────────────────────────────────────────────────────
+    // `MakeRef` / `MakeFieldRef` / `MakeIndexRef` / `DerefLoad` /
+    // `DerefStore` / `SetIndexRef` — kinded RefTarget redesign per
+    // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10).
+    //
+    // The deleted carrier (`nanboxed::RefTarget` / `RefProjection`
+    // packed into a TAG_REF `ValueWord`) is replaced by typed-`Arc`
+    // `RefTarget` payloads emitted to the kinded stack with kind
+    // `NativeKind::Ptr(HeapKind::Reference)`. Each `RefTarget` variant
+    // carries the `NativeKind` of the **projected slot**, threaded
+    // from the producing-opcode emit per §2.7.7 / §2.7.8 / §2.7.10 /
+    // §2.7.11 invariant — no tag-bit decoding, no kind fabrication
+    // at projection time, no `is_heap()` probe.
+    //
+    // Slot bits for a Reference-labeled slot are
+    // `Arc::into_raw(Arc<RefTarget>) as u64` directly (mirror of the
+    // §2.7.9 FilterExpr precedent — `slot.as_heap_value()` is undefined
+    // on Reference-labeled bits; recovery is `Arc::from_raw::<RefTarget>`).
+    // ────────────────────────────────────────────────────────────────────
+
+    /// `MakeRef { Operand::Local(slot) | Operand::ModuleBinding(idx) }` —
+    /// constructs a `RefTarget::Local { frame_index, slot_index, kind }`
+    /// or `RefTarget::ModuleBinding { binding_idx, kind }` and pushes
+    /// it onto the kinded stack as
+    /// `Arc::into_raw(Arc<RefTarget>) as u64` with kind
+    /// `NativeKind::Ptr(HeapKind::Reference)`. The kind is sourced from
+    /// the §2.7.7 stack parallel-kind track (for locals) or the §2.7.8
+    /// module-binding parallel-kind track (for module bindings) — never
+    /// fabricated.
     pub(in crate::executor) fn op_make_ref(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "MakeRef: the deleted nanboxed::RefTarget / ValueWord::from_ref reference \
-             carrier needs a kinded redesign per ADR-006 §2.7.4 / Phase-2c. The \
-             pre-deletion shape packed RefTarget::{Stack,ModuleBinding} into a TAG_REF \
-             ValueWord; post-strict-typing the carrier should live on KindedSlot at \
-             the runtime tier with a dedicated NativeKind::Ptr(HeapKind::Ref) variant. \
-             Out of B6 territory (playbook §10 row scope; surface-and-stop trigger per \
-             playbook §8 cross-cluster cascade)."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        let rt = match instruction.operand {
+            Some(Operand::Local(local_idx)) => {
+                let frame_index = self
+                    .call_stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "MakeRef Local outside any call frame".into(),
+                        )
+                    })? as u32;
+                let bp = self.current_locals_base();
+                let slot = bp + local_idx as usize;
+                if slot >= self.stack.len() {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeRef Local {} out of bounds (stack len {})",
+                        local_idx,
+                        self.stack.len()
+                    )));
+                }
+                // Kind sourced from the §2.7.7 parallel-kind track at
+                // construction time. The producing typed-Store / typed-
+                // initial-write emitted this kind; refs capture it
+                // verbatim, no fabrication.
+                let (_bits, kind) = self.stack_read_kinded_raw(slot);
+                shape_value::RefTarget::Local {
+                    frame_index,
+                    slot_index: local_idx as u32,
+                    kind,
+                }
+            }
+            Some(Operand::ModuleBinding(binding_idx)) => {
+                // Kind sourced from the §2.7.8 module-binding parallel-
+                // kind track at construction time.
+                let (_bits, kind) =
+                    self.module_binding_read_kinded_raw(binding_idx as usize);
+                shape_value::RefTarget::ModuleBinding {
+                    binding_idx: binding_idx as u32,
+                    kind,
+                }
+            }
+            _ => return Err(VMError::InvalidOperand),
+        };
+        // Wrap in Arc<RefTarget>, transfer the strong-count share onto
+        // the stack via `Arc::into_raw`. Slot bits are the `Arc<RefTarget>`
+        // pointer directly per the §2.7.9 FilterExpr precedent — NOT a
+        // `Box<HeapValue>` wrap.
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
+    /// `MakeFieldRef { Operand::TypedField{type_id, field_idx,
+    /// field_type_tag} }` — pops a base-ref carrier from the stack,
+    /// resolves the receiver to an `Arc<TypedObjectStorage>`, and
+    /// pushes a projected `RefTarget::TypedField` ref. The projected
+    /// slot's kind is sourced from `field_type_tag` via
+    /// `field_tag_to_native_kind` (heap arms + inline scalars) — never
+    /// fabricated.
     pub(in crate::executor) fn op_make_field_ref(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "MakeFieldRef: paired with MakeRef SURFACE — the deleted \
-             nanboxed::RefTarget::Projected + RefProjection::TypedField encoding has \
-             no post-§2.7.7 replacement yet. ADR-006 §2.7.4 / Phase-2c."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        let Some(Operand::TypedField {
+            field_idx,
+            field_type_tag,
+            ..
+        }) = instruction.operand
+        else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Source the projected slot's NativeKind from the operand-encoded
+        // field_type_tag — playbook §2 kind-sourcing rules. Surface (no
+        // fabrication, no Bool-default fallback per §2.7.7 #9) when the
+        // tag is FIELD_TAG_ANY / FIELD_TAG_UNKNOWN.
+        let projected_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(
+            field_type_tag,
+        )
+        .ok_or_else(|| {
+            VMError::NotImplemented(format!(
+                "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
+                 FIELD_TAG_UNKNOWN) has no statically-sourceable NativeKind \
+                 — ADR-006 §2.7.13 / Q14 forbids fabrication. Producing emitter \
+                 must stamp a concrete tag.",
+                field_type_tag
+            ))
+        })?;
+        // Pop the base-ref carrier. The stack transfers one
+        // `Arc<RefTarget>` strong-count share to us via `pop_kinded`.
+        let (base_bits, base_kind) = self.pop_kinded()?;
+        if base_kind != NativeKind::Ptr(HeapKind::Reference) {
+            // Release the popped share even on failure — stack ownership
+            // discipline (§2.7.7 / WB2.4).
+            crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+            return Err(VMError::RuntimeError(format!(
+                "MakeFieldRef expected Reference receiver, got {:?}",
+                base_kind
+            )));
+        }
+        // Resolve the base RefTarget. We hold one strong-count share via
+        // `base_bits`; recover the `Arc<RefTarget>` and read it. We must
+        // chase the base ref's *receiver* (the underlying TypedObject) —
+        // for a Local/ModuleBinding base, read the place's bits to get
+        // the TypedObject's `Arc::into_raw` pointer; for a TypedField
+        // base (chained projection), recursively resolve the receiver
+        // through the parent.
+        // SAFETY: kind == Ptr(HeapKind::Reference) is the §2.7.9-style
+        // 1:1 dispatch-table invariant — `base_bits` came from
+        // `Arc::into_raw::<RefTarget>` at the matching MakeRef /
+        // MakeFieldRef / MakeIndexRef site.
+        let base_arc: std::sync::Arc<shape_value::RefTarget> =
+            unsafe { std::sync::Arc::from_raw(base_bits as *const shape_value::RefTarget) };
+        let receiver = match self.resolve_typed_object_receiver(&base_arc) {
+            Ok(r) => r,
+            Err(e) => {
+                // Drop the base ref before bubbling the error (the share
+                // we held via base_arc auto-drops here as it goes out of
+                // scope).
+                drop(base_arc);
+                return Err(e);
+            }
+        };
+        // The base ref share retires here as `base_arc` goes out of scope
+        // (the popped share was transferred to base_arc; base_arc::drop
+        // decrements it).
+        drop(base_arc);
+        // Bounds check against the receiver's slot count.
+        if (field_idx as usize) >= receiver.slots.len() {
+            return Err(VMError::RuntimeError(format!(
+                "MakeFieldRef field_idx {} out of bounds (slot count {})",
+                field_idx,
+                receiver.slots.len()
+            )));
+        }
+        let rt = shape_value::RefTarget::TypedField {
+            receiver,
+            field_offset: field_idx as u32,
+            kind: projected_kind,
+        };
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
+    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack
+    /// (top is index), resolves the receiver to an `Arc<TypedArrayData>`,
+    /// and pushes a `RefTarget::TypedIndex` ref. The element kind is
+    /// sourced by matching on the receiver `TypedArrayData` variant —
+    /// the producing opcode (`NewTypedArray*`) emitted typed elements,
+    /// so the variant identifies the element kind unambiguously.
     pub(in crate::executor) fn op_make_index_ref(
         &mut self,
         _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "MakeIndexRef: paired with MakeRef SURFACE — deleted RefProjection::Index / \
-             ::MatrixRow encoding. ADR-006 §2.7.4 / Phase-2c."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        // Pop index (top of stack) — must be Int64 per the producing
+        // opcode emitting integer index expressions.
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        if idx_kind != NativeKind::Int64 {
+            crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+            return Err(VMError::RuntimeError(format!(
+                "MakeIndexRef expected Int64 index, got {:?}",
+                idx_kind
+            )));
+        }
+        let index = idx_bits as i64;
+        if index < 0 {
+            return Err(VMError::RuntimeError(format!(
+                "MakeIndexRef negative index {}",
+                index
+            )));
+        }
+        // Pop the base-ref carrier.
+        let (base_bits, base_kind) = self.pop_kinded()?;
+        if base_kind != NativeKind::Ptr(HeapKind::Reference) {
+            crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+            return Err(VMError::RuntimeError(format!(
+                "MakeIndexRef expected Reference receiver, got {:?}",
+                base_kind
+            )));
+        }
+        // SAFETY: kind == Ptr(HeapKind::Reference) — see op_make_field_ref.
+        let base_arc: std::sync::Arc<shape_value::RefTarget> =
+            unsafe { std::sync::Arc::from_raw(base_bits as *const shape_value::RefTarget) };
+        let receiver = match self.resolve_typed_array_receiver(&base_arc) {
+            Ok(r) => r,
+            Err(e) => {
+                drop(base_arc);
+                return Err(e);
+            }
+        };
+        drop(base_arc);
+        // Source the element NativeKind from the receiver's variant —
+        // the producing opcode (`NewTypedArray*`) committed to a typed
+        // variant; the variant is the kind-source. No fabrication.
+        let elem_kind = typed_array_element_kind(&receiver).ok_or_else(|| {
+            VMError::NotImplemented(format!(
+                "MakeIndexRef SURFACE: TypedArrayData variant has no \
+                 statically-sourceable element NativeKind (e.g. \
+                 HeapValue / FloatSlice / Matrix) — ADR-006 §2.7.13 / Q14"
+            ))
+        })?;
+        let rt = shape_value::RefTarget::TypedIndex {
+            receiver,
+            index: index as u64,
+            elem_kind,
+        };
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
-    /// `DerefLoad { ref_slot }` — SURFACE per ADR-006 §2.7.4 /
-    /// Phase-2c, paired with `MakeRef` deletion above.
+    /// `DerefLoad { Operand::Local(idx) }` — reads the ref-bearing local
+    /// (without consuming the slot's share), recovers the `RefTarget`,
+    /// reads the projected slot's `(bits, kind)`, runs `clone_with_kind`
+    /// to bump the underlying heap share, and pushes the value onto the
+    /// kinded stack. The local's ref-share stays live (the binding
+    /// retains it).
     pub(in crate::executor) fn op_deref_load(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "DerefLoad: paired with MakeRef SURFACE — depends on the kinded \
-             RefTarget redesign per ADR-006 §2.7.4 / Phase-2c. The pre-deletion path \
-             read the local slot's TAG_REF bits, decoded RefTarget via \
-             nanboxed::as_ref_target, then dispatched on RefProjection::TypedField / \
-             ::Index / ::MatrixRow — none of those types exist post-strict-typing."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            return Err(VMError::RuntimeError(format!(
+                "DerefLoad slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
+        }
+        // Read the ref-bearing local without consuming its share — the
+        // local retains the `Arc<RefTarget>` share; we borrow.
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            return Err(VMError::RuntimeError(format!(
+                "DerefLoad expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
+        // `Arc::into_raw::<RefTarget>` pointer and the slot keeps one
+        // share live for us.
+        let rt: &shape_value::RefTarget =
+            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let (out_bits, out_kind) = self.read_ref_target(rt)?;
+        // WB2.4 retain-on-read: bump the projected share so the pushed
+        // slot's share is independent of the place's share. The place
+        // retains its own ownership (the local / module-binding /
+        // typed-object-field / typed-array-element keeps its share).
+        crate::executor::vm_impl::stack::clone_with_kind(out_bits, out_kind);
+        self.push_kinded(out_bits, out_kind)
     }
 
-    /// `DerefStore { ref_slot }` — SURFACE.
+    /// `DerefStore { Operand::Local(idx) }` — pops the kinded value to
+    /// store, reads the ref-bearing local (without consuming its share),
+    /// recovers the `RefTarget`, releases the projected place's prior
+    /// occupant via `drop_with_kind`, and writes the new bits. The
+    /// stored value's share transfers to the place.
     pub(in crate::executor) fn op_deref_store(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "DerefStore: paired with DerefLoad SURFACE — same RefTarget / \
-             RefProjection kinded-redesign dependency. ADR-006 §2.7.4 / Phase-2c."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop the value to store FIRST — we own its share. If the ref-
+        // shape check fails below, we'll release this share before
+        // returning the error.
+        let (val_bits, val_kind) = self.pop_kinded()?;
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "DerefStore slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
+        }
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "DerefStore expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: same as DerefLoad.
+        let rt: &shape_value::RefTarget =
+            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        // Cross-check: the popped value's kind matches the projected
+        // slot's kind (§2.7.5.1 stack-contents-are-post-proof). On a
+        // mismatch, surface — never silently fabricate.
+        let projected_kind = rt.projected_kind();
+        debug_assert_eq!(
+            val_kind, projected_kind,
+            "DerefStore kind drift: popped {:?}, place {:?} — \
+             ADR-006 §2.7.13 invariant violated",
+            val_kind, projected_kind
+        );
+        // The write_ref_target helper takes ownership of val_bits and
+        // releases the prior occupant via drop_with_kind. record_heap_write
+        // is invoked inside per the GC discipline.
+        record_heap_write();
+        self.write_ref_target(rt, val_bits, val_kind)
     }
 
-    /// `SetIndexRef { ref_slot }` — SURFACE.
+    /// `SetIndexRef { Operand::Local(idx) }` — variant of `DerefStore`
+    /// for the `arr[i] = value` shape. Pops [index, value] (top is value),
+    /// reads the ref-bearing local, pre-projects through the index to
+    /// build a one-shot `TypedIndex`-projection write, and writes the
+    /// value into the array element. Conceptually equivalent to
+    /// `MakeIndexRef + DerefStore` collapsed into one opcode.
     pub(in crate::executor) fn op_set_index_ref(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "SetIndexRef: paired with DerefStore SURFACE; the deleted \
-             set_array_index_on_object / RefTarget::{Stack,ModuleBinding,Projected} \
-             dispatch table is part of the same kinded-redesign work. ADR-006 \
-             §2.7.4 / Phase-2c."
-                .into(),
-        ))
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop value (top of stack), then index.
+        let (val_bits, val_kind) = self.pop_kinded()?;
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        if idx_kind != NativeKind::Int64 {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef expected Int64 index, got {:?}",
+                idx_kind
+            )));
+        }
+        let index = idx_bits as i64;
+        if index < 0 {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef negative index {}",
+                index
+            )));
+        }
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
+        }
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: same as DerefLoad / DerefStore.
+        let rt: &shape_value::RefTarget =
+            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        // Resolve the ref to the receiving TypedArray, then construct a
+        // synthetic `TypedIndex` projection for the element write.
+        let receiver = self.resolve_typed_array_receiver(rt)?;
+        let elem_kind = typed_array_element_kind(&receiver).ok_or_else(|| {
+            VMError::NotImplemented(format!(
+                "SetIndexRef SURFACE: TypedArrayData variant has no \
+                 statically-sourceable element NativeKind — \
+                 ADR-006 §2.7.13 / Q14"
+            ))
+        })?;
+        // Cross-check: val_kind matches the array element kind.
+        debug_assert_eq!(
+            val_kind, elem_kind,
+            "SetIndexRef kind drift: popped value {:?}, element {:?} — \
+             ADR-006 §2.7.13 invariant violated",
+            val_kind, elem_kind
+        );
+        let synthetic = shape_value::RefTarget::TypedIndex {
+            receiver,
+            index: index as u64,
+            elem_kind,
+        };
+        record_heap_write();
+        self.write_ref_target(&synthetic, val_bits, val_kind)
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // RefTarget resolution + read/write helpers (ADR-006 §2.7.13).
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Resolve a `RefTarget` to its underlying `Arc<TypedObjectStorage>`
+    /// receiver. For chained projections (TypedField → TypedField), walks
+    /// the inner ref. Returns an error if the ref points at a non-
+    /// TypedObject place (e.g. an array or scalar local), which is a
+    /// construction-side bug.
+    fn resolve_typed_object_receiver(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<std::sync::Arc<shape_value::heap_value::TypedObjectStorage>, VMError> {
+        use shape_value::HeapKind;
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                let (bits, _) = self.stack_read_kinded_raw(slot);
+                // SAFETY: kind == Ptr(HeapKind::TypedObject) means the
+                // bits are `Arc::into_raw::<TypedObjectStorage>`. We bump
+                // the strong-count to hand the caller an independent
+                // share (the local retains its own share).
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
+                }
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let (bits, _) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
+                }
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "Chained MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let bits = receiver.slots[*field_offset as usize].raw();
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
+                }
+            }
+            shape_value::RefTarget::TypedIndex { .. } => Err(VMError::RuntimeError(
+                "MakeFieldRef chained off a TypedIndex base is unsupported \
+                 — array elements aren't TypedObject-typed at the projection \
+                 layer (ADR-006 §2.7.13)"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Resolve a `RefTarget` to its underlying `Arc<TypedArrayData>`
+    /// receiver. Symmetric to `resolve_typed_object_receiver`.
+    fn resolve_typed_array_receiver(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<std::sync::Arc<shape_value::heap_value::TypedArrayData>, VMError> {
+        use shape_value::HeapKind;
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeIndexRef / SetIndexRef base must reference a TypedArray; got {:?}",
+                        kind
+                    )));
+                }
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                let (bits, _) = self.stack_read_kinded_raw(slot);
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    ))
+                }
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeIndexRef / SetIndexRef base must reference a TypedArray; got {:?}",
+                        kind
+                    )));
+                }
+                let (bits, _) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    ))
+                }
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeIndexRef base via TypedField must project a TypedArray; got {:?}",
+                        kind
+                    )));
+                }
+                let bits = receiver.slots[*field_offset as usize].raw();
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedArrayData,
+                    ))
+                }
+            }
+            shape_value::RefTarget::TypedIndex { .. } => Err(VMError::RuntimeError(
+                "MakeIndexRef chained off a TypedIndex base is unsupported \
+                 — element-of-element projection is not modelled (ADR-006 \
+                 §2.7.13)"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
+    /// borrows the place's share (the place retains ownership). Caller
+    /// is responsible for `clone_with_kind` if pushing onto the stack.
+    fn read_ref_target(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<(u64, NativeKind), VMError> {
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "DerefLoad: RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                let (bits, _stored_kind) = self.stack_read_kinded_raw(slot);
+                Ok((bits, *kind))
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                let (bits, _stored_kind) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                Ok((bits, *kind))
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                let bits = receiver.slots[*field_offset as usize].raw();
+                Ok((bits, *kind))
+            }
+            shape_value::RefTarget::TypedIndex {
+                receiver,
+                index,
+                elem_kind,
+            } => {
+                let bits = typed_array_read_index_raw(receiver, *index as usize)?;
+                Ok((bits, *elem_kind))
+            }
+        }
+    }
+
+    /// Write `(val_bits, val_kind)` into the projected slot of a
+    /// `RefTarget`, releasing the prior occupant's share via
+    /// `drop_with_kind`. Caller transfers ownership of `val_bits` to
+    /// the place.
+    fn write_ref_target(
+        &mut self,
+        rt: &shape_value::RefTarget,
+        val_bits: u64,
+        val_kind: NativeKind,
+    ) -> Result<(), VMError> {
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        crate::executor::vm_impl::stack::drop_with_kind(
+                            val_bits, val_kind,
+                        );
+                        VMError::RuntimeError(format!(
+                            "DerefStore: RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                // Cross-check: the place's stored kind matches the ref's
+                // captured kind (drift = construction-side bug).
+                let (prior_bits, prior_kind) = self.stack_read_kinded_raw(slot);
+                debug_assert_eq!(
+                    prior_kind, *kind,
+                    "DerefStore: place kind drift (stored {:?}, ref {:?}) — \
+                     ADR-006 §2.7.13",
+                    prior_kind, kind
+                );
+                write_barrier_slot(prior_bits, val_bits);
+                self.stack_write_kinded(slot, val_bits, val_kind);
+                Ok(())
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                let (prior_bits, prior_kind) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                debug_assert_eq!(
+                    prior_kind, *kind,
+                    "DerefStore: module-binding kind drift (stored {:?}, ref {:?}) — \
+                     ADR-006 §2.7.13",
+                    prior_kind, kind
+                );
+                write_barrier_slot(prior_bits, val_bits);
+                self.module_binding_write_kinded(
+                    *binding_idx as usize,
+                    val_bits,
+                    val_kind,
+                );
+                Ok(())
+            }
+            shape_value::RefTarget::TypedField { .. }
+            | shape_value::RefTarget::TypedIndex { .. } => {
+                // Writing through a TypedField / TypedIndex projection
+                // requires mutable access to the receiver's slot buffer.
+                // The current `Arc<TypedObjectStorage>` / `Arc<TypedArrayData>`
+                // shape is shared-immutable; in-place mutation goes
+                // through the same v2-raw-heap aliasing class CLAUDE.md
+                // tracks as a separate workstream (see "v2-raw-heap-audit").
+                // Surface here per playbook §7 REVISED #4 (no Bool-default,
+                // no fabrication) — the kinded RefTarget redesign is
+                // landed; the projection-write path lands when the
+                // raw-heap-mutation rebuild closes that workstream.
+                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                Err(VMError::NotImplemented(
+                    "DerefStore / SetIndexRef SURFACE: writing through a \
+                     TypedField / TypedIndex projection requires the v2-raw-heap \
+                     mutation rebuild — Arc<TypedObjectStorage> / \
+                     Arc<TypedArrayData> are shared-immutable carriers \
+                     today. ADR-006 §2.7.13 / Q14 lands the kinded ref \
+                     carrier; the projection-write rebuild is tracked as \
+                     the v2-raw-heap-audit follow-up (CLAUDE.md \"Known \
+                     Constraints\")."
+                        .into(),
+                ))
+            }
+        }
     }
 
     /// `StoreModuleBinding { idx }` — Wave-γ G-module-bindings-kind:
@@ -2807,6 +3455,159 @@ impl VirtualMachine {
         crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
         Ok(())
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// `RefTarget::TypedIndex` element-kind / read helpers (ADR-006 §2.7.13).
+//
+// `TypedArrayData` variants are typed-element buffers; the variant is
+// the kind-source. `MakeIndexRef` / `SetIndexRef` / `DerefLoad` over a
+// `TypedIndex` projection match the variant to recover the element
+// `NativeKind` and read the element at `index`.
+//
+// Variants without a statically-sourceable scalar element kind
+// (`HeapValue`, `FloatSlice`, `Matrix`) surface back to the caller via
+// `None` — the §2.7.13 invariant forbids fabrication. These variants
+// land when the v2-raw-heap mutation rebuild closes (CLAUDE.md
+// "v2-raw-heap-audit" follow-up).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Element `NativeKind` of a `TypedArrayData` variant, or `None` for
+/// variants whose element kind isn't a single inline-scalar kind.
+#[inline]
+fn typed_array_element_kind(
+    arr: &shape_value::heap_value::TypedArrayData,
+) -> Option<NativeKind> {
+    use shape_value::heap_value::TypedArrayData;
+    Some(match arr {
+        TypedArrayData::I64(_) => NativeKind::Int64,
+        TypedArrayData::F64(_) => NativeKind::Float64,
+        TypedArrayData::Bool(_) => NativeKind::Bool,
+        TypedArrayData::I8(_) => NativeKind::Int8,
+        TypedArrayData::I16(_) => NativeKind::Int16,
+        TypedArrayData::I32(_) => NativeKind::Int32,
+        TypedArrayData::U8(_) => NativeKind::UInt8,
+        TypedArrayData::U16(_) => NativeKind::UInt16,
+        TypedArrayData::U32(_) => NativeKind::UInt32,
+        TypedArrayData::U64(_) => NativeKind::UInt64,
+        TypedArrayData::F32(_) => NativeKind::Float64,
+        TypedArrayData::String(_) => NativeKind::String,
+        // Variants without a single statically-sourceable scalar
+        // element kind. Caller surfaces (no fabrication per §2.7.7 #9).
+        TypedArrayData::HeapValue(_)
+        | TypedArrayData::FloatSlice { .. }
+        | TypedArrayData::Matrix(_) => return None,
+    })
+}
+
+/// Read the `index`-th element of a `TypedArrayData` as raw bits.
+/// Returns an error for out-of-bounds reads or for variants that don't
+/// support raw-bits read (HeapValue / FloatSlice / Matrix — the
+/// element layout isn't a single u64 slot in those shapes).
+#[inline]
+fn typed_array_read_index_raw(
+    arr: &shape_value::heap_value::TypedArrayData,
+    index: usize,
+) -> Result<u64, VMError> {
+    use shape_value::heap_value::TypedArrayData;
+    let bits = match arr {
+        TypedArrayData::I64(buf) => *buf
+            .data
+            .get(index)
+            .ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            })? as u64,
+        TypedArrayData::F64(buf) => buf
+            .data
+            .get(index)
+            .ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            })?
+            .to_bits(),
+        TypedArrayData::Bool(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as u64,
+        TypedArrayData::I8(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as i64 as u64,
+        TypedArrayData::I16(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as i64 as u64,
+        TypedArrayData::I32(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as i64 as u64,
+        TypedArrayData::U8(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as u64,
+        TypedArrayData::U16(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as u64,
+        TypedArrayData::U32(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as u64,
+        TypedArrayData::U64(buf) => *buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })?,
+        TypedArrayData::F32(buf) => (*buf.data.get(index).ok_or_else(|| {
+            VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            }
+        })? as f64)
+            .to_bits(),
+        TypedArrayData::String(buf) => {
+            // Each element is `Arc<String>`; the slot bits are
+            // `Arc::into_raw::<String>(arc)`. Bump the strong-count so
+            // the read produces an independent share for the caller.
+            let s_arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: buf.data.len(),
+            })?;
+            let raw = std::sync::Arc::as_ptr(s_arc) as u64;
+            // Caller (`read_ref_target`) does not bump — this read path
+            // is borrow-only; the buffer keeps its share. The caller
+            // (`op_deref_load`) runs `clone_with_kind(bits, String)` to
+            // bump the strong-count for the pushed slot.
+            raw
+        }
+        TypedArrayData::HeapValue(_)
+        | TypedArrayData::FloatSlice { .. }
+        | TypedArrayData::Matrix(_) => {
+            return Err(VMError::NotImplemented(
+                "DerefLoad through TypedIndex SURFACE: HeapValue / \
+                 FloatSlice / Matrix variants don't support raw-bits \
+                 element read — ADR-006 §2.7.13 / Q14"
+                    .into(),
+            ));
+        }
+    };
+    Ok(bits)
 }
 
 // ────────────────────────────────────────────────────────────────────────

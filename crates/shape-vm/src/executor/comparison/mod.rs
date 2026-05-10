@@ -439,6 +439,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // FilterExpr discriminator labels query-DSL Arc<FilterNode>
         // payloads emitted by `executor/logical/mod.rs`.
         NativeKind::Ptr(HeapKind::FilterExpr) => "filter_expr",
+        // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26): Reference carriers
+        // (`Arc<RefTarget>`) emitted by the `MakeRef` family.
+        NativeKind::Ptr(HeapKind::Reference) => "ref",
     }
 }
 

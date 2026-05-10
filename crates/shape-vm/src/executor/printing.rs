@@ -284,6 +284,15 @@ impl<'a> ValueFormatter<'a> {
                 let _ = bits;
                 "<filter_expr>".to_string()
             }
+            HeapKind::Reference => {
+                // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
+                // Reference values are within-program data emitted by the
+                // `MakeRef` family and consumed locally by `DerefLoad` /
+                // `DerefStore` / `SetIndexRef`. They don't have a
+                // user-facing print form; render as an opaque tag.
+                let _ = bits;
+                "<ref>".to_string()
+            }
         }
     }
 

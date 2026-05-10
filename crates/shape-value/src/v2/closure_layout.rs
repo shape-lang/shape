@@ -401,6 +401,16 @@ impl Drop for SharedCell {
                     HeapKind::FilterExpr => {
                         Arc::decrement_strong_count(bits as *const crate::value::FilterNode);
                     }
+                    // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                    // a `SharedCell` whose single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::Reference)` carries
+                    // `Arc::into_raw(Arc<RefTarget>) as u64` directly
+                    // (mirror of FilterExpr's pure-discriminator-style
+                    // dispatch — NOT a `Box<HeapValue>` wrap). Retire one
+                    // `Arc<RefTarget>` strong-count share at cell drop.
+                    HeapKind::Reference => {
+                        Arc::decrement_strong_count(bits as *const crate::reference::RefTarget);
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
                     HeapKind::Char => {}

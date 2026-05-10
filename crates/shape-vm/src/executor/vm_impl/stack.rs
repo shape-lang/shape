@@ -26,7 +26,7 @@
 
 use super::super::*;
 use shape_value::{
-    FilterNode, KindedSlot, NativeKind, VMError, ValueSlot,
+    FilterNode, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
         HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
         TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
@@ -120,6 +120,16 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<NativeViewData>`.
                 HeapKind::FilterExpr => {
                     Arc::increment_strong_count(bits as *const FilterNode);
+                }
+                // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                // Reference-value carrier — slot bits are
+                // `Arc::into_raw(Arc<RefTarget>) as u64` directly (mirror
+                // of FilterExpr's pure-discriminator-style dispatch, not
+                // a `Box<HeapValue>` wrap). Retain/release at the matching
+                // `Arc<RefTarget>` shape; calling `as_heap_value()` on
+                // these bits is undefined behavior per §2.7.13.
+                HeapKind::Reference => {
+                    Arc::increment_strong_count(bits as *const RefTarget);
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
@@ -271,6 +281,18 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // layout, undefined behavior at the share retire site.
                 HeapKind::FilterExpr => {
                     Arc::decrement_strong_count(bits as *const FilterNode);
+                }
+                // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                // mirror of the `clone_with_kind` Reference arm. Retires
+                // one `Arc<RefTarget>` strong-count share — slot bits are
+                // `Arc::into_raw(Arc<RefTarget>)` directly per §2.7.13's
+                // pure-discriminator-style dispatch (NOT a `Box<HeapValue>`
+                // wrap). At refcount=0 the inner `RefTarget` Drop releases
+                // its `receiver` typed-Arc share (TypedField /
+                // TypedIndex variants) — local / module-binding variants
+                // hold no Arc.
+                HeapKind::Reference => {
+                    Arc::decrement_strong_count(bits as *const RefTarget);
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}

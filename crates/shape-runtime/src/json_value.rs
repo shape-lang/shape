@@ -149,6 +149,11 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // representation. Reject in the same shape as the other non-data
         // variants.
         HeapValue::FilterExpr(_) => Err("cannot serialize: FilterExpr".into()),
+        // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10): Reference
+        // values are within-program data and never cross the JSON
+        // serialization boundary. Reject in the same shape as
+        // FilterExpr.
+        HeapValue::Reference(_) => Err("cannot serialize: Reference".into()),
     }
 }
 

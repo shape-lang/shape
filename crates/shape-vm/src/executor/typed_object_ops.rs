@@ -99,6 +99,33 @@ fn field_tag_to_heap_native_kind(tag: u16) -> Option<NativeKind> {
     }
 }
 
+/// Map any `field_type_tag` (heap-backed or inline scalar) to its
+/// `NativeKind`. ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26): the
+/// `MakeFieldRef` projection captures the projected slot's kind on the
+/// `RefTarget::TypedField` variant; the kind-source is the operand-
+/// encoded `field_type_tag`, and the `MakeFieldRef` path needs the
+/// inline-scalar arms too (a `&obj.bool_field` ref carries
+/// `kind = NativeKind::Bool`, etc.).
+///
+/// Returns `None` for `FIELD_TAG_ANY` / `FIELD_TAG_UNKNOWN` (no
+/// statically-sourceable kind — caller surfaces per playbook §7
+/// REVISED #4, no Bool-default fallback per §2.7.7 #9).
+#[inline]
+pub(in crate::executor) fn field_tag_to_native_kind(tag: u16) -> Option<NativeKind> {
+    match tag {
+        FIELD_TAG_F64 => Some(NativeKind::Float64),
+        FIELD_TAG_I64 => Some(NativeKind::Int64),
+        FIELD_TAG_BOOL => Some(NativeKind::Bool),
+        FIELD_TAG_STRING => Some(NativeKind::String),
+        FIELD_TAG_ARRAY => Some(NativeKind::Ptr(HeapKind::TypedArray)),
+        FIELD_TAG_OBJECT => Some(NativeKind::Ptr(HeapKind::TypedObject)),
+        FIELD_TAG_DECIMAL => Some(NativeKind::Ptr(HeapKind::Decimal)),
+        FIELD_TAG_TIMESTAMP => Some(NativeKind::Ptr(HeapKind::Temporal)),
+        // Dynamic / unknown — ADR-006 §2.7.7: no statically-sourceable kind.
+        _ => None,
+    }
+}
+
 /// Push a TypedObject field onto the kinded VM stack.
 ///
 /// ADR-006 §2.7.7 — kind is sourced from the operand-encoded `field_type_tag`

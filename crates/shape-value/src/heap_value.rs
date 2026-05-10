@@ -862,6 +862,20 @@ impl Drop for TypedObjectStorage {
                                 bits as *const crate::value::FilterNode,
                             );
                         }
+                        // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+                        // a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Reference)` holds slot
+                        // bits = `Arc::into_raw(Arc<RefTarget>)` directly
+                        // (mirror of FilterExpr's pure-discriminator-style
+                        // dispatch — NOT a `Box<HeapValue>` wrap). At
+                        // storage drop, retire one `Arc<RefTarget>`
+                        // strong-count share. Same dispatch shape as the
+                        // FilterExpr §2.7.9 amendment.
+                        HeapKind::Reference => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::reference::RefTarget,
+                            );
+                        }
                         // Round 2.5b W7-closure-retain-parallel (ADR-006
                         // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
                         // Round 2.5 close `5fa4b19`): when a TypedObject
@@ -1337,6 +1351,11 @@ impl Clone for HeapValue {
             // FilterExpr Arcs share the typed-Arc clone shape — single
             // strong-count bump, no payload copy.
             HeapValue::FilterExpr(v) => HeapValue::FilterExpr(Arc::clone(v)),
+            // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
+            // Reference Arcs share the typed-Arc clone shape — single
+            // strong-count bump on the shared `Arc<RefTarget>`, no
+            // payload copy.
+            HeapValue::Reference(v) => HeapValue::Reference(Arc::clone(v)),
         }
     }
 }
@@ -1490,6 +1509,11 @@ impl fmt::Display for HeapValue {
             // tag for diagnostics. Construction-side bug if a FilterExpr
             // ever escapes into a user-visible Display path.
             HeapValue::FilterExpr(_) => write!(f, "<filter_expr>"),
+            // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10): no
+            // user-facing reference literal exists; render as an opaque
+            // tag for diagnostics. References are within-program data
+            // and don't cross any user-visible Display surface.
+            HeapValue::Reference(_) => write!(f, "<ref>"),
         }
     }
 }

@@ -89,6 +89,21 @@ macro_rules! define_heap_types {
             // wrong-type retain/release. ADR-006 §2.3 / §2.7.6 / Q8
             // amendment (Wave-γ G-heap-filter-expr).
             FilterExpr,    // 18  (Wave-γ G-heap-filter-expr, 2026-05-09)
+            // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
+            // Reference-value carrier — replaces the deleted
+            // `nanboxed::RefTarget` / `RefProjection` `ValueWord`-shaped
+            // enum. Slot bits are `Arc::into_raw(Arc<RefTarget>) as u64`
+            // directly (mirror of FilterExpr's pure-discriminator-style
+            // dispatch — `as_heap_value()` is undefined on
+            // Reference-labeled bits; recovery is `Arc::from_raw::
+            // <RefTarget>(bits)`). The `clone_with_kind` /
+            // `drop_with_kind` dispatch tables retain/release
+            // `Arc<RefTarget>` directly, NOT through `HeapValue`. The
+            // `HeapValue::Reference` arm below exists ONLY to preserve
+            // the ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue`
+            // symmetry property; no caller materializes a `Reference`
+            // through `HeapValue` pattern matching.
+            Reference,     // 19  (Wave 8 W8-T26, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -212,6 +227,21 @@ macro_rules! define_heap_types {
             /// not `Arc<NativeViewData>` (the pre-Wave-γ type-confusion gap
             /// surfaced by Wave-α D-raw-helpers, commit `a27c0e4`).
             FilterExpr(std::sync::Arc<$crate::value::FilterNode>),
+            // ===== Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10) =====
+            /// Reference-value carrier (`Arc<RefTarget>`) used by the
+            /// `MakeRef` / `MakeFieldRef` / `MakeIndexRef` /
+            /// `DerefLoad` / `DerefStore` / `SetIndexRef` opcode family
+            /// (`executor/variables/mod.rs`). In current code Reference
+            /// payloads are emitted directly to the kinded stack as
+            /// `Arc::into_raw(Arc<RefTarget>) as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::Reference)` and never wrapped
+            /// in `HeapValue`. The arm exists to preserve the ADR-005
+            /// §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9). Calling
+            /// `slot.as_heap_value()` on a Reference-labeled slot is
+            /// undefined behavior; the canonical recovery is
+            /// `Arc::from_raw::<RefTarget>(bits)`.
+            Reference(std::sync::Arc<$crate::reference::RefTarget>),
         }
 
         impl HeapValue {
@@ -238,6 +268,7 @@ macro_rules! define_heap_types {
                     HeapValue::TableView(..) => HeapKind::TableView,
                     HeapValue::HashMap(..) => HeapKind::HashMap,
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
+                    HeapValue::Reference(..) => HeapKind::Reference,
                 }
             }
 
@@ -265,6 +296,9 @@ macro_rules! define_heap_types {
                     HeapValue::HashMap(d) => !d.is_empty(),
                     // Filter-expression trees are always truthy when present.
                     HeapValue::FilterExpr(_) => true,
+                    // Reference values are always truthy when present
+                    // (a live ref points at a reachable place).
+                    HeapValue::Reference(_) => true,
                 }
             }
 
@@ -297,6 +331,7 @@ macro_rules! define_heap_types {
                     HeapValue::TableView(tv) => tv.type_name(),
                     HeapValue::HashMap(_) => "hashmap",
                     HeapValue::FilterExpr(_) => "filter_expr",
+                    HeapValue::Reference(_) => "ref",
                 }
             }
         }
