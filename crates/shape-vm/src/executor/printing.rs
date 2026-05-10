@@ -27,8 +27,10 @@
 //! recovery, per the playbook's surface-and-stop discipline.
 
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::heap_value::{HeapKind, TypedArrayData};
-use shape_value::{KindedSlot, NativeKind};
+use shape_value::heap_value::{
+    HashMapData, HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
+};
+use shape_value::{KindedSlot, NativeKind, ValueSlot};
 
 // Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
 // formatter consumers — keeps the post-§2.7.4 import path coherent for
@@ -80,13 +82,28 @@ impl<'a> ValueFormatter<'a> {
     }
 
     /// Primary entry point: format a runtime value to a string.
+    ///
+    /// At the top level, raw strings render unquoted (so `print("hi")`
+    /// prints `hi`, not `"hi"`). Inside containers (TypedObject fields,
+    /// HashMap values, heap-array elements) strings are quoted via
+    /// [`Self::format_kinded_nested`].
     pub fn format_kinded(&self, slot: &KindedSlot) -> String {
-        self.format_kinded_with_depth(slot, 0)
+        self.format_kinded_inner(slot, 0, false)
+    }
+
+    /// Format a runtime value as it appears nested inside another
+    /// container — quotes string values to disambiguate `{name: "alice"}`
+    /// vs `{name: alice}`.
+    pub fn format_kinded_nested(&self, slot: &KindedSlot) -> String {
+        self.format_kinded_inner(slot, 0, true)
     }
 
     /// Recursive helper with depth tracking. Caps recursion at depth 50
     /// to bound output for cyclic / deeply nested values.
-    fn format_kinded_with_depth(&self, slot: &KindedSlot, depth: usize) -> String {
+    ///
+    /// `quote_strings` controls whether `String`-kind slots render as
+    /// `"hello"` (true, nested) or `hello` (false, top-level).
+    fn format_kinded_inner(&self, slot: &KindedSlot, depth: usize, quote_strings: bool) -> String {
         if depth > 50 {
             return "[max depth reached]".to_string();
         }
@@ -105,14 +122,28 @@ impl<'a> ValueFormatter<'a> {
             | NativeKind::NullableInt64
             | NativeKind::IntSize
             | NativeKind::NullableIntSize => slot.slot.as_i64().to_string(),
+            NativeKind::UInt64 | NativeKind::NullableUInt64 => {
+                // ADR-006 §2.7.7 / Wave 6.5 D-v2-array-detect — v2 typed
+                // arrays flow through the kinded API as raw `*mut TypedArray<T>`
+                // bits stamped with `NativeKind::UInt64` (no Arc, no
+                // refcount). Probe the heap-header `_pad` byte to recognize
+                // a v2 typed array pointer; fall back to integer rendering
+                // for plain UInt64 scalars.
+                if let Some(view) = crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(
+                    bits,
+                    slot.kind,
+                ) {
+                    self.format_v2_typed_array(&view)
+                } else {
+                    slot.slot.as_u64().to_string()
+                }
+            }
             NativeKind::UInt8
             | NativeKind::NullableUInt8
             | NativeKind::UInt16
             | NativeKind::NullableUInt16
             | NativeKind::UInt32
             | NativeKind::NullableUInt32
-            | NativeKind::UInt64
-            | NativeKind::NullableUInt64
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize => slot.slot.as_u64().to_string(),
             NativeKind::Float64 | NativeKind::NullableFloat64 => {
@@ -129,17 +160,31 @@ impl<'a> ValueFormatter<'a> {
                 // bits and the slot owns one strong-count share. Read
                 // the inner `&str` for the lifetime of `&self`.
                 let s: &String = unsafe { &*(bits as *const String) };
-                s.clone()
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.clone()
+                }
             }
             // ── Heap-pointer kinds: dispatch via HeapKind ───────────────
-            NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth),
+            NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth, quote_strings),
         }
     }
 
     /// Heap-arm formatter: dispatches on `HeapKind` directly to read the
     /// matching typed `Arc<T>` payload (Q8 — no per-heap-variant accessor
     /// on the carrier; the kind discriminant is local).
-    fn format_heap_kind(&self, bits: u64, hk: HeapKind, depth: usize) -> String {
+    ///
+    /// `quote_strings` propagates from the entry point — when this heap
+    /// arm is itself a child of a TypedObject/HashMap/array and the parent
+    /// asked for nested formatting, the leaf string render quotes.
+    fn format_heap_kind(
+        &self,
+        bits: u64,
+        hk: HeapKind,
+        depth: usize,
+        quote_strings: bool,
+    ) -> String {
         if bits == 0 {
             return "None".to_string();
         }
@@ -147,7 +192,11 @@ impl<'a> ValueFormatter<'a> {
             HeapKind::String => {
                 // SAFETY: typed-Arc payload per §2.4.
                 let s: &String = unsafe { &*(bits as *const String) };
-                s.clone()
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.clone()
+                }
             }
             HeapKind::Decimal => {
                 let d: &rust_decimal::Decimal =
@@ -170,25 +219,25 @@ impl<'a> ValueFormatter<'a> {
                 self.format_typed_array(arr, depth)
             }
             HeapKind::TypedObject => {
-                // TypedObject formatting depends on the schema-registry
-                // walking each `ValueSlot` per its `NativeKind` — the
-                // kinded reformatting of slots routes through the same
-                // §2.7.6 dispatch pattern as the typed_handlers but at
-                // depth, and is wired up in the Phase-2c output-adapter
-                // rebuild.
-                let _ = self.schema_registry;
-                todo!(
-                    "phase-2c — see ADR-006 §2.7.4: TypedObject formatting \
-                     needs the kinded slot-by-slot walk against the \
-                     schema's NativeKind track (§2.7.6)"
-                );
+                // ADR-006 §2.7.4 / §2.7.6 / Q8 — walk the per-field slots,
+                // dispatch each on `field_kinds[i]` (the per-schema
+                // `Arc<[NativeKind]>` co-located with the storage), and
+                // resolve field names via the schema registry. SAFETY:
+                // construction-side contract on `KindedSlot::from_typed_object`
+                // — `TypedObject`-kind bits are `Arc::into_raw(Arc<TypedObjectStorage>)`.
+                let storage: &TypedObjectStorage =
+                    unsafe { &*(bits as *const TypedObjectStorage) };
+                self.format_typed_object(storage, depth)
             }
             HeapKind::HashMap => {
-                todo!(
-                    "phase-2c — see ADR-006 §2.7.4: HashMap formatting \
-                     needs kinded key/value walks (HashMapData buffers \
-                     carry their own NativeKind tracks per §2.4)"
-                );
+                // ADR-006 §2.7.4 — HashMapData stores parallel
+                // `Vec<Arc<String>>` keys and `Vec<Arc<HeapValue>>` values.
+                // Render each entry by recursing through the heap-value
+                // variant, with the Q8 single-discriminator dispatch
+                // (`HeapValue` match) preserved at the value side. SAFETY:
+                // construction-side contract on `KindedSlot::from_hashmap`.
+                let map: &HashMapData = unsafe { &*(bits as *const HashMapData) };
+                self.format_hashmap(map, depth)
             }
             HeapKind::DataTable => {
                 let dt: &shape_value::DataTable =
@@ -309,10 +358,42 @@ impl<'a> ValueFormatter<'a> {
         }
     }
 
+    /// Format a v2 typed array (raw `*mut TypedArray<T>` pointer) as
+    /// `[1, 2, 3]`. Element type comes from the heap-header `_pad` byte
+    /// stamped at allocation time; element bits / kind come from the
+    /// canonical kinded read helper
+    /// (`v2_array_detect::read_element`).
+    fn format_v2_typed_array(
+        &self,
+        view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
+    ) -> String {
+        use crate::executor::v2_handlers::v2_array_detect::read_element;
+        let mut out = String::with_capacity(2 + view.len as usize * 4);
+        out.push('[');
+        for i in 0..view.len {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // Per-element rendering — the element kind is one of
+            // Float64 / Int64 / Int32 / Bool per the v2 typed-array
+            // contract. Format each through the canonical scalar arms.
+            if let Some((bits, kind)) = read_element(view, i) {
+                let elem_slot =
+                    KindedSlot::new(ValueSlot::from_raw(bits), kind);
+                out.push_str(&self.format_kinded_inner(&elem_slot, 0, true));
+                std::mem::forget(elem_slot);
+            } else {
+                out.push_str("?");
+            }
+        }
+        out.push(']');
+        out
+    }
+
     /// Format the inline-typed-array variants. Each element is formatted
     /// per its native scalar kind (no schema lookup needed); the heap
     /// element variants surface as Phase-2c todo!().
-    fn format_typed_array(&self, arr: &TypedArrayData, _depth: usize) -> String {
+    fn format_typed_array(&self, arr: &TypedArrayData, depth: usize) -> String {
         match arr {
             TypedArrayData::I64(a) => {
                 let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
@@ -380,18 +461,23 @@ impl<'a> ValueFormatter<'a> {
                 format!("<Mat<number>:{}x{}>", m.rows, m.cols)
             }
             TypedArrayData::String(a) => {
-                let elems: Vec<String> = a.iter().map(|s| s.as_str().to_string()).collect();
+                // Inside an array, strings render quoted to disambiguate
+                // `["a", "b"]` from `[a, b]` (matches the TypedObject-field
+                // and HashMap-value rule).
+                let elems: Vec<String> =
+                    a.iter().map(|s| format!("\"{}\"", s.as_str())).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::HeapValue(_) => {
-                // Per-element heap-formatting needs the kinded payload
-                // walk that depends on the slot-by-slot §2.7.6 dispatch
-                // landing in Phase-2c. Surface rather than paper over.
-                todo!(
-                    "phase-2c — see ADR-006 §2.7.4: TypedArray<HeapValue> \
-                     element formatting needs the kinded heap-element \
-                     walk (§2.7.6 dispatch_slice)"
-                );
+            TypedArrayData::HeapValue(buf) => {
+                // ADR-005 §1 single-discriminator: each element is an
+                // `Arc<HeapValue>` carried directly in the buffer; recurse
+                // through `HeapValue` match.
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|hv| self.format_heap_value(hv.as_ref(), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
             }
         }
     }
@@ -407,10 +493,133 @@ impl<'a> ValueFormatter<'a> {
     fn format_ref(&self, slot: &KindedSlot, depth: usize) -> String {
         if let Some(deref) = &self.deref_fn {
             if let Some(resolved) = deref(slot) {
-                return self.format_kinded_with_depth(&resolved, depth + 1);
+                return self.format_kinded_inner(&resolved, depth + 1, true);
             }
         }
         "<ref>".to_string()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // TypedObject + HashMap helpers (ADR-006 §2.7.4 / §2.7.6 / Q8)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Format a `TypedObjectStorage` as `{field1: val1, field2: val2}`.
+    ///
+    /// Field names come from the schema registry when the storage's
+    /// `schema_id` resolves; otherwise positional `_0`, `_1` placeholders
+    /// are used so the formatter degrades gracefully when the registry is
+    /// not populated for a runtime-built object (e.g. anonymous record
+    /// literals before schema registration).
+    ///
+    /// Each slot is reified as a `KindedSlot { slot, kind: field_kinds[i] }`
+    /// and recursed through `format_kinded_inner` with `quote_strings = true`
+    /// so nested string fields render `"…"`. Slots are *borrowed*: we do
+    /// NOT clone the slot bits or transfer ownership; the parent
+    /// `TypedObjectStorage` keeps holding all heap shares for the
+    /// lifetime of `&self`.
+    fn format_typed_object(&self, storage: &TypedObjectStorage, depth: usize) -> String {
+        let schema = self.schema_registry.get_by_id(storage.schema_id as u32);
+        let n = storage.slots.len().min(storage.field_kinds.len());
+        let mut out = String::with_capacity(2 + n * 8);
+        out.push('{');
+        for i in 0..n {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // Field name: prefer the schema-resolved name; fall back to
+            // a positional placeholder so the formatter still produces
+            // human-readable output for schema-less objects.
+            let name: &str = schema
+                .and_then(|s| s.fields.get(i).map(|f| f.name.as_str()))
+                .unwrap_or("_");
+            if name == "_" {
+                out.push_str(&format!("_{}", i));
+            } else {
+                out.push_str(name);
+            }
+            out.push_str(": ");
+            // Reify the slot as a borrowed `KindedSlot` for the recursive
+            // formatter call. This carrier never owns a strong-count share
+            // — it is dropped via `mem::forget` at the end of the loop
+            // iteration so the parent storage retains every payload.
+            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
+            let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+            out.push_str(&rendered);
+            std::mem::forget(kinded);
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format a `HashMapData` as `{key1: val1, key2: val2}`.
+    ///
+    /// Each value is an `Arc<HeapValue>` — dispatched through the
+    /// canonical ADR-005 §1 single-discriminator `HeapValue` match.
+    fn format_hashmap(&self, map: &HashMapData, depth: usize) -> String {
+        let n = map.keys.data.len().min(map.values.data.len());
+        let mut out = String::with_capacity(2 + n * 8);
+        out.push('{');
+        for i in 0..n {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let key = &map.keys.data[i];
+            out.push_str(&format!("\"{}\"", key));
+            out.push_str(": ");
+            out.push_str(&self.format_heap_value(&map.values.data[i], depth + 1));
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format a `HeapValue` reference (the value side of `HashMapData`'s
+    /// `TypedBuffer<Arc<HeapValue>>` and the heterogeneous element arm of
+    /// `TypedArrayData::HeapValue`). Dispatches via the ADR-005 §1
+    /// single-discriminator `HeapValue` match.
+    fn format_heap_value(&self, hv: &HeapValue, depth: usize) -> String {
+        if depth > 50 {
+            return "[max depth reached]".to_string();
+        }
+        match hv {
+            HeapValue::String(s) => format!("\"{}\"", s),
+            HeapValue::Decimal(d) => format!("{}D", d),
+            HeapValue::BigInt(b) => b.as_ref().to_string(),
+            HeapValue::Char(c) => format!("'{}'", c),
+            HeapValue::Future(id) => format!("[Future:{}]", id),
+            HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
+            HeapValue::TypedObject(o) => self.format_typed_object(o.as_ref(), depth),
+            HeapValue::HashMap(m) => self.format_hashmap(m.as_ref(), depth),
+            HeapValue::DataTable(t) => format!("{}", t),
+            HeapValue::Content(n) => format!("{}", n),
+            HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),
+            HeapValue::IoHandle(h) => {
+                let status = if h.is_open() { "open" } else { "closed" };
+                format!("<io_handle:{}:{}>", h.path, status)
+            }
+            HeapValue::NativeView(v) => format!(
+                "<{}:{}@0x{:x}>",
+                if v.mutable { "cmut" } else { "cview" },
+                v.layout.name,
+                v.ptr
+            ),
+            HeapValue::TableView(tv) => format!("{}", tv),
+            HeapValue::TaskGroup(tg) => {
+                let kind_str = match tg.kind {
+                    0 => "All",
+                    1 => "Race",
+                    2 => "Any",
+                    3 => "Settle",
+                    _ => "Unknown",
+                };
+                format!("[TaskGroup:{}({})]", kind_str, tg.task_ids.len())
+            }
+            HeapValue::NativeScalar(_) => "<native_scalar>".to_string(),
+            HeapValue::Temporal(_) => "<temporal>".to_string(),
+            HeapValue::ClosureRaw(_) => "<closure>".to_string(),
+            HeapValue::FilterExpr(_) => "<filter_expr>".to_string(),
+            HeapValue::Reference(_) => "<ref>".to_string(),
+        }
     }
 }
 
