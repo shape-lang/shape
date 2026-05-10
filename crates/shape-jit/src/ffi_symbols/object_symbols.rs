@@ -39,8 +39,6 @@ use super::super::ffi::object::{
     jit_write_shared_cell_u32, jit_write_shared_cell_u64,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
-use super::super::ffi::typed_object::jit_typed_object_get_field;
-use super::super::ffi::typed_object::jit_typed_object_set_field;
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
