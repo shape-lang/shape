@@ -39,6 +39,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-iterator-methods` | `../shape-w9-iterator-methods` | W9-iterator-methods — kinded iterator bodies | — | `crates/shape-vm/src/executor/objects/iterator_methods.rs` (19 sites) | idle (last: W9-iterator-methods close — all 19 PHF sites surface as §2.7.4 IteratorState rebuild via shared `iterator_phase2c_surface` helper; HeapValue::Iterator + IteratorState + IteratorTransform substrate deleted in Phase-1.A so no body migration possible until Phase-2c typed iterator carrier lands; §2.7.10/Q11 kinded MethodFnV2 ABI signatures already in place; shape-vm --lib builds; check-no-dynamic exit 0) | 2026-05-10 |
 
 ## Status values
 
