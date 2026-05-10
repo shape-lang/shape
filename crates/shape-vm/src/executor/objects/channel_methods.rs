@@ -61,20 +61,24 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// — the caller borrows through the `&Arc<ChannelData>` and never
 /// decrements.
 #[inline]
-fn as_channel(slot: &KindedSlot) -> Result<&Arc<ChannelData>, VMError> {
+fn as_channel(slot: &KindedSlot) -> Result<Arc<ChannelData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Channel)) {
         return Err(type_error(format!(
             "Channel method receiver must be a Channel (got kind {:?})",
             slot.kind
         )));
     }
-    match slot.slot.as_heap_value() {
-        HeapValue::Channel(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "Channel method receiver kind says Channel but heap arm is {:?}",
-            other.kind()
-        ))),
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(type_error("Channel method receiver slot bits null"));
     }
+    // SAFETY: see `set_methods::as_hashset` for the canonical form.
+    // `KindedSlot::from_channel` stores `Arc::into_raw(Arc<ChannelData>)`
+    // directly per §2.7.20; recovery uses the same typed-Arc shape.
+    let arc = unsafe { Arc::<ChannelData>::from_raw(bits as *const ChannelData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -101,7 +105,7 @@ pub fn v2_channel_send(
             "Channel.send() requires exactly 1 argument (value)",
         ));
     }
-    let ch: &Arc<ChannelData> = as_channel(&args[0])?;
+    let ch: Arc<ChannelData> = as_channel(&args[0])?;
     // Clone the value's KindedSlot — bumps refcount for heap shares,
     // no-op for inline scalars (Drop discipline preserved through
     // KindedSlot::Clone per §2.7.7).
@@ -111,7 +115,7 @@ pub fn v2_channel_send(
     }
     // Return the receiver share — fresh KindedSlot with one strong-
     // count bump on the same `Arc<ChannelData>`.
-    let result = Arc::clone(ch);
+    let result = ch;
     Ok(KindedSlot::from_channel(result))
 }
 
@@ -140,7 +144,7 @@ pub fn v2_channel_recv(
     if args.len() != 1 {
         return Err(type_error("Channel.recv() takes no arguments"));
     }
-    let ch: &Arc<ChannelData> = as_channel(&args[0])?;
+    let ch: Arc<ChannelData> = as_channel(&args[0])?;
     if let Some(slot) = ch.try_recv() {
         return Ok(slot);
     }
@@ -174,7 +178,7 @@ pub fn v2_channel_try_recv(
             "Channel.try_recv() takes no arguments",
         ));
     }
-    let ch: &Arc<ChannelData> = as_channel(&args[0])?;
+    let ch: Arc<ChannelData> = as_channel(&args[0])?;
     Ok(ch.try_recv().unwrap_or_else(KindedSlot::none))
 }
 
@@ -194,9 +198,9 @@ pub fn v2_channel_close(
     if args.len() != 1 {
         return Err(type_error("Channel.close() takes no arguments"));
     }
-    let ch: &Arc<ChannelData> = as_channel(&args[0])?;
+    let ch: Arc<ChannelData> = as_channel(&args[0])?;
     ch.close();
-    Ok(KindedSlot::from_channel(Arc::clone(ch)))
+    Ok(KindedSlot::from_channel(ch))
 }
 
 /// Channel.is_closed() -> bool
@@ -210,7 +214,7 @@ pub fn v2_channel_is_closed(
             "Channel.is_closed() takes no arguments",
         ));
     }
-    let ch: &Arc<ChannelData> = as_channel(&args[0])?;
+    let ch: Arc<ChannelData> = as_channel(&args[0])?;
     Ok(KindedSlot::from_bool(ch.is_closed()))
 }
 

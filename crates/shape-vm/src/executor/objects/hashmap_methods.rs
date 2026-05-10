@@ -92,20 +92,27 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// `HeapValue::HashMap(arc)`. The receiver retains its share — the caller
 /// borrows through the `&Arc<HashMapData>` and never decrements.
 #[inline]
-fn as_hashmap(slot: &KindedSlot) -> Result<&Arc<HashMapData>, VMError> {
+fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
         return Err(type_error(format!(
             "HashMap method receiver must be a HashMap (got kind {:?})",
             slot.kind
         )));
     }
-    match slot.slot.as_heap_value() {
-        HeapValue::HashMap(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "HashMap method receiver kind says HashMap but heap arm is {:?}",
-            other.kind()
-        ))),
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(type_error("HashMap method receiver slot bits null"));
     }
+    // SAFETY: per the construction-side contract on `KindedSlot::
+    // from_hashmap`, `Ptr(HeapKind::HashMap)` slot bits are
+    // `Arc::into_raw(Arc<HashMapData>)` and the slot owns one
+    // strong-count share. Reconstruct, clone, restore. The W13 version
+    // went through `slot.as_heap_value()` — wrong-type cast (the
+    // underlying allocation is `HashMapData`, not a `HeapValue` enum).
+    let arc = unsafe { Arc::<HashMapData>::from_raw(bits as *const HashMapData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 /// Borrow a `&str` key from a `KindedSlot` whose kind is `String` /
@@ -365,7 +372,7 @@ pub fn v2_set(
     // Take an owned share of the receiver Arc, then `Arc::make_mut` to
     // mutate without disturbing other live shares. Clone-on-write per
     // ADR-006 §2.7.4 (the same shape as `typed_array_elem.rs:255`).
-    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
     Arc::make_mut(&mut hm).insert(key_arc, value_arc);
     Ok(KindedSlot::from_hashmap(hm))
 }
@@ -388,7 +395,7 @@ pub fn v2_delete(
         ));
     }
     let key = as_string_key(&args[1])?;
-    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
     Arc::make_mut(&mut hm).remove(key);
     Ok(KindedSlot::from_hashmap(hm))
 }
@@ -409,9 +416,9 @@ pub fn v2_merge(
             "HashMap.merge() requires exactly 1 argument (other)",
         ));
     }
-    let other: &Arc<HashMapData> = as_hashmap(&args[1])?;
-    let mut hm: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
-    Arc::make_mut(&mut hm).merge(other);
+    let other: Arc<HashMapData> = as_hashmap(&args[1])?;
+    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
+    Arc::make_mut(&mut hm).merge(&other);
     Ok(KindedSlot::from_hashmap(hm))
 }
 
@@ -449,7 +456,7 @@ pub fn v2_for_each(
             "HashMap.forEach() requires exactly 1 argument (callback)",
         ));
     }
-    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
     let closure = &args[1];
     let n = map.len();
     for i in 0..n {
@@ -476,7 +483,7 @@ pub fn v2_filter(
             "HashMap.filter() requires exactly 1 argument (predicate)",
         ));
     }
-    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
     let closure = &args[1];
     let n = map.len();
     let mut out_keys: Vec<Arc<String>> = Vec::new();
@@ -517,7 +524,7 @@ pub fn v2_map(
             "HashMap.map() requires exactly 1 argument (mapper)",
         ));
     }
-    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
     let closure = &args[1];
     let n = map.len();
     let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
@@ -549,7 +556,7 @@ pub fn v2_reduce(
             "HashMap.reduce() requires exactly 2 arguments (reducer, initial)",
         ));
     }
-    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
     let closure = &args[1];
     let mut acc: KindedSlot = args[2].clone();
     let n = map.len();
@@ -581,7 +588,7 @@ pub fn v2_group_by(
             "HashMap.groupBy() requires exactly 1 argument (key-extractor)",
         ));
     }
-    let map: Arc<HashMapData> = Arc::clone(as_hashmap(&args[0])?);
+    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
     let closure = &args[1];
     let n = map.len();
 

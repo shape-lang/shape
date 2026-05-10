@@ -59,20 +59,24 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// `HeapValue::Deque(arc)`. The receiver retains its share — the
 /// caller borrows through the `&Arc<DequeData>` and never decrements.
 #[inline]
-fn as_deque(slot: &KindedSlot) -> Result<&Arc<DequeData>, VMError> {
+fn as_deque(slot: &KindedSlot) -> Result<Arc<DequeData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Deque)) {
         return Err(type_error(format!(
             "Deque method receiver must be a Deque (got kind {:?})",
             slot.kind
         )));
     }
-    match slot.slot.as_heap_value() {
-        HeapValue::Deque(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "Deque method receiver kind says Deque but heap arm is {:?}",
-            other.kind()
-        ))),
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(type_error("Deque method receiver slot bits null"));
     }
+    // SAFETY: see `set_methods::as_hashset` for the canonical form.
+    // `KindedSlot::from_deque` stores `Arc::into_raw(Arc<DequeData>)`
+    // directly per §2.7.19; recovery uses the same typed-Arc shape.
+    let arc = unsafe { Arc::<DequeData>::from_raw(bits as *const DequeData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 /// Project a callback / argument `KindedSlot` to an `Arc<HeapValue>`
@@ -284,7 +288,7 @@ pub fn v2_push_back(
         ));
     }
     let value: Arc<HeapValue> = arg_slot_to_heap_value_arc(&args[1])?;
-    let mut dq: Arc<DequeData> = Arc::clone(as_deque(&args[0])?);
+    let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     Arc::make_mut(&mut dq).push_back(value);
     Ok(KindedSlot::from_deque(dq))
 }
@@ -303,7 +307,7 @@ pub fn v2_push_front(
         ));
     }
     let value: Arc<HeapValue> = arg_slot_to_heap_value_arc(&args[1])?;
-    let mut dq: Arc<DequeData> = Arc::clone(as_deque(&args[0])?);
+    let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     Arc::make_mut(&mut dq).push_front(value);
     Ok(KindedSlot::from_deque(dq))
 }
@@ -324,7 +328,7 @@ pub fn v2_pop_back(
     if args.len() != 1 {
         return Err(type_error("Deque.popBack() takes no arguments"));
     }
-    let mut dq: Arc<DequeData> = Arc::clone(as_deque(&args[0])?);
+    let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     let popped = Arc::make_mut(&mut dq).pop_back();
     match popped {
         Some(arc) => Ok(heap_value_arc_to_slot(&arc)),
@@ -343,7 +347,7 @@ pub fn v2_pop_front(
     if args.len() != 1 {
         return Err(type_error("Deque.popFront() takes no arguments"));
     }
-    let mut dq: Arc<DequeData> = Arc::clone(as_deque(&args[0])?);
+    let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     let popped = Arc::make_mut(&mut dq).pop_front();
     match popped {
         Some(arc) => Ok(heap_value_arc_to_slot(&arc)),

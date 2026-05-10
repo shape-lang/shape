@@ -70,26 +70,41 @@ fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
-/// Project the receiver `KindedSlot` to the inner `Arc<HashSetData>` via
-/// the §2.7.6 / Q8 single-discriminator path: kind gate on
-/// `Ptr(HeapKind::HashSet)`, then `slot.as_heap_value()` matched against
-/// `HeapValue::HashSet(arc)`. The receiver retains its share — the
-/// caller borrows through the `&Arc<HashSetData>` and never decrements.
+/// Project the receiver `KindedSlot` to an `Arc<HashSetData>` clone via
+/// the `iterator_methods::clone_typed_array_arc` sound-pattern
+/// (`Arc::from_raw` + `Arc::clone` + `Arc::into_raw`): kind gate on
+/// `Ptr(HeapKind::HashSet)`, reconstruct the typed Arc directly from
+/// slot bits, clone the share, restore the receiver's slot.
+///
+/// The W13 version went through `slot.as_heap_value()` matched against
+/// `HeapValue::HashSet(arc)` — but `KindedSlot::from_hashset` stores
+/// `Arc::into_raw(Arc<HashSetData>) as u64` directly per §2.7.15, so
+/// casting those bits to `*const HeapValue` is wrong-type recovery (the
+/// underlying allocation is `HashSetData`, not a `HeapValue` enum) and
+/// segfaults at the first field read. The sound recovery uses
+/// `Arc::from_raw::<HashSetData>` to reconstruct the typed Arc, matching
+/// the construction-side contract verbatim.
 #[inline]
-fn as_hashset(slot: &KindedSlot) -> Result<&Arc<HashSetData>, VMError> {
+fn as_hashset(slot: &KindedSlot) -> Result<Arc<HashSetData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashSet)) {
         return Err(type_error(format!(
             "Set method receiver must be a Set (got kind {:?})",
             slot.kind
         )));
     }
-    match slot.slot.as_heap_value() {
-        HeapValue::HashSet(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "Set method receiver kind says Set but heap arm is {:?}",
-            other.kind()
-        ))),
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(type_error("Set method receiver slot bits null"));
     }
+    // SAFETY: per the construction-side contract on
+    // `KindedSlot::from_hashset`, `Ptr(HeapKind::HashSet)` slot bits are
+    // `Arc::into_raw(Arc<HashSetData>)` and the slot owns one
+    // strong-count share. Reconstruct, clone (bumping the share), then
+    // restore the slot's original share via `Arc::into_raw`.
+    let arc = unsafe { Arc::<HashSetData>::from_raw(bits as *const HashSetData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 /// Borrow a `&str` key from a `KindedSlot` whose kind is `String` /
@@ -233,7 +248,7 @@ pub fn v2_add(
             args[1].kind()
         ))
     })?;
-    let mut hs: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let mut hs: Arc<HashSetData> = as_hashset(&args[0])?;
     Arc::make_mut(&mut hs).insert(key_arc);
     Ok(KindedSlot::from_hashset(hs))
 }
@@ -256,7 +271,7 @@ pub fn v2_delete(
         ));
     }
     let key = as_string_key(&args[1])?;
-    let mut hs: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let mut hs: Arc<HashSetData> = as_hashset(&args[0])?;
     Arc::make_mut(&mut hs).remove(key);
     Ok(KindedSlot::from_hashset(hs))
 }
@@ -280,8 +295,8 @@ pub fn v2_union(
             "Set.union() requires exactly 1 argument (other)",
         ));
     }
-    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
-    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
     let mut keys: Vec<Arc<String>> = Vec::with_capacity(lhs.len() + rhs.len());
     for k in lhs.keys.data.iter() {
         keys.push(Arc::clone(k));
@@ -309,8 +324,8 @@ pub fn v2_intersection(
             "Set.intersection() requires exactly 1 argument (other)",
         ));
     }
-    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
-    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
     // Walk the smaller side; probe the larger for membership.
     let (small, large) = if lhs.len() <= rhs.len() {
         (lhs.as_ref(), rhs.as_ref())
@@ -342,8 +357,8 @@ pub fn v2_difference(
             "Set.difference() requires exactly 1 argument (other)",
         ));
     }
-    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
-    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
     let mut keys: Vec<Arc<String>> = Vec::new();
     for k in lhs.keys.data.iter() {
         if !rhs.contains(k.as_str()) {
@@ -372,7 +387,7 @@ pub fn v2_for_each(
             "Set.forEach() requires exactly 1 argument (callback)",
         ));
     }
-    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];
     let n = set.len();
     for i in 0..n {
@@ -399,7 +414,7 @@ pub fn v2_map(
             "Set.map() requires exactly 1 argument (mapper)",
         ));
     }
-    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];
     let n = set.len();
     let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
@@ -433,7 +448,7 @@ pub fn v2_filter(
             "Set.filter() requires exactly 1 argument (predicate)",
         ));
     }
-    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];
     let n = set.len();
     let mut out_keys: Vec<Arc<String>> = Vec::new();

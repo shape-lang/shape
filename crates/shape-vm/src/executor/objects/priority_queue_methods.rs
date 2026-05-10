@@ -61,7 +61,7 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// share — the caller borrows through the `&Arc<PriorityQueueData>` and
 /// never decrements.
 #[inline]
-fn as_priority_queue(slot: &KindedSlot) -> Result<&Arc<PriorityQueueData>, VMError> {
+fn as_priority_queue(slot: &KindedSlot) -> Result<Arc<PriorityQueueData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::PriorityQueue)) {
         return Err(type_error(format!(
             "PriorityQueue method receiver must be a PriorityQueue \
@@ -69,14 +69,21 @@ fn as_priority_queue(slot: &KindedSlot) -> Result<&Arc<PriorityQueueData>, VMErr
             slot.kind
         )));
     }
-    match slot.slot.as_heap_value() {
-        HeapValue::PriorityQueue(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "PriorityQueue method receiver kind says PriorityQueue but \
-             heap arm is {:?}",
-            other.kind()
-        ))),
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return Err(type_error(
+            "PriorityQueue method receiver slot bits null",
+        ));
     }
+    // SAFETY: see `set_methods::as_hashset` for the canonical form.
+    // `KindedSlot::from_priority_queue` stores
+    // `Arc::into_raw(Arc<PriorityQueueData>)` directly per §2.7.18;
+    // recovery uses the same typed-Arc shape.
+    let arc =
+        unsafe { Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 /// Read an i64 priority from a `KindedSlot` whose kind is `Int64`.
@@ -206,7 +213,7 @@ pub fn v2_push(
     }
     let pq = as_priority_queue(&args[0])?;
     let value = as_i64_priority(&args[1])?;
-    let mut owned = Arc::clone(pq);
+    let mut owned = pq;
     Arc::make_mut(&mut owned).push(value);
     Ok(KindedSlot::from_priority_queue(owned))
 }
@@ -228,7 +235,7 @@ pub fn v2_pop(
         ));
     }
     let pq = as_priority_queue(&args[0])?;
-    let mut owned = Arc::clone(pq);
+    let mut owned = pq;
     let min = Arc::make_mut(&mut owned).pop().unwrap_or(0);
     Ok(KindedSlot::from_int(min))
 }
