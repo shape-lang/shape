@@ -44,8 +44,9 @@ before it's coded.
 | `bulldozer-strictly-typed-w9-iterator-methods` | `../shape-w9-iterator-methods` | W9-iterator-methods (surface-only) | — | iterator_methods.rs | idle (close `6670ff4` merged at `22eddb3`) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-array-basic` | `../shape-w9-array-basic` | W9-array-basic | — | objects/{array_basic,array_operations,array_joins,array_sets}.rs | idle (close `beb5906` merged at `cb7071f` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-array-query` | `../shape-w9-array-query` | W9-array-query | — | array_query.rs | idle (close `eac4ee8` merged at `1db0fe5` 2026-05-10) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-typed-array-methods` | `../shape-w9-typed-array-methods` | W9-typed-array-methods | — | objects/typed_array_methods.rs (+typed_number/int) | idle (close `a49a749` merged at `d88a80c` 2026-05-10; 14 closure-callbacks; 19→1 stubs) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-array-aggregation` | `../shape-w9-array-aggregation` | W9-array-aggregation | — | objects/array_aggregation.rs | idle (close `f4bf0bd` 2026-05-10; count(predicate) + reduce migrated; sum/avg/min/max retained from prior migration) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-typed-array-methods` | `../shape-w9-typed-array-methods` | W9-typed-array-methods | — | objects/typed_array_methods.rs (+typed_number/int) | idle (close `a49a749` merged at `d88a80c` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-aggregation` | `../shape-w9-array-aggregation` | W9-array-aggregation | — | objects/array_aggregation.rs | idle (close `f4bf0bd` merged at `e681df8` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-misc-methods` | `../shape-w9-misc-methods` | W9-misc-methods | — | objects/{13 misc files} | idle (close `23ecf2a` 2026-05-10; number_methods.rs 23 stubs migrated; 12/13 files already Stage C SURFACE — deleted HeapKind variants need Phase-2c Stage C typed-Arc replacements) | 2026-05-10 |
 
 ## Status values
 
