@@ -40,6 +40,37 @@
 //! top of the kinded `Arc<TypedObjectStorage>` model after
 //! D-raw-helpers cleans up the heap-decode primitives.
 //!
+//! ### W13-result-option-ops audit (close 2026-05-10)
+//!
+//! W13-anyerror (close `e9c7260`) closed the AnyError TypedObject
+//! builder + `op_throw` + dispatch.rs converters but explicitly
+//! deferred 8 variant-discriminator opcodes (`op_type_check`,
+//! `op_error_context`, `op_try_unwrap`, `op_unwrap_option`, `op_is_ok`,
+//! `op_is_err`, `op_unwrap_ok`, `op_unwrap_err`) because they need a
+//! `Result<_,_>` / `Option<_>` runtime representation that has not
+//! been determined post-bulldozer.
+//!
+//! W13-result-option-ops audited the upstream substrate
+//! (`BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor`,
+//! `HeapKind::Result` / `HeapKind::Option` candidacy, `__Result` /
+//! `__Option` schema candidacy) and confirmed: the variant-codegen
+//! producers in `executor/vm_impl/builtins.rs:510-518` are still
+//! `todo!("phase-1b-vm wave 5e — Option/Result ctor body migration
+//! pending")`; no HeapKind variant exists; no schema is registered.
+//! Filling the consumer-side discriminator before the producer would
+//! either fabricate the runtime contract (defection-attractor — same
+//! shape as the deleted pre-bulldozer `extract_ok_inner` /
+//! `extract_err_inner` raw_helpers) or surface against an empty
+//! contract.
+//!
+//! The 8 ops therefore close as surface-and-stop with refined
+//! per-op messages naming the precise upstream gap
+//! (`PHASE_2C_VARIANT_CODEGEN_SURFACE` below). Re-emission cluster:
+//! `W14-variant-codegen` — land OkCtor / ErrCtor / SomeCtor body in
+//! Wave-5e closure, register `__Result` / `__Option` schema OR amend
+//! `HeapKind::Result` / `HeapKind::Option` per Q8 carrier-API-bound,
+//! then close all 8 ops in a single follow-up.
+//!
 //! Cross-cluster cascade (per playbook §8 surface-and-stop):
 //!
 //! - `dispatch.rs` calls `handle_exception` at runtime-error
@@ -85,6 +116,73 @@ const PHASE_2C_EXCEPTION_OBJECT_SURFACE: &str =
      dispatch.rs / control_flow/mod.rs / builtins/type_ops.rs migrating \
      ValueWord-typed arguments to (u64, NativeKind). See ADR-006 \
      §2.7.4 / playbook §10 E-exceptions row.";
+
+/// Phase-2c surface message for the variant-discriminator opcode family
+/// (`IsOk`, `IsErr`, `UnwrapOk`, `UnwrapErr`, `UnwrapOption`,
+/// `TryUnwrap`). W13-result-option-ops audit (close 2026-05-10):
+///
+/// W13-anyerror (close `e9c7260`) deferred these 6 opcodes plus
+/// `op_type_check` and `op_error_context` because the consumer-side
+/// discriminator dispatches on a Result/Option runtime representation
+/// that the upstream variant-codegen producers have not migrated to.
+/// The precise upstream gap:
+///
+/// - `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` in
+///   `executor/vm_impl/builtins.rs:510-518` are still `todo!("phase-1b-vm
+///   wave 5e — Option/Result ctor body migration pending")`. Without
+///   the producer, no determined runtime bits flow through the
+///   discriminator. Filling the consumer first would either fabricate
+///   a representation (defection-attractor: same shape as the deleted
+///   `extract_ok_inner` / `extract_err_inner` / `extract_some_inner`
+///   helpers in pre-bulldozer `raw_helpers`, forbidden #7 in playbook
+///   §4) or surface against an empty contract.
+///
+/// - No `HeapKind::Result` / `HeapKind::Option` variant exists in
+///   `shape-value/src/heap_variants.rs` (verified 2026-05-10). The
+///   `Q8` carrier-API-bound forbids inventing a variant outside the
+///   ADR-amendment process (mirror of §2.7.9 `HeapKind::FilterExpr`
+///   ordinal-18 and §2.7.12 `HeapKind::SharedCell` ordinal-20).
+///
+/// - No `__Result` / `__Option` schema in `shape-runtime/src/
+///   type_schema/builtin_schemas.rs::register_builtin_schemas` — the
+///   alternative TypedObject-discriminator path (`schema_id == result_id
+///   ? read field 0 as discriminant : read field 1 as payload`) is
+///   also un-substantiated.
+///
+/// The one fragmentary signal in current code is null-coding for
+/// `Option`: `compile_pattern_check_local` at
+/// `compiler/patterns/checking.rs:213` emits `LoadLocal; IsNull;
+/// JumpIfTrue fail` for `None`, and `op_is_null` in
+/// `executor/comparison/mod.rs:177` dispatches the null sentinel via
+/// `is_null_kinded`. But `Some(x)` requires the `SomeCtor` body to
+/// land before any value flows through `op_unwrap_option` — without
+/// it, even the null-coded Option half is starved of producers.
+///
+/// `op_type_check` and `op_error_context` carry their own additional
+/// substrate dependencies (runtime `TypeAnnotation` matching against
+/// `KindedSlot`; AnyError cause-chain construction respectively) but
+/// fall under the same close: the variant-codegen contract is the
+/// upstream gate.
+///
+/// Re-emission cluster (recommended naming): `W14-variant-codegen` —
+/// land OkCtor / ErrCtor / SomeCtor body in
+/// `executor/vm_impl/builtins.rs` (Wave-5e deferral closure) +
+/// register `__Result` / `__Option` schema OR amend
+/// `HeapKind::Result` / `HeapKind::Option` per Q8 carrier-API-bound,
+/// then close all 8 ops here in a single follow-up.
+const PHASE_2C_VARIANT_CODEGEN_SURFACE: &str =
+    "phase-2c — Result/Option variant-discriminator pending upstream \
+     codegen migration. BuiltinFunction::OkCtor / ErrCtor / SomeCtor \
+     bodies in executor/vm_impl/builtins.rs are still todo!() (Wave-5e \
+     deferral); no HeapKind::Result / HeapKind::Option variant in \
+     shape-value/heap_variants.rs; no __Result / __Option schema in \
+     shape-runtime/type_schema/builtin_schemas.rs. Filling the \
+     consumer-side discriminator first would fabricate the runtime \
+     representation. See ADR-006 §2.7.4 (Phase-2c surface-and-stop) + \
+     §2.7.6 / Q8 carrier-API-bound (Q8-amendment process for new \
+     HeapKind variants). Re-emission cluster: W14-variant-codegen — \
+     land OkCtor/ErrCtor/SomeCtor producer + register schema or amend \
+     HeapKind, then close all 8 ops in this module.";
 
 impl VirtualMachine {
     // ===== Helper Methods =====
@@ -180,15 +278,24 @@ impl VirtualMachine {
     /// `TypeCheck`: pop a value, compare against a type-annotation
     /// constant, push a `Bool` result.
     ///
-    /// SURFACE: the runtime-tier `check_instanceof` body relied on
-    /// `ValueWord::heap_kind()`, `as_str`, `as_i64`, `as_f64`,
-    /// `as_any_array`, `as_decimal`, `as_char`, `is_function` etc. —
-    /// all on the deleted `ValueWord` carrier. The kinded equivalent
-    /// inspects `value.kind()` directly and dispatches on
-    /// `value.slot().as_heap_value()` per §2.7.6 / Q8, but it depends
-    /// on the `KindedSlot` consumer-side helpers landing first
-    /// (D-type-ops territory has the closest pattern). Until then we
-    /// drop the popped carrier and surface.
+    /// SURFACE (W13-result-option-ops audit, 2026-05-10): the runtime-
+    /// tier `check_instanceof` body needs to dispatch a
+    /// `TypeAnnotation` (Basic / Reference / Generic{Result|Option,
+    /// args} / Array / Tuple / Object / Function / Union / Null / ...)
+    /// against an arbitrary `KindedSlot` per §2.7.6 / Q8. The
+    /// `Generic { Result, [T, E] }` and `Generic { Option, [T] }`
+    /// arms specifically need the variant-discriminator contract that
+    /// `op_is_ok` / `op_is_err` / `op_unwrap_option` are blocked on
+    /// (see PHASE_2C_VARIANT_CODEGEN_SURFACE). The Basic-scalar arms
+    /// (int / number / bool / string) could land independently, but
+    /// the compiler in `compiler/patterns/checking.rs:91` and
+    /// `compiler/expressions/type_ops.rs:837` emits `TypeCheck` against
+    /// any annotation including Result/Option, so a partial body would
+    /// cover only a fraction of emit sites and silently regress the
+    /// rest — surface-and-stop is the right shape until W14-variant-
+    /// codegen lands. Until then we drop the popped carrier (kind-
+    /// dispatched refcount retire via `KindedSlot::Drop` per Q8) and
+    /// surface so the stack stays balanced.
     pub(in crate::executor) fn op_type_check(
         &mut self,
         instruction: &Instruction,
@@ -218,7 +325,7 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_type_check: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
@@ -430,7 +537,20 @@ impl VirtualMachine {
     }
 
     /// `ErrorContext` (`!!` operator): pop context + value, wrap value
-    /// into AnyError with context. Phase-2c stub — drop both carriers
+    /// into AnyError with context.
+    ///
+    /// SURFACE (W13-result-option-ops audit, 2026-05-10): the body
+    /// must (a) discriminate whether `value` is an `Err(_)` or `None`
+    /// (uses the same variant discriminator as `op_is_err` /
+    /// `op_unwrap_option`), (b) extract the inner error / handle the
+    /// None case as an AnyError, (c) wrap with the user-provided
+    /// `context` string via `build_any_error(payload=inner,
+    /// cause=Some(context_arc), trace, code=None)`, (d) re-push as
+    /// `NativeKind::Ptr(HeapKind::TypedObject)` per §2.7.7 stack
+    /// parallel-kind. Half (c) is now available — `build_any_error`
+    /// landed in W13-anyerror close `e9c7260` — but halves (a) and (b)
+    /// share the same upstream blocker as `op_is_err` / `op_unwrap_ok`
+    /// (see PHASE_2C_VARIANT_CODEGEN_SURFACE). Drop both carriers
     /// (kind-dispatched refcount retire via `KindedSlot::Drop`) and
     /// surface so the stack stays balanced.
     pub(in crate::executor) fn op_error_context(&mut self) -> Result<(), VMError> {
@@ -442,7 +562,7 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_error_context: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
@@ -455,41 +575,77 @@ impl VirtualMachine {
     /// - `Some(value)` => unwraps to `value`
     /// - bare non-`None` values => pass-through
     ///
-    /// SURFACE: the variant discriminator (`extract_ok_inner` /
-    /// `extract_err_inner` / `extract_some_inner` / `is_none`) lived
-    /// in `raw_helpers` (forbidden #7) and on the `ValueWord`
-    /// accessor surface (CLAUDE.md). The kinded equivalent dispatches
-    /// on `kind == NativeKind::Ptr(HeapKind::TypedObject)` plus
-    /// pattern-match on `slot.as_heap_value()` per Q8 — but
-    /// `Result<_,_>` and `Option<_>` are heap-side discriminators
-    /// owned by the variant-codegen path, which is part of the same
-    /// Phase-2c work.
+    /// SURFACE (W13-result-option-ops audit, 2026-05-10): two
+    /// substrate gaps stack here.
+    ///
+    /// (1) Variant discriminator — same gap as `op_is_ok` /
+    /// `op_unwrap_ok` (see PHASE_2C_VARIANT_CODEGEN_SURFACE): no
+    /// determined runtime representation for `Result<_,_>` because
+    /// `BuiltinFunction::OkCtor` / `ErrCtor` are still `todo!()`. The
+    /// pre-bulldozer `extract_ok_inner` / `extract_err_inner` /
+    /// `extract_some_inner` / `is_none` raw_helpers are deleted
+    /// (forbidden #7 in playbook §4).
+    ///
+    /// (2) Early-return (Err propagation) machinery: `?` must
+    /// terminate the current call frame and return `Err(_)` /
+    /// AnyError-wrapped None to the caller, NOT unwind to the nearest
+    /// try-block (`handle_exception`'s contract). Two distinct
+    /// behaviors that have to be threaded explicitly. The current
+    /// frame-return path is `op_return` in `executor/control_flow/
+    /// mod.rs` which pops a single result slot and pops the call
+    /// frame; the `?`-from-fallible-fn body would call into the same
+    /// frame-pop path with the Err/None-wrapped slot as the result.
+    /// This second half is buildable on top of existing machinery
+    /// (no new ABI), but is meaningless without the variant
+    /// discriminator from (1).
     pub(in crate::executor) fn op_try_unwrap(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_try_unwrap: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
     /// `UnwrapOption` (`opt!`-style): pop a `T?` and unwrap to `T`,
     /// throwing if `None`.
     ///
-    /// SURFACE: same discriminator dependency as `op_try_unwrap` —
-    /// the inner-extract helpers and the `is_none` predicate are part
-    /// of the variant-codegen Phase-2c surface.
+    /// SURFACE (W13-result-option-ops audit, 2026-05-10): the audit
+    /// observed that compiler emit sites for `UnwrapOption` (the only
+    /// site is `compile_match_binding_local` at
+    /// `compiler/patterns/binding.rs:417`) are guarded by an
+    /// `op_is_null` test in the corresponding pattern-checking phase
+    /// (`compiler/patterns/checking.rs:241`), so today's `Option`
+    /// representation is null-coding (`Some(x)` ≡ `x`, `None` ≡ the
+    /// null sentinel routed through `is_null_kinded` per
+    /// `executor/comparison/mod.rs:383`). A null-coding-only body
+    /// would be: pop, if `is_null_kinded(bits, kind)` throw via
+    /// `handle_exception`, else push back. BUT the `Some(x)` producer
+    /// (`BuiltinFunction::SomeCtor` in `executor/vm_impl/builtins.rs:
+    /// 510-518`) is still `todo!()`, so no `T?` value with a present
+    /// payload can flow through this opcode end-to-end today — and
+    /// once `SomeCtor` lands, the ctor's chosen representation may
+    /// elect a non-null-coded shape (e.g. `Arc<TypedObjectStorage>`
+    /// schema-wrapped, mirroring AnyError) which would invalidate a
+    /// null-coding-only body. Surface-and-stop is the correct shape:
+    /// the consumer body is contracted by the producer choice, which
+    /// must land first. See PHASE_2C_VARIANT_CODEGEN_SURFACE.
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_unwrap_option: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
+    /// `IsOk`: pop a `Result<_,_>`, push `Bool` indicating Ok variant.
+    ///
+    /// SURFACE: variant-codegen producer (`OkCtor` / `ErrCtor`) not
+    /// migrated; no determined runtime representation to dispatch on.
+    /// See PHASE_2C_VARIANT_CODEGEN_SURFACE.
     #[inline(always)]
     pub(in crate::executor) fn op_is_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
@@ -497,10 +653,14 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_is_ok: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
+    /// `IsErr`: pop a `Result<_,_>`, push `Bool` indicating Err variant.
+    ///
+    /// SURFACE: same upstream gap as `op_is_ok`. See
+    /// PHASE_2C_VARIANT_CODEGEN_SURFACE.
     #[inline(always)]
     pub(in crate::executor) fn op_is_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
@@ -508,7 +668,7 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_is_err: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
@@ -522,7 +682,9 @@ impl VirtualMachine {
     /// The unit-test regression docs in this module's tail (preserved
     /// as `#[ignore]` for Phase-2c) name the exact aliasing class.
     ///
-    /// SURFACE: extract-inner variant discriminators are Phase-2c.
+    /// SURFACE: variant-codegen producer (`OkCtor`) not migrated; no
+    /// determined runtime representation to extract from. See
+    /// PHASE_2C_VARIANT_CODEGEN_SURFACE.
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
@@ -530,7 +692,7 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_unwrap_ok: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 
@@ -538,10 +700,12 @@ impl VirtualMachine {
     /// (unwrapping the AnyError wrapper if the inner is itself an
     /// AnyError TypedObject).
     ///
-    /// SURFACE: same Phase-2c surface as `op_unwrap_ok`. The
-    /// AnyError-unwrap path additionally requires `is_any_error`
-    /// discrimination (depends on `raw_helpers::extract_typed_object`
-    /// — forbidden) plus `ANYERROR_PAYLOAD` slot read.
+    /// SURFACE: same upstream gap as `op_unwrap_ok` —
+    /// `BuiltinFunction::ErrCtor` is still `todo!()`. The AnyError-
+    /// unwrap path's downstream half is now buildable on top of
+    /// W13-anyerror's `build_any_error`/`normalize_err_payload` (close
+    /// `e9c7260`), but until the variant producer lands there is no
+    /// `Err(_)` value to unwrap. See PHASE_2C_VARIANT_CODEGEN_SURFACE.
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
@@ -549,7 +713,7 @@ impl VirtualMachine {
         drop(value);
         Err(VMError::NotImplemented(format!(
             "op_unwrap_err: {}",
-            PHASE_2C_EXCEPTION_OBJECT_SURFACE
+            PHASE_2C_VARIANT_CODEGEN_SURFACE
         )))
     }
 }
