@@ -378,8 +378,10 @@ impl VirtualMachine {
     /// `VMError::Suspended` mid-call is propagated upward and the
     /// task's cached entry remains `Pending` until a future Phase-2c
     /// rebuild lands the snapshot-tier resumption.
-    #[allow(dead_code)]
-    fn resolve_spawned_task(&mut self, task_id: u64) -> Result<KindedSlot, VMError> {
+    pub(in crate::executor) fn resolve_spawned_task(
+        &mut self,
+        task_id: u64,
+    ) -> Result<KindedSlot, VMError> {
         // Cached fast-path — the scheduler already holds a Completed
         // share for this task. Hand out a fresh share via
         // `clone_with_kind` so the cached entry retains its own.

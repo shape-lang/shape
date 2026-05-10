@@ -53,16 +53,34 @@
 //! - `TaskGroup(Arc<TaskGroupData>)` ⇒ `NativeKind::Ptr(HeapKind::TaskGroup)`
 //!   — `Arc<TaskGroupData>` payload per ADR-006 §2.3.
 //!
-//! The legacy `task_scheduler::TaskScheduler` API takes `ValueWord` (deleted
-//! in shape-value), so any handler that needs to thread a callable into the
-//! scheduler — `op_spawn_task`, `op_await`, `op_join_await` — surfaces the
-//! out-of-territory dependency via `todo!("phase-2c — ADR-006 §2.7.4: \
-//! task_scheduler ValueWord API not migrated to kinded; out of E-async \
-//! territory")`. The §10 dispatch protocol forbids editing files outside the
-//! sub-cluster's listed territory; `task_scheduler.rs` is unowned and must be
-//! migrated in a follow-up cluster before the spawn/await fast-paths can
-//! re-light. Stack-side migration here is complete; suspended call sites are
-//! tracked, not silently papered over.
+//! ## Wave 8 W8-AS migration (ADR-006 §2.7.11/Q12, §2.7.4 Phase-2c boundary)
+//!
+//! The `task_scheduler::TaskScheduler` API was migrated to the kinded
+//! `(bits, kind)` carrier shape during Wave 6.5 R-async-time / E-async
+//! close, and `call_convention.rs::resolve_spawned_task` was filled by
+//! W7-cv-async (close `f3502b0`) per §2.7.11/Q12 — sync resolution of
+//! spawned closures + function-id callables routes through
+//! `call_closure_with_nb_args_keepalive` / `call_function_with_nb_args`.
+//! W8-AS lights up the per-await-site integration:
+//!
+//! - `op_await` resolves a `Future(id)`-kinded slot synchronously via
+//!   `vm.resolve_spawned_task(task_id)` and pushes the kinded result.
+//! - `op_spawn_task` allocates a fresh `future_id`, transfers the popped
+//!   callable share into `task_scheduler.register(id, bits, kind)`,
+//!   tracks the future id in the active async-scope stack, and pushes
+//!   the future id as `Ptr(HeapKind::Future)`.
+//! - `op_join_await` walks the carried `task_ids` and dispatches per-id
+//!   to `resolve_spawned_task` per the join strategy (All / Race / Any
+//!   / AllSettled), aggregating into an `Arc<TaskGroupData>` `Ptr(HeapKind::TaskGroup)`
+//!   carrier (Race/Any return the per-task result directly).
+//!
+//! ### §2.7.4 Phase-2c boundary
+//!
+//! Suspension state crossing a `resolve_spawned_task` frame boundary —
+//! a `VMError::Suspended` raised inside a spawned closure body — stays
+//! out of scope. The current sync-resolution path propagates the error
+//! upward; the task's cached entry remains `Pending` until a future
+//! Phase-2c rebuild lands the snapshot-tier resumption.
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
@@ -266,19 +284,39 @@ impl VirtualMachine {
         let (bits, kind) = self.pop_kinded()?;
         match kind {
             NativeKind::Ptr(HeapKind::Future) => {
-                // Future(id) is an inline scalar — `bits` IS the future ID.
-                // No Arc share to drop (HeapKind::Future is a no-op in
-                // drop_with_kind). task_scheduler API still takes `ValueWord`
-                // (out-of-territory for E-async; see ADR-006 §2.7.4 / playbook
-                // §10 E-async row). Surface the suspended call rather than
-                // fabricate a forbidden ValueWord shim.
-                let _id = bits;
-                let _ = sp_before;
-                todo!(
-                    "phase-2c — ADR-006 §2.7.4: task_scheduler::resolve_task \
-                     takes ValueWord; migration belongs to a separate \
-                     task_scheduler cluster (out of E-async territory)"
+                // Future(id) is an inline scalar — `bits` IS the future ID
+                // (see TaskScheduler docstring + §2.7.11/Q12 Future row).
+                // No Arc share to drop on the popped slot; HeapKind::Future
+                // is a no-op in drop_with_kind / clone_with_kind.
+                //
+                // Sync-resolution path (§2.7.11/Q12 dispatch precedent,
+                // closed by W7-cv-async at `f3502b0`): hand the future id
+                // to `resolve_spawned_task`, which routes through the
+                // kinded `call_*_with_nb_args` family for closure /
+                // function-id callables and returns the result `KindedSlot`.
+                //
+                // Phase-2c boundary (ADR-006 §2.7.4): if the spawned
+                // body suspends mid-execution, `resolve_spawned_task`
+                // propagates `VMError::Suspended` up. The task's cached
+                // entry remains `Pending` until a future snapshot-tier
+                // rebuild lands. This is explicitly out-of-scope here.
+                let task_id = bits;
+                let result = self.resolve_spawned_task(task_id)?;
+
+                // Transfer the result share onto the stack via the
+                // canonical `push_kinded(raw, kind)` + `mem::forget`
+                // pattern (per §2.7.10/§2.7.11 dispatch-shell shape —
+                // `control_flow/mod.rs::dispatch_call_value_immediate`
+                // is the precedent). The carrier's Drop must not fire
+                // after the share moves to the stack slot.
+                self.push_kinded(result.raw(), result.kind())?;
+                std::mem::forget(result);
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_await (Future): stack depth changed (before={}, after={})",
+                    sp_before, self.sp
                 );
+                Ok(AsyncExecutionResult::Continue)
             }
             _ => {
                 // Sync shortcut: value is already resolved, push it back.
@@ -305,22 +343,43 @@ impl VirtualMachine {
     ///
     /// If inside an async scope, the spawned future ID is tracked for cancellation.
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let _sp_before = self.sp;
-        // Pop the callable's kinded slot. The share would transfer to the
-        // task_scheduler — but the scheduler API takes `ValueWord` (deleted),
-        // so this surfaces as out-of-territory work.
+        let sp_before = self.sp;
+        // Pop the callable's kinded slot. The share transfers to the
+        // task_scheduler via `register(id, bits, kind)` — same retain-on-store
+        // contract as the §2.7.7 stack and §2.7.8 cell-storage tracks (one
+        // strong-count share owned by the storage; released by `take_callable`
+        // / `cancel` / `Drop`). No `drop_with_kind` here: the share is moved,
+        // not released.
         let (callable_bits, callable_kind) = self.pop_kinded()?;
-        // Drop the popped share to keep refcount discipline correct under the
-        // todo!() surface — without this, the share leaks until phase-2c
-        // unblocks the scheduler migration.
-        drop_with_kind(callable_bits, callable_kind);
-        todo!(
-            "phase-2c — ADR-006 §2.7.4: task_scheduler::register takes \
-             ValueWord; spawn-task callable threading belongs to a separate \
-             task_scheduler cluster (out of E-async territory). Future ID \
-             allocation + async-scope tracking + Future-kinded push will \
-             re-light once the scheduler API is migrated to (bits, kind)."
+
+        // Allocate a fresh future id. `next_future_id` is monotonic and
+        // single-threaded (the VM is `!Sync` per the module docstring's
+        // concurrency model section).
+        let task_id = self.next_future_id();
+
+        // Transfer the share into the scheduler. `register` honours the
+        // Wave-6.5 R-async-time kinded API (bits + NativeKind pair).
+        self.task_scheduler
+            .register(task_id, callable_bits, callable_kind);
+
+        // Track the spawned future id in the active async scope (if any)
+        // so `op_async_scope_exit` can cancel still-pending tasks in
+        // LIFO order (structured concurrency contract — see module
+        // docstring's "Structured Concurrency" section).
+        if let Some(scope) = self.async_scope_stack.last_mut() {
+            scope.push(task_id);
+        }
+
+        // Push the future id as `Ptr(HeapKind::Future)`. The Future kind
+        // is an inline-scalar payload — `bits` IS the future id, no Arc
+        // backing. Drop is a no-op in `drop_with_kind`.
+        self.push_kinded(task_id, NativeKind::Ptr(HeapKind::Future))?;
+        debug_assert_eq!(
+            self.sp, sp_before,
+            "op_spawn_task: stack depth changed (before={}, after={})",
+            sp_before, self.sp
         );
+        Ok(AsyncExecutionResult::Continue)
     }
 
     /// Initialize a join group from futures on the stack
@@ -388,28 +447,149 @@ impl VirtualMachine {
         let (bits, slot_kind) = self.pop_kinded()?;
         match slot_kind {
             NativeKind::Ptr(HeapKind::TaskGroup) => {
-                // Reclaim the Arc<TaskGroupData> share that pop_kinded just
-                // transferred to us. We extract `kind` + `task_ids.clone()`
-                // for the suspension fall-back, then drop the Arc.
+                // Reclaim the `Arc<TaskGroupData>` share that `pop_kinded`
+                // transferred to us. Extract `kind` + `task_ids` for the
+                // join walk, then drop the Arc.
                 //
                 // SAFETY: the construction-side contract for
                 // `push_kinded(bits, Ptr(HeapKind::TaskGroup))` (see
-                // `op_join_init` above + ADR-006 §2.3) guarantees `bits` is
-                // the result of `Arc::into_raw::<TaskGroupData>` and we own
-                // exactly one strong-count share.
+                // `op_join_init` above + ADR-006 §2.3) guarantees `bits`
+                // is the result of `Arc::into_raw::<TaskGroupData>` and
+                // we own exactly one strong-count share.
                 let arc: Arc<TaskGroupData> =
                     unsafe { Arc::from_raw(bits as *const TaskGroupData) };
-                let _kind = arc.kind;
-                let _task_ids = arc.task_ids.clone();
+                let join_kind = arc.kind;
+                let task_ids = arc.task_ids.clone();
                 drop(arc);
-                let _ = sp_before;
-                // task_scheduler::resolve_task_group still takes `ValueWord`
-                // (out-of-territory). Surface and stop per playbook §10 row.
-                todo!(
-                    "phase-2c — ADR-006 §2.7.4: task_scheduler::resolve_task_group \
-                     takes ValueWord; join-await result threading belongs to a \
-                     separate task_scheduler cluster (out of E-async territory)."
+
+                // Per-id sync resolution via the §2.7.11/Q12 dispatch
+                // entry-point. `resolve_spawned_task` consults the
+                // scheduler's cached-result fast-path first, then takes
+                // the callable share and routes through
+                // `call_*_with_nb_args` family. The borrow shape here
+                // mirrors `resolve_spawned_task`'s own `take_callable` /
+                // `complete` cycle — no per-call closure capture of
+                // `&mut self.task_scheduler` is needed because the
+                // scheduler is consulted/mutated point-wise inside
+                // `resolve_spawned_task` itself.
+                //
+                // Phase-2c boundary (ADR-006 §2.7.4): if a constituent
+                // task's body suspends (`VMError::Suspended`), the join
+                // surfaces the error upward. Snapshot-tier resumption
+                // of in-flight join groups stays out of scope per
+                // §2.7.11 out-of-scope clause.
+                match join_kind {
+                    // All: resolve every task, drop each per-task share
+                    // (the aggregate carrier is a `TaskGroupData` of
+                    // ids only, mirroring `TaskScheduler::resolve_task_group`'s
+                    // All-mode shape). Push a fresh `Arc<TaskGroupData>`
+                    // result carrier kinded `Ptr(HeapKind::TaskGroup)`.
+                    0 => {
+                        for &id in &task_ids {
+                            let result = self.resolve_spawned_task(id)?;
+                            drop_with_kind(result.raw(), result.kind());
+                            std::mem::forget(result);
+                        }
+                        let aggregate: Arc<TaskGroupData> = Arc::new(TaskGroupData {
+                            kind: 0,
+                            task_ids: task_ids.clone(),
+                        });
+                        let result_bits = Arc::into_raw(aggregate) as u64;
+                        self.push_kinded(
+                            result_bits,
+                            NativeKind::Ptr(HeapKind::TaskGroup),
+                        )?;
+                    }
+                    // Race: resolve all tasks; return the first result.
+                    // Matches `TaskScheduler::resolve_task_group`'s
+                    // race-mode semantics. Empty list → RuntimeError.
+                    1 => {
+                        let mut pushed = false;
+                        for (idx, &id) in task_ids.iter().enumerate() {
+                            let result = self.resolve_spawned_task(id)?;
+                            if idx == 0 {
+                                self.push_kinded(result.raw(), result.kind())?;
+                                std::mem::forget(result);
+                                pushed = true;
+                            } else {
+                                // Subsequent results: their shares aren't
+                                // returned to the user; release each.
+                                drop_with_kind(result.raw(), result.kind());
+                                std::mem::forget(result);
+                            }
+                        }
+                        if !pushed {
+                            return Err(VMError::RuntimeError(
+                                "Race join with empty task list".to_string(),
+                            ));
+                        }
+                    }
+                    // Any: return first success; on errors, keep the
+                    // last for the empty-success fallback. Matches
+                    // `TaskScheduler::resolve_task_group`'s any-mode.
+                    2 => {
+                        let mut last_err: Option<VMError> = None;
+                        let mut pushed = false;
+                        for &id in &task_ids {
+                            match self.resolve_spawned_task(id) {
+                                Ok(result) => {
+                                    self.push_kinded(result.raw(), result.kind())?;
+                                    std::mem::forget(result);
+                                    pushed = true;
+                                    break;
+                                }
+                                Err(e) => last_err = Some(e),
+                            }
+                        }
+                        if !pushed {
+                            return Err(last_err.unwrap_or_else(|| {
+                                VMError::RuntimeError(
+                                    "Any join with empty task list".to_string(),
+                                )
+                            }));
+                        }
+                    }
+                    // AllSettled: drive every task; per-task errors are
+                    // preserved in the scheduler's result map (caller
+                    // can inspect via `get_result`). Aggregate carrier
+                    // kind=3 mirrors `TaskScheduler::resolve_task_group`.
+                    // The {status, value/error} array view depends on
+                    // a kinded VMArray helper that's Phase-2c per
+                    // ADR-006 §2.7.4 — the TaskGroup carrier is the
+                    // minimum shape the await-time decoder can re-walk.
+                    3 => {
+                        for &id in &task_ids {
+                            if let Ok(result) = self.resolve_spawned_task(id) {
+                                drop_with_kind(result.raw(), result.kind());
+                                std::mem::forget(result);
+                            }
+                            // Errors per-task are preserved in the
+                            // scheduler's result map.
+                        }
+                        let aggregate: Arc<TaskGroupData> = Arc::new(TaskGroupData {
+                            kind: 3,
+                            task_ids: task_ids.clone(),
+                        });
+                        let result_bits = Arc::into_raw(aggregate) as u64;
+                        self.push_kinded(
+                            result_bits,
+                            NativeKind::Ptr(HeapKind::TaskGroup),
+                        )?;
+                    }
+                    other => {
+                        return Err(VMError::RuntimeError(format!(
+                            "Unknown join kind: {}",
+                            other
+                        )));
+                    }
+                }
+
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_join_await: stack depth changed (before={}, after={})",
+                    sp_before, self.sp
                 );
+                Ok(AsyncExecutionResult::Continue)
             }
             _ => {
                 drop_with_kind(bits, slot_kind);
