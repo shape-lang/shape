@@ -26,7 +26,7 @@
 
 use super::super::*;
 use shape_value::{
-    FilterNode, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
+    FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
         HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
         TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
@@ -130,6 +130,18 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // these bits is undefined behavior per §2.7.13.
                 HeapKind::Reference => {
                     Arc::increment_strong_count(bits as *const RefTarget);
+                }
+                // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+                // Iterator-kinded slots own one
+                // `Arc::into_raw(Arc<IteratorState>)` strong-count
+                // share. Slot bits are typed-Arc directly (mirror of
+                // FilterExpr / Reference's typed-Arc dispatch — NOT a
+                // `Box<HeapValue>` wrap). Same dispatch shape as the
+                // `HeapKind::FilterExpr` §2.7.9 amendment (one
+                // variant, one matching `Arc<T>` retain at the slot
+                // tier).
+                HeapKind::Iterator => {
+                    Arc::increment_strong_count(bits as *const IteratorState);
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
                 HeapKind::Char => {}
@@ -308,6 +320,15 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // hold no Arc.
                 HeapKind::Reference => {
                     Arc::decrement_strong_count(bits as *const RefTarget);
+                }
+                // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+                // mirror of the `clone_with_kind` Iterator arm. Retires
+                // one `Arc<IteratorState>` strong-count share. At
+                // refcount=0 the inner `IteratorState` Drop releases
+                // its `source` typed-Arc and per-transform
+                // `Arc<HeapValue>` (closure) shares transitively.
+                HeapKind::Iterator => {
+                    Arc::decrement_strong_count(bits as *const IteratorState);
                 }
                 // Char: inline-scalar payload. No-op.
                 HeapKind::Char => {}

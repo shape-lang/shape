@@ -446,6 +446,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // `Arc<SharedCell>` cell-pointer slots emitted by
         // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
         NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
+        // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+        // `Arc<IteratorState>` lazy-iterator carriers emitted by the
+        // iterator-method PHF.
+        NativeKind::Ptr(HeapKind::Iterator) => "iterator",
     }
 }
 

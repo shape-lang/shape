@@ -411,6 +411,20 @@ impl Drop for SharedCell {
                     HeapKind::Reference => {
                         Arc::decrement_strong_count(bits as *const crate::reference::RefTarget);
                     }
+                    // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                    // 2026-05-10): a `SharedCell` whose single-slot
+                    // payload is a
+                    // `NativeKind::Ptr(HeapKind::Iterator)` carries
+                    // `Arc::into_raw(Arc<IteratorState>) as u64`
+                    // directly (mirror of FilterExpr / Reference's
+                    // typed-Arc dispatch — NOT a `Box<HeapValue>`
+                    // wrap). Retire one `Arc<IteratorState>`
+                    // strong-count share at cell drop.
+                    HeapKind::Iterator => {
+                        Arc::decrement_strong_count(
+                            bits as *const crate::iterator_state::IteratorState,
+                        );
+                    }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
                     HeapKind::Char => {}

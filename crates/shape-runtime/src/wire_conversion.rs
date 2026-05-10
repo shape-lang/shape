@@ -233,6 +233,12 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // values are within-program data and never cross the wire
         // boundary. Surface as an opaque tag, same as FilterExpr.
         HeapValue::Reference(_) => WireValue::String("<ref>".to_string()),
+        // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+        // Iterator pipelines are lazy within-program values and never
+        // cross the wire boundary (callers materialise via collect /
+        // forEach / etc. before serialisation). Surface as an opaque
+        // tag, same as FilterExpr / Reference.
+        HeapValue::Iterator(_) => WireValue::String("<iterator>".to_string()),
     }
 }
 

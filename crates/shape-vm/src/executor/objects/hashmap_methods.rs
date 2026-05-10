@@ -718,18 +718,17 @@ fn result_slot_to_string_arc(result: &KindedSlot) -> Option<Arc<String>> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// HashMap.iter() -> Iterator
+///
+/// W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10): forwards to
+/// the iterator cluster's `handle_hashmap_iter` factory. Each yielded
+/// element is a 2-element `[key, value]` inner array (mirrors
+/// `HashMap.entries()`).
 pub fn v2_iter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "HashMap.iter — SURFACE: phase-2c (ADR-006 §2.7.4). The legacy \
-         IteratorState struct is deleted; the kinded HashMap-iteration \
-         shape (per-entry key + value kind dispatch over the typed buffers) \
-         is a phase-2c follow-up workstream."
-            .into(),
-    ))
+    crate::executor::objects::iterator_methods::handle_hashmap_iter(vm, args, ctx)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────

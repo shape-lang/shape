@@ -154,6 +154,12 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // serialization boundary. Reject in the same shape as
         // FilterExpr.
         HeapValue::Reference(_) => Err("cannot serialize: Reference".into()),
+        // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+        // Iterator pipelines are lazy within-program values and never
+        // cross the JSON serialization boundary. Reject in the same
+        // shape as FilterExpr / Reference (callers materialise via
+        // collect / forEach / etc. before serialisation).
+        HeapValue::Iterator(_) => Err("cannot serialize: Iterator".into()),
     }
 }
 

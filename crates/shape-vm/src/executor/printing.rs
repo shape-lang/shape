@@ -355,6 +355,16 @@ impl<'a> ValueFormatter<'a> {
                 let _ = bits;
                 "<shared_cell>".to_string()
             }
+            HeapKind::Iterator => {
+                // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                // 2026-05-10): iterator pipelines have no user-facing
+                // print form — terminals materialise their elements;
+                // an Iterator slot reaching the Display surface is
+                // "still lazy" by construction. Render as an opaque
+                // tag.
+                let _ = bits;
+                "<iterator>".to_string()
+            }
         }
     }
 
@@ -619,6 +629,7 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::ClosureRaw(_) => "<closure>".to_string(),
             HeapValue::FilterExpr(_) => "<filter_expr>".to_string(),
             HeapValue::Reference(_) => "<ref>".to_string(),
+            HeapValue::Iterator(_) => "<iterator>".to_string(),
         }
     }
 }

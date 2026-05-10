@@ -982,6 +982,21 @@ impl Drop for TypedObjectStorage {
                                 bits as *const crate::reference::RefTarget,
                             );
                         }
+                        // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                        // 2026-05-10): a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Iterator)` holds
+                        // slot bits = `Arc::into_raw(Arc<IteratorState>)`
+                        // directly (mirror of FilterExpr / Reference
+                        // typed-Arc dispatch — NOT a `Box<HeapValue>`
+                        // wrap). At storage drop, retire one
+                        // `Arc<IteratorState>` strong-count share. Same
+                        // dispatch shape as the FilterExpr §2.7.9
+                        // amendment.
+                        HeapKind::Iterator => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const crate::iterator_state::IteratorState,
+                            );
+                        }
                         // Round 2.5b W7-closure-retain-parallel (ADR-006
                         // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
                         // Round 2.5 close `5fa4b19`): when a TypedObject
@@ -1477,6 +1492,13 @@ impl Clone for HeapValue {
             // strong-count bump on the shared `Arc<RefTarget>`, no
             // payload copy.
             HeapValue::Reference(v) => HeapValue::Reference(Arc::clone(v)),
+            // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+            // Iterator Arcs share the typed-Arc clone shape — single
+            // strong-count bump on the shared `Arc<IteratorState>`. The
+            // inner state is `Clone`-by-derive (typed-Arc payloads in
+            // every field), but the outer `Arc` bump is the canonical
+            // shared-receiver path.
+            HeapValue::Iterator(v) => HeapValue::Iterator(Arc::clone(v)),
         }
     }
 }
@@ -1635,6 +1657,13 @@ impl fmt::Display for HeapValue {
             // tag for diagnostics. References are within-program data
             // and don't cross any user-visible Display surface.
             HeapValue::Reference(_) => write!(f, "<ref>"),
+            // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10):
+            // iterator pipelines have no user-facing literal — render
+            // as an opaque tag. Terminal operations (collect / forEach
+            // / reduce / etc.) materialise the elements; an iterator
+            // reaching the Display surface is "still lazy" by
+            // construction.
+            HeapValue::Iterator(_) => write!(f, "<iterator>"),
         }
     }
 }

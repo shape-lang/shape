@@ -555,6 +555,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Reference) => "ref",
         // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment, 2026-05-10).
         NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
+        // W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10).
+        NativeKind::Ptr(HeapKind::Iterator) => "iterator",
     }
 }
 
