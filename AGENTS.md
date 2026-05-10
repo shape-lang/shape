@@ -48,6 +48,7 @@ before it's coded.
 | `bulldozer-strictly-typed-w9-array-aggregation` | `../shape-w9-array-aggregation` | W9-array-aggregation | — | objects/array_aggregation.rs | idle (close `f4bf0bd` merged at `e681df8` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-misc-methods` | `../shape-w9-misc-methods` | W9-misc-methods | — | objects/{13 misc files} | idle (close `23ecf2a` merged at `66b987c` 2026-05-10; number_methods.rs 23 stubs migrated; 12/13 already Stage C SURFACE) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-datatable` | `../shape-w9-datatable` | W9-datatable | — | objects/datatable_methods/{joins,query,aggregation,simulation,rolling,indexing}.rs | idle (close `b62f798` 2026-05-10; 6 closure-callback bodies migrated for filter/orderBy/forEach/sum/mean/min/max/sort; 5 SURFACE on TypedObject construction) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-transform` | `../shape-w9-array-transform` | W9-array-transform | — | objects/array_transform.rs | idle (close `3db88f4` 2026-05-10; 5 closure-callback bodies migrated — handle_{map,filter,sort,flat_map,group_by}_v2; HeapValue/Matrix arms remain Phase-2c per-element-kind gap) | 2026-05-10 |
 
 ## Status values
 

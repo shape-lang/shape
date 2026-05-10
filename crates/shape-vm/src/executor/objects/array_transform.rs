@@ -15,16 +15,15 @@
 //! project, then `Arc::into_raw` to restore (cluster A precedent in
 //! `executor/v2_handlers/typed_array_elem.rs:119`).
 //!
-//! ## Phase-2c surfaces — closure-callback dispatch
+//! ## W9-array-transform body migration (closure-callback wave)
 //!
-//! `map`, `filter`, `sort` (comparator form), `flatMap`, and `groupBy` all
-//! need to issue per-element kinded closure callbacks through
-//! `op_call_value`. That op is itself a `todo!("phase-2c")` stub in
-//! `control_flow/mod.rs::op_call_value` (call_convention.rs:308 —
-//! `call_value_immediate_nb` rebuild pending). The MethodFnV2 ABI is
-//! kinded post-Wave-γ, but the per-element callback (kinded callee +
-//! kinded arg slice + kinded result) cannot be issued until the
-//! Phase-2c call-convention rebuild lands per ADR-006 §2.7.4 / §2.7.5.
+//! Wave-γ G-method-fn-v2-abi flipped MethodFnV2 to the kinded carrier
+//! slice form. W7 Round-2 (`06cdfce`) filled
+//! `call_value_immediate_nb` with the kinded value-call dispatch body
+//! per ADR-006 §2.7.11 / Q12 — the closure-callback path is now LIVE
+//! and bodies that need per-element / per-key closure invocation
+//! migrate via `vm.call_value_immediate_nb(&closure, &[elem], ctx)`
+//! per the wave-9 method-refill playbook §1 recipe.
 //!
 //! ## Cross-variant ambiguity surfaces
 //!
@@ -39,7 +38,7 @@
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::{HeapKind, TypedArrayData};
+use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
@@ -497,80 +496,656 @@ fn concat_typed_array(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Closure-callback helpers (W9 — playbook §1 recipe)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build an owned `KindedSlot` carrier from element index `idx` of `arr`.
+/// For inline-scalar arms (Int/Float/Bool) the carrier carries the raw
+/// payload. For heap-bearing arms (`String`, `HeapValue`) the carrier
+/// owns a freshly-cloned `Arc` share — the caller hands the carrier to
+/// `call_value_immediate_nb` which transfers the share into the new
+/// frame's local slot via `stack_write_kinded` (ADR-006 §2.7.7 WB2.4 —
+/// stack-slot-owns-share invariant).
+///
+/// Per W9 playbook §4 the `Matrix` and `FloatSlice` arms project to a
+/// `Float64` scalar payload (matrix elements are `f64` row-major data;
+/// FloatSlice is a view into one such region). The `HeapValue` arm
+/// projects each element's `Arc<HeapValue>` to a `KindedSlot` whose
+/// `kind` is dispatched per `HeapValue::kind()` — this is where the
+/// existing flatten/groupBy SURFACE notes flagged the per-element kind
+/// metadata gap.
+fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
+    match arr {
+        TypedArrayData::I64(buf) => Ok(KindedSlot::from_int(buf.data[idx])),
+        TypedArrayData::F64(buf) => Ok(KindedSlot::from_number(buf.data.as_slice()[idx])),
+        TypedArrayData::Bool(buf) => Ok(KindedSlot::from_bool(buf.data[idx] != 0)),
+        TypedArrayData::I8(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::I16(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::I32(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::U8(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::U16(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::U32(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::U64(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
+        TypedArrayData::F32(buf) => Ok(KindedSlot::from_number(buf.data[idx] as f64)),
+        TypedArrayData::String(buf) => {
+            // String elements: the buffer owns one share per slot; bump
+            // the share so the carrier owns an independent count that
+            // transfers cleanly through `call_value_immediate_nb`.
+            Ok(KindedSlot::from_string_arc(Arc::clone(&buf.data[idx])))
+        }
+        TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len,
+        } => {
+            let off = *offset as usize;
+            let n = *len as usize;
+            debug_assert!(idx < n, "FloatSlice element_kinded: idx out of bounds");
+            Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
+        }
+        TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
+        TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
+            "closure-callback over HeapValue array — SURFACE: each \
+             element's NativeKind needs to be sourced from a \
+             per-element parallel-kind track that does not yet exist on \
+             `TypedArrayData::HeapValue` (ADR-006 §2.7.4 — same gap that \
+             surfaces in `flatten`'s HeapValue arm). The closure-callback \
+             ABI is live; the blocker is the missing per-element kind \
+             metadata. Wave-10 / Phase-2c reentry."
+                .to_string(),
+        )),
+    }
+}
+
+/// Stringify a `KindedSlot` for `groupBy` bucket keys. Dispatches on
+/// `KindedSlot.kind` per ADR-006 §2.7.6 / Q8 heterogeneous-kind body
+/// pattern. Replaces the deleted `nb_to_string_coerce` (forbidden
+/// §2.7.7 #7).
+fn kinded_to_bucket_key(slot: &KindedSlot) -> Result<String, VMError> {
+    match slot.kind {
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize => Ok(format!("{}", slot.slot.raw() as i64)),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => Ok(format!("{}", slot.slot.raw())),
+        NativeKind::Float64 => {
+            let v = slot.slot.as_f64();
+            if v == v.trunc() && v.abs() < 1e15 {
+                Ok(format!("{}", v as i64))
+            } else {
+                Ok(format!("{}", v))
+            }
+        }
+        NativeKind::Bool => Ok(format!("{}", slot.slot.as_bool())),
+        NativeKind::String => slot
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| VMError::RuntimeError("groupBy: empty string-key slot".into())),
+        other => Err(VMError::NotImplemented(format!(
+            "groupBy: bucket-key stringification for kind {:?} — SURFACE: \
+             only inline-scalar / String key kinds dispatched in W9. \
+             Heap-typed keys (HeapValue::Decimal, BigInt, ...) need an \
+             ADR-006 §2.7.6 / Q8 per-kind formatter table; Wave-10 / \
+             Phase-2c reentry.",
+            other
+        ))),
+    }
+}
+
+/// Build a fresh same-variant `Arc<TypedArrayData>` from indices `keep`
+/// of the receiver (filter projection).
+fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Arc<TypedArrayData>, VMError> {
+    match arr {
+        TypedArrayData::I64(buf) => {
+            let v: Vec<i64> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::I64(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::F64(buf) => {
+            let v: Vec<f64> = keep.iter().map(|&i| buf.data.as_slice()[i]).collect();
+            let aligned = AlignedVec::<f64>::from_vec(v);
+            Ok(Arc::new(TypedArrayData::F64(Arc::new(
+                AlignedTypedBuffer::from_aligned(aligned),
+            ))))
+        }
+        TypedArrayData::Bool(buf) => {
+            let v: Vec<u8> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::Bool(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I8(buf) => {
+            let v: Vec<i8> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::I8(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I16(buf) => {
+            let v: Vec<i16> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::I16(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I32(buf) => {
+            let v: Vec<i32> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::I32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U8(buf) => {
+            let v: Vec<u8> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::U8(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U16(buf) => {
+            let v: Vec<u16> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::U16(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U32(buf) => {
+            let v: Vec<u32> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::U32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U64(buf) => {
+            let v: Vec<u64> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::U64(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::F32(buf) => {
+            let v: Vec<f32> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::F32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::String(buf) => {
+            let v: Vec<Arc<String>> = keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::String(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len: _,
+        } => {
+            let off = *offset as usize;
+            let v: Vec<f64> = keep
+                .iter()
+                .map(|&i| parent.data.as_slice()[off + i])
+                .collect();
+            let aligned = AlignedVec::<f64>::from_vec(v);
+            Ok(Arc::new(TypedArrayData::F64(Arc::new(
+                AlignedTypedBuffer::from_aligned(aligned),
+            ))))
+        }
+        TypedArrayData::HeapValue(_) | TypedArrayData::Matrix(_) => {
+            Err(VMError::NotImplemented(format!(
+                "filter: {} variant — SURFACE: per-element projection on \
+                 HeapValue / Matrix needs the same per-element kind \
+                 metadata gap that `flatten` flags (ADR-006 §2.7.4). \
+                 Wave-10 / Phase-2c reentry.",
+                arr.type_name()
+            )))
+        }
+    }
+}
+
+/// Build a fresh `Arc<TypedArrayData>` from a homogeneous-kind result
+/// vector. Used by `map` to materialize the per-element closure-callback
+/// outputs into a single typed array. Cross-kind result vectors surface
+/// (no implicit promotion under strict typing — CLAUDE.md "No runtime
+/// coercion").
+fn collect_homogeneous_results(
+    results: Vec<KindedSlot>,
+) -> Result<Arc<TypedArrayData>, VMError> {
+    if results.is_empty() {
+        // Empty result — pick a stable default. I64 is the natural
+        // empty-array element type used elsewhere in the runtime
+        // (matches the empty-vec construction in `slice_typed_array`).
+        return Ok(Arc::new(TypedArrayData::I64(Arc::new(
+            TypedBuffer::from_vec(Vec::<i64>::new()),
+        ))));
+    }
+    let head_kind = results[0].kind;
+    if !results.iter().all(|r| r.kind == head_kind) {
+        return Err(VMError::NotImplemented(
+            "map: heterogeneous closure-result kinds — SURFACE: strict \
+             typing precludes implicit promotion (CLAUDE.md \"No runtime \
+             coercion\"); the homogeneous-result fast-paths cover the \
+             monomorphic stdlib usage. The heterogeneous fall-back \
+             (HeapValue::TypedArray with per-element kind metadata) needs \
+             the same per-element kind track flagged on `flatten` \
+             (ADR-006 §2.7.4). Wave-10 / Phase-2c reentry."
+                .to_string(),
+        ));
+    }
+    match head_kind {
+        NativeKind::Int64 => {
+            let v: Vec<i64> = results.iter().map(|r| r.slot.as_i64()).collect();
+            Ok(Arc::new(TypedArrayData::I64(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        NativeKind::Float64 => {
+            let v: Vec<f64> = results.iter().map(|r| r.slot.as_f64()).collect();
+            let aligned = AlignedVec::<f64>::from_vec(v);
+            Ok(Arc::new(TypedArrayData::F64(Arc::new(
+                AlignedTypedBuffer::from_aligned(aligned),
+            ))))
+        }
+        NativeKind::Bool => {
+            let v: Vec<u8> = results
+                .iter()
+                .map(|r| if r.slot.as_bool() { 1u8 } else { 0u8 })
+                .collect();
+            Ok(Arc::new(TypedArrayData::Bool(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        NativeKind::String => {
+            // Each result owns one Arc<String> share; we move those shares
+            // into the output buffer via Arc::clone (the source carriers
+            // Drop on scope exit, releasing their shares — net zero).
+            let v: Vec<Arc<String>> = results
+                .iter()
+                .map(|r| {
+                    let bits = r.slot.raw();
+                    // SAFETY: kind == String → bits is `Arc::into_raw(Arc<String>)`.
+                    // Bump and reconstruct into the buffer.
+                    unsafe { Arc::increment_strong_count(bits as *const String) };
+                    let arc = unsafe { Arc::<String>::from_raw(bits as *const String) };
+                    arc
+                })
+                .collect();
+            Ok(Arc::new(TypedArrayData::String(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        other => Err(VMError::NotImplemented(format!(
+            "map: closure-result kind {:?} — SURFACE: only Int64 / Float64 / \
+             Bool / String homogeneous results are materialized in W9. \
+             Heap-typed result kinds (HeapValue::TypedArray, TypedObject, \
+             Decimal, ...) need a per-kind output-buffer factory aligned \
+             with the missing per-element kind track (ADR-006 §2.7.4). \
+             Wave-10 / Phase-2c reentry.",
+            other
+        ))),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) handlers — kinded carrier slice in/out
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `arr.map(|x| ...)`
+/// `arr.map(|x| ...)` — per-element closure callback. The closure-callback
+/// dispatch path (`call_value_immediate_nb`) landed in W7 Round-2
+/// (`06cdfce`) per ADR-006 §2.7.11 / Q12; this body issues the per-
+/// element call via that entry-point, collecting kinded results into a
+/// homogeneous output buffer.
 ///
-/// SURFACE: closure-callback dispatch through `op_call_value` is itself
-/// a `todo!("phase-2c")` stub in `control_flow/mod.rs::op_call_value`
-/// (`call_convention.rs:308` — `call_value_immediate_nb` rebuild
-/// pending). Per-element invocation needs kinded callee + 1-arg kinded
-/// slice + kinded result. Unblocked once the Phase-2c call-convention
-/// rebuild lands per ADR-006 §2.7.4 / §2.7.5.
+/// Heterogeneous-kind result fallback + heap-element receivers surface
+/// per `collect_homogeneous_results` / `element_kinded` (ADR-006 §2.7.4
+/// per-element kind metadata gap on `TypedArrayData::HeapValue`).
 pub(crate) fn handle_map_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "map — SURFACE: closure-callback dispatch through op_call_value is \
-         itself a `todo!(\"phase-2c\")` stub (control_flow/mod.rs::op_call_value, \
-         call_convention.rs:308 call_value_immediate_nb rebuild pending). \
-         Per-element invocation needs kinded callee + 1-arg kinded slice + \
-         kinded result. Unblocked once the Phase-2c call-convention \
-         rebuild lands per ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "map: expected (array, closure)".to_string(),
+        ));
+    }
+    if args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "map: second argument must be a closure, got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let closure = &args[1];
+
+    // Borrow the receiver arc without disturbing its share, take a
+    // local copy for indexed access — we cannot hold the borrow across
+    // a `&mut self` re-entry into the VM through `call_value_immediate_nb`.
+    let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            // Reconstruct + clone share + restore — same precedent as
+            // `with_typed_array` but yields an owning clone for the
+            // body's lifetime (the VM re-entry borrow rules force this
+            // shape; we cannot pass a borrow into the inner call).
+            let arc = unsafe {
+                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
+            };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "map: expected Array receiver, got kind {:?}",
+                other
+            )));
+        }
+    };
+    let len = typed_array_len(&receiver_arc);
+
+    let mut results: Vec<KindedSlot> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = element_kinded(&receiver_arc, i)?;
+        let result = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        results.push(result);
+    }
+    let out = collect_homogeneous_results(results)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
-/// `arr.filter(|x| ...)`
-///
-/// SURFACE: same closure-callback dispatch gap as `map`.
+/// `arr.filter(|x| ...)` — per-element predicate keep-mask. Predicate
+/// closure is expected to return `Bool`; non-bool results surface as a
+/// runtime type error.
 pub(crate) fn handle_filter_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "filter — SURFACE: closure-callback dispatch through op_call_value is \
-         itself a `todo!(\"phase-2c\")` stub (control_flow/mod.rs::op_call_value, \
-         call_convention.rs:308 call_value_immediate_nb rebuild pending). \
-         Per-element predicate invocation needs kinded callee + 1-arg \
-         kinded slice + Bool result. Unblocked once the Phase-2c call- \
-         convention rebuild lands per ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "filter: expected (array, predicate)".to_string(),
+        ));
+    }
+    if args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "filter: second argument must be a closure, got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let closure = &args[1];
+
+    let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = unsafe {
+                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
+            };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "filter: expected Array receiver, got kind {:?}",
+                other
+            )));
+        }
+    };
+    let len = typed_array_len(&receiver_arc);
+
+    let mut keep: Vec<usize> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = element_kinded(&receiver_arc, i)?;
+        let result = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        match result.kind {
+            NativeKind::Bool => {
+                if result.slot.as_bool() {
+                    keep.push(i);
+                }
+            }
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "filter: predicate must return Bool, got kind {:?}",
+                    other
+                )));
+            }
+        }
+    }
+    let out = project_indices(&receiver_arc, &keep)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
-/// `arr.sort()` (no-arg — natural order) / `arr.sort(|a, b| ...)` (comparator)
-///
-/// SURFACE: the no-arg form needs per-element comparison that crosses
-/// variant boundaries through `numeric_domain` dispatch + same-domain
-/// total-order; that path is implementable without a closure callback,
-/// but the comparator form needs the same closure-callback dispatch
-/// gap as `map`. Both forms surface together to keep the dispatch
-/// contract consistent — implementing one half now and the other
-/// later would split the kind-dispatch table in two and re-create
-/// the receiver/closure detection ambiguity the V2 ABI flip just
-/// closed.
+/// `arr.sort()` / `arr.sort(|a, b| ...)` — out-of-place sort. The arity-0
+/// form does a natural-order sort dispatched per-variant. The arity-1
+/// form invokes the comparator closure once per pair-comparison; the
+/// closure is expected to return an integer (negative / zero / positive
+/// for less / equal / greater).
 pub(crate) fn handle_sort_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "sort — SURFACE: comparator form needs closure-callback dispatch \
-         through op_call_value, which is itself a `todo!(\"phase-2c\")` \
-         stub (control_flow/mod.rs::op_call_value, call_convention.rs:308 \
-         call_value_immediate_nb rebuild pending). Both arity-0 and \
-         arity-1 forms surface together to keep the dispatch contract \
-         consistent — splitting the implementation across the closure-call \
-         migration boundary would re-create the receiver/closure detection \
-         ambiguity the V2 ABI flip just closed. Unblocked once the \
-         Phase-2c call-convention rebuild lands per ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    if args.is_empty() {
+        return Err(VMError::RuntimeError("sort: missing receiver".to_string()));
+    }
+    let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = unsafe {
+                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
+            };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "sort: expected Array receiver, got kind {:?}",
+                other
+            )));
+        }
+    };
+
+    // Arity-1 form: comparator closure.
+    if args.len() >= 2 {
+        if args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+            return Err(VMError::RuntimeError(format!(
+                "sort: comparator must be a closure, got kind {:?}",
+                args[1].kind
+            )));
+        }
+        let closure = &args[1];
+        let len = typed_array_len(&receiver_arc);
+        // Build an index permutation and sort it via comparator-driven
+        // bubble sort. Bubble sort keeps the comparator-call count
+        // bounded by O(n^2) without a stable-sort closure-recursion
+        // contract; same shape as the pre-Wave-6 comparator path.
+        let mut idx: Vec<usize> = (0..len).collect();
+        // Use stdlib stable sort via comparator that issues a closure
+        // call. Closure errors propagate via a sticky `Result` shadow —
+        // `slice::sort_by` cannot signal failure, so we capture the
+        // first error and short-circuit subsequent comparisons.
+        let mut cmp_err: Option<VMError> = None;
+        idx.sort_by(|&a, &b| {
+            if cmp_err.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            let elem_a = match element_kinded(&receiver_arc, a) {
+                Ok(s) => s,
+                Err(e) => {
+                    cmp_err = Some(e);
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let elem_b = match element_kinded(&receiver_arc, b) {
+                Ok(s) => s,
+                Err(e) => {
+                    cmp_err = Some(e);
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let result =
+                match vm.call_value_immediate_nb(closure, &[elem_a, elem_b], ctx.as_deref_mut()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        cmp_err = Some(e);
+                        return std::cmp::Ordering::Equal;
+                    }
+                };
+            // Comparator return: negative / zero / positive integer.
+            let cmp_int: i64 = match result.kind {
+                NativeKind::Int8
+                | NativeKind::Int16
+                | NativeKind::Int32
+                | NativeKind::Int64
+                | NativeKind::IntSize => result.slot.raw() as i64,
+                NativeKind::Float64 => {
+                    let v = result.slot.as_f64();
+                    if v < 0.0 {
+                        -1
+                    } else if v > 0.0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                other => {
+                    cmp_err = Some(VMError::RuntimeError(format!(
+                        "sort: comparator must return integer or number, got kind {:?}",
+                        other
+                    )));
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            if cmp_int < 0 {
+                std::cmp::Ordering::Less
+            } else if cmp_int > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        if let Some(e) = cmp_err {
+            return Err(e);
+        }
+        let out = project_indices(&receiver_arc, &idx)?;
+        return Ok(KindedSlot::from_typed_array(out));
+    }
+
+    // Arity-0 form: natural-order per-variant sort.
+    let out = sort_natural(&receiver_arc)?;
+    Ok(KindedSlot::from_typed_array(out))
+}
+
+/// Per-variant natural-order sort. Numeric variants use total order;
+/// `f64` / `f32` use `total_cmp` (NaN-safe). Strings sort by lexical
+/// `Ord`. `Bool` sorts false-before-true.
+fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
+    match arr {
+        TypedArrayData::I64(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::I64(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::F64(buf) => {
+            let mut v = buf.data.as_slice().to_vec();
+            v.sort_by(|a, b| a.total_cmp(b));
+            let aligned = AlignedVec::<f64>::from_vec(v);
+            Ok(Arc::new(TypedArrayData::F64(Arc::new(
+                AlignedTypedBuffer::from_aligned(aligned),
+            ))))
+        }
+        TypedArrayData::Bool(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::Bool(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I8(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::I8(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I16(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::I16(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::I32(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::I32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U8(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::U8(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U16(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::U16(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U32(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::U32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::U64(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::U64(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::F32(buf) => {
+            let mut v = buf.data.to_vec();
+            v.sort_by(|a, b| a.total_cmp(b));
+            Ok(Arc::new(TypedArrayData::F32(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::String(buf) => {
+            let mut v: Vec<Arc<String>> = buf.data.iter().map(Arc::clone).collect();
+            v.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            Ok(Arc::new(TypedArrayData::String(Arc::new(
+                TypedBuffer::from_vec(v),
+            ))))
+        }
+        TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len,
+        } => {
+            let off = *offset as usize;
+            let n = *len as usize;
+            let mut v: Vec<f64> = parent.data.as_slice()[off..off + n].to_vec();
+            v.sort_by(|a, b| a.total_cmp(b));
+            let aligned = AlignedVec::<f64>::from_vec(v);
+            Ok(Arc::new(TypedArrayData::F64(Arc::new(
+                AlignedTypedBuffer::from_aligned(aligned),
+            ))))
+        }
+        TypedArrayData::Matrix(_) | TypedArrayData::HeapValue(_) => {
+            Err(VMError::NotImplemented(format!(
+                "sort: {} variant — SURFACE: row-major matrix and \
+                 HeapValue arrays need the per-element kind metadata gap \
+                 flagged on `flatten` (ADR-006 §2.7.4) for an order \
+                 contract. Wave-10 / Phase-2c reentry.",
+                arr.type_name()
+            )))
+        }
+    }
 }
 
 /// `arr.slice(start, end)` — Python-style range slicing, negative
@@ -742,54 +1317,152 @@ pub(crate) fn handle_flatten_v2(
     })
 }
 
-/// `arr.flatMap(|x| ...)`
-///
-/// SURFACE: closure-callback dispatch + per-element-result-array
-/// flattening. The closure-callback path is itself a `todo!("phase-2c")`
-/// stub.
+/// `arr.flatMap(|x| ...)` — per-element closure callback returns an array;
+/// the body concats all per-element result arrays into a single
+/// homogeneous output buffer.
 pub(crate) fn handle_flat_map_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "flatMap — SURFACE: closure-callback dispatch through op_call_value \
-         is itself a `todo!(\"phase-2c\")` stub (control_flow/mod.rs::op_call_value, \
-         call_convention.rs:308 call_value_immediate_nb rebuild pending). \
-         Per-element invocation returns an array; result is the concat of \
-         all per-element arrays. Unblocked once the Phase-2c call- \
-         convention rebuild lands per ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "flatMap: expected (array, closure)".to_string(),
+        ));
+    }
+    if args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "flatMap: second argument must be a closure, got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let closure = &args[1];
+
+    let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = unsafe {
+                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
+            };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "flatMap: expected Array receiver, got kind {:?}",
+                other
+            )));
+        }
+    };
+    let len = typed_array_len(&receiver_arc);
+
+    // Each per-element call returns an `Arc<TypedArrayData>`; collect
+    // them and concat pairwise via the same-variant `concat_typed_array`
+    // helper. Cross-variant returns surface (strict-typing).
+    let mut accum: Option<Arc<TypedArrayData>> = None;
+    for i in 0..len {
+        let elem = element_kinded(&receiver_arc, i)?;
+        let result = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        if result.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            return Err(VMError::RuntimeError(format!(
+                "flatMap: closure must return Array, got kind {:?}",
+                result.kind
+            )));
+        }
+        // Recover the result's `Arc<TypedArrayData>` via the typed-Arc
+        // round-trip pattern (ADR-005 §1 single-discriminator + ADR-006
+        // §2.4 typed-pointer slot ABI). `Ptr(HeapKind::TypedArray)`
+        // slots store `Arc::into_raw(Arc<TypedArrayData>)` directly —
+        // reconstruct, clone, restore the share.
+        let result_arc: Arc<TypedArrayData> = unsafe {
+            let arc =
+                Arc::<TypedArrayData>::from_raw(result.slot.raw() as *const TypedArrayData);
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        };
+        accum = Some(match accum.take() {
+            None => result_arc,
+            Some(prev) => concat_typed_array(&prev, &result_arc)?,
+        });
+        // `result` Drop releases the outer Arc<TypedArrayData> share.
+    }
+    let out = accum.unwrap_or_else(|| {
+        Arc::new(TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(
+            Vec::<i64>::new(),
+        ))))
+    });
+    Ok(KindedSlot::from_typed_array(out))
 }
 
-/// `arr.groupBy(|x| key)`
-///
-/// SURFACE: closure-callback dispatch (key fn) + kind-aware string
-/// stringifier for the bucket key. The deleted `nb_to_string_coerce`
-/// (forbidden §2.7.7 #7) was the pre-Wave-6.5 stringifier; the
-/// replacement needs to dispatch on `KindedSlot.kind` per §2.7.6 / Q8
-/// heterogeneous-kind body pattern, but the closure-callback that
-/// produces the bucket keys is the same `todo!("phase-2c")` gap as
-/// `map`/`filter`. Surface together.
+/// `arr.groupBy(|x| key)` — bucket each element under `key(elem)` and
+/// return a `HashMap<String, Array>`. The kind-aware bucket-key
+/// stringifier (`kinded_to_bucket_key`) replaces the deleted
+/// `nb_to_string_coerce` (forbidden §2.7.7 #7) by dispatching on
+/// `KindedSlot.kind` per ADR-006 §2.7.6 / Q8 heterogeneous-kind body
+/// pattern. Heap-typed key kinds surface per the helper's contract.
 pub(crate) fn handle_group_by_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "groupBy — SURFACE: closure-callback dispatch (key fn) through \
-         op_call_value is itself a `todo!(\"phase-2c\")` stub \
-         (control_flow/mod.rs::op_call_value, call_convention.rs:308 \
-         call_value_immediate_nb rebuild pending). Result is \
-         HashMapData<Arc<String>, Arc<HeapValue::TypedArray>>; the \
-         kind-aware bucket-key stringifier replaces the deleted \
-         nb_to_string_coerce (forbidden §2.7.7 #7) by dispatching on \
-         `KindedSlot.kind` per §2.7.6 / Q8 heterogeneous-kind body \
-         pattern. Unblocked once the Phase-2c call-convention rebuild \
-         lands per ADR-006 §2.7.4 / §2.7.5."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "groupBy: expected (array, key_fn)".to_string(),
+        ));
+    }
+    if args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "groupBy: second argument must be a closure, got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let closure = &args[1];
+
+    let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let arc = unsafe {
+                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
+            };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "groupBy: expected Array receiver, got kind {:?}",
+                other
+            )));
+        }
+    };
+    let len = typed_array_len(&receiver_arc);
+
+    // Bucket the receiver's element indices by stringified key,
+    // preserving insertion order via a `Vec<(key, indices)>` buffer.
+    let mut buckets: Vec<(String, Vec<usize>)> = Vec::new();
+    for i in 0..len {
+        let elem = element_kinded(&receiver_arc, i)?;
+        let key_slot = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        let key = kinded_to_bucket_key(&key_slot)?;
+        if let Some(existing) = buckets.iter_mut().find(|(k, _)| *k == key) {
+            existing.1.push(i);
+        } else {
+            buckets.push((key, vec![i]));
+        }
+    }
+
+    // Materialize each bucket as a same-variant Arc<TypedArrayData>,
+    // wrap in HeapValue::TypedArray, and compose into a HashMapData
+    // via `from_pairs`.
+    let mut keys: Vec<Arc<String>> = Vec::with_capacity(buckets.len());
+    let mut values: Vec<Arc<HeapValue>> = Vec::with_capacity(buckets.len());
+    for (key, indices) in buckets {
+        let bucket_arr = project_indices(&receiver_arc, &indices)?;
+        keys.push(Arc::new(key));
+        values.push(Arc::new(HeapValue::TypedArray(bucket_arr)));
+    }
+    let map = HashMapData::from_pairs(keys, values);
+    Ok(KindedSlot::from_hashmap(Arc::new(map)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
