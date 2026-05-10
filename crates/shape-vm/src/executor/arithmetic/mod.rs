@@ -671,6 +671,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Deque) => "deque",
         // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10).
         NativeKind::Ptr(HeapKind::Channel) => "channel",
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10).
+        NativeKind::Ptr(HeapKind::PriorityQueue) => "priority_queue",
     }
 }
 

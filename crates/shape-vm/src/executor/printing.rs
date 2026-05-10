@@ -400,6 +400,19 @@ impl<'a> ValueFormatter<'a> {
                     unsafe { &*(bits as *const shape_value::heap_value::ChannelData) };
                 let state = if ch.is_closed() { "closed" } else { "open" };
                 format!("<channel:{}:{}>", state, ch.len())
+            HeapKind::PriorityQueue => {
+                // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                // 2026-05-10): PriorityQueueData stores i64
+                // priorities heap-ordered in `Arc<TypedBuffer<i64>>`
+                // (mirror of HashSetData with the keys buffer carrying
+                // i64 instead of `Arc<String>`). Render as
+                // `PriorityQueue[1, 3, 2, ...]` in heap-array order
+                // (NOT sorted; for sorted output the user must call
+                // `pq.toSortedArray()`). SAFETY: construction-side
+                // contract on `KindedSlot::from_priority_queue`.
+                let pq: &shape_value::heap_value::PriorityQueueData =
+                    unsafe { &*(bits as *const shape_value::heap_value::PriorityQueueData) };
+                self.format_priority_queue(pq)
             }
         }
     }
@@ -598,6 +611,28 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
+    /// Format a `PriorityQueueData` as `PriorityQueue[v1, v2, ...]` in
+    /// heap-array order. Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
+    /// Q19) — i64-priority min-heap render shape (mirror of HashSet's
+    /// render shape with the values column carrying i64 instead of
+    /// quoted strings).
+    fn format_priority_queue(
+        &self,
+        pq: &shape_value::heap_value::PriorityQueueData,
+    ) -> String {
+        let n = pq.heap.data.len();
+        let mut out = String::with_capacity(16 + n * 4);
+        out.push_str("PriorityQueue[");
+        for (i, v) in pq.heap.data.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{}", v));
+        }
+        out.push(']');
+        out
+    }
+
     /// Format a `HashSetData` as `{"a", "b", ...}`. Wave 13
     /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
     /// HashMap's render shape with the values column dropped.
@@ -707,6 +742,7 @@ impl<'a> ValueFormatter<'a> {
                 let state = if c.is_closed() { "closed" } else { "open" };
                 format!("<channel:{}:{}>", state, c.len())
             }
+            HeapValue::PriorityQueue(p) => self.format_priority_queue(p.as_ref()),
         }
     }
 }

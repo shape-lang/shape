@@ -255,6 +255,17 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // same phase-2c deferral shape as HashMap / HashSet. Surface as
         // an opaque tag for diagnostics.
         HeapValue::Channel(_) => WireValue::String("<channel:phase-2c>".to_string()),
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+        // 2026-05-10): PriorityQueue wire serialisation projects to a
+        // `WireValue::Array` of i64 priorities in heap-array order
+        // (mirror of the JSON shape — i64-priority-only at landing).
+        HeapValue::PriorityQueue(d) => WireValue::Array(
+            d.heap
+                .data
+                .iter()
+                .map(|v| WireValue::Integer(*v))
+                .collect(),
+        ),
     }
 }
 

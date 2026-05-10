@@ -193,6 +193,20 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // are runtime-mutable and don't have a stable serialized
         // form. Reject in the same shape as FilterExpr / Iterator.
         HeapValue::Channel(_) => Err("cannot serialize: Channel".into()),
+
+        // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+        // 2026-05-10): PriorityQueue serialises as a JSON array of
+        // i64 priorities in heap-array order (the §2.7.18 amendment's
+        // documented wire shape — i64-priority-only at landing). The
+        // sorted shape is exposed only via `pq.toSortedArray()`; raw
+        // serialisation preserves heap order to match Display.
+        HeapValue::PriorityQueue(d) => Ok(JsonValue::Array(
+            d.heap
+                .data
+                .iter()
+                .map(|v| JsonValue::Int(*v))
+                .collect(),
+        )),
     }
 }
 

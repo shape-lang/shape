@@ -182,6 +182,20 @@ macro_rules! define_heap_types {
             // can be stored in TypedObject slots and `TypedArrayData::HeapValue`
             // buffers.
             Channel,       // 24  (Wave 15 W15-channel-rebuild, 2026-05-10; bumped from drafted 23 at merge — Deque already took 23)
+            // ADR-006 §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue,
+            // 2026-05-10): i64-priority min-heap carrier, structurally
+            // a mirror of the §2.7.15 HashSet shape with the keys
+            // buffer carrying i64 priorities instead of `Arc<String>`.
+            // Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            // / SharedCell): PriorityQueue values flow through
+            // `slot.as_heap_value()` for receiver classification at
+            // method dispatch (`pq.push(...)` / `pq.pop()` /
+            // `pq.peek()`). See `$crate::heap_value::PriorityQueueData`
+            // for the storage shape and §2.7.18 for the full
+            // justification + the rejected typed-payload alternative.
+            // Pre-assigned ordinal 25 per the wave-14-15-16 playbook
+            // (no bump needed at landing).
+            PriorityQueue, // 25  (Wave 15 W15-priority-queue, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -377,6 +391,26 @@ macro_rules! define_heap_types {
             /// `slot.as_heap_value()` for receiver classification at
             /// method dispatch — same shape as `HashSet` / `Iterator`.
             Channel(std::sync::Arc<$crate::heap_value::ChannelData>),
+            // ===== Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+            // 2026-05-10) =====
+            /// Min-heap-backed PriorityQueue carrier. Mirror of
+            /// `HeapValue::HashSet(Arc<HashSetData>)` with the keys
+            /// buffer carrying i64 priorities instead of `Arc<String>`:
+            /// `Arc<TypedBuffer<i64>>` heap-ordered values (root = min).
+            /// See `$crate::heap_value::PriorityQueueData` for the
+            /// storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): PriorityQueue values flow through
+            /// `as_heap_value()` for method-receiver classification per
+            /// the §2.7.18 amendment.
+            ///
+            /// **i64-priority-only at landing** per the §2.7.18 Q19
+            /// ruling (typed-payload `PriorityQueue<T, K>` with
+            /// key-extractor is a future Phase-2c amendment with
+            /// measurement; the smoke target is exercised on this
+            /// shape).
+            PriorityQueue(std::sync::Arc<$crate::heap_value::PriorityQueueData>),
         }
 
         impl HeapValue {
@@ -408,6 +442,7 @@ macro_rules! define_heap_types {
                     HeapValue::Iterator(..) => HeapKind::Iterator,
                     HeapValue::Deque(..) => HeapKind::Deque,
                     HeapValue::Channel(..) => HeapKind::Channel,
+                    HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
                 }
             }
 
@@ -451,6 +486,10 @@ macro_rules! define_heap_types {
                     // (a live channel is a usable endpoint regardless of
                     // queued-element count or closed state).
                     HeapValue::Channel(_) => true,
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                    // 2026-05-10): empty PQ is falsy, non-empty is
+                    // truthy — mirror of the HashSet / HashMap shape.
+                    HeapValue::PriorityQueue(d) => !d.is_empty(),
                 }
             }
 
@@ -488,6 +527,7 @@ macro_rules! define_heap_types {
                     HeapValue::Iterator(_) => "iterator",
                     HeapValue::Deque(_) => "deque",
                     HeapValue::Channel(_) => "channel",
+                    HeapValue::PriorityQueue(_) => "priority_queue",
                 }
             }
         }

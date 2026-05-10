@@ -589,6 +589,41 @@ impl VirtualMachine {
                          after the strict-typing Phase-2 deletion. Tracked \
                          as W15-priority-queue per the W14-15-16 playbook \
                          §2. ADR-006 §2.7.4.",
+                BuiltinFunction::PriorityQueueCtor => {
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
+                    // Q19, 2026-05-10): empty PriorityQueue ctor —
+                    // discard any args (the surface form
+                    // `PriorityQueue()` takes no args at landing;
+                    // `PriorityQueue([elements])` initialization is a
+                    // follow-up). Build an empty
+                    // `Arc::new(PriorityQueueData::new())` and push as
+                    // a `KindedSlot::from_priority_queue(...)`.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::PriorityQueueData::new(),
+                    );
+                    let result = KindedSlot::from_priority_queue(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::DequeCtor => {
+                    // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
+                    // rebuild required. The pre-bulldozer HeapKind
+                    // ordinals for `Deque`, `Channel`, `Column`,
+                    // `Matrix`, `Range` were deleted when their
+                    // `HeapValue` arms were trimmed in the
+                    // strict-typing Phase-2 pass. Each remaining ctor
+                    // is its own Stage C cluster (per playbook "Out of
+                    // scope" list) — surface here, do not fabricate a
+                    // HeapKind. (HashMap was rebuilt at Stage C P1(b);
+                    // Set at Wave 13 W13-hashset-rebuild §2.7.15;
+                    // PriorityQueue at Wave 15 §2.7.18.)
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    return Err(VMError::NotImplemented(format!(
+                        "{:?} — SURFACE: Stage C HeapKind family rebuild \
+                         required. Deque has no HeapKind variant after \
+                         the strict-typing Phase-2 deletion. Each is \
+                         its own Stage C cluster per the W13/W15 \
+                         playbook. ADR-006 §2.7.4.",
                         builtin
                     )));
                 }
