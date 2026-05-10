@@ -116,6 +116,20 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
                 .collect(),
         )),
 
+        // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10):
+        // Deque serializes as a JSON array of front-to-back elements.
+        // Each element dispatches through the canonical ADR-005 §1
+        // single-discriminator `HeapValue` recursion. Same mechanical-
+        // yes mapping shape as HashSet (string-array specialisation
+        // generalised to heterogeneous-element).
+        HeapValue::Deque(d) => {
+            let mut elems: Vec<JsonValue> = Vec::with_capacity(d.items.len());
+            for v in d.items.iter() {
+                elems.push(heap_to_json_value(v)?);
+            }
+            Ok(JsonValue::Array(elems))
+        }
+
         // TypedObject schema-aware (1)
         HeapValue::TypedObject(storage) => typed_object_to_json_value(
             storage.schema_id,

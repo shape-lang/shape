@@ -861,6 +861,132 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+// ── Deque storage (W15-deque, ADR-006 §2.7.19 / Q20, 2026-05-10) ───────────
+
+/// Double-ended queue storage. Heterogeneous element kinds are stored as
+/// `Arc<HeapValue>` payloads (mirror of `HashMapData::values` per ADR-005
+/// §1 single-discriminator) — the deque is element-kind-agnostic at
+/// landing, in line with the W13-hashmap precedent.
+///
+/// ADR-006 §2.7.19 / Q20 amendment (Wave 15 W15-deque, 2026-05-10).
+/// Mirror of the §2.7.15 HashSet shape (full `HeapValue::Deque` arm,
+/// NOT pure-discriminator like FilterExpr / SharedCell): receivers
+/// flow through `slot.as_heap_value()` for receiver classification at
+/// method dispatch (`d.pushBack(...)` / `d.popFront()` / `d.size()`).
+///
+/// **Heterogeneous-element keyspace at landing.** Element kinds that
+/// can be heap-wrapped (string / int via `BigInt(Arc<i64>)` / typed
+/// arrays / typed objects / hashmaps / etc.) are accepted by the
+/// mutation API; bare `Float64` / `Bool` results are rejected (no
+/// matching `HeapValue::*` arm exists post-§2.3). Same coverage shape
+/// as `HashMapData::values` storage (`hashmap_methods.rs::
+/// result_slot_to_heap_value_arc`).
+///
+/// Per the W15-deque audit: `VecDeque<Arc<HeapValue>>` chosen over the
+/// alternative `Vec<u64>` + parallel `Vec<NativeKind>` (per §2.7.7
+/// stack ABI) — Deque is heterogeneous-element, not scalar-only, so
+/// the parallel-kind track shape would force every push site to
+/// carry both bits and kind through the deque API. The
+/// `Arc<HeapValue>` shape collapses both into a single payload at the
+/// element tier and matches the Stage C P1(b) HashMap precedent.
+#[derive(Debug)]
+pub struct DequeData {
+    /// Insertion-ordered double-ended queue of heap-allocated element
+    /// payloads. Element kinds are recovered via the canonical ADR-005
+    /// §1 single-discriminator `HeapValue` match at the read site.
+    pub items: std::collections::VecDeque<Arc<HeapValue>>,
+}
+
+impl DequeData {
+    /// Build an empty DequeData with no elements.
+    pub fn new() -> Self {
+        Self {
+            items: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Build from a `Vec<Arc<HeapValue>>`. Insertion order is the
+    /// front-to-back walk order.
+    pub fn from_items(items: Vec<Arc<HeapValue>>) -> Self {
+        Self {
+            items: std::collections::VecDeque::from(items),
+        }
+    }
+
+    /// Number of elements.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether the deque is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Borrow the front element without removing it. `None` when empty.
+    pub fn peek_front(&self) -> Option<&Arc<HeapValue>> {
+        self.items.front()
+    }
+
+    /// Borrow the back element without removing it. `None` when empty.
+    pub fn peek_back(&self) -> Option<&Arc<HeapValue>> {
+        self.items.back()
+    }
+
+    /// Borrow the element at `index` (front-counted). `None` when out
+    /// of bounds.
+    pub fn get(&self, index: usize) -> Option<&Arc<HeapValue>> {
+        self.items.get(index)
+    }
+
+    // ── Mutation API (W15-deque, 2026-05-10) ────────────────────────────────
+    //
+    // Mirror of HashMapData / HashSetData clone-on-write shape — callers
+    // wrap mutation in `Arc::make_mut(&mut arc).push_back(...)` so the
+    // shared-receiver semantics are preserved per ADR-006 §2.7.4.
+
+    /// Push an element onto the back of the deque.
+    pub fn push_back(&mut self, value: Arc<HeapValue>) {
+        self.items.push_back(value);
+    }
+
+    /// Push an element onto the front of the deque.
+    pub fn push_front(&mut self, value: Arc<HeapValue>) {
+        self.items.push_front(value);
+    }
+
+    /// Remove and return the back element. `None` when empty.
+    pub fn pop_back(&mut self) -> Option<Arc<HeapValue>> {
+        self.items.pop_back()
+    }
+
+    /// Remove and return the front element. `None` when empty.
+    pub fn pop_front(&mut self) -> Option<Arc<HeapValue>> {
+        self.items.pop_front()
+    }
+}
+
+impl Default for DequeData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for DequeData {
+    fn clone(&self) -> Self {
+        // Per-element `Arc<HeapValue>` clone bumps each element's strong-
+        // count share; the resulting `VecDeque` is structurally
+        // independent of the source. Mirror of `HashSetData::clone`'s
+        // `Arc::clone(&keys)` shape but without the buffer-Arc indirection
+        // (the per-element `Arc<HeapValue>` already provides the share).
+        Self {
+            items: self.items.iter().map(Arc::clone).collect(),
+        }
+    }
+}
+
 // ── TaskGroup storage (ADR-006 §2.3) ────────────────────────────────────────
 
 /// Task-group payload. Extracted from the inline
@@ -1084,6 +1210,17 @@ impl Drop for TypedObjectStorage {
                         // share at storage drop.
                         HeapKind::HashSet => {
                             std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
+                        }
+                        // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                        // 2026-05-10): a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Deque)` holds slot
+                        // bits = `Arc::into_raw(Arc<DequeData>)`.
+                        // Same dispatch shape as the HashSet arm above
+                        // (Deque is a HashSet sibling per §2.7.19) —
+                        // retire one `Arc<DequeData>` strong-count
+                        // share at storage drop.
+                        HeapKind::Deque => {
+                            std::sync::Arc::decrement_strong_count(bits as *const DequeData);
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -1655,6 +1792,11 @@ impl Clone for HeapValue {
             // 2026-05-10): mirror of HashMap — single strong-count bump
             // on the shared `Arc<HashSetData>`, no payload copy.
             HeapValue::HashSet(v) => HeapValue::HashSet(Arc::clone(v)),
+            // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10):
+            // mirror of HashSet — single strong-count bump on the
+            // shared `Arc<DequeData>`, no payload copy. Per-element
+            // `Arc<HeapValue>` shares stay shared with the source.
+            HeapValue::Deque(v) => HeapValue::Deque(Arc::clone(v)),
             // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / Q8 amendment):
             // FilterExpr Arcs share the typed-Arc clone shape — single
             // strong-count bump, no payload copy.
@@ -1832,6 +1974,20 @@ impl fmt::Display for HeapValue {
                     write!(f, "\"{}\"", k)?;
                 }
                 write!(f, "}}")
+            }
+            // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10):
+            // render front-to-back as `Deque[elem1, elem2, ...]` —
+            // dispatch each element through the canonical ADR-005 §1
+            // single-discriminator `HeapValue` Display.
+            HeapValue::Deque(d) => {
+                write!(f, "Deque[")?;
+                for (i, v) in d.items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
             }
             // Wave-γ G-heap-filter-expr (ADR-006 §2.3 amendment): no
             // user-facing FilterExpr literal exists; render as an opaque
@@ -2459,5 +2615,127 @@ mod hashset_mutation {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains("a"));
         assert!(!snapshot.contains("b"));
+    }
+}
+
+#[cfg(test)]
+mod deque_mutation {
+    //! W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10): pin the
+    //! `push_front` / `push_back` / `pop_front` / `pop_back` API
+    //! contracts on `DequeData`. Mirror of `hashset_mutation` with
+    //! the bucket-index dropped (Deque is order-preserving with no
+    //! deduplication, so no parallel hash structure is needed).
+    use super::*;
+    use std::sync::Arc;
+
+    fn s(text: &str) -> Arc<HeapValue> {
+        Arc::new(HeapValue::String(Arc::new(text.to_string())))
+    }
+
+    fn i(n: i64) -> Arc<HeapValue> {
+        Arc::new(HeapValue::BigInt(Arc::new(n)))
+    }
+
+    #[test]
+    fn empty_deque_has_zero_len_and_is_empty() {
+        let d = DequeData::new();
+        assert_eq!(d.len(), 0);
+        assert!(d.is_empty());
+        assert!(d.peek_front().is_none());
+        assert!(d.peek_back().is_none());
+        assert!(d.get(0).is_none());
+    }
+
+    #[test]
+    fn push_back_and_pop_front_preserve_fifo_order() {
+        // FIFO: push 1,2,3 to back, pop from front yields 1,2,3.
+        let mut d = DequeData::new();
+        d.push_back(i(1));
+        d.push_back(i(2));
+        d.push_back(i(3));
+        assert_eq!(d.len(), 3);
+        let p1 = d.pop_front().expect("front");
+        assert!(matches!(p1.as_ref(), HeapValue::BigInt(b) if **b == 1));
+        let p2 = d.pop_front().expect("front");
+        assert!(matches!(p2.as_ref(), HeapValue::BigInt(b) if **b == 2));
+        let p3 = d.pop_front().expect("front");
+        assert!(matches!(p3.as_ref(), HeapValue::BigInt(b) if **b == 3));
+        assert!(d.pop_front().is_none());
+    }
+
+    #[test]
+    fn push_front_and_pop_back_preserve_reverse_order() {
+        // Reverse: push 1,2,3 to front, pop from back yields 1,2,3.
+        let mut d = DequeData::new();
+        d.push_front(i(1));
+        d.push_front(i(2));
+        d.push_front(i(3));
+        // Now layout is [3, 2, 1] front-to-back.
+        let p1 = d.pop_back().expect("back");
+        assert!(matches!(p1.as_ref(), HeapValue::BigInt(b) if **b == 1));
+        let p2 = d.pop_back().expect("back");
+        assert!(matches!(p2.as_ref(), HeapValue::BigInt(b) if **b == 2));
+        let p3 = d.pop_back().expect("back");
+        assert!(matches!(p3.as_ref(), HeapValue::BigInt(b) if **b == 3));
+    }
+
+    #[test]
+    fn smoke_target_push_back_push_front_pop_back() {
+        // Storage-layer counterpart of the W15-deque smoke target:
+        // `let d = Deque(); d.push_back(1); d.push_front(0); d.pop_back()`
+        // returns `1`. After the two pushes the layout is [0, 1]
+        // front-to-back; pop_back yields 1.
+        let mut d = DequeData::new();
+        d.push_back(i(1));
+        d.push_front(i(0));
+        assert_eq!(d.len(), 2);
+        let popped = d.pop_back().expect("back");
+        assert!(matches!(popped.as_ref(), HeapValue::BigInt(b) if **b == 1));
+        // Front element retained.
+        assert_eq!(d.len(), 1);
+        let front = d.peek_front().expect("front").clone();
+        assert!(matches!(front.as_ref(), HeapValue::BigInt(b) if **b == 0));
+    }
+
+    #[test]
+    fn peek_front_back_and_get_borrow_without_removing() {
+        let mut d = DequeData::new();
+        d.push_back(s("a"));
+        d.push_back(s("b"));
+        d.push_back(s("c"));
+        assert_eq!(d.len(), 3);
+        let front = d.peek_front().expect("front");
+        assert!(matches!(front.as_ref(), HeapValue::String(t) if t.as_str() == "a"));
+        let back = d.peek_back().expect("back");
+        assert!(matches!(back.as_ref(), HeapValue::String(t) if t.as_str() == "c"));
+        let mid = d.get(1).expect("idx 1");
+        assert!(matches!(mid.as_ref(), HeapValue::String(t) if t.as_str() == "b"));
+        // Length unchanged after read-only borrows.
+        assert_eq!(d.len(), 3);
+    }
+
+    #[test]
+    fn from_items_preserves_insertion_order() {
+        let d = DequeData::from_items(vec![s("a"), s("b"), s("c")]);
+        assert_eq!(d.len(), 3);
+        assert!(matches!(d.get(0).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "a"));
+        assert!(matches!(d.get(1).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "b"));
+        assert!(matches!(d.get(2).unwrap().as_ref(), HeapValue::String(t) if t.as_str() == "c"));
+    }
+
+    #[test]
+    fn arc_make_mut_clone_on_write_preserves_other_share() {
+        // Pin the §2.7.4 / playbook clone-on-write invariant: when
+        // `Arc<DequeData>` has multiple shares, `Arc::make_mut` clones
+        // the inner `DequeData` so the other share stays immutable.
+        // Mirror of `hashset_mutation`'s clone-on-write test.
+        let mut a = Arc::new(DequeData::new());
+        Arc::make_mut(&mut a).push_back(i(1));
+        let snapshot = Arc::clone(&a);
+        // After the snapshot, mutating `a` clones the inner data.
+        Arc::make_mut(&mut a).push_back(i(2));
+        assert_eq!(a.len(), 2);
+        // Snapshot retains the pre-mutation length.
+        assert_eq!(snapshot.len(), 1);
     }
 }

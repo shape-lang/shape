@@ -148,6 +148,22 @@ macro_rules! define_heap_types {
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
             Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // ADR-006 §2.7.19 / Q20 amendment (Wave 15 W15-deque,
+            // 2026-05-10): heterogeneous-element double-ended queue
+            // carrier, structurally a mirror of the §2.7.15 HashSet
+            // shape with the dedup keyspace replaced by a
+            // VecDeque<Arc<HeapValue>>. Full HeapValue arm (NOT
+            // pure-discriminator like FilterExpr / SharedCell): Deque
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`d.pushBack(...)` /
+            // `d.popFront()` / `d.size()`). Ordinal 23 (not the
+            // originally drafted 26) — W14 / W15-priority-queue have
+            // not landed at this branch's parent (`bb0ccc3`); per
+            // playbook §0 ordinal-bump rule, the next free slot
+            // after Iterator=22 is taken. Merge ordering at
+            // integration time per playbook §4 (W14 → PriorityQueue
+            // → Deque) restores the documented 26 spec layout.
+            Deque,         // 23  (Wave 15 W15-deque, 2026-05-10)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -313,6 +329,19 @@ macro_rules! define_heap_types {
             /// cursor triple is opaque at the dispatch shell —
             /// terminals walk `arc.transforms` and dispatch per stage).
             Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10) =====
+            /// Double-ended queue carrier. Structurally a mirror of
+            /// `HeapValue::HashSet(Arc<HashSetData>)` with the dedup
+            /// keyspace replaced by a `VecDeque<Arc<HeapValue>>`
+            /// (heterogeneous-element, order-preserving, no
+            /// deduplication). See `$crate::heap_value::DequeData` for
+            /// the storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like
+            /// FilterExpr / SharedCell): Deque values flow through
+            /// `as_heap_value()` for receiver classification per the
+            /// §2.7.19 amendment.
+            Deque(std::sync::Arc<$crate::heap_value::DequeData>),
         }
 
         impl HeapValue {
@@ -342,6 +371,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
                     HeapValue::Reference(..) => HeapKind::Reference,
                     HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::Deque(..) => HeapKind::Deque,
                 }
             }
 
@@ -378,6 +408,9 @@ macro_rules! define_heap_types {
                     // if its terminal evaluation will yield zero
                     // elements after filter / take 0 etc.).
                     HeapValue::Iterator(_) => true,
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20):
+                    // truthy iff the deque has at least one element.
+                    HeapValue::Deque(d) => !d.is_empty(),
                 }
             }
 
@@ -413,6 +446,7 @@ macro_rules! define_heap_types {
                     HeapValue::FilterExpr(_) => "filter_expr",
                     HeapValue::Reference(_) => "ref",
                     HeapValue::Iterator(_) => "iterator",
+                    HeapValue::Deque(_) => "deque",
                 }
             }
         }

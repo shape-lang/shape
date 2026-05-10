@@ -17,7 +17,7 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
+    DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
     TypedObjectStorage,
 };
 use crate::datatable::DataTable;
@@ -155,6 +155,14 @@ impl ValueSlot {
     /// sibling, full-`HeapValue` arm shape.
     pub fn from_hashset(h: Arc<HashSetData>) -> Self {
         Self(Arc::into_raw(h) as u64)
+    }
+
+    /// Store an `Arc<DequeData>` directly. Mirrors
+    /// `HeapValue::Deque(Arc<DequeData>)`. ADR-006 §2.7.19 / Q20
+    /// amendment (Wave 15 W15-deque) — Deque is a HashSet sibling,
+    /// full-`HeapValue` arm shape.
+    pub fn from_deque(d: Arc<DequeData>) -> Self {
+        Self(Arc::into_raw(d) as u64)
     }
 
     /// Store an `Arc<DataTable>` directly. Mirrors
