@@ -4,6 +4,23 @@
 //! of FFI entry points the v2 JIT codegen pipeline actually references.
 //! Historically this builder declared ~240 functions; the V6 cleanup pruned
 //! it to the live native-typed surface.
+//!
+//! ## Surface-and-stop boundary (ADR-006 §2.7.14 / Q15)
+//!
+//! After the W10 jit-playbook cleanup, several FFI registration modules
+//! (`array_symbols`, `arc_symbols`, parts of `v2_symbols` for the typed-map
+//! family) were no-op'd because their entry points wrapped the deleted
+//! `JitArray` / `UnifiedArray` heap layout. The keys we look up below
+//! (`jit_new_array`, `jit_array_push_elem`, `jit_arc_retain`,
+//! `jit_arc_release`, the `jit_v2_map_*` family, etc.) are absent from
+//! `self.ffi_funcs` until the kinded `TypedArray<T>` / map-FFI rebuild
+//! lands (Q15 close trigger).
+//!
+//! Previously each missing key triggered an unhandled `HashMap` index
+//! panic at JIT-init time. We now look each key up via `.get()` and
+//! return a clean `RuntimeError`-shaped error citing §2.7.14, so the
+//! JIT entry path surfaces the deferral as a `RuntimeError` instead of
+//! an unhandled panic. The error includes the missing key for triage.
 
 use super::setup::JITCompiler;
 use crate::ffi_refs::FFIFuncRefs;
@@ -12,17 +29,38 @@ use cranelift_module::Module;
 
 impl JITCompiler {
     #[inline(always)]
-    pub(super) fn build_ffi_refs(&mut self, builder: &mut FunctionBuilder) -> FFIFuncRefs {
-        // Helper closure-style shorthand: declare an already-registered FFI
-        // function (via `ffi_funcs[key]`) into the current Cranelift func.
+    pub(super) fn build_ffi_refs(
+        &mut self,
+        builder: &mut FunctionBuilder,
+    ) -> Result<FFIFuncRefs, String> {
+        // Helper: declare an already-registered FFI function by key. On a
+        // missing key we return an Err carrying the §2.7.14 marker so the
+        // caller can propagate a clean RuntimeError instead of panicking
+        // on `HashMap::index`.
         macro_rules! r {
-            ($key:expr) => {
-                self.module
-                    .declare_func_in_func(self.ffi_funcs[$key], builder.func)
-            };
+            ($key:expr) => {{
+                let key: &str = $key;
+                match self.ffi_funcs.get(key) {
+                    Some(&func_id) => self.module.declare_func_in_func(func_id, builder.func),
+                    None => {
+                        return Err(format!(
+                            "phase-2c §2.7.14 / W10 jit-playbook §5: JitArray rebuild required \
+                             for JIT execution path — FFI symbol `{}` is not registered. \
+                             The deleted UnifiedArray / JitArray heap layout removed the \
+                             implementations behind several `register_*_symbols` modules \
+                             (array_symbols, arc_symbols, v2 typed-map family). The kinded \
+                             `TypedArray<T>` rebuild (ADR-006 §2.7.14 Q15) re-introduces \
+                             these entries with element/key kinds threaded from the JIT \
+                             call signature per §2.7.5. See \
+                             docs/adr/006-value-and-memory-model.md §2.7.14.",
+                            key
+                        ));
+                    }
+                }
+            }};
         }
 
-        FFIFuncRefs {
+        Ok(FFIFuncRefs {
             // Object / property access
             get_prop: r!("jit_get_prop"),
             set_prop: r!("jit_set_prop"),
@@ -160,6 +198,6 @@ impl JITCompiler {
             v2_map_has_str: r!("jit_v2_map_has_str"),
             v2_map_set_str_i64: r!("jit_v2_map_set_str_i64"),
             v2_map_len: r!("jit_v2_map_len"),
-        }
+        })
     }
 }

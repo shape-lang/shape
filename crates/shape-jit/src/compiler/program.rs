@@ -273,7 +273,7 @@ impl JITCompiler {
                 user_func_refs.insert(fn_idx, func_ref);
             }
 
-            let ffi = self.build_ffi_refs(&mut builder);
+            let ffi = self.build_ffi_refs(&mut builder)?;
 
             let func_end = func.entry_point + func.body_length;
             let sub_instructions = &program.instructions[func.entry_point..func_end];

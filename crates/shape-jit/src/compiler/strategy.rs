@@ -63,7 +63,7 @@ impl JITCompiler {
 
             let ctx_ptr = builder.block_params(entry_block)[0];
 
-            let ffi = self.build_ffi_refs(&mut builder);
+            let ffi = self.build_ffi_refs(&mut builder)?;
 
             {
                 let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = program
@@ -188,7 +188,7 @@ impl JITCompiler {
                 user_func_refs.insert(fn_idx, func_ref);
             }
 
-            let ffi = self.build_ffi_refs(&mut builder);
+            let ffi = self.build_ffi_refs(&mut builder)?;
 
             {
                 let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = program
