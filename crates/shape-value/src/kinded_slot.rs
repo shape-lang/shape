@@ -134,7 +134,6 @@ impl KindedSlot {
         )
     }
 
-<<<<<<< HEAD
     /// Convenience: a `Ptr(HeapKind::Deque)`-kind slot. Mirror of
     /// `from_hashset` per ADR-006 §2.7.19 / Q20 amendment (Wave 15
     /// W15-deque). Deque is a HashSet sibling — full
@@ -148,7 +147,6 @@ impl KindedSlot {
     }
 
 =======
->>>>>>> bulldozer-strictly-typed-w15-matrix
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).
