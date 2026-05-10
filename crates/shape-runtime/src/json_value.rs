@@ -187,6 +187,12 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // shape as FilterExpr / Reference (callers materialise via
         // collect / forEach / etc. before serialisation).
         HeapValue::Iterator(_) => Err("cannot serialize: Iterator".into()),
+        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+        // 2026-05-10): channels are concurrency primitives with
+        // interior `Mutex<ChannelInner>` state; the queue contents
+        // are runtime-mutable and don't have a stable serialized
+        // form. Reject in the same shape as FilterExpr / Iterator.
+        HeapValue::Channel(_) => Err("cannot serialize: Channel".into()),
     }
 }
 

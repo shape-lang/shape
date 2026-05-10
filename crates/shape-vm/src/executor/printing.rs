@@ -387,6 +387,19 @@ impl<'a> ValueFormatter<'a> {
                 let deque: &shape_value::heap_value::DequeData =
                     unsafe { &*(bits as *const shape_value::heap_value::DequeData) };
                 self.format_deque(deque, depth)
+            HeapKind::Channel => {
+                // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                // 2026-05-10): channels are concurrency primitives
+                // with no user-facing literal; render as an opaque
+                // tag annotated with current queue length and closed
+                // flag for diagnostics. SAFETY: construction-side
+                // contract on `KindedSlot::from_channel` —
+                // `Channel`-kind bits are
+                // `Arc::into_raw(Arc<ChannelData>)`.
+                let ch: &shape_value::heap_value::ChannelData =
+                    unsafe { &*(bits as *const shape_value::heap_value::ChannelData) };
+                let state = if ch.is_closed() { "closed" } else { "open" };
+                format!("<channel:{}:{}>", state, ch.len())
             }
         }
     }
@@ -690,6 +703,10 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::FilterExpr(_) => "<filter_expr>".to_string(),
             HeapValue::Reference(_) => "<ref>".to_string(),
             HeapValue::Iterator(_) => "<iterator>".to_string(),
+            HeapValue::Channel(c) => {
+                let state = if c.is_closed() { "closed" } else { "open" };
+                format!("<channel:{}:{}>", state, c.len())
+            }
         }
     }
 }

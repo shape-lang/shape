@@ -18,6 +18,7 @@
 
 use crate::heap_value::{
     DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
+    ChannelData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
     TypedObjectStorage,
 };
 use crate::datatable::DataTable;
@@ -163,6 +164,14 @@ impl ValueSlot {
     /// full-`HeapValue` arm shape.
     pub fn from_deque(d: Arc<DequeData>) -> Self {
         Self(Arc::into_raw(d) as u64)
+    /// Store an `Arc<ChannelData>` directly. Mirrors
+    /// `HeapValue::Channel(Arc<ChannelData>)`. ADR-006 §2.7.20 / Q21
+    /// amendment (Wave 15 W15-channel-rebuild). Channel is a
+    /// concurrency primitive; the inner `ChannelData` carries
+    /// `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares of the
+    /// same channel observe each other's `send` / `recv`.
+    pub fn from_channel(c: Arc<ChannelData>) -> Self {
+        Self(Arc::into_raw(c) as u64)
     }
 
     /// Store an `Arc<DataTable>` directly. Mirrors

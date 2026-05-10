@@ -29,6 +29,7 @@ use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
         DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
+        ChannelData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData,
         TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
     },
 };
@@ -94,6 +95,18 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // arm.
                 HeapKind::Deque => {
                     Arc::increment_strong_count(bits as *const DequeData);
+                // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                // 2026-05-10): mirror of the HashSet arm. Slot bits are
+                // `Arc::into_raw(Arc<ChannelData>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::Channel)`. Bumps one
+                // `Arc<ChannelData>` strong-count share — the outer
+                // Arc clone is a fresh endpoint of the same channel
+                // (interior `Mutex<ChannelInner>` is shared, not cloned).
+                // Channel is the first concurrency primitive to land
+                // kinded; same retain dispatch shape as HashSet (full
+                // HeapValue arm, not pure-discriminator).
+                HeapKind::Channel => {
+                    Arc::increment_strong_count(bits as *const ChannelData);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -298,6 +311,15 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // one `Arc<DequeData>` strong-count share.
                 HeapKind::Deque => {
                     Arc::decrement_strong_count(bits as *const DequeData);
+                // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                // 2026-05-10): mirror of the HashSet arm above. Retires
+                // one `Arc<ChannelData>` strong-count share. At
+                // refcount=0 the inner `ChannelData` Drop runs — the
+                // `VecDeque<KindedSlot>` queue's elements drop in turn,
+                // each retiring one strong-count share for any
+                // heap-bearing payload.
+                HeapKind::Channel => {
+                    Arc::decrement_strong_count(bits as *const ChannelData);
                 }
                 HeapKind::Decimal => {
                     Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

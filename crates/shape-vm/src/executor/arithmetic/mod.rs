@@ -669,6 +669,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Iterator) => "iterator",
         // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10).
         NativeKind::Ptr(HeapKind::Deque) => "deque",
+        // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10).
+        NativeKind::Ptr(HeapKind::Channel) => "channel",
     }
 }
 
