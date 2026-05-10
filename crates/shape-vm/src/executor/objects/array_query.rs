@@ -3,31 +3,42 @@
 //! Handles: where, select, find, find_index, index_of, includes, some, every,
 //! any, all, single, take_while, skip_while, for_each
 //!
-//! ## Wave-δ `MR-array-basic-query` body migration (playbook §10 / §7 REVISED)
+//! ## Wave-9 `W9-array-query` body migration (playbook §1 / ADR-006 §2.7.10 / §2.7.11)
 //!
-//! Wave-γ `G-method-fn-v2-abi` (merge `5091cba`) flipped `MethodFnV2` to
-//! the kinded ABI per ADR-006 §2.7.10 / Q11. This file's handlers split
-//! into two classes:
+//! Wave 7 (`call_value_immediate_nb` rebuild close `06cdfce` 2026-05-09)
+//! brought the kinded value-call ABI live. The closure-callback handlers
+//! in this file now invoke the user closure per element via
+//! `vm.call_value_immediate_nb(&closure, &[elem], ctx)` per playbook §1
+//! and ADR-006 §2.7.11 / Q12.
 //!
-//! 1. **Value-search methods** (`indexOf`, `includes`) — take a receiver
-//!    array + a search value; no closure dispatch. **Migrated** to
-//!    real bodies below: receiver via `Ptr(HeapKind::TypedArray)` +
-//!    `Arc::into_raw(Arc<TypedArrayData>)`; element comparison
-//!    dispatches on the receiver's `TypedArrayData` variant cross-checked
-//!    against the search value's `NativeKind`. CLAUDE.md "No runtime
-//!    coercion" — kind mismatch implies "not present" without coercion.
+//! ## Two classes of body
 //!
-//! 2. **Higher-order closure-callback methods** (`where`, `select`,
-//!    `find`, `findIndex`, `some`, `every`, `any`, `all`, `single`,
-//!    `takeWhile`, `skipWhile`, `forEach`) — invoke a user closure per
-//!    element. The architectural prerequisite is the kinded
-//!    closure-call dispatch (`call_value_immediate_*` family in
-//!    `call_convention.rs`). Today every kinded variant of those is
-//!    `todo!("phase-2c — ADR-006 §2.7.8 cluster B-round-2: ... rebuild
-//!    pending")`; the kind-threaded callee/args/return ABI is Wave-10
-//!    JIT-trampoline + B-round-2 territory. **Surface** with a
-//!    closure-call-gap reason per playbook §7 REVISED rather than
-//!    paper over with a forbidden-pattern call into the deleted ABI.
+//! 1. **Value-search methods** (`indexOf`, `includes`) — receiver array +
+//!    a search value; no closure dispatch. Element comparison dispatches
+//!    on the receiver's `TypedArrayData` variant cross-checked against
+//!    the search value's `NativeKind`. CLAUDE.md "No runtime coercion" —
+//!    kind mismatch implies "not present" without coercion.
+//!
+//! 2. **Higher-order closure-callback methods that return Bool / scalar /
+//!    Optional<elem>** (`find`, `findIndex`, `some`, `every`, `any`,
+//!    `all`, `single`, `forEach`) — invoke a user closure per element.
+//!    Element kind comes from the receiver's `TypedArrayData` variant
+//!    (see `read_element_at`); closure result kind comes from
+//!    `call_value_immediate_nb`'s returned `KindedSlot`. Predicate-form
+//!    handlers strictly require the closure return `NativeKind::Bool`
+//!    (no Bool-default fallback per ADR-006 §2.7.7 #9 / §2.7.8 #4 — a
+//!    non-Bool predicate result is a `RuntimeError`).
+//!
+//! 3. **Higher-order closure-callback methods that build a typed-Array
+//!    result** (`where`, `select`, `takeWhile`, `skipWhile`) — surface
+//!    with explicit Phase-2c §2.7.4 reason: typed-array reconstruction
+//!    requires the per-NativeKind builder matrix that lives in the
+//!    sibling W9-array-transform / W9-array-aggregation cluster
+//!    (`handle_filter_v2` / `handle_map_v2`). Implementing the
+//!    closure-driven scan here without the result builder would either
+//!    re-create the per-variant accumulator pattern (cluster cascade) or
+//!    silently degrade to a HeapValue fallback (forbidden per
+//!    CLAUDE.md "Forbidden Patterns"). Wired in W9-array-transform.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -55,6 +66,76 @@ fn typed_array_ref<'a>(slot: &'a KindedSlot) -> Result<&'a TypedArrayData, VMErr
             expected: "Array",
             got: "non-array",
         }),
+    }
+}
+
+/// Element count for a `TypedArrayData`, dispatching on the variant.
+/// Mirrors `array_basic::typed_array_len`.
+#[inline]
+fn typed_array_len(arr: &TypedArrayData) -> usize {
+    match arr {
+        TypedArrayData::I64(b) => b.data.len(),
+        TypedArrayData::F64(b) => b.data.len(),
+        TypedArrayData::Bool(b) => b.data.len(),
+        TypedArrayData::I8(b) => b.data.len(),
+        TypedArrayData::I16(b) => b.data.len(),
+        TypedArrayData::I32(b) => b.data.len(),
+        TypedArrayData::U8(b) => b.data.len(),
+        TypedArrayData::U16(b) => b.data.len(),
+        TypedArrayData::U32(b) => b.data.len(),
+        TypedArrayData::U64(b) => b.data.len(),
+        TypedArrayData::F32(b) => b.data.len(),
+        TypedArrayData::String(b) => b.data.len(),
+        TypedArrayData::HeapValue(b) => b.data.len(),
+        TypedArrayData::Matrix(m) => m.data.len(),
+        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+    }
+}
+
+/// Read element at `idx` as a kinded carrier. The kind matches the
+/// receiver's `TypedArrayData` variant; per-variant the bits encoding is
+/// the same as `array_basic::read_element_at` (the canonical reference).
+/// Narrow-int / matrix / heap-value-backed / float-slice arrays surface
+/// per playbook §1 — element-kind-aware reads for those variants are
+/// W9-array-basic's territory (the §2.7.6 / Q8 per-variant constructor
+/// matrix needed to round-trip them through a `KindedSlot`).
+fn read_element_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
+    match arr {
+        TypedArrayData::I64(buf) => {
+            let v = buf.data.get(idx).copied().ok_or(VMError::IndexOutOfBounds {
+                index: idx as i32,
+                length: buf.data.len(),
+            })?;
+            Ok(KindedSlot::from_int(v))
+        }
+        TypedArrayData::F64(buf) => {
+            let v = buf.data.get(idx).copied().ok_or(VMError::IndexOutOfBounds {
+                index: idx as i32,
+                length: buf.data.len(),
+            })?;
+            Ok(KindedSlot::from_number(v))
+        }
+        TypedArrayData::Bool(buf) => {
+            let v = buf.data.get(idx).copied().ok_or(VMError::IndexOutOfBounds {
+                index: idx as i32,
+                length: buf.data.len(),
+            })?;
+            Ok(KindedSlot::from_bool(v != 0))
+        }
+        TypedArrayData::String(buf) => {
+            let v = buf.data.get(idx).cloned().ok_or(VMError::IndexOutOfBounds {
+                index: idx as i32,
+                length: buf.data.len(),
+            })?;
+            Ok(KindedSlot::from_string_arc(v))
+        }
+        other => Err(VMError::NotImplemented(format!(
+            "array element read: TypedArrayData variant {} — Phase-2c \
+             reentry per ADR-006 §2.7.4. Element-kind-aware read for \
+             narrow-int / matrix / heap-value-backed / float-slice arrays \
+             needs the §2.7.6 / Q8 per-variant constructor matrix completed.",
+            other.type_name()
+        ))),
     }
 }
 
@@ -93,14 +174,63 @@ fn find_first_index(arr: &TypedArrayData, needle: &KindedSlot) -> Result<Option<
         }
         // Narrow-int / matrix / float-slice / heap-value-backed receivers
         // need element-kind-aware comparison the §2.7.6 / Q8 per-variant
-        // constructor matrix completes in Wave-γ-followup. Surface
-        // explicitly per playbook §7 REVISED.
+        // constructor matrix completes in the W9-array-basic follow-up.
+        // Surface explicitly per playbook §4 (API gap).
         other => Err(VMError::NotImplemented(format!(
-            "Array.indexOf/includes: TypedArrayData variant {} — Wave-γ-\
-             followup. Element-kind-aware comparison needs narrow-int \
-             width, heap-value-backed equality, matrix shape, and \
-             float-slice view comparison.",
+            "Array.indexOf/includes: TypedArrayData variant {} — Phase-2c \
+             reentry per ADR-006 §2.7.4. Element-kind-aware comparison \
+             needs narrow-int width, heap-value-backed equality, matrix \
+             shape, and float-slice view comparison.",
             other.type_name()
+        ))),
+    }
+}
+
+/// Read `args[1]` as a closure-kinded callee `&KindedSlot`. The
+/// closure-callback handlers expect a `Ptr(HeapKind::Closure)` callee in
+/// the second slot (receiver in slot 0). Surface a `RuntimeError` if the
+/// kind doesn't classify (CLAUDE.md "No Bool-default fallback for
+/// unknown kinds").
+#[inline]
+fn closure_arg<'a>(args: &'a [KindedSlot], op: &'static str) -> Result<&'a KindedSlot, VMError> {
+    let Some(slot) = args.get(1) else {
+        return Err(VMError::argument_count_error(op, 1, 0));
+    };
+    match slot.kind {
+        // §2.7.11 / Q12 callee-classification kinds. `UInt64` is also
+        // accepted by `call_value_immediate_nb` (function-id callees);
+        // forward both kinds and let the dispatch body classify.
+        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => Ok(slot),
+        other => Err(VMError::RuntimeError(format!(
+            "Array.{}: closure argument must be a Closure or function ref, got {:?}",
+            op, other
+        ))),
+    }
+}
+
+/// Invoke `closure(elem)` and require a Bool result. The kind of the
+/// returned `KindedSlot` is sourced from the callee's last produced
+/// opcode (per `call_value_immediate_nb`'s `pop_kinded` at the return
+/// site); a non-Bool result surfaces as a `RuntimeError` rather than a
+/// Bool-default fallback (forbidden per ADR-006 §2.7.7 #9 / §2.7.8 #4).
+#[inline]
+fn invoke_predicate(
+    vm: &mut VirtualMachine,
+    closure: &KindedSlot,
+    elem: KindedSlot,
+    ctx: Option<&mut ExecutionContext>,
+    op: &'static str,
+) -> Result<bool, VMError> {
+    let result = vm.call_value_immediate_nb(closure, std::slice::from_ref(&elem), ctx)?;
+    // `elem` Drop runs at end of scope, releasing its share. `result`
+    // owns one share for the predicate's return (Bool: no Arc share, but
+    // Drop is still a no-op).
+    match result.as_bool() {
+        Some(b) => Ok(b),
+        None => Err(VMError::RuntimeError(format!(
+            "Array.{}: predicate must return Bool, got {:?}",
+            op,
+            result.kind()
         ))),
     }
 }
@@ -109,26 +239,30 @@ fn find_first_index(arr: &TypedArrayData, needle: &KindedSlot) -> Result<Option<
 // MethodFnV2 (kinded ABI per ADR-006 §2.7.10 / Q11) handlers
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Two classes:
+// Three classes:
 //
-// 1. Value-search methods (`indexOf`, `includes`) — real bodies below.
-// 2. Higher-order closure-callback methods — surface with closure-call
-//    gap reason. The kinded `call_value_immediate_*` family in
-//    `call_convention.rs` is `todo!("phase-2c — ADR-006 §2.7.8 cluster
-//    B-round-2: ... rebuild pending")`.
+// 1. Value-search (`indexOf`, `includes`) — real bodies, no closure dispatch.
+// 2. Closure-callback predicates / scalar return (`find`, `findIndex`,
+//    `some`, `every`, `any`, `all`, `single`, `forEach`) — real bodies
+//    via `call_value_immediate_nb`.
+// 3. Closure-callback typed-Array result (`where`, `select`, `takeWhile`,
+//    `skipWhile`) — surface with explicit Phase-2c §2.7.4 reason; typed-
+//    array reconstruction is W9-array-transform's territory.
 
-const CLOSURE_DISPATCH_SURFACE: &str =
-    "SURFACE: closure-callback dispatch is Wave-10 JIT-trampoline + \
-     B-round-2 territory. The kinded `call_value_immediate_nb` / \
-     `call_value_immediate_raw` / `call_function_with_raw_args` / \
-     `jit_trampoline_call_closure` paths in `call_convention.rs` are all \
-     `todo!(\"phase-2c — ADR-006 §2.7.8 cluster B-round-2\")` pending the \
-     kind-threaded callee/upvalues/args/return ABI. Per playbook §7 \
-     REVISED + §8 cross-cluster cascade, this handler surfaces back \
-     rather than paper over with a forbidden-pattern call into the \
-     deleted kind-blind ABI (CLAUDE.md \"Forbidden Patterns\" #1).";
+const TYPED_ARRAY_BUILDER_SURFACE: &str =
+    "SURFACE per ADR-006 §2.7.4 (Phase-2c reentry): typed-Array result \
+     reconstruction requires the per-NativeKind result-builder matrix \
+     that lives alongside `array_transform::handle_filter_v2` / \
+     `handle_map_v2` in the sibling W9-array-transform sub-cluster. \
+     Implementing the closure-driven scan here without that builder \
+     would either re-create the per-variant accumulator pattern (cluster \
+     cascade) or silently widen to `TypedArrayData::HeapValue` (forbidden \
+     per CLAUDE.md \"No runtime coercion\" / \"Forbidden Patterns\"). \
+     Wired in W9-array-transform once the per-variant builder lands.";
 
 /// `arr.where(predicate)` — filter via closure callback.
+///
+/// SURFACE — typed-Array result builder. See `TYPED_ARRAY_BUILDER_SURFACE`.
 pub(crate) fn handle_where_v2(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
@@ -136,11 +270,13 @@ pub(crate) fn handle_where_v2(
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(format!(
         "Array.where — {}",
-        CLOSURE_DISPATCH_SURFACE
+        TYPED_ARRAY_BUILDER_SURFACE
     )))
 }
 
 /// `arr.select(projector)` — project via closure callback.
+///
+/// SURFACE — typed-Array result builder. See `TYPED_ARRAY_BUILDER_SURFACE`.
 pub(crate) fn handle_select_v2(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
@@ -148,33 +284,52 @@ pub(crate) fn handle_select_v2(
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(format!(
         "Array.select — {}",
-        CLOSURE_DISPATCH_SURFACE
+        TYPED_ARRAY_BUILDER_SURFACE
     )))
 }
 
 /// `arr.find(predicate)` — first matching element via closure callback.
+/// Returns the matching element or `null` if no match.
 pub(crate) fn handle_find_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.find — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "find")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        // Read element a second time so we can return the matching one
+        // without depending on whether `invoke_predicate` consumed `elem`.
+        // (`elem`'s share is released by its Drop at end of the predicate
+        // call; the receiver still owns the source share, so a fresh
+        // `read_element_at` is a clean independent share.)
+        let matched = invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "find")?;
+        if matched {
+            return read_element_at(arr, i);
+        }
+    }
+    Ok(KindedSlot::none())
 }
 
 /// `arr.findIndex(predicate)` — index of first matching element via
-/// closure callback.
+/// closure callback. Returns `-1` if no match.
 pub(crate) fn handle_find_index_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.findIndex — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "findIndex")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "findIndex")? {
+            return Ok(KindedSlot::from_int(i as i64));
+        }
+    }
+    Ok(KindedSlot::from_int(-1))
 }
 
 /// `arr.indexOf(value)` — first index of `value`, or `-1` if absent. No
@@ -208,70 +363,117 @@ pub(crate) fn handle_includes_v2(
 }
 
 /// `arr.some(predicate)` — true if any element satisfies the closure
-/// predicate.
+/// predicate. Short-circuits on the first match.
 pub(crate) fn handle_some_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.some — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "some")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "some")? {
+            return Ok(KindedSlot::from_bool(true));
+        }
+    }
+    Ok(KindedSlot::from_bool(false))
 }
 
 /// `arr.every(predicate)` — true if all elements satisfy the closure
-/// predicate.
+/// predicate. Short-circuits on the first failure.
 pub(crate) fn handle_every_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.every — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "every")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "every")? {
+            return Ok(KindedSlot::from_bool(false));
+        }
+    }
+    Ok(KindedSlot::from_bool(true))
 }
 
 /// `arr.any(predicate)` — alias for `some` in the SQL-like query DSL.
 pub(crate) fn handle_any_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.any — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "any")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "any")? {
+            return Ok(KindedSlot::from_bool(true));
+        }
+    }
+    Ok(KindedSlot::from_bool(false))
 }
 
 /// `arr.all(predicate)` — alias for `every` in the SQL-like query DSL.
 pub(crate) fn handle_all_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.all — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "all")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "all")? {
+            return Ok(KindedSlot::from_bool(false));
+        }
+    }
+    Ok(KindedSlot::from_bool(true))
 }
 
 /// `arr.single(predicate)` — exactly-one-match via closure predicate;
 /// errors on zero or multiple matches.
 pub(crate) fn handle_single_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.single — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "single")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    let mut found_idx: Option<usize> = None;
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "single")? {
+            if found_idx.is_some() {
+                return Err(VMError::RuntimeError(
+                    "Array.single: more than one element matched the predicate".to_string(),
+                ));
+            }
+            found_idx = Some(i);
+        }
+    }
+    match found_idx {
+        Some(i) => read_element_at(arr, i),
+        None => Err(VMError::RuntimeError(
+            "Array.single: no element matched the predicate".to_string(),
+        )),
+    }
 }
 
 /// `arr.takeWhile(predicate)` — prefix where the closure predicate
 /// holds.
+///
+/// SURFACE — typed-Array result builder. The handler can scan the array
+/// to compute the boundary index `k` (first index where the predicate
+/// fails), but constructing the resulting `arr[0..k]` shares its
+/// per-NativeKind reconstruction surface with `where` / `select` /
+/// `slice`. See `TYPED_ARRAY_BUILDER_SURFACE`.
 pub(crate) fn handle_take_while_v2(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
@@ -279,12 +481,15 @@ pub(crate) fn handle_take_while_v2(
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(format!(
         "Array.takeWhile — {}",
-        CLOSURE_DISPATCH_SURFACE
+        TYPED_ARRAY_BUILDER_SURFACE
     )))
 }
 
 /// `arr.skipWhile(predicate)` — suffix from the first element where the
 /// closure predicate fails.
+///
+/// SURFACE — typed-Array result builder. Same dependency as `takeWhile`.
+/// See `TYPED_ARRAY_BUILDER_SURFACE`.
 pub(crate) fn handle_skip_while_v2(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
@@ -292,18 +497,28 @@ pub(crate) fn handle_skip_while_v2(
 ) -> Result<KindedSlot, VMError> {
     Err(VMError::NotImplemented(format!(
         "Array.skipWhile — {}",
-        CLOSURE_DISPATCH_SURFACE
+        TYPED_ARRAY_BUILDER_SURFACE
     )))
 }
 
-/// `arr.forEach(action)` — invoke the closure on every element.
+/// `arr.forEach(action)` — invoke the closure on every element. The
+/// closure result is discarded (its share is released by `result`'s
+/// `Drop` when it goes out of scope each iteration). Returns null per
+/// the JS / SQL `forEach` contract.
 pub(crate) fn handle_for_each_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.forEach — {}",
-        CLOSURE_DISPATCH_SURFACE
-    )))
+    let closure = closure_arg(args, "forEach")?;
+    let arr = typed_array_ref(&args[0])?;
+    let len = typed_array_len(arr);
+    for i in 0..len {
+        let elem = read_element_at(arr, i)?;
+        // Result share is released by its `Drop` at end of scope; we
+        // do not require any particular kind for forEach (action form).
+        let _ =
+            vm.call_value_immediate_nb(closure, std::slice::from_ref(&elem), ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }

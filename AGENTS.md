@@ -39,10 +39,12 @@ before it's coded.
 | `bulldozer-strictly-typed-w8-ex` | `../shape-w8-ex` | W8-EX — Exception handler rebuild | — | `crates/shape-vm/src/executor/exceptions/mod.rs` + foreign_marshal.rs + 2 dispatch.rs converter sites | idle (close `3b5debf` merged at `691d8c3` 2026-05-10; ABI flip from (u64, NativeKind) parallel-pair to KindedSlot per §2.7.6/Q8) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-wj` | `../shape-w8-wj` | W8-WJ — Window join rebuild | — | `crates/shape-vm/src/executor/window_join.rs` (~7 sites) | idle (close `a8c3443` merged at `b47c330` 2026-05-10) | 2026-05-10 |
 | `bulldozer-strictly-typed-w8-as` | `../shape-w8-as` | W8-AS — Async/transport/remote preparatory | — | `crates/shape-vm/src/executor/async_ops/`, remote.rs, transport/remote builtins, vm_impl/modules.rs | idle (close `6cd9548` merged at `3f09709` 2026-05-10) | 2026-05-10 |
+<<<<<<< HEAD
 | `bulldozer-strictly-typed-w9-string-methods` | `../shape-w9-string-methods` | W9-string-methods | — | string_methods.rs | idle (close `0fc52ba` merged at `f363482`) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-set-methods` | `../shape-w9-set-methods` | W9-set-methods (surface-only) | — | set_methods.rs | idle (close `4c81e54` merged at `23cf618`; Set arm deleted in Phase-2 bulldozer) | 2026-05-10 |
 | `bulldozer-strictly-typed-w9-iterator-methods` | `../shape-w9-iterator-methods` | W9-iterator-methods (surface-only) | — | iterator_methods.rs | idle (close `6670ff4` merged at `22eddb3`; IteratorState substrate deleted in Phase-1.A) | 2026-05-10 |
-| `bulldozer-strictly-typed-w9-array-basic` | `../shape-w9-array-basic` | W9-array-basic | — | objects/{array_basic,array_operations,array_joins,array_sets}.rs | idle (close `beb5906` 2026-05-10; most bodies pre-landed; refreshed 4 SURFACE comments to point at op_make_closure as upstream gate) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-basic` | `../shape-w9-array-basic` | W9-array-basic | — | objects/{array_basic,array_operations,array_joins,array_sets}.rs | idle (close `beb5906` merged at `cb7071f` 2026-05-10) | 2026-05-10 |
+| `bulldozer-strictly-typed-w9-array-query` | `../shape-w9-array-query` | W9-array-query | — | array_query.rs | idle (close `eac4ee8` 2026-05-10; 8 real bodies via call_value_immediate_nb (find/findIndex/some/every/any/all/single/forEach); 4 typed-Array-builder sites left SURFACE per W9-array-transform sibling cluster) | 2026-05-10 |
 
 ## Status values
 
