@@ -538,33 +538,30 @@ impl VirtualMachine {
                     )));
                 }
                 BuiltinFunction::HashMapCtor => {
-                    // Wave 5e collection-ctor body fill (W13-hashmap-ctor):
-                    // `let m = HashMap()` produces a fresh empty
-                    // `Arc<HashMapData>` slot. Reader contract is
-                    // `borrow_hashmap_slot`
-                    // (executor/objects/typed_access.rs:96): kind ==
-                    // `Ptr(HeapKind::HashMap)`, bits =
-                    // `Arc::into_raw::<HashMapData>`. `KindedSlot::from_hashmap`
-                    // is the canonical constructor (kinded_slot.rs:117),
-                    // `push_kinded_slot` transfers the share onto the
-                    // stack via `mem::forget` per §2.7.7.
-                    //
-                    // Args (if any — e.g. `HashMap()` is the no-arg
-                    // form; the typed-map emission path may also surface
-                    // initial pairs through this opcode in legacy
-                    // bytecode) are popped via `pop_builtin_args`; their
-                    // `KindedSlot::Drop` retires per-arg shares
-                    // kind-dispatched. The empty-ctor smoke target is
-                    // `let m = HashMap(); m.set("a", 1); m.set("b", 2);
-                    // m.delete("a"); print(m.size())` → 1.
+                    // Wave 5e W13-hashmap-ctor (2026-05-10): `let m = HashMap()`
+                    // produces a fresh empty `Arc<HashMapData>` slot.
+                    // Reader contract: kind == Ptr(HeapKind::HashMap),
+                    // bits = Arc::into_raw::<HashMapData>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     let hm = std::sync::Arc::new(
                         shape_value::heap_value::HashMapData::new(),
                     );
                     self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
                 }
-                BuiltinFunction::SetCtor
-                | BuiltinFunction::DequeCtor
+                BuiltinFunction::SetCtor => {
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                    // 2026-05-10): empty Set ctor — `Set()` takes no
+                    // args at landing; `Set([elements])` initialization
+                    // is a follow-up. Build empty Arc<HashSetData> and
+                    // push via KindedSlot::from_hashset.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::HashSetData::new(),
+                    );
+                    let result = KindedSlot::from_hashset(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::DequeCtor
                 | BuiltinFunction::PriorityQueueCtor => {
                     // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
                     // rebuild required. The pre-bulldozer HeapKind

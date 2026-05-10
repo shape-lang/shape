@@ -39,8 +39,8 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    HashMapData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData, TaskGroupData,
-    TemporalData, TypedArrayData, TypedObjectStorage,
+    HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData, NativeViewData, TableViewData,
+    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -360,6 +360,17 @@ impl Drop for SharedCell {
                     }
                     HeapKind::HashMap => {
                         Arc::decrement_strong_count(bits as *const HashMapData);
+                    }
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                    // 2026-05-10): mirror of the HashMap arm. A
+                    // SharedCell whose single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::HashSet)` carries
+                    // `Arc::into_raw(Arc<HashSetData>) as u64`. Retire
+                    // one `Arc<HashSetData>` strong-count share at cell
+                    // drop. Same dispatch shape as HashMap (HashSet is
+                    // a HashMap sibling per §2.7.15).
+                    HeapKind::HashSet => {
+                        Arc::decrement_strong_count(bits as *const HashSetData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

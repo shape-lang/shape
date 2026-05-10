@@ -1,183 +1,482 @@
 //! Method handlers for the Set collection type.
 //!
-//! W9-set-methods (Phase 1.B-vm Wave 9): bodies remain
-//! `NotImplemented(SURFACE)` per Wave 9 playbook §4 surface-and-stop
-//! triggers — `Set` has no live heap representation so no method body has
-//! a kinded receiver to dispatch on. ADR-006 §2.7.4 (Phase-2c deferral)
-//! applies to every entry in this file.
+//! ## W13-hashset-rebuild migration (2026-05-10)
 //!
-//! ## Audit findings (W9 cluster owner, 2026-05-10)
+//! Per ADR-006 §2.7.15 / Q16 amendment (Wave 13 W13-hashset-rebuild),
+//! the Set carrier is a typed-`Arc<HashSetData>`-backed `HeapValue`
+//! arm — full HeapValue arm, not pure-discriminator like FilterExpr /
+//! SharedCell. Set is a HashMap sibling: same `Arc<TypedBuffer<Arc<
+//! String>>>` keys + eager FNV-1a bucket index, with the values buffer
+//! dropped.
 //!
-//! 1. `HeapKind` enumeration has no `Set` variant
-//!    (`crates/shape-value/src/heap_variants.rs`). `HeapValue` likewise
-//!    has no `Set` arm. The Phase-2 ValueWord bulldozer removed the
-//!    pre-existing `HeapValue::Set { items: Vec<ValueWord> }` payload
-//!    along with the rest of the heterogeneous-element collections.
-//! 2. `BuiltinFunction::SetCtor` exists in the bytecode opcode table
-//!    (`bytecode/opcode_defs.rs:2268`) but the executor body in
-//!    `vm_impl/builtins.rs:491` is itself a `todo!()` ("phase-1b-vm
-//!    wave 5e — collection ctor body migration pending"). Set values
-//!    cannot reach a method handler from any execution path today, so
-//!    even the `args[0]` receiver is unreachable.
-//! 3. The Wave 9 playbook (§1 recipe) prescribes `args[0].slot
-//!    .as_heap_value()` receiver classification followed by
-//!    `vm.call_value_immediate_nb` for closure-callback ops
-//!    (`forEach` / `map` / `filter`); the precondition for both is a
-//!    surviving `HeapValue::Set` arm.
+//! All 12 handlers (`add`, `has`, `delete`, `size`, `is_empty`,
+//! `to_array`, `union`, `intersection`, `difference`, `for_each`,
+//! `map`, `filter`) are real bodies on top of the post-§2.7.15
+//! `HashSetData` shape (`shape_value::heap_value::HashSetData`).
 //!
-//! ## Replacement design space (out of W9 scope)
+//! Receiver dispatch follows §2.7.6 / Q8: kind check on `args[0].kind ==
+//! NativeKind::Ptr(HeapKind::HashSet)`, then `args[0].slot.as_heap_value()`
+//! pattern-matched against `HeapValue::HashSet(arc)` (single-discriminator
+//! per ADR-005 §1 — no per-heap-variant `KindedSlot` accessor).
 //!
-//! Two paths are coherent with ADR-006 §2.3 typed-Arc and ADR-005 §1
-//! single-discriminator discipline:
+//! Per-key kind classification follows the same shape: `args[1].kind`
+//! against `NativeKind::String | NativeKind::Ptr(HeapKind::String)`,
+//! then `as_str()` for the borrow.
 //!
-//! - **Path A — `Arc<HashSetData>` adjacent to Stage C P1(b)
-//!   `HashMapData`.** Same insertion-ordered `TypedBuffer<Arc<String>>`
-//!   keys + bucket-index hash store, no values buffer. Closure-callback
-//!   ops (`map` / `filter` / `forEach`) iterate the keys buffer and
-//!   dispatch via `call_value_immediate_nb`. Mutation ops (`add` /
-//!   `delete`) need the **HashMapData typed-buffer mutation API**
-//!   follow-up: `Arc::make_mut` over the inner
-//!   `TypedBuffer<Arc<String>>` plus a parallel rebuild of the
-//!   bucket index — neither HashMap nor Set has a mutation entry-point
-//!   today (`HashMapData` is documented as immutable at the marshal
-//!   boundary, see `heap_value.rs:577`). This is the cluster of work
-//!   tracked as "HashMapData typed-buffer mutation API" in the Phase-2c
-//!   backlog.
-//! - **Path B — Monomorphized `TypedSet<T>` per element kind.** Mirrors
-//!   `TypedArrayData::*` arms with a hash-side index for O(1) `has`.
-//!   Wider surface (one variant per element kind) but cleaner kind
-//!   discipline for non-string element types.
+//! Result construction follows playbook §3:
+//! - `size` / `is_empty` / `has` → inline-scalar `KindedSlot::from_int`
+//!   / `from_bool`.
+//! - `add` / `delete` → return the post-mutation `Arc<HashSetData>` via
+//!   `KindedSlot::from_hashset` (clone-on-write per ADR-006 §2.7.4 /
+//!   W13-hashmap-mutation precedent).
+//! - `union` / `intersection` / `difference` → build a fresh
+//!   `HashSetData` via `from_keys` (no Arc::make_mut on either input —
+//!   both receivers borrowed read-only).
+//! - `to_array` → reuse the receiver's keys buffer as
+//!   `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` — single
+//!   Arc bump, no per-element clone.
 //!
-//! Either choice is a Phase-2c Stage C decision and an ADR-006
-//! amendment, not a Wave-β / Wave 9 migration.
+//! ## Wave-9 closure-callback migration
 //!
-//! Per Wave 9 playbook §3 (forbidden) #6, every entry in this file
-//! carries an explicit ADR-006 §2.7.4 surface comment plus the
-//! "HashMapData typed-buffer mutation API" follow-up reference (see
-//! `surface()` below).
+//! `for_each`, `map`, `filter` route the per-element callback through
+//! `vm.call_value_immediate_nb(&closure, &[key], ctx.as_deref_mut())`
+//! (the W7-cv-static §2.7.11 / Q12 dispatch shell at
+//! `executor/call_convention.rs:767`). The receiver `Arc<HashSetData>`
+//! is cloned once up-front so the iteration borrow is independent of
+//! the `&mut VirtualMachine` reborrow on each call.
+//!
+//! - `for_each` drops the closure's return value (its share is released
+//!   as the `KindedSlot` carrier goes out of scope).
+//! - `map` requires the closure result kind to be `String` (the
+//!   §2.7.15 invariant constrains keys to `Arc<String>`); non-string
+//!   results surface as a `RuntimeError`.
+//! - `filter` reads the predicate's `as_bool()`; non-bool results
+//!   surface as a `RuntimeError`.
+//!
+//! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / §2.7.11 / §2.7.15 + playbook
+//! §1.W13-hashset-rebuild.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{KindedSlot, VMError};
+use shape_value::heap_value::{HashSetData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::typed_buffer::TypedBuffer;
+use shape_value::{KindedSlot, NativeKind, VMError};
+use std::sync::Arc;
 
-/// Build the canonical SURFACE error for every entry-point in this file.
-///
-/// ADR-006 §2.7.4 deferral: no live `HeapKind::Set` /
-/// `HeapValue::Set` arm exists, so receiver classification (Wave 9
-/// playbook §1 step 1) cannot run. Reintroduction is gated on the
-/// "HashMapData typed-buffer mutation API" follow-up plus an ADR-006
-/// amendment selecting between Path A (`Arc<HashSetData>`) and Path B
-/// (`TypedSet<T>` per element kind) — see file-level comment.
+// ── Local helpers ─────────────────────────────────────────────────────────
+
 #[inline]
-fn surface(method: &str) -> VMError {
-    VMError::NotImplemented(format!(
-        "phase-2c — Set.{}(): no surviving HeapKind::Set / HeapValue::Set \
-         arm (ADR-006 §2.3 trim, §2.7.4 deferral). Reintroducing Set \
-         requires (1) a typed-Arc heap variant — Path A `Arc<HashSetData>` \
-         adjacent to Stage C P1(b) HashMapData, or Path B `TypedSet<T>` \
-         per element kind — and (2) the \"HashMapData typed-buffer \
-         mutation API\" follow-up so add/delete/etc. can reach the inner \
-         `TypedBuffer` via `Arc::make_mut` and rebuild the bucket index. \
-         Closure-callback ops (forEach/map/filter) additionally need a \
-         live receiver to dispatch through `call_value_immediate_nb` per \
-         ADR-006 §2.7.11. Tracked as Phase-2c Stage C, not a Wave-9 \
-         migration; see `set_methods.rs` file-level audit.",
-        method
-    ))
+fn type_error(msg: impl Into<String>) -> VMError {
+    VMError::RuntimeError(msg.into())
 }
 
-pub fn v2_add(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<KindedSlot, VMError> {
-    Err(surface("add"))
+/// Project the receiver `KindedSlot` to the inner `Arc<HashSetData>` via
+/// the §2.7.6 / Q8 single-discriminator path: kind gate on
+/// `Ptr(HeapKind::HashSet)`, then `slot.as_heap_value()` matched against
+/// `HeapValue::HashSet(arc)`. The receiver retains its share — the
+/// caller borrows through the `&Arc<HashSetData>` and never decrements.
+#[inline]
+fn as_hashset(slot: &KindedSlot) -> Result<&Arc<HashSetData>, VMError> {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashSet)) {
+        return Err(type_error(format!(
+            "Set method receiver must be a Set (got kind {:?})",
+            slot.kind
+        )));
+    }
+    match slot.slot.as_heap_value() {
+        HeapValue::HashSet(arc) => Ok(arc),
+        other => Err(type_error(format!(
+            "Set method receiver kind says Set but heap arm is {:?}",
+            other.kind()
+        ))),
+    }
 }
 
+/// Borrow a `&str` key from a `KindedSlot` whose kind is `String` /
+/// `Ptr(HeapKind::String)`. Mirror of `as_string_key` in
+/// `hashmap_methods.rs`. Returns a `RuntimeError` for non-string kinds.
+#[inline]
+fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
+    match slot.kind {
+        NativeKind::String => slot
+            .as_str()
+            .ok_or_else(|| type_error("Set key kind=String but slot bits null")),
+        NativeKind::Ptr(HeapKind::String) => match slot.slot.as_heap_value() {
+            HeapValue::String(s) => Ok(s.as_str()),
+            _ => Err(type_error(
+                "Set key kind=Ptr(String) but heap arm mismatched",
+            )),
+        },
+        _ => Err(type_error(format!(
+            "Set key must be a string (got kind {:?})",
+            slot.kind
+        ))),
+    }
+}
+
+/// Project a callback-return `KindedSlot` to an `Arc<String>` for use
+/// as a `HashSetData` key. Mirror of `result_slot_to_string_arc` in
+/// `hashmap_methods.rs`. Returns `None` for non-string kinds — caller
+/// surfaces the kind mismatch as a `RuntimeError`.
+fn result_slot_to_string_arc(result: &KindedSlot) -> Option<Arc<String>> {
+    match result.kind {
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            let bits = result.slot.raw();
+            if bits == 0 {
+                return None;
+            }
+            // SAFETY: per the construction-side contract for both
+            // string kinds, the slot bits are `Arc::into_raw::<String>`
+            // and the result `KindedSlot` carrier owns one strong-count
+            // share. Bump the count once via `increment_strong_count`
+            // and reconstruct an owned `Arc<String>` via `Arc::from_raw`;
+            // the carrier's drop releases the original share.
+            unsafe {
+                Arc::increment_strong_count(bits as *const String);
+                Some(Arc::from_raw(bits as *const String))
+            }
+        }
+        _ => None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Read-only handlers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set.has(key) -> bool
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("has"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.has() requires exactly 1 argument (key)",
+        ));
+    }
+    let set = as_hashset(&args[0])?;
+    let key = as_string_key(&args[1])?;
+    Ok(KindedSlot::from_bool(set.contains(key)))
 }
 
-pub fn v2_delete(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<KindedSlot, VMError> {
-    Err(surface("delete"))
-}
-
+/// Set.size() -> int
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("size"))
+    if args.len() != 1 {
+        return Err(type_error("Set.size() takes no arguments"));
+    }
+    let set = as_hashset(&args[0])?;
+    Ok(KindedSlot::from_int(set.len() as i64))
 }
 
+/// Set.isEmpty() -> bool
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("isEmpty"))
+    if args.len() != 1 {
+        return Err(type_error("Set.isEmpty() takes no arguments"));
+    }
+    let set = as_hashset(&args[0])?;
+    Ok(KindedSlot::from_bool(set.is_empty()))
 }
 
+/// Set.toArray() -> Array<string>
+///
+/// Returns an `Array<string>` reusing the receiver's keys buffer
+/// (`Arc<TypedBuffer<Arc<String>>>`) — single Arc bump on the buffer,
+/// no per-element clone. Same shape as `HashMap.keys()`.
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("toArray"))
+    if args.len() != 1 {
+        return Err(type_error("Set.toArray() takes no arguments"));
+    }
+    let set = as_hashset(&args[0])?;
+    let arr = TypedArrayData::String(Arc::clone(&set.keys));
+    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Mutation handlers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set.add(key) -> Set
+///
+/// Routes through `HashSetData::insert(Arc<String>) -> bool`. The
+/// receiver `Arc<HashSetData>` is cloned up-front so `Arc::make_mut`
+/// clones the underlying data only when other shares exist
+/// (clone-on-write per ADR-006 §2.7.4 / W13-hashmap-mutation
+/// precedent). Returns the (possibly newly-cloned) `Arc<HashSetData>`
+/// as the result so chained `s.add(...).add(...)` continues to flow
+/// through the post-mutation share.
+pub fn v2_add(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.add() requires exactly 1 argument (key)",
+        ));
+    }
+    let key_arc: Arc<String> = result_slot_to_string_arc(&args[1]).ok_or_else(|| {
+        type_error(format!(
+            "Set.add(): key must be a string (got kind {:?})",
+            args[1].kind()
+        ))
+    })?;
+    let mut hs: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    Arc::make_mut(&mut hs).insert(key_arc);
+    Ok(KindedSlot::from_hashset(hs))
+}
+
+/// Set.delete(key) -> Set
+///
+/// Routes through `HashSetData::remove(&str) -> bool`. Returns the
+/// (possibly newly-cloned) `Arc<HashSetData>` post-removal — missing-
+/// key removals are a no-op at the `HashSetData` layer (the `bool`
+/// return is ignored at this surface; the result still carries the
+/// receiver share for chaining).
+pub fn v2_delete(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.delete() requires exactly 1 argument (key)",
+        ));
+    }
+    let key = as_string_key(&args[1])?;
+    let mut hs: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    Arc::make_mut(&mut hs).remove(key);
+    Ok(KindedSlot::from_hashset(hs))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Set-operation handlers (build a fresh HashSetData)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set.union(other) -> Set
+///
+/// Returns a new `Set` containing every element in either receiver.
+/// Both inputs are borrowed read-only (no `Arc::make_mut` on either);
+/// the result is a fresh `HashSetData` built via `from_keys`.
 pub fn v2_union(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("union"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.union() requires exactly 1 argument (other)",
+        ));
+    }
+    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    let mut keys: Vec<Arc<String>> = Vec::with_capacity(lhs.len() + rhs.len());
+    for k in lhs.keys.data.iter() {
+        keys.push(Arc::clone(k));
+    }
+    for k in rhs.keys.data.iter() {
+        keys.push(Arc::clone(k));
+    }
+    // `from_keys` collapses duplicates — first occurrence wins.
+    let result = HashSetData::from_keys(keys);
+    Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
+/// Set.intersection(other) -> Set
+///
+/// Returns a new `Set` containing only elements present in both
+/// receivers. Iteration walks the smaller receiver and probes the
+/// larger for membership via the bucket index.
 pub fn v2_intersection(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("intersection"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.intersection() requires exactly 1 argument (other)",
+        ));
+    }
+    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    // Walk the smaller side; probe the larger for membership.
+    let (small, large) = if lhs.len() <= rhs.len() {
+        (lhs.as_ref(), rhs.as_ref())
+    } else {
+        (rhs.as_ref(), lhs.as_ref())
+    };
+    let mut keys: Vec<Arc<String>> = Vec::new();
+    for k in small.keys.data.iter() {
+        if large.contains(k.as_str()) {
+            keys.push(Arc::clone(k));
+        }
+    }
+    let result = HashSetData::from_keys(keys);
+    Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
+/// Set.difference(other) -> Set
+///
+/// Returns a new `Set` containing every element in the receiver that
+/// is NOT present in `other` (left-biased asymmetric difference,
+/// matching JS / Python `Set.difference`).
 pub fn v2_difference(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("difference"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.difference() requires exactly 1 argument (other)",
+        ));
+    }
+    let lhs: &Arc<HashSetData> = as_hashset(&args[0])?;
+    let rhs: &Arc<HashSetData> = as_hashset(&args[1])?;
+    let mut keys: Vec<Arc<String>> = Vec::new();
+    for k in lhs.keys.data.iter() {
+        if !rhs.contains(k.as_str()) {
+            keys.push(Arc::clone(k));
+        }
+    }
+    let result = HashSetData::from_keys(keys);
+    Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Closure-based handlers — Wave-9 W9-set-methods migration
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set.forEach(fn(key)) -> unit
+///
+/// Iterates entries in insertion order, invoking the closure with the
+/// per-element key. The callback's return is dropped.
 pub fn v2_for_each(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("forEach"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.forEach() requires exactly 1 argument (callback)",
+        ));
+    }
+    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let closure = &args[1];
+    let n = set.len();
+    for i in 0..n {
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys.data[i]));
+        let _ = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }
 
+/// Set.map(fn(key) -> new_key) -> Set
+///
+/// Builds a new `Set` whose elements are the closure's per-element
+/// returns. The §2.7.15 invariant constrains keys to `Arc<String>`;
+/// non-string closure results surface as a `RuntimeError`. Duplicate
+/// outputs are collapsed by `HashSetData::from_keys` (first occurrence
+/// wins).
 pub fn v2_map(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("map"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.map() requires exactly 1 argument (mapper)",
+        ));
+    }
+    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let closure = &args[1];
+    let n = set.len();
+    let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys.data[i]));
+        let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+        let new_key: Arc<String> = result_slot_to_string_arc(&result).ok_or_else(|| {
+            type_error(format!(
+                "Set.map(): mapper must return a string (got kind {:?})",
+                result.kind()
+            ))
+        })?;
+        out_keys.push(new_key);
+    }
+    let result = HashSetData::from_keys(out_keys);
+    Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
+/// Set.filter(fn(key) -> bool) -> Set
+///
+/// Keeps elements for which the closure returns `true`. Non-bool
+/// closure results surface as a `RuntimeError` per playbook §6 — no
+/// Bool-default fallback.
 pub fn v2_filter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("filter"))
+    if args.len() != 2 {
+        return Err(type_error(
+            "Set.filter() requires exactly 1 argument (predicate)",
+        ));
+    }
+    let set: Arc<HashSetData> = Arc::clone(as_hashset(&args[0])?);
+    let closure = &args[1];
+    let n = set.len();
+    let mut out_keys: Vec<Arc<String>> = Vec::new();
+    for i in 0..n {
+        let key_arc = Arc::clone(&set.keys.data[i]);
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
+        let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+        let keep = result.as_bool().ok_or_else(|| {
+            type_error(format!(
+                "Set.filter(): predicate must return bool (got kind {:?})",
+                result.kind()
+            ))
+        })?;
+        if keep {
+            out_keys.push(key_arc);
+        }
+    }
+    // Filter preserves order with no duplicates (the receiver is
+    // already deduplicated and we don't introduce new keys); construct
+    // directly without going through `from_keys`'s dedup pass.
+    let buf = TypedBuffer::from_vec(out_keys);
+    let mut index: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
+    for (i, k) in buf.data.iter().enumerate() {
+        let h = fnv1a_hash_local(k.as_bytes());
+        index.entry(h).or_default().push(i as u32);
+    }
+    let result = HashSetData {
+        keys: Arc::new(buf),
+        index,
+    };
+    Ok(KindedSlot::from_hashset(Arc::new(result)))
+}
+
+/// Local FNV-1a hash matching `shape_value::heap_value::fnv1a_hash`'s
+/// shape (the `heap_value`-private function isn't `pub`; replicating
+/// the algorithm here keeps the bucket-index hash semantics aligned
+/// with `HashSetData::contains` / `insert`).
+#[inline]
+fn fnv1a_hash_local(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

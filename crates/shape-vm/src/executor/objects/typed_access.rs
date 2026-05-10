@@ -555,6 +555,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Reference) => "ref",
         // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment, 2026-05-10).
         NativeKind::Ptr(HeapKind::SharedCell) => "shared_cell",
+        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16, 2026-05-10).
+        NativeKind::Ptr(HeapKind::HashSet) => "set",
     }
 }
 

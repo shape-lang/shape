@@ -17,7 +17,8 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    HashMapData, HeapValue, IoHandleData, NativeViewData, TypedArrayData, TypedObjectStorage,
+    HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData, TypedArrayData,
+    TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -145,6 +146,14 @@ impl ValueSlot {
     /// Store an `Arc<HashMapData>` directly. Mirrors
     /// `HeapValue::HashMap(Arc<HashMapData>)`.
     pub fn from_hashmap(h: Arc<HashMapData>) -> Self {
+        Self(Arc::into_raw(h) as u64)
+    }
+
+    /// Store an `Arc<HashSetData>` directly. Mirrors
+    /// `HeapValue::HashSet(Arc<HashSetData>)`. ADR-006 §2.7.15 / Q16
+    /// amendment (Wave 13 W13-hashset-rebuild) — Set is a HashMap
+    /// sibling, full-`HeapValue` arm shape.
+    pub fn from_hashset(h: Arc<HashSetData>) -> Self {
         Self(Arc::into_raw(h) as u64)
     }
 
