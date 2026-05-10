@@ -25,18 +25,28 @@
 //!   `raw_bits`, `into_raw_bits`, `clone_from_bits`, `type_name`), and
 //!   every owning-share helper (`vw_drop`, `vw_clone`) were deleted.
 //!
-//! ## Disposition (Wave-β `M-iterator`)
+//! ## Disposition (W9-iterator-methods, Wave-γ continuation)
 //!
-//! Per `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md` §10
-//! (Wave-α/β file-list, M-iterator row) and ADR-006 §2.7.4 (Phase-2c
-//! deferral pattern): every PHF-bound entry below is **live** in
+//! Per `docs/cluster-audits/wave-9-method-refill-playbook.md` §4
+//! (surface-and-stop triggers) and ADR-006 §2.7.4 (Phase-2c deferral
+//! pattern): every PHF-bound entry below is **live** in
 //! `executor/objects/method_registry.rs` (`ARRAY_METHODS["iter"]`,
 //! `RANGE_METHODS["iter"]`, the entire `ITERATOR_METHODS` map). The
-//! handlers therefore cannot simply be deleted — the PHF map is OOR
-//! and a missing symbol breaks the registry build. Instead each live
-//! handler is rebuilt as a `NotImplemented(SURFACE: …)` stub that
-//! preserves the `MethodFnV2` shape (`fn(&mut VirtualMachine, &mut [u64],
-//! Option<&mut ExecutionContext>) -> Result<u64, VMError>`).
+//! handlers therefore cannot simply be deleted — the PHF map is OOR and
+//! a missing symbol breaks the registry build. Each handler ships with
+//! the §2.7.10/Q11 kinded `MethodFnV2` ABI signature
+//! (`fn(&mut VirtualMachine, &[KindedSlot], Option<&mut ExecutionContext>)
+//! -> Result<KindedSlot, VMError>`) but the **body** is a
+//! `NotImplemented(SURFACE: §2.7.4 — IteratorState rebuild)` stub: the
+//! `HeapValue::Iterator(Arc<IteratorState>)` substrate is deleted (no
+//! lazy-iterator carrier in the post-§2.7.6 heap layout), so there is
+//! nothing to dispatch on. This is the W9 playbook §4 surface-and-stop
+//! case — body genuinely depends on Phase-2c work (the typed iterator
+//! carrier + transform-chain Arcs).
+//!
+//! Note: §2.7.10/Q11 (kinded MethodFnV2 ABI) **has landed**; the
+//! signature here is already kinded. The surface is exclusively the
+//! body-side IteratorState rebuild dependency.
 //!
 //! The two pre-existing `pub` helpers (`iter_source_len`,
 //! `iter_source_element_at`) were called by `executor/loops/mod.rs`
@@ -62,17 +72,48 @@
 //!   `clone_with_kind` / `drop_with_kind` per ADR-006 §2.7.7).
 //!
 //! See `docs/adr/006-value-and-memory-model.md` §2.7.4, §2.7.6, §2.7.7,
-//! Q8, and `CLAUDE.md` "Forbidden Patterns" + "Renames to refuse on sight".
+//! §2.7.10/Q11, and `CLAUDE.md` "Forbidden Patterns" + "Renames to
+//! refuse on sight".
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{KindedSlot, VMError};
 
-// Pre-§2.7.9 surface helper `surface() -> Result<u64, VMError>` deleted
-// — the kinded ABI landed per ADR-006 §2.7.9 / Q11, so the helper's
-// return type no longer matches `MethodFnV2`. Each SURFACE handler body
-// carries the §2.7.9-aware migration contract inline. Wave-γ-followup
-// territory (M-iterator-class).
+// Shared SURFACE message for every iterator-method handler in this
+// module. The kinded `MethodFnV2` ABI (§2.7.10/Q11) has landed — the
+// signature here is already kinded. The body-side blocker is §2.7.4:
+// the `HeapValue::Iterator(Arc<IteratorState>)` substrate (and the
+// companion `IteratorTransform` chain) was deleted in Phase-1.A;
+// there is no lazy-iterator carrier in the post-§2.7.6 heap layout to
+// dispatch on, and no kinded element-fetch / transform-chain Arc
+// shape exists yet. Phase-2c will rebuild on a typed iterator carrier
+// (`HeapValue::TypedIterator(Arc<...>)` + `NativeKind::Ptr(HeapKind::
+// TypedIterator)`); until that lands every body in this module must
+// surface — never paper over with a Bool-default fallback (§2.7.7 #9)
+// or by reintroducing `ValueWord::from_iterator` / `as_iterator` /
+// `IteratorState` under any name (CLAUDE.md "Renames to refuse on
+// sight"). W9-iterator-methods playbook §4 surface-and-stop case.
+#[inline]
+fn iterator_phase2c_surface(handler: &'static str) -> VMError {
+    VMError::NotImplemented(format!(
+        "{handler} — SURFACE: ADR-006 §2.7.4 — Phase-2c IteratorState \
+         rebuild. The `HeapValue::Iterator(Arc<IteratorState>)` substrate \
+         and `IteratorTransform` chain were deleted in Phase-1.A; the \
+         post-§2.7.6 heap layout has no lazy-iterator carrier to dispatch \
+         on. The §2.7.10/Q11 kinded `MethodFnV2` ABI has already landed \
+         (signature is `&[KindedSlot] -> Result<KindedSlot, VMError>`), \
+         so the surface is exclusively body-side: re-implementation \
+         needs the typed iterator carrier (likely \
+         `HeapValue::TypedIterator(Arc<...>)` + \
+         `NativeKind::Ptr(HeapKind::TypedIterator)`), kinded per-source \
+         element fetch via `slot.as_heap_value()` + `HeapValue::*` match \
+         (Q8 single-discriminator), and kinded transform-chain Arcs via \
+         `clone_with_kind` / `drop_with_kind` (§2.7.7). Reintroducing \
+         `IteratorState` / `ValueWord::from_iterator` / `as_iterator` \
+         under any name is a CLAUDE.md \"Renames to refuse on sight\" \
+         defection."
+    ))
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Receiver-bound iter() factories (live in ARRAY_METHODS / RANGE_METHODS / ...)
@@ -84,10 +125,7 @@ pub fn v2_range_iter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "v2_range_iter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("v2_range_iter"))
 }
 
 /// Array.iter() — live `ARRAY_METHODS["iter"]`. Phase-2c stub.
@@ -96,10 +134,7 @@ pub(crate) fn handle_array_iter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_array_iter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_array_iter"))
 }
 
 /// String.iter() — live `STRING_METHODS["iter"]` (when wired). Phase-2c stub.
@@ -108,10 +143,7 @@ pub(crate) fn handle_string_iter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_string_iter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_string_iter"))
 }
 
 /// Range.iter() — alternate handler binding. Phase-2c stub.
@@ -120,10 +152,7 @@ pub(crate) fn handle_range_iter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_range_iter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_range_iter"))
 }
 
 /// HashMap.iter() — Phase-2c stub.
@@ -132,10 +161,7 @@ pub(crate) fn handle_hashmap_iter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_hashmap_iter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_hashmap_iter"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -150,10 +176,7 @@ pub(crate) fn handle_map(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_map — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_map"))
 }
 
 /// Iterator.filter(fn) — Phase-2c stub.
@@ -162,10 +185,7 @@ pub(crate) fn handle_filter(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_filter — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_filter"))
 }
 
 /// Iterator.take(n) — Phase-2c stub.
@@ -174,10 +194,7 @@ pub(crate) fn handle_take(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_take — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_take"))
 }
 
 /// Iterator.skip(n) — Phase-2c stub.
@@ -186,10 +203,7 @@ pub(crate) fn handle_skip(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_skip — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_skip"))
 }
 
 /// Iterator.flatMap(fn) — Phase-2c stub.
@@ -198,10 +212,7 @@ pub(crate) fn handle_flat_map(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_flat_map — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_flat_map"))
 }
 
 /// Iterator.enumerate() — Phase-2c stub.
@@ -210,10 +221,7 @@ pub(crate) fn handle_enumerate(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_enumerate — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_enumerate"))
 }
 
 /// Iterator.chain(other) — Phase-2c stub.
@@ -222,10 +230,7 @@ pub(crate) fn handle_chain(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_chain — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_chain"))
 }
 
 // ── Terminal operations (consume the iterator) ────────────────────────────
@@ -236,10 +241,7 @@ pub(crate) fn handle_collect(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_collect — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_collect"))
 }
 
 /// Iterator.forEach(fn) — Phase-2c stub.
@@ -248,10 +250,7 @@ pub(crate) fn handle_for_each(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_for_each — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_for_each"))
 }
 
 /// Iterator.reduce(fn, init) — Phase-2c stub.
@@ -260,10 +259,7 @@ pub(crate) fn handle_reduce(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_reduce — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_reduce"))
 }
 
 /// Iterator.count() — Phase-2c stub.
@@ -272,10 +268,7 @@ pub(crate) fn handle_count(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_count — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_count"))
 }
 
 /// Iterator.any(fn) — Phase-2c stub.
@@ -284,10 +277,7 @@ pub(crate) fn handle_any(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_any — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_any"))
 }
 
 /// Iterator.all(fn) — Phase-2c stub.
@@ -296,10 +286,7 @@ pub(crate) fn handle_all(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_all — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_all"))
 }
 
 /// Iterator.find(fn) — Phase-2c stub.
@@ -308,8 +295,5 @@ pub(crate) fn handle_find(
     _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "handle_find — SURFACE: ADR-006 §2.7.9 / Q11 — kinded MethodFnV2 ABI landed (Wave-γ G-method-fn-v2-abi); body migration is Wave-γ-followup territory. Receiver kind dispatch via `args[0].kind` + `args[0].slot.as_heap_value()` (HeapValue match per ADR-005 §1) replaces the deleted ValueWord-shape probes. Per-arg kinds come from the §2.7.7 stack parallel-Vec<NativeKind> track at the dispatch boundary; result is constructed via per-NativeKind `KindedSlot::from_*` (or `KindedSlot::new(ValueSlot::from_..., NativeKind::*)` for heap arms) per playbook §3."
-            .to_string(),
-    ))
+    Err(iterator_phase2c_surface("handle_find"))
 }
