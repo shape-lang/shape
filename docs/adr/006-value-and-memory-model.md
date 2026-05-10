@@ -3462,6 +3462,166 @@ in-flight Deque state (the §2.7.4 phase-2c marshal rebuild covers
 this for HashMap / HashSet / Deque uniformly); element-kind
 specialisation (Path B `TypedDeque<T>` per kind, future
 amendment).
+#### 2.7.22 Matrix lives under `HeapKind::TypedArray` — Q23 audit-only ruling (Wave 15 W15-matrix, 2026-05-10)
+
+W15-matrix (close 2026-05-10) audited the wave-14-15-16 playbook §2
+W15-matrix sub-cluster proposal to add `HeapKind::Matrix = 29` +
+`HeapValue::Matrix(Arc<MatrixData>)` adjacent to the §2.7.15 HashSet
+rebuild precedent. The audit's critical finding: **MatrixData already
+exists** as an Arc-backed payload reachable through the existing
+`TypedArrayData::Matrix(Arc<MatrixData>)` arm under
+`HeapKind::TypedArray = 8`. Adding a parallel `HeapKind::Matrix` would
+create the exact failure mode §2.7.9 documents (Wave-γ
+G-heap-filter-expr / commit `a27c0e4`) where the same `Arc<T>`
+payload was indexed under two different `HeapKind` labels and
+`clone_with_kind` / `drop_with_kind` dispatched the wrong-type
+retain/release.
+
+**Decision (Q23 ruling):** Matrix continues to live under
+`HeapKind::TypedArray` via the existing `TypedArrayData::Matrix(Arc<
+MatrixData>)` arm. The HeapKind ordinal 29 reserved by the playbook is
+**vacated** — no `HeapKind::Matrix` variant is added. The
+`HeapValue::Matrix(...)` arm remains absent (deleted in the Phase 2
+ValueWord bulldozer; not reintroduced). The 4 lockstep dispatch tables
+(§2.7.7 / §2.7.8 / §2.7.9 / §2.7.10) need NO new arms for Matrix
+because `Arc<TypedArrayData>` retain/release already covers
+`TypedArrayData::Matrix(Arc<MatrixData>)` through enum-variant
+`Clone` / `Drop` (the inner `Arc<MatrixData>` is refcount-managed by
+the enum constructor).
+
+**Why not pure-discriminator (mirror of §2.7.9 FilterExpr / §2.7.12
+SharedCell):** §2.7.9 / §2.7.12's pure-discriminator shape is
+justified because their payloads (`Arc<FilterNode>` / `Arc<SharedCell>`)
+are emitted directly to the kinded stack as `Arc::into_raw(...) as u64`
+and never wrapped in `HeapValue` — `as_heap_value()` is unsound on
+those slot bits. Matrix values **do** flow through `HeapValue`
+materialization: `op_new_matrix` (`crates/shape-vm/src/executor/
+objects/object_creation.rs`) pushes `Arc<TypedArrayData>` containing
+`TypedArrayData::Matrix(Arc<MatrixData>)`, with kind
+`Ptr(HeapKind::TypedArray)`; method-handler bodies recover the typed
+`Arc<MatrixData>` via the §2.7.10 / Q11 single-discriminator path
+(`slot.as_heap_value()` → `HeapValue::TypedArray(arr)` → match
+`arr.as_ref()` against `TypedArrayData::Matrix`). Pure-discriminator
+status would re-introduce the §2.7.9 type-confusion pattern at a
+different layer.
+
+**Why not a separate full `HeapValue::Matrix(Arc<MatrixData>)` arm
+(mirror of §2.7.15 HashSet / §2.7.16 Iterator):** §2.7.15 HashSet and
+§2.7.16 Iterator are full HeapValue arms because their payloads
+(`HashSetData` / `IteratorState`) are **new** typed structs with no
+prior carrier — a new HeapValue arm is the canonical landing site for
+a new typed Arc payload. Matrix's situation is the inverse: the typed
+struct (`MatrixData`) **already has a carrier** via
+`TypedArrayData::Matrix`, and `TypedArrayData::FloatSlice { parent:
+Arc<MatrixData>, ... }` structurally depends on `Arc<MatrixData>` as
+parent through that carrier. Adding `HeapValue::Matrix(Arc<MatrixData>)`
+would create two parallel HeapKind labels (`HeapKind::Matrix` direct
++ `HeapKind::TypedArray` via `TypedArrayData::Matrix`) for the same
+`Arc<MatrixData>` payload, which is exactly the ADR-005 §1
+single-discriminator forbidden pattern.
+
+**Receiver-projection contract:** Matrix method handlers recover the
+typed `Arc<MatrixData>` via the canonical reconstruct-clone-restore
+pattern established by `array_transform::handle_map_v2` and
+`iterator_methods::clone_typed_array_arc`:
+`Arc::<TypedArrayData>::from_raw(slot.raw() as *const TypedArrayData)`,
+match the inner against `TypedArrayData::Matrix(m)`, `Arc::clone(m)`
+to bump the inner share, then `Arc::into_raw(outer)` to restore the
+slot's outer share. **`slot.as_heap_value()` is unsound on
+`Ptr(HeapKind::TypedArray)`-kinded bits** — `ValueSlot::from_typed_array`
+stores `Arc::into_raw(Arc<TypedArrayData>) as u64` directly, NOT
+`Box<HeapValue>` (the deleted `from_heap` shape ADR-005 §3 retired);
+interpreting those bits as `*const HeapValue` would dereference into
+the wrong type. The `slot.as_heap_value()` recovery path is reserved
+for variants whose carrier path goes through `Box<HeapValue>` (the
+pre-§2.3 deleted shape) or whose construction stores
+`Arc::into_raw(Arc<HeapValue>) as u64` (the §2.7.16 Iterator pattern,
+where `HeapValue::Iterator(arc)` recovery via `as_heap_value()` IS
+sound).
+
+**Method dispatch path:** the `MATRIX_METHODS` PHF table in
+`crates/shape-vm/src/executor/objects/method_registry.rs` (18
+handlers — `transpose` / `inverse` / `det` / `determinant` / `trace`
+/ `shape` / `reshape` / `row` / `col` / `diag` / `flatten` / `map` /
+`sum` / `min` / `max` / `mean` / `rowSum` / `colSum`) is filled with
+real bodies operating on `Arc<MatrixData>` (post-W15-matrix close,
+this commit). The receiver classification cascade routes
+`Ptr(HeapKind::TypedArray)`-kinded receivers to either `ARRAY_METHODS`
+or `MATRIX_METHODS` based on the inner `TypedArrayData` arm — that
+routing is the §2.7.10 / Q11 dispatch shell's territory, owned by
+W16-op-call-method. W15-matrix close-out lands the bodies; W16 lands
+the routing.
+
+**Mechanical lockstep updates (NONE for Matrix per this ruling):**
+
+1. `crates/shape-value/src/heap_variants.rs` — **no changes**. Ordinal
+   29 stays vacated; HashSet (21) and Iterator (22) remain the most
+   recent additions.
+2. `crates/shape-vm/src/executor/vm_impl/stack.rs` — **no changes** to
+   `clone_with_kind` / `drop_with_kind`. The existing
+   `Ptr(HeapKind::TypedArray)` arm (which retains/releases
+   `Arc<TypedArrayData>`) covers Matrix transparently.
+3. `crates/shape-value/src/kinded_slot.rs` — **no changes** to
+   `KindedSlot::Drop` / `KindedSlot::Clone`. Same reasoning.
+4. `crates/shape-value/src/v2/closure_layout.rs` — **no changes** to
+   `SharedCell::drop`. Same reasoning.
+5. `crates/shape-value/src/heap_value.rs` — **no changes** to
+   `TypedObjectStorage::drop`. The existing `NativeKind::Ptr(HeapKind::
+   TypedArray)` arm covers Matrix-bearing slots transparently.
+6. `kind_type_name` maps in `printing.rs` / `arithmetic/mod.rs` /
+   `comparison/mod.rs` / `objects/typed_access.rs` — **no changes**.
+   Matrix slots type-name as "array" via `HeapKind::TypedArray`; the
+   inner-arm distinction surfaces in `TypedArrayData::type_name()`
+   ("Mat<number>") at user-facing `print` time only.
+7. Wire/JSON conversion arms in `wire_conversion.rs` / `json_value.rs`
+   — **no changes**. The pre-existing `TypedArrayData::Matrix` rejection
+   (commit predating this audit; see `json_value.rs` line ~244 "Matrix
+   serialization policy not yet decided (N7 architectural-choice
+   deferral)") stands; deciding the encoding is out-of-scope here.
+
+**Anti-pattern call-out:** the playbook §2 W15-matrix proposal of
+`HeapKind::Matrix = 29` was a templating error — the
+W15-priority-queue / W15-deque / W15-channel sub-clusters are
+structurally similar to W15-matrix but have no pre-existing
+`Arc<T>`-backed carrier, so for them the §2.7.15 HashSet recipe
+(new HeapKind + new HeapValue arm) is the right shape. W15-matrix's
+inverse situation is the W15-column-style "audit may reveal this is a
+deletion candidate, not a rebuild" outcome the playbook §2 W15-column
+section explicitly anticipated; W15-matrix is the second sub-cluster
+in this wave to land that outcome (column being the first if its
+audit lands the same way).
+
+**Forbidden patterns refused at audit time:**
+
+- A "tag-decode bridge" / "matrix-typed-array adapter" / similar
+  CLAUDE.md "Renames to refuse on sight" framing for the proposed
+  `HeapKind::Matrix` parallel discriminator. Per the broader-family
+  rule the proposal would have shipped under that defection-attractor
+  framing.
+- Bool-default fallback at the `as_matrix` projection helper — the
+  receiver must be `Ptr(HeapKind::TypedArray)` AND the inner
+  `TypedArrayData` arm must be `Matrix`; mismatch surfaces a typed
+  `RuntimeError` per ADR-006 §2.7.10 / Q11.
+- Transitional shims preserving deleted Matrix-shape names —
+  `from_matrix` / `from_float_array` / `vw_drop` / `vmarray_from_vec`
+  / `extract_matrix` are not reintroduced.
+- ValueWord revival in `Vec<ValueWord>` disguise — payload is typed
+  `AlignedVec<f64>` end-to-end; closure-callback values flow through
+  `KindedSlot` per §2.7.10 / Q11.
+
+**Out-of-scope this amendment:**
+
+- The `matrix(...)` stdlib ctor (Wave 5e per playbook §2 W15-matrix
+  smoke-target note); user-facing matrix construction via a
+  function-call form is W15-matrix-adjacent but not the body fill
+  this amendment lands.
+- The W16 `op_call_method` dispatch shell that routes
+  `Ptr(HeapKind::TypedArray)`-kinded receivers to `MATRIX_METHODS` vs
+  `ARRAY_METHODS` based on inner `TypedArrayData` arm — owned by
+  W16-op-call-method per playbook §3.
+- Snapshot/wire serialization of Matrix (shape-runtime/snapshot.rs
+  `BlobKind::Matrix` exists pre-audit; encoding policy is an N7
+  architectural-choice deferral per `json_value.rs` line ~244).
 
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
