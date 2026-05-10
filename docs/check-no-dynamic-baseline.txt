@@ -10,7 +10,7 @@
 #
 # Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
 
-25	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
+17	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
 1	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
 5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
