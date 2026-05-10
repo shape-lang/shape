@@ -1211,6 +1211,13 @@ fn cell_load_type_for_field_kind(kind: FieldKind) -> Type {
 // Unit tests for inline typed-struct field access
 // ===========================================================================
 
+// W11: this test module exercises the deleted `shape_value::ValueBits`
+// API (e.g. `ValueBits::make_unified_heap`) and the deleted
+// `UnifiedValue` heap-wrapper layout. Both belong to the pre-strict-typing
+// dynamic-FFI dispatch path the bulldozer removed. The kinded-FFI inline
+// typed-field-access tests are tracked under ADR-006 §2.7.4 Phase 2c FFI
+// rebuild — until then the whole module is gated out of compilation.
+#[cfg(any())]
 #[cfg(test)]
 mod tests {
     use super::*;

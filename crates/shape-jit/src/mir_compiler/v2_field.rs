@@ -435,7 +435,14 @@ mod tests {
         assert_eq!(cranelift_type_for_slot(NativeKind::Int16), types::I16);
         assert_eq!(cranelift_type_for_slot(NativeKind::Bool), types::I8);
         assert_eq!(cranelift_type_for_slot(NativeKind::Int8), types::I8);
-        assert_eq!(cranelift_type_for_slot(NativeKind::Dynamic), types::I64);
+        // W11: `NativeKind::Dynamic` deleted by the strict-typing bulldozer
+        // (see `crates/shape-value/src/native_kind.rs:103-107`). The
+        // ex-`Dynamic` slot mapping (raw u64 storage) is now covered by
+        // any heap-pointer kind — `Ptr(HeapKind::TypedArray)` stands in.
+        assert_eq!(
+            cranelift_type_for_slot(NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)),
+            types::I64
+        );
         assert_eq!(cranelift_type_for_slot(NativeKind::String), types::I64);
     }
 
