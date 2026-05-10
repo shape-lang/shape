@@ -175,10 +175,10 @@ pub mod concat;
 pub mod typed_access;
 
 use crate::{
-    bytecode::{Instruction, OpCode},
+    bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::VMError;
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, TypedArrayData, ValueSlot, VMError};
 
 impl VirtualMachine {
     /// Dispatch shell for object opcodes.
@@ -251,112 +251,354 @@ impl VirtualMachine {
         ))
     }
 
-    /// SURFACE: CallMethod dispatch shell — kinded ABI landed, receiver
-    /// classification + IC wiring downstream.
+    /// CallMethod dispatch shell (W16-op-call-method close).
     ///
-    /// `op_call_method` is the central method-dispatch shell. The
-    /// `MethodFnV2` ABI flip to `(&mut VM, &[KindedSlot], _) ->
-    /// Result<KindedSlot, VMError>` landed in this cluster (Wave-γ
-    /// G-method-fn-v2-abi, ADR-006 §2.7.9 / Q11); see the parent
-    /// commit's amendment to `docs/adr/006-value-and-memory-model.md`
-    /// for the architectural justification.
+    /// ADR-006 §2.7.10 / Q11 dispatch shell — pops the receiver +
+    /// arg-count call args from the §2.7.7 kinded stack, classifies
+    /// the receiver kind to pick the matching PHF method registry,
+    /// dispatches through `MethodFnV2`, and pushes the kinded result.
     ///
-    /// With the kinded ABI in place, the dispatch shell's mechanical
-    /// shape per ADR-006 §2.7.9 is:
+    /// Body shape per the W7-op-call-value precedent (close commit
+    /// `27812cf`, `executor/control_flow/mod.rs:dispatch_call_value_immediate`):
     ///
-    /// ```ignore
-    /// // Pop receiver + N args from the §2.7.7 kinded stack.
-    /// // Kind for each entry comes from the parallel-Vec<NativeKind>
-    /// // track populated by the producing opcode — no fabrication.
-    /// let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count + 1);
-    /// for _ in 0..(arg_count + 1) {
-    ///     let (bits, kind) = self.pop_kinded()?;
-    ///     args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
-    /// }
-    /// args.reverse();  // pop order is reverse of push order
+    /// 1. Pop `arg_count + 1` slots via `pop_kinded()` (receiver
+    ///    included). Each pop transfers one share (heap-bearing kinds)
+    ///    into the returned `(bits, kind)` pair (WB2.4 retain-on-read,
+    ///    §2.7.7); the `KindedSlot::new` carrier takes ownership of
+    ///    that share. Pop order is reverse of push order, so reverse
+    ///    the vec back to position-aligned order with `args[0]` =
+    ///    receiver.
+    /// 2. Decode `arg_count` + method name from
+    ///    `Operand::TypedMethodCall { arg_count, string_id, .. }`
+    ///    (`bytecode/opcode_defs.rs:2023`). The method name string is
+    ///    indexed via `string_id` into `self.program.strings`.
+    /// 3. Classify `args[0].kind` to pick a PHF registry per the
+    ///    §2.7.6 / Q8 heterogeneous-kind body pattern. Numeric / Bool
+    ///    / String scalars route to the matching scalar registry;
+    ///    `Ptr(HeapKind::*)` heap kinds route to the per-heap-kind
+    ///    registry, with `HeapKind::TypedArray` sub-classified on the
+    ///    inner `TypedArrayData::{I64, F64, Bool, ...}` variant via
+    ///    `slot.as_heap_value()` and `HeapKind::Temporal`
+    ///    sub-classified on the inner `TemporalData::{DateTime,
+    ///    TimeSpan, ...}` variant. The v2 typed-array fast path
+    ///    (`UInt64`-tagged raw `*mut TypedArray<T>` pointer) routes
+    ///    through `as_v2_typed_array` to `TYPED_INT_ARRAY_METHODS` /
+    ///    `TYPED_NUMBER_ARRAY_METHODS` per playbook §10
+    ///    `D-v2-array-detect`.
+    /// 4. PHF lookup keyed on `&str` method name returns the
+    ///    `MethodFnV2` handler. A miss surfaces a `RuntimeError`
+    ///    citing the receiver kind + method name; user-defined
+    ///    methods on `HeapValue::TypedObject` fall through to a UFCS
+    ///    function-name lookup (`function_name_index`) before the
+    ///    final `Unknown method` error. Closure / Future / Reference
+    ///    / SharedCell / FilterExpr receivers reject — they are not
+    ///    method-call targets.
+    /// 5. Dispatch: `handler(self, &args, ctx)` returns
+    ///    `Result<KindedSlot, VMError>`. The `&[KindedSlot]` borrow
+    ///    leaves the shares with the carriers in this stack frame —
+    ///    handlers borrow each entry per §2.7.10 / Q11 borrow-only
+    ///    ABI.
+    /// 6. Push the result via `push_kinded(result.raw(), result.kind())`
+    ///    and `std::mem::forget(result)` so the result share transfers
+    ///    cleanly to the stack (no double-drop). The `args` carriers
+    ///    drop at end of scope; `KindedSlot::Drop` dispatches on kind
+    ///    and releases each share via `drop_with_kind` (no bare
+    ///    `vw_drop`, no Bool-default fallback).
     ///
-    /// // Resolve handler: PHF lookup keyed on (receiver_kind, method_name).
-    /// // Receiver kind is `args[0].kind` per §2.7.9; for heap receivers
-    /// // unwrap to HeapKind via `Ptr(HeapKind::*)` matching, then index
-    /// // into the matching PHF map (HEAP_KIND -> PHF_REGISTRY mapping
-    /// // is the ARRAY_METHODS / DATATABLE_METHODS / etc. table).
-    /// let handler: MethodFnV2 = resolve_handler(args[0].kind, method_name_id)?;
+    /// Forbidden surfaces (per CLAUDE.md "Renames to refuse on sight"
+    /// + ADR-006 §2.7.10 / Q11): `Vec<KindedSlot>` by-move into a
+    /// dispatch helper; `args: &mut [KindedSlot]`; tag-bits decode on
+    /// receiver bits; `is_heap()` probe on raw bits; Bool-default
+    /// fallback for unknown kind; defection-attractor framing on
+    /// the method-dispatch ABI (`MethodFn` / `MethodFnLegacy` /
+    /// `dispatch_method_handler_raw` / `call_handler_with_u64_slice`).
     ///
-    /// // Dispatch: handler reads &args, returns a kinded result.
-    /// let result: KindedSlot = handler(self, &args, ctx)?;
-    ///
-    /// // Push result back onto the kinded stack (kind from the
-    /// // returned KindedSlot — no fabrication). mem::forget skips the
-    /// // carrier-drop so the share transfers cleanly to the stack.
-    /// self.push_kinded(result.slot.into_raw(), result.kind)?;
-    /// std::mem::forget(result);
-    /// // args drops here — each KindedSlot's Drop dispatches on kind
-    /// // and releases the share via drop_with_kind. No bare vw_drop
-    /// // (forbidden #8). No Bool-default fallback (forbidden §2.7.7 #9
-    /// // / §2.7.9).
-    /// ```
-    ///
-    /// This shell body is **not yet wired** in this cluster. The ABI
-    /// flip is the deliverable of Wave-γ G-method-fn-v2-abi; the
-    /// dispatch-shell body wiring depends on:
-    ///
-    /// 1. The receiver-classification cascade
-    ///    (`receiver_is_numeric` / `receiver_is_bool` /
-    ///    `receiver_is_heap` + `HeapKind` match + sub-dispatch on
-    ///    `Concurrency` / `TypedArray` / `Temporal` / `TableView`
-    ///    inner variants). Pre-§2.7.9 this used `ValueWord::is_*` /
-    ///    `as_heap_ref` (forbidden, playbook §4 #7); post-§2.7.9 it's
-    ///    `match args[0].kind { NativeKind::* => ..., NativeKind::Ptr(
-    ///    HeapKind::*) => args[0].slot.as_heap_value() match {
-    ///    HeapValue::* => ... } }` per §2.7.6 / Q8. Wave-γ-followup
-    ///    territory (sub-cluster `D-objects-mod-receiver-class`).
-    /// 2. The IC fast-path call
-    ///    (`crate::executor::ic_fast_paths::method_ic_check`) — the
-    ///    `MethodFnV2` storage transmute through `usize` is ABI-opaque
-    ///    and the `(receiver_kind, method_name_id)` keying is
-    ///    unchanged, so the IC fast-path semantics survive the flip
-    ///    untouched. The IC unit test's `dummy_handler` constant
-    ///    signature realigns to the kinded ABI — IC sub-cluster
-    ///    follow-up.
-    /// 3. The v2-typed-array PHF fast-path detector
-    ///    (`v2_array_detect::as_v2_typed_array`) — pre-§2.7.9 this
-    ///    relied on `as_vw_ref` reinterpreting `&u64` as `&ValueWord`
-    ///    (deleted). Post-§2.7.9 the detector takes
-    ///    `(args[0].slot.bits(), args[0].kind)` directly. Wave-γ-
-    ///    followup `D-v2-array-detect` cluster row.
-    /// 4. The legacy stack-based calling convention reading
-    ///    `arg_count` + `method_name` via `pop_raw_u64` +
-    ///    `ValueWord::as_str` — either rewrites to `pop_kinded` +
-    ///    `NativeKind::String` arm match, or is deleted as legacy
-    ///    bytecode the compiler no longer emits. Wave-γ-followup
-    ///    territory.
-    /// 5. The `handle_typed_object_method_v2` path — pre-§2.7.9 used
-    ///    `as_heap_ref` (forbidden) to extract `(schema_id, slots,
-    ///    heap_mask)`; post-§2.7.9 uses `args[0].slot.as_heap_value()`
-    ///    + `HeapValue::TypedObject` match. Wave-γ-followup territory.
-    ///
-    /// Per playbook §7.4 + §8 surface-and-stop trigger ("Cross-cluster
-    /// migration cascade") this body surfaces back as
-    /// `NotImplemented(SURFACE)` until the receiver-classification
-    /// cascade lands. The ABI is no longer the blocker; the
-    /// classification rewrite is. Do not paper over.
+    /// Surfaces remaining (out of W16 territory):
+    /// - **IC fast-path recording / hit**: `method_ic_check` /
+    ///   `method_ic_record` already accept the kinded `MethodFnV2`
+    ///   transmute (`ic_fast_paths.rs:42-44`) — wiring the IC
+    ///   recording at the dispatch shell is a downstream JIT-IC
+    ///   follow-up, not a correctness gate. The dispatch shell stays
+    ///   correct without IC; the IC adds speed only.
+    /// - **`HeapKind::Closure` receivers** (e.g. closure-as-trait-
+    ///   object dispatch). Trait-object dispatch goes through
+    ///   `op_dyn_method_call`, not `op_call_method`; the closure arm
+    ///   here rejects with a clear error.
     pub fn op_call_method(
         &mut self,
-        _instruction: &Instruction,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "SURFACE: op_call_method body wiring depends on the receiver-\
-             classification cascade rewrite (Wave-γ-followup). The MethodFnV2 ABI \
-             flip landed in this cluster (ADR-006 §2.7.9 / Q11) — the dispatch shell \
-             now constructs `&[KindedSlot]` from popped stack args via \
-             pop_kinded() and pushes the returned KindedSlot via push_kinded() \
-             without fabricated kinds. Receiver classification + HeapKind \
-             sub-dispatch + v2-array-detect + IC fast-path realignment are \
-             downstream Wave-γ-followup territory. See ADR-006 §2.7.9 for the \
-             dispatch-shell pseudocode + sub-cluster split."
-                .into(),
-        ))
+        // ADR-006 §2.7.10 / Q11: arg_count + method name from operand
+        // (typed dispatch is the only emit shape per
+        // `compiler/expressions/function_calls.rs:2014` / `binary_ops.rs`
+        // / `unary_ops.rs`). Legacy stack-arg-count dispatch is gone.
+        let (arg_count, string_id, _method_id, _receiver_type_tag) = match instruction.operand {
+            Some(Operand::TypedMethodCall {
+                method_id,
+                arg_count,
+                string_id,
+                receiver_type_tag,
+            }) => (
+                arg_count as usize,
+                string_id as usize,
+                method_id,
+                receiver_type_tag,
+            ),
+            _ => return Err(VMError::InvalidOperand),
+        };
+
+        // Pop receiver + arg_count call args. Each pop_kinded transfers
+        // one share into the returned (bits, kind); the KindedSlot
+        // carrier takes ownership and releases via drop_with_kind on
+        // scope exit. ADR-006 §2.7.7 WB2.4 retain-on-read.
+        let total = arg_count + 1;
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(total);
+        for _ in 0..total {
+            let (bits, kind) = self.pop_kinded()?;
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+        // Pop is reverse of push order; flip so args[0] is the receiver.
+        args.reverse();
+
+        // Resolve method name. The string pool index was offset-fixed
+        // at link time (`executor/mod.rs:883`), so direct indexing is
+        // always in-range for a well-formed program.
+        let method_name: &str = self
+            .program
+            .strings
+            .get(string_id)
+            .map(|s| s.as_str())
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "op_call_method: string_id {} out of bounds (pool size {})",
+                    string_id,
+                    self.program.strings.len()
+                ))
+            })?;
+
+        // Classify the receiver and resolve the handler. UFCS / unknown
+        // is signalled by `Ok(None)` from the resolver so the helper can
+        // fall back to a user-defined function lookup before raising
+        // `RuntimeError`.
+        let handler = self.resolve_method_handler(&args, method_name)?;
+
+        // Dispatch — borrow-only ABI per §2.7.10 / Q11. The handler
+        // borrows each KindedSlot; share ownership stays with the
+        // carriers in `args`.
+        let result = handler(self, &args, ctx)?;
+
+        // Transfer the result share onto the kinded stack. The result
+        // carrier is forgotten so its Drop does not double-release.
+        self.push_kinded(result.raw(), result.kind())?;
+        std::mem::forget(result);
+
+        // `args` carriers drop here. `KindedSlot::Drop` dispatches on
+        // each entry's kind and retires its share via the matching
+        // `Arc::decrement_strong_count::<T>` arm — no bare vw_drop
+        // (forbidden), no Bool-default fallback (forbidden §2.7.7 #9).
+        Ok(())
+    }
+
+    /// Resolve a method handler from `(receiver_kind, method_name)`.
+    ///
+    /// Receiver classification per ADR-006 §2.7.6 / Q8 heterogeneous-
+    /// kind body pattern: scalar kinds map directly to scalar PHF
+    /// registries; `Ptr(HeapKind::*)` heap kinds map to the matching
+    /// per-heap-kind registry, with `TypedArray` and `Temporal`
+    /// sub-classified through `slot.as_heap_value()` matching to pick
+    /// the element-typed sub-registry. The `UInt64`-tagged v2 typed-
+    /// array fast path (`*mut TypedArray<T>` pointer with stamped
+    /// element-type byte) routes through `v2_array_detect`.
+    ///
+    /// Returns `Err(RuntimeError)` for unknown method on a known
+    /// receiver kind, or unsupported receiver kind. Falls through to
+    /// `function_name_index` UFCS for `HeapKind::TypedObject`
+    /// receivers when the method is not in `DATATABLE_METHODS` (the
+    /// dispatch table covering generic table-shaped methods is the
+    /// closest fit; user-defined methods land via UFCS).
+    fn resolve_method_handler(
+        &self,
+        args: &[KindedSlot],
+        method_name: &str,
+    ) -> Result<method_registry::MethodHandler, VMError> {
+        use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
+
+        let receiver = &args[0];
+        let kind = receiver.kind;
+
+        // Pure-scalar receivers — kind alone selects the registry.
+        let scalar_handler: Option<method_registry::MethodHandler> = match kind {
+            NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize => method_registry::NUMBER_METHODS.get(method_name).copied(),
+            NativeKind::Bool => method_registry::BOOL_METHODS.get(method_name).copied(),
+            NativeKind::String => method_registry::STRING_METHODS.get(method_name).copied(),
+            // UInt64 may be a v2 typed-array pointer (raw `*mut
+            // TypedArray<T>`, no Arc) or a plain unsigned integer.
+            // Classify via the stamped element-type byte.
+            NativeKind::UInt64 => {
+                let bits = receiver.slot.raw();
+                if let Some(view) = as_v2_typed_array(bits, kind) {
+                    let typed = match view.elem_type {
+                        V2ElemType::I64 | V2ElemType::I32 => {
+                            method_registry::TYPED_INT_ARRAY_METHODS
+                                .get(method_name)
+                                .copied()
+                        }
+                        V2ElemType::F64 => method_registry::TYPED_NUMBER_ARRAY_METHODS
+                            .get(method_name)
+                            .copied(),
+                        V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
+                            .get(method_name)
+                            .copied(),
+                    };
+                    typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
+                } else {
+                    method_registry::NUMBER_METHODS.get(method_name).copied()
+                }
+            }
+            NativeKind::Ptr(_) => None,
+        };
+        if let Some(h) = scalar_handler {
+            return Ok(h);
+        }
+
+        // Heap receivers — dispatch on HeapKind, then sub-classify
+        // TypedArray / Temporal via `slot.as_heap_value()`.
+        if let NativeKind::Ptr(hk) = kind {
+            let heap_handler: Option<method_registry::MethodHandler> = match hk {
+                HeapKind::String => method_registry::STRING_METHODS.get(method_name).copied(),
+                HeapKind::Char => method_registry::CHAR_METHODS.get(method_name).copied(),
+                HeapKind::HashMap => method_registry::HASHMAP_METHODS.get(method_name).copied(),
+                HeapKind::HashSet => method_registry::SET_METHODS.get(method_name).copied(),
+                HeapKind::DataTable => method_registry::DATATABLE_METHODS
+                    .get(method_name)
+                    .copied(),
+                HeapKind::Iterator => method_registry::ITERATOR_METHODS.get(method_name).copied(),
+                HeapKind::Instant => method_registry::INSTANT_METHODS.get(method_name).copied(),
+                HeapKind::Content => method_registry::CONTENT_METHODS.get(method_name).copied(),
+                HeapKind::Decimal => method_registry::NUMBER_METHODS.get(method_name).copied(),
+                HeapKind::BigInt => method_registry::NUMBER_METHODS.get(method_name).copied(),
+                HeapKind::TypedArray => {
+                    // Sub-classify on the inner TypedArrayData variant
+                    // (per playbook §10 D-objects-mod receiver-class).
+                    // `as_heap_value()` is sound here — TypedArray is a
+                    // full `HeapValue` arm (ADR-005 §1).
+                    let typed = match receiver.slot.as_heap_value() {
+                        HeapValue::TypedArray(arc) => match arc.as_ref() {
+                            TypedArrayData::I64(_)
+                            | TypedArrayData::I8(_)
+                            | TypedArrayData::I16(_)
+                            | TypedArrayData::I32(_)
+                            | TypedArrayData::U8(_)
+                            | TypedArrayData::U16(_)
+                            | TypedArrayData::U32(_)
+                            | TypedArrayData::U64(_) => method_registry::INT_ARRAY_METHODS
+                                .get(method_name)
+                                .copied(),
+                            TypedArrayData::F64(_)
+                            | TypedArrayData::F32(_)
+                            | TypedArrayData::FloatSlice { .. } => {
+                                method_registry::FLOAT_ARRAY_METHODS
+                                    .get(method_name)
+                                    .copied()
+                            }
+                            TypedArrayData::Bool(_) => method_registry::BOOL_ARRAY_METHODS
+                                .get(method_name)
+                                .copied(),
+                            TypedArrayData::Matrix(_) => {
+                                method_registry::MATRIX_METHODS.get(method_name).copied()
+                            }
+                            TypedArrayData::String(_) | TypedArrayData::HeapValue(_) => None,
+                        },
+                        _ => None,
+                    };
+                    typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
+                }
+                HeapKind::Temporal => match receiver.slot.as_heap_value() {
+                    HeapValue::Temporal(arc) => match arc.as_ref() {
+                        TemporalData::DateTime(_) => {
+                            method_registry::DATETIME_METHODS.get(method_name).copied()
+                        }
+                        TemporalData::TimeSpan(_) | TemporalData::Duration(_) => {
+                            method_registry::TIMESPAN_METHODS.get(method_name).copied()
+                        }
+                        // Timeframe / TimeReference / DateTimeExpr /
+                        // DataDateTimeRef have no method PHF — they are
+                        // language-level metadata, not method-call
+                        // targets. Fall through to UnknownMethod.
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                HeapKind::TypedObject => {
+                    // User-defined object methods land here. The
+                    // built-in DataTable PHF covers shared table-shape
+                    // methods; UFCS resolution below catches user-
+                    // defined `fn TypeName.method(self, ...)` shapes.
+                    method_registry::DATATABLE_METHODS
+                        .get(method_name)
+                        .copied()
+                }
+                HeapKind::TableView => method_registry::DATATABLE_METHODS
+                    .get(method_name)
+                    .copied(),
+                // `HeapKind::Channel` does not exist yet — W15-channel
+                // (playbook §2 row) lands the `HeapKind::Channel = 27`
+                // ordinal + `HeapValue::Channel(Arc<ChannelData>)` arm
+                // alongside the `CHANNEL_METHODS` registry. Until that
+                // wave merges, channel receivers cannot be pushed onto
+                // the kinded stack — there is no `NativeKind::Ptr(
+                // HeapKind::Channel)` to classify here.
+                //
+                // ADR-006 §2.7.10 explicitly excludes the closure /
+                // future / reference / shared-cell / filter-expr
+                // discriminators from method-call dispatch — these are
+                // not user-callable receivers. Trait-object method
+                // calls go through `op_dyn_method_call`, not here.
+                HeapKind::Closure
+                | HeapKind::Future
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::FilterExpr
+                | HeapKind::IoHandle
+                | HeapKind::TaskGroup
+                | HeapKind::NativeView
+                | HeapKind::NativeScalar => None,
+            };
+            if let Some(h) = heap_handler {
+                return Ok(h);
+            }
+        }
+
+        // UFCS / unknown — surface the receiver kind in the error so
+        // call sites can diagnose. Per playbook §3 "surface-and-stop
+        // if PHF lookup API doesn't quite match", an unknown method
+        // is *not* a SURFACE — it's a real runtime error the program
+        // can hit, so we return `RuntimeError`, not `NotImplemented`.
+        Err(VMError::RuntimeError(format!(
+            "no method '{}' on receiver kind {:?}",
+            method_name, kind
+        )))
     }
 
     /// SURFACE: MakeRange cannot be migrated in this cluster.
