@@ -42,19 +42,22 @@
 //! - Int `handle_int_abs` constructs a fresh `Arc<TypedArrayData::I64>` and
 //!   pushes the same heap kind.
 //!
-//! ## Out-of-territory surfaces
+//! ## Higher-order methods (W9-typed-array-methods migration)
 //!
-//! Higher-order methods (`handle_float_map/filter/for_each/reduce/find/some/every`,
-//! `handle_int_map/filter/for_each/reduce/find/some/every`) require the kinded
-//! `op_call_value` callback ABI to invoke a closure with kinded args + result.
-//! That dispatch surface is downstream territory (Wave-γ-followup
-//! `MR-method-fn-v2-callback` — the closure-callback equivalent of the
-//! method-handler ABI flip); per playbook §7 REVISED + §8 surface-and-stop the
-//! correct shape is `NotImplemented(SURFACE)`, never a forbidden-pattern
-//! workaround. The pre-Wave-β bodies threaded `vm.call_value_immediate_raw(...)`
-//! through `ValueWord` carriers; that helper consumed `&[u64]` raw bits +
-//! returned a `u64` — every ingredient deleted with the strict-typing
-//! bulldozer (CLAUDE.md "Forbidden Patterns").
+//! Closure-callback bodies (`handle_float_map/filter/for_each/reduce/find/some/every`,
+//! and the `handle_int_*` siblings) flow through `vm.call_value_immediate_nb`
+//! per ADR-006 §2.7.11 / Q12 (Wave-7 W7-cv-method Round 3 close `b7c9770`):
+//! the `(callee: &KindedSlot, args: &[KindedSlot], ctx) -> KindedSlot` value-
+//! call entry-point is live and kind-aware. Per-element callbacks build a
+//! single-slot `&[KindedSlot]` arg slice carrying `KindedSlot::from_number(v)`
+//! (Float family) or `KindedSlot::from_int(v)` (Int family); the receiver
+//! borrow is dropped before the loop (snapshot `Vec<f64>` / `Vec<i64>`) so
+//! the `&mut vm` callback doesn't conflict with a live receiver borrow.
+//! `ctx.as_deref_mut()` reborrows for each call. No `tag_bits` decode, no
+//! `ValueWord` carrier, no Bool-default fallback for unknown closure return
+//! kinds — surfaces per ADR-006 §2.7.4 instead.
+//!
+//! ## Out-of-territory surfaces
 //!
 //! `handle_float_to_array` / `handle_int_to_array` / `handle_bool_to_array`
 //! materialized the typed array into the generic `HeapValue::Array(Arc<Vec<ValueWord>>)`
@@ -868,92 +871,308 @@ pub(crate) fn handle_float_exp(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Higher-order methods (float arrays) — depend on the kinded
-// `op_call_value` callback ABI which is downstream territory. Surface per
-// playbook §7 REVISED + §8.
+// Higher-order methods (float arrays) — kinded closure-callback bodies
+// (W9-typed-array-methods, ADR-006 §2.7.10 / Q11 + §2.7.11 / Q12).
+//
+// `vm.call_value_immediate_nb(callee: &KindedSlot, args: &[KindedSlot], ctx)`
+// is the live kinded value-call entry-point post-Round-3 close. Per-element
+// callbacks build a single-element `&[KindedSlot]` arg slice carrying
+// `KindedSlot::from_number(v)`; the closure carrier is `args[1]` (the
+// receiver is `args[0]`). `ctx.as_deref_mut()` reborrows for each call.
+//
+// Element-source rule (playbook §2): `Vec<number>` elements are sourced as
+// `NativeKind::Float64` from the receiver's typed-array variant; the
+// closure-callback path does not synthesize kinds. Empty arrays follow the
+// pre-Wave-β semantics (forEach/find/reduce/etc.) below.
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Common surface error for higher-order method handlers blocked on the kinded
-/// closure-callback ABI. The pre-Wave-β bodies threaded
-/// `vm.call_value_immediate_raw(args[1], &[u64], …) -> u64` through `ValueWord`
-/// carriers (forbidden post-§2.7.7); the kinded equivalent is downstream.
+/// Common error for receivers whose `TypedArrayData::*` variant is not on
+/// the F64 path covered in this round (narrow widths, heap-element backing,
+/// matrix shape). The closure-callback semantics for those variants depend
+/// on the per-width / per-shape element-kind matrix the §2.7.6 / Q8
+/// constructor surface completes in Wave-γ-followup territory.
 #[inline]
-fn closure_callback_surface(method: &str) -> VMError {
-    VMError::NotImplemented(format!(
-        "Vec<*>.{} — SURFACE: ADR-006 §2.7.10 / Q11 — kinded MethodFnV2 ABI \
-         landed (Wave-γ G-method-fn-v2-abi); body migration depends on the \
-         closure-callback equivalent (`call_value_immediate_kinded` taking \
-         `&[KindedSlot]` + returning `KindedSlot`). The pre-Wave-β path \
-         used `call_value_immediate_raw(args, &[u64]) -> u64` over \
-         `ValueWord` carriers — every ingredient deleted with the strict-\
-         typing bulldozer (CLAUDE.md \"Forbidden Patterns\"). Per playbook \
-         §7 REVISED + §8, surface; do not paper over with a forbidden-\
-         pattern workaround.",
-        method
+fn float_higher_order_variant_surface(method: &str, arr: &TypedArrayData) -> VMError {
+    VMError::RuntimeError(format!(
+        "Vec<number>.{}: receiver variant {} (Phase-2c: per-width / heap-\
+         element / matrix / float-slice closure-callback dispatch needs \
+         the §2.7.6 / Q8 element-kind matrix completion).",
+        method,
+        arr.type_name()
     ))
 }
 
-/// v2 map for float arrays.
+/// Borrow the F64 element slice as an owned `Vec<f64>`. Used by the
+/// higher-order handlers to avoid keeping an immutable borrow on the
+/// `TypedArrayData` arc across the `&mut vm` callback. Returns the same
+/// surface as `borrow_f64_slice` for non-F64 variants.
+#[inline]
+fn snapshot_f64_elements(arr: &TypedArrayData, op: &'static str) -> Result<Vec<f64>, VMError> {
+    borrow_f64_slice(arr, op)
+}
+
+/// `Vec<number>.map(|x| ...)` — apply the closure to each element and
+/// build a fresh F64 typed array. The closure must return `Float64`; an
+/// `Int64` result is widened (mechanical promotion at the carrier
+/// boundary, no runtime `IntToNumber` opcode). Other return kinds surface
+/// per ADR-006 §2.7.4 — a heterogeneous `Vec<*>` materialization needs
+/// the §2.7.7 typed heterogeneous-array story (separate ADR amendment).
 pub(crate) fn handle_float_map(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("map"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.map expects 1 argument (closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "map")?
+        }
+        _ => return Err(float_higher_order_variant_surface("map", arr)),
+    };
+    let closure = &args[1];
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(elems.len());
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let mapped: f64 = match result.kind {
+            NativeKind::Float64 => result.slot.as_f64(),
+            NativeKind::Int64 => result.slot.as_i64() as f64,
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<number>.map: closure returned kind {:?}; only \
+                     Float64/Int64 are accepted in this round (ADR-006 \
+                     §2.7.7 heterogeneous-array surface)",
+                    other
+                )));
+            }
+        };
+        out.push(mapped);
+    }
+    Ok(float_array_result(out))
 }
 
-/// v2 filter for float arrays.
+/// `Vec<number>.filter(|x| ...)` — retain elements where the closure
+/// returns `true`; the result is a fresh F64 typed array of the same
+/// element kind as the receiver.
 pub(crate) fn handle_float_filter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("filter"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.filter expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "filter")?
+        }
+        _ => return Err(float_higher_order_variant_surface("filter", arr)),
+    };
+    let closure = &args[1];
+    let mut out: AlignedVec<f64> = AlignedVec::with_capacity(elems.len());
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let keep = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<number>.filter: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if keep {
+            out.push(v);
+        }
+    }
+    Ok(float_array_result(out))
 }
 
-/// v2 forEach for float arrays.
+/// `Vec<number>.forEach(|x| ...)` — invoke the closure on each element
+/// for side-effects; returns the null/unit sentinel.
 pub(crate) fn handle_float_for_each(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("forEach"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.forEach expects 1 argument (closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "forEach")?
+        }
+        _ => return Err(float_higher_order_variant_surface("forEach", arr)),
+    };
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let _ = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }
 
-/// v2 reduce for float arrays.
+/// `Vec<number>.reduce(init, |acc, x| ...)` — fold the array with a
+/// 2-arg closure starting from `init`. `args[0]` is the receiver, `args[1]`
+/// is the initial accumulator (kind preserved through the loop), and
+/// `args[2]` is the closure callee.
 pub(crate) fn handle_float_reduce(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("reduce"))
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.reduce expects 2 arguments (init, closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "reduce")?
+        }
+        _ => return Err(float_higher_order_variant_surface("reduce", arr)),
+    };
+    let closure = &args[2];
+    let mut acc = args[1].clone();
+    for v in elems {
+        let call_args = [acc.clone(), KindedSlot::from_number(v)];
+        acc = vm.call_value_immediate_nb(closure, &call_args, ctx.as_deref_mut())?;
+    }
+    Ok(acc)
 }
 
-/// v2 find for float arrays.
+/// `Vec<number>.find(|x| ...)` — first element where the closure returns
+/// `true`, or the null sentinel if none.
 pub(crate) fn handle_float_find(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("find"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.find expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "find")?
+        }
+        _ => return Err(float_higher_order_variant_surface("find", arr)),
+    };
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<number>.find: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if hit {
+            return Ok(KindedSlot::from_number(v));
+        }
+    }
+    Ok(KindedSlot::none())
 }
 
-/// v2 some for float arrays.
+/// `Vec<number>.some(|x| ...)` — true if any element satisfies the
+/// predicate.
 pub(crate) fn handle_float_some(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("some"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.some expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "some")?
+        }
+        _ => return Err(float_higher_order_variant_surface("some", arr)),
+    };
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<number>.some: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if hit {
+            return Ok(KindedSlot::from_bool(true));
+        }
+    }
+    Ok(KindedSlot::from_bool(false))
 }
 
-/// v2 every for float arrays.
+/// `Vec<number>.every(|x| ...)` — true if all elements satisfy the
+/// predicate.
 pub(crate) fn handle_float_every(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("every"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<number>.every expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = match arr {
+        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+            snapshot_f64_elements(arr, "every")?
+        }
+        _ => return Err(float_higher_order_variant_surface("every", arr)),
+    };
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_number(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<number>.every: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if !hit {
+            return Ok(KindedSlot::from_bool(false));
+        }
+    }
+    Ok(KindedSlot::from_bool(true))
 }
 
 /// Common surface error for typed-array → generic-`Array` materialization
@@ -1005,67 +1224,254 @@ pub(crate) fn handle_int_abs(
     Ok(int_array_result(out))
 }
 
-/// v2 map for int arrays.
+// ─────────────────────────────────────────────────────────────────────────────
+// Higher-order methods (int arrays) — kinded closure-callback bodies
+// (W9-typed-array-methods, ADR-006 §2.7.10 / Q11 + §2.7.11 / Q12). Element
+// source is `NativeKind::Int64`; structural shape mirrors the Float family
+// (snapshot the I64 slice, then iterate with `vm.call_value_immediate_nb`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Surface for non-I64 receiver variants in the int higher-order family.
+#[inline]
+fn int_higher_order_variant_surface(method: &str, arr: &TypedArrayData) -> VMError {
+    VMError::RuntimeError(format!(
+        "Vec<int>.{}: receiver variant {} (Phase-2c: per-width / heap-\
+         element closure-callback dispatch needs the §2.7.6 / Q8 element-\
+         kind matrix completion).",
+        method,
+        arr.type_name()
+    ))
+}
+
+/// Snapshot the I64 element slice as an owned `Vec<i64>` so the receiver
+/// borrow doesn't span the `&mut vm` callback.
+#[inline]
+fn snapshot_i64_elements(arr: &TypedArrayData, op: &'static str) -> Result<Vec<i64>, VMError> {
+    match arr {
+        TypedArrayData::I64(b) => Ok(b.data.clone()),
+        _ => Err(int_higher_order_variant_surface(op, arr)),
+    }
+}
+
+/// `Vec<int>.map(|x| ...)` — apply the closure to each element. `Int64`
+/// closure returns build a fresh I64 array; `Float64` returns surface as
+/// a heterogeneous-result error (mixing element kinds across `map`
+/// outputs needs the §2.7.7 typed heterogeneous-array story).
 pub(crate) fn handle_int_map(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.map"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.map expects 1 argument (closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "map")?;
+    let closure = &args[1];
+    let mut out: Vec<i64> = Vec::with_capacity(elems.len());
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let mapped = match result.kind {
+            NativeKind::Int64 => result.slot.as_i64(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<int>.map: closure returned kind {:?}; only Int64 \
+                     accepted in this round (ADR-006 §2.7.7 heterogeneous-\
+                     array surface for promotion to Float64 / heap arms)",
+                    other
+                )));
+            }
+        };
+        out.push(mapped);
+    }
+    Ok(int_array_result(out))
 }
 
-/// v2 filter for int arrays.
+/// `Vec<int>.filter(|x| ...)` — retain elements where the predicate
+/// returns `true`.
 pub(crate) fn handle_int_filter(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.filter"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.filter expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "filter")?;
+    let closure = &args[1];
+    let mut out: Vec<i64> = Vec::with_capacity(elems.len());
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let keep = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<int>.filter: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if keep {
+            out.push(v);
+        }
+    }
+    Ok(int_array_result(out))
 }
 
-/// v2 forEach for int arrays.
+/// `Vec<int>.forEach(|x| ...)` — invoke the closure on each element.
 pub(crate) fn handle_int_for_each(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.forEach"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.forEach expects 1 argument (closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "forEach")?;
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let _ = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }
 
-/// v2 reduce for int arrays.
+/// `Vec<int>.reduce(init, |acc, x| ...)` — fold from `init`. `args[0]` is
+/// the receiver, `args[1]` is the initial accumulator, `args[2]` the
+/// closure.
 pub(crate) fn handle_int_reduce(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.reduce"))
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.reduce expects 2 arguments (init, closure)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "reduce")?;
+    let closure = &args[2];
+    let mut acc = args[1].clone();
+    for v in elems {
+        let call_args = [acc.clone(), KindedSlot::from_int(v)];
+        acc = vm.call_value_immediate_nb(closure, &call_args, ctx.as_deref_mut())?;
+    }
+    Ok(acc)
 }
 
-/// v2 find for int arrays.
+/// `Vec<int>.find(|x| ...)` — first element where the predicate returns
+/// `true`, or the null sentinel.
 pub(crate) fn handle_int_find(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.find"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.find expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "find")?;
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<int>.find: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if hit {
+            return Ok(KindedSlot::from_int(v));
+        }
+    }
+    Ok(KindedSlot::none())
 }
 
-/// v2 some for int arrays.
+/// `Vec<int>.some(|x| ...)` — true if any element satisfies the predicate.
 pub(crate) fn handle_int_some(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.some"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.some expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "some")?;
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<int>.some: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if hit {
+            return Ok(KindedSlot::from_bool(true));
+        }
+    }
+    Ok(KindedSlot::from_bool(false))
 }
 
-/// v2 every for int arrays.
+/// `Vec<int>.every(|x| ...)` — true if all elements satisfy the predicate.
 pub(crate) fn handle_int_every(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(closure_callback_surface("Vec<int>.every"))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Vec<int>.every expects 1 argument (predicate)".into(),
+        ));
+    }
+    let arr = borrow_typed_array(&args[0])?;
+    let elems = snapshot_i64_elements(arr, "every")?;
+    let closure = &args[1];
+    for v in elems {
+        let arg = [KindedSlot::from_int(v)];
+        let result = vm.call_value_immediate_nb(closure, &arg, ctx.as_deref_mut())?;
+        let hit = match result.kind {
+            NativeKind::Bool => result.slot.as_bool(),
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "Vec<int>.every: predicate returned kind {:?}, \
+                     expected Bool",
+                    other
+                )));
+            }
+        };
+        if !hit {
+            return Ok(KindedSlot::from_bool(false));
+        }
+    }
+    Ok(KindedSlot::from_bool(true))
 }
 
 /// v2 toArray for int arrays.
