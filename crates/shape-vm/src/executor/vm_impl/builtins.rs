@@ -59,13 +59,32 @@ impl VirtualMachine {
     /// transfers ownership to the carrier. `KindedSlot::Drop` retires the
     /// share when the returned `Vec` goes out of scope.
     pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<KindedSlot>, VMError> {
-        // Top of stack: the arg count, pushed as a numeric constant by the
-        // compiler (`PushConst(Number(arg_count as f64))`). The count slot
-        // is inline-scalar (Float64-kinded), so dropping its share is a
-        // no-op — but we still go through `pop_kinded` for invariant
-        // discipline.
-        let (count_bits, _count_kind) = self.pop_kinded()?;
-        let count = f64::from_bits(count_bits) as usize;
+        // Top of stack: the arg count, pushed as a typed integer constant
+        // by the compiler (`PushConst(Int(arg_count as i64))`). The count
+        // slot is an integer-family inline scalar; `int_operand` dispatches
+        // per the §2.7.6 heterogeneous-kind body pattern (same shape as
+        // `op_call` / `op_call_value` use).
+        //
+        // Historical note (W17-make-closure): prior to the arg-count emit
+        // migration the compiler emitted `Number(arg_count as f64)` and
+        // this body decoded `f64::from_bits(count_bits) as usize`. That
+        // shape made `op_call` (which uses `int_operand`) reject the same
+        // arg-count slot, surfacing as the smoke-2 "Expected integer for
+        // arg count" failure. The fix landed here together with the
+        // call-site emit changes in `compiler/expressions/function_calls.rs`.
+        let (count_bits, count_kind) = self.pop_kinded()?;
+        let count_slot = KindedSlot::new(ValueSlot::from_raw(count_bits), count_kind);
+        let count = crate::executor::builtins::kind_coerce::int_operand(&count_slot)
+            .map_err(|_| {
+                VMError::RuntimeError(format!(
+                    "pop_builtin_args: arg-count slot must be integer-family, got kind {:?}",
+                    count_kind
+                ))
+            })? as usize;
+        // Drop the arg-count's share (inline scalar — no-op for integer
+        // kinds, but the discipline lives at the §2.7.7 parallel-kind
+        // boundary).
+        crate::executor::vm_impl::stack::drop_with_kind(count_bits, count_kind);
 
         let mut args: Vec<KindedSlot> = Vec::with_capacity(count);
         for _ in 0..count {

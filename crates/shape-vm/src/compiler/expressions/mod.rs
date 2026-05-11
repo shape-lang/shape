@@ -268,7 +268,7 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(before_result_local)),
         ));
-        let one_const = self.program.add_constant(Constant::Number(1.0));
+        let one_const = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const)),
@@ -293,7 +293,7 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(before_result_local)),
         ));
-        let one_const2 = self.program.add_constant(Constant::Number(1.0));
+        let one_const2 = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const2)),
@@ -522,7 +522,7 @@ impl BytecodeCompiler {
                     let before_arg_count = 1 + annotation.args.len() + 2;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(before_arg_count as f64));
+                        .add_constant(Constant::Int(before_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -590,7 +590,7 @@ impl BytecodeCompiler {
                     let after_arg_count = 1 + annotation.args.len() + 3;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(after_arg_count as f64));
+                        .add_constant(Constant::Int(after_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -710,7 +710,7 @@ impl BytecodeCompiler {
                     let before_arg_count = 1 + annotation.args.len() + 2;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(before_arg_count as f64));
+                        .add_constant(Constant::Int(before_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -790,7 +790,7 @@ impl BytecodeCompiler {
                     let after_arg_count = 1 + annotation.args.len() + 3;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(after_arg_count as f64));
+                        .add_constant(Constant::Int(after_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),

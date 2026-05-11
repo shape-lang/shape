@@ -548,7 +548,7 @@ impl BytecodeCompiler {
         // Push arg count and emit the builtin call
         let count_const = self
             .program
-            .add_constant(Constant::Number(arg_count as f64));
+            .add_constant(Constant::Int(arg_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count_const)),

@@ -138,7 +138,7 @@ impl BytecodeCompiler {
         self.compile_expr(left)?;
         self.compile_expr(right)?;
 
-        let arg_count = self.program.add_constant(Constant::Number(2.0));
+        let arg_count = self.program.add_constant(Constant::Int(2));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -208,7 +208,7 @@ impl BytecodeCompiler {
         self.compile_expr(left)?;
         self.compile_expr(right)?;
 
-        let arg_count = self.program.add_constant(Constant::Number(2.0));
+        let arg_count = self.program.add_constant(Constant::Int(2));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -284,7 +284,7 @@ impl BytecodeCompiler {
         self.compile_expr(left)?;
         self.compile_expr(right)?;
 
-        let arg_count = self.program.add_constant(Constant::Number(2.0));
+        let arg_count = self.program.add_constant(Constant::Int(2));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
