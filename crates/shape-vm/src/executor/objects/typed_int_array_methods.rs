@@ -175,6 +175,60 @@ pub fn sum(
     }
 }
 
+/// `arr.avg()` — arithmetic mean of all elements. Result kind `Float64`
+/// (mean of an integer array is a float; the empty-array form returns
+/// `NaN` per the v2_array_detect primitive contract).
+pub fn avg(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_i64(&view)?;
+    match v2_array_detect::avg_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<int>.avg: avg_elements returned None for I64 receiver".into(),
+        )),
+    }
+}
+
+/// `arr.min()` — minimum element. Result kind `Int64` for non-empty
+/// arrays; empty arrays push the `(0u64, Bool)` null/unit sentinel
+/// (matches the `pop`/`first`/`last` empty-receiver contract on this
+/// type).
+pub fn min(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_i64(&view)?;
+    match v2_array_detect::min_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<int>.min: min_elements returned None for I64 receiver".into(),
+        )),
+    }
+}
+
+/// `arr.max()` — maximum element. Same empty-receiver shape as
+/// [`min`].
+pub fn max(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_i64(&view)?;
+    match v2_array_detect::max_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<int>.max: max_elements returned None for I64 receiver".into(),
+        )),
+    }
+}
+
 /// `arr.first()` — first element, or the `(0u64, Bool)` null sentinel if
 /// empty.
 pub fn first(

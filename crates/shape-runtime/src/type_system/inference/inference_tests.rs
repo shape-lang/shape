@@ -1,7 +1,5 @@
 use super::*;
 
-use super::*;
-
 #[test]
 fn test_fallible_scope_tracking() {
     let mut engine = TypeInferenceEngine::new();

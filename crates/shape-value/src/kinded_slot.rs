@@ -525,7 +525,9 @@ impl Drop for KindedSlot {
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid
                     // (e.g. `from_char('a')` stores 97).
-                    HeapKind::Char => {}
+                    HeapKind::Char => {
+                        // No-op: inline-scalar payload.
+                    }
                     // Round 2.5b W7-closure-retain-parallel (ADR-006
                     // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
                     // Round 2.5 close `5fa4b19`): a
@@ -556,7 +558,9 @@ impl Drop for KindedSlot {
                     // §"Wave 6.5 / E-async migration" docstring and
                     // `printing.rs` `HeapKind::Future` arm. Same shape
                     // as `HeapKind::Char`.
-                    HeapKind::Future => {}
+                    HeapKind::Future => {
+                        // No-op: future-id inline scalar.
+                    }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): `SharedCell`-kinded `KindedSlot`s
                     // own one `Arc::into_raw(Arc<SharedCell>)` strong-
@@ -760,7 +764,9 @@ impl Clone for KindedSlot {
                     }
                     // Char: inline-scalar payload (codepoint bits). Clone
                     // is a no-op (Rust copies the slot bits below).
-                    HeapKind::Char => {}
+                    HeapKind::Char => {
+                        // No-op: inline-scalar payload.
+                    }
                     // Round 2.5b W7-closure-retain-parallel (ADR-006
                     // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
                     // Round 2.5 close `5fa4b19`): mirror of the Drop
@@ -779,7 +785,9 @@ impl Clone for KindedSlot {
                     // `Ptr(HeapKind::Future)` carries the future-id u64
                     // directly in `bits` — Rust copies the slot bits
                     // below; no refcount work. Mirror of the Drop arm.
-                    HeapKind::Future => {}
+                    HeapKind::Future => {
+                        // No-op: future-id inline scalar.
+                    }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): mirror of the Drop arm above. Bumps
                     // one `Arc<SharedCell>` strong-count share — the
