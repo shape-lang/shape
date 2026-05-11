@@ -12,9 +12,22 @@
 //! Forbidden patterns (CLAUDE.md "Forbidden Patterns" + playbook §4):
 //! the deleted dynamic-word runtime construction, the deleted raw-helper
 //! tag_bits dispatch, and the deleted Wave 6.0 transitional shim layer
-//! have all been migrated off this file. Cross-cluster cascades (write-path
-//! `clone_slots_with_update` / `op_set_field_typed`) are surfaced as
-//! `VMError::NotImplemented` with a SURFACE marker per playbook §7 #4.
+//! have all been migrated off this file.
+//!
+//! `op_set_field_typed` write-path was rebuilt by
+//! W17-typed-object-mutation (2026-05-11) on top of
+//! `TypedObjectStorage::write_slot_in_place` (the kinded in-place
+//! projection writer landed by W17-references-mutation `30b9ebf`,
+//! ADR-006 §2.7.13 / Q14). The legacy `clone_slots_with_update` shape
+//! is intentionally NOT resurrected — `Arc::make_mut` on a shared
+//! `Arc<TypedObjectStorage>` is fundamentally incompatible with the
+//! ref-projection invariant that prompted the kinded in-place writer
+//! (refcount > 1 by construction; the struct is intentionally not
+//! `Clone`). Remaining `NotImplemented(SURFACE)` sites in this file
+//! (`push_field_value` arms for impossible non-heap/heap-with-Any
+//! shapes; soundness gap when receiver kind says TypedObject but the
+//! HeapValue arm disagrees) are defensive surfaces for construction-
+//! side bugs, not migration cascades.
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
@@ -396,14 +409,21 @@ impl TypedObjectOps for super::VirtualMachine {
 
     /// Set field on typed object using precomputed field type tag.
     ///
-    /// SURFACE per playbook §7 REVISED #4 / §8 — write-path requires
-    /// rewriting `clone_slots_with_update` (`object_creation.rs`,
-    /// territory `D-obj-create`) to take kinded `(bits, kind)` instead
-    /// of the deleted dynamic-word reference, plus a kinded
-    /// `HeapValue::TypedObject` rebuild. Both are cross-cluster cascade
-    /// per playbook §8 surface-and-stop. Until those land, the write-
-    /// path is `NotImplemented(SURFACE)` rather than a Bool-default
-    /// forbidden-pattern workaround (CLAUDE.md "Forbidden Patterns").
+    /// W17-typed-object-mutation (2026-05-11) — write-path rebuild on
+    /// top of `TypedObjectStorage::write_slot_in_place` (the kinded
+    /// in-place projection writer added by W17-references-mutation close
+    /// `30b9ebf`, ADR-006 §2.7.13 / Q14). Mirror of the
+    /// `RefTarget::TypedField` arm in `write_ref_target`
+    /// (`variables/mod.rs:3100`) — same single-threaded VM contract,
+    /// same kind-invariance debug_assert, same heap_mask-driven
+    /// drop_with_kind on the prior occupant.
+    ///
+    /// Stack contract (per `assignment.rs:611-625` emit pattern):
+    /// pop value, pop receiver; mutate the receiver's slot in place;
+    /// push the (now-mutated) receiver back so `emit_nested_store_back`
+    /// can either store it back to a local/binding identifier or `Pop`
+    /// it for non-identifier roots. Schema-mismatch falls back through
+    /// the same name-based + IC lookup chain as `op_get_field_typed`.
     fn op_set_field_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let operand = instruction
             .operand
@@ -411,29 +431,367 @@ impl TypedObjectOps for super::VirtualMachine {
             .ok_or(VMError::InvalidOperand)?;
 
         let Operand::TypedField {
-            type_id: _,
-            field_idx: _,
-            field_type_tag: _,
+            type_id,
+            field_idx,
+            field_type_tag,
         } = operand
         else {
             return Err(VMError::InvalidOperand);
         };
 
-        // Drain the value + receiver shares before surfacing so the kind
-        // track stays balanced (refcount discipline ADR-006 §2.7.7 WB2.4).
+        // Pop value then receiver (LIFO; the compiler pushes receiver
+        // first per `assignment.rs:566`).
         let (value_bits, value_kind) = self.pop_kinded()?;
         let (recv_bits, recv_kind) = self.pop_kinded()?;
-        drop_with_kind(value_bits, value_kind);
-        drop_with_kind(recv_bits, recv_kind);
 
-        Err(VMError::NotImplemented(
-            "op_set_field_typed SURFACE: write-path requires kinded \
-             clone_slots_with_update + HeapValue::TypedObject(Arc<TypedObjectStorage>) \
-             rebuild — cross-cluster cascade with D-obj-create \
-             (playbook §8 surface-and-stop / §10 D-typed-obj-ops). \
-             ADR-006 §2.7.7 / Q10 — no Bool-default fallback per W-series \
-             defection-attractor."
-                .into(),
-        ))
+        // Validate receiver kind. Non-TypedObject receivers: drain shares
+        // and surface a TypeError. The Bool-sentinel fallback shape of
+        // `op_get_field_typed` is read-side only — write-side type
+        // confusion must error rather than silently no-op.
+        if recv_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+            drop_with_kind(value_bits, value_kind);
+            drop_with_kind(recv_bits, recv_kind);
+            return Err(VMError::TypeError {
+                expected: "TypedObject receiver",
+                got: "non-TypedObject kind",
+            });
+        }
+
+        if recv_bits == 0 {
+            drop_with_kind(value_bits, value_kind);
+            return Err(VMError::RuntimeError(
+                "op_set_field_typed: null TypedObject receiver".to_string(),
+            ));
+        }
+
+        // SAFETY: kind says `Ptr(HeapKind::TypedObject)`, so `recv_bits`
+        // is `Arc::into_raw::<TypedObjectStorage>` and the popped slot
+        // owns one strong-count share. Reconstruct, mutate in place,
+        // re-into_raw to transfer the same share onto the result stack
+        // slot (no refcount change).
+        let storage_arc: std::sync::Arc<shape_value::heap_value::TypedObjectStorage> =
+            unsafe { std::sync::Arc::from_raw(recv_bits as *const _) };
+
+        let result = self.write_typed_object_field(
+            &storage_arc,
+            *type_id,
+            *field_idx,
+            *field_type_tag,
+            value_bits,
+            value_kind,
+        );
+
+        // Re-into_raw before result handling so the stack push transfers
+        // the receiver share back regardless of which branch fired.
+        let recv_bits_back = std::sync::Arc::into_raw(storage_arc) as u64;
+        match result {
+            Ok(()) => self.push_kinded(recv_bits_back, recv_kind),
+            Err(e) => {
+                // On error the value was already dropped inside
+                // write_typed_object_field; release the receiver share.
+                drop_with_kind(recv_bits_back, recv_kind);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl super::VirtualMachine {
+    /// Write `value_bits`/`value_kind` into `storage`'s field at the
+    /// operand-specified location. Mirrors the schema-match / IC /
+    /// name-fallback chain in `op_get_field_typed`. On success the
+    /// `value_bits` share is transferred to the storage's slot and the
+    /// prior occupant's share is released via `drop_with_kind`. On error
+    /// the `value_bits` share is dropped before return.
+    ///
+    /// ADR-006 §2.7.13 / Q14 in-place write via
+    /// `TypedObjectStorage::write_slot_in_place`.
+    fn write_typed_object_field(
+        &mut self,
+        storage: &std::sync::Arc<shape_value::heap_value::TypedObjectStorage>,
+        type_id: u16,
+        field_idx: u16,
+        field_type_tag: u16,
+        value_bits: u64,
+        value_kind: NativeKind,
+    ) -> Result<(), VMError> {
+        let schema_id = storage.schema_id;
+        let field_count = storage.slots.len();
+
+        // Schema-match path: direct field index from the operand's
+        // pre-baked offset.
+        if schema_id == type_id as u64 {
+            let idx = field_idx as usize;
+            if idx >= field_count {
+                drop_with_kind(value_bits, value_kind);
+                return Err(VMError::RuntimeError(format!(
+                    "op_set_field_typed: field_idx {} out of bounds \
+                     (slot count {})",
+                    idx, field_count
+                )));
+            }
+            return write_field_at_idx(storage, idx, field_type_tag, value_bits, value_kind);
+        }
+
+        // Schema-mismatch path: name-based lookup via IC + megamorphic
+        // cache + registry. Mirror of `op_get_field_typed`'s structure.
+        let ic_ip = self.ip;
+
+        // IC fast path: monomorphic per-schema cache hit.
+        if let Some(hit) =
+            crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, schema_id)
+        {
+            let src_idx = hit.field_idx as usize;
+            if src_idx < field_count {
+                return write_field_at_idx(
+                    storage,
+                    src_idx,
+                    hit.field_type_tag,
+                    value_bits,
+                    value_kind,
+                );
+            }
+        }
+
+        // Resolve target field name + source-side index from the registry.
+        let resolved = {
+            let target_schema = self.program.type_schema_registry.get_by_id(type_id as u32);
+            let source_schema = self.program.type_schema_registry.get_by_id(schema_id as u32);
+            match (target_schema, source_schema) {
+                (Some(target), Some(source)) => {
+                    if let Some(target_field) = target.field_by_index(field_idx) {
+                        let field_name = target_field.name.clone();
+                        if let Some(src_field_idx) = source.field_index(&field_name) {
+                            let tag = source
+                                .field_by_index(src_field_idx)
+                                .map(|f| field_type_to_tag(&f.field_type))
+                                .unwrap_or(0);
+                            Some((field_name, src_field_idx, tag))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        // Megamorphic cache fast path.
+        if let Some((ref fname, _, _)) = resolved {
+            if let Some(hit) = crate::executor::ic_fast_paths::megamorphic_property_check(
+                self, ic_ip, schema_id, fname,
+            ) {
+                let src_idx = hit.field_idx as usize;
+                if src_idx < field_count {
+                    return write_field_at_idx(
+                        storage,
+                        src_idx,
+                        hit.field_type_tag,
+                        value_bits,
+                        value_kind,
+                    );
+                }
+            }
+        }
+
+        // Full name-based fallback.
+        if let Some((field_name, src_field_idx, tag)) = resolved {
+            let src_idx = src_field_idx as usize;
+            if src_idx < field_count {
+                if let Some(fv) = self.current_feedback_vector() {
+                    fv.record_property(
+                        ic_ip,
+                        schema_id,
+                        src_field_idx,
+                        tag,
+                        crate::feedback::RECEIVER_TYPED_OBJECT,
+                    );
+                }
+                crate::executor::ic_fast_paths::megamorphic_property_insert(
+                    self,
+                    schema_id,
+                    &field_name,
+                    src_field_idx,
+                    tag,
+                );
+                return write_field_at_idx(storage, src_idx, tag, value_bits, value_kind);
+            }
+        }
+
+        // Field not found on either side: drop the value share and
+        // surface UndefinedProperty rather than silently no-op'ing.
+        drop_with_kind(value_bits, value_kind);
+        Err(VMError::RuntimeError(format!(
+            "op_set_field_typed: field index {} on schema {} not found \
+             on receiver schema {}",
+            field_idx, type_id, schema_id,
+        )))
+    }
+}
+
+/// Common in-place writer: validate the field's kind matches the popped
+/// value's kind (post-proof §2.7.5.1 contract), write through
+/// `write_slot_in_place`, drop the prior occupant's share.
+fn write_field_at_idx(
+    storage: &shape_value::heap_value::TypedObjectStorage,
+    idx: usize,
+    field_type_tag: u16,
+    value_bits: u64,
+    value_kind: NativeKind,
+) -> Result<(), VMError> {
+    debug_assert!(idx < storage.slots.len());
+    debug_assert!(idx < storage.field_kinds.len());
+
+    let stored_kind = storage.field_kinds[idx];
+
+    // Kind invariance check (release form). The post-proof contract
+    // forbids mid-life kind changes for typed fields; if a divergent
+    // kind reaches here it's a compiler-emit bug worth surfacing.
+    // FIELD_TAG_ANY / UNKNOWN are the only operand tags that may
+    // legitimately carry a kind not statically resolvable in the
+    // operand — for those we accept the stored kind as canonical.
+    if value_kind != stored_kind
+        && field_type_tag != FIELD_TAG_ANY
+        && field_type_tag != FIELD_TAG_UNKNOWN
+    {
+        // Tag-based equivalence: width-integer fields all store as
+        // Int64; FIELD_TAG_TIMESTAMP also routes through Int64. Accept
+        // those equivalences without surfacing.
+        let kind_compatible_with_tag = match field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => matches!(
+                value_kind,
+                NativeKind::Int64
+                    | NativeKind::Int8
+                    | NativeKind::Int16
+                    | NativeKind::Int32
+                    | NativeKind::UInt8
+                    | NativeKind::UInt16
+                    | NativeKind::UInt32
+                    | NativeKind::UInt64
+            ),
+            FIELD_TAG_F64 => value_kind == NativeKind::Float64,
+            FIELD_TAG_BOOL => value_kind == NativeKind::Bool,
+            FIELD_TAG_STRING => matches!(
+                value_kind,
+                NativeKind::String | NativeKind::Ptr(HeapKind::String)
+            ),
+            _ => value_kind == stored_kind,
+        };
+        if !kind_compatible_with_tag {
+            drop_with_kind(value_bits, value_kind);
+            return Err(VMError::TypeError {
+                expected: "value kind matching field schema",
+                got: "mismatched kind",
+            });
+        }
+    }
+
+    // Pre-read prior bits for the write barrier; the in-place writer
+    // returns the same value so we record it before the call.
+    let prior_bits = storage.slots[idx].raw();
+    crate::memory::write_barrier_slot(prior_bits, value_bits);
+
+    // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
+    // single-threaded VM, no aliased `&mut ValueSlot` outstanding (this
+    // function holds only `&storage`; the in-place writer reaches the
+    // slot through `*const ValueSlot` cast), kind invariance verified
+    // above against the storage's `field_kinds` track. `value_bits`
+    // ownership (one strong-count share for heap kinds) transfers to
+    // the slot; the returned `_returned_prior` is the same bits we
+    // pre-read.
+    let _returned_prior = unsafe { storage.write_slot_in_place(idx, value_bits) };
+    debug_assert_eq!(
+        _returned_prior, prior_bits,
+        "op_set_field_typed: write_slot_in_place prior_bits mismatch — \
+         concurrent write detected? ADR-006 §2.7.13 / Q14",
+    );
+
+    // Release the prior occupant's share via the kind-aware dispatch
+    // table (§2.7.7 WB2.4). For inline scalar fields this is a no-op.
+    drop_with_kind(prior_bits, stored_kind);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Instruction, OpCode};
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_runtime::type_schema::{FieldType, TypeSchema};
+    use shape_value::heap_value::TypedObjectStorage;
+    use std::sync::Arc;
+
+    /// `op_set_field_typed` on a schema-match path rotates the field's
+    /// slot through `write_slot_in_place` and pushes the (mutated)
+    /// receiver back. W17-typed-object-mutation fill (2026-05-11).
+    #[test]
+    fn set_field_typed_schema_match_writes_int_field() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let schema = TypeSchema::new(
+            "Probe".to_string(),
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        let slots = vec![ValueSlot::from_raw(1u64), ValueSlot::from_raw(2u64)];
+        let storage = TypedObjectStorage::new(
+            schema_id as u64,
+            slots.into_boxed_slice(),
+            0,
+            Arc::from(vec![NativeKind::Int64, NativeKind::Int64].into_boxed_slice()),
+        );
+        let storage_arc = Arc::new(storage);
+        let recv_bits = Arc::into_raw(storage_arc) as u64;
+
+        // Stack: [recv, value]; operand: TypedField { type_id = schema_id, field_idx = 1, tag = I64 }
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        vm.push_kinded(99u64, NativeKind::Int64).unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 1,
+            field_type_tag: FIELD_TAG_I64,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr).unwrap();
+
+        // op_set_field_typed pushes the (mutated) receiver back.
+        let (obj_bits_back, obj_kind_back) = vm.pop_kinded().unwrap();
+        assert_eq!(obj_kind_back, NativeKind::Ptr(HeapKind::TypedObject));
+        // Recover and verify field y now reads 99.
+        let storage_back: Arc<TypedObjectStorage> =
+            unsafe { Arc::from_raw(obj_bits_back as *const _) };
+        assert_eq!(storage_back.slots[0].raw(), 1u64);
+        assert_eq!(storage_back.slots[1].raw(), 99u64);
+        drop(storage_back);
+    }
+
+    /// `op_set_field_typed` on a non-TypedObject receiver returns a
+    /// TypeError after draining shares. W17-typed-object-mutation
+    /// (2026-05-11).
+    #[test]
+    fn set_field_typed_non_typed_object_receiver_errors() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Push an Int64 "receiver" — wrong kind for SetFieldTyped.
+        vm.push_kinded(0u64, NativeKind::Int64).unwrap();
+        vm.push_kinded(1u64, NativeKind::Int64).unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: 0,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_I64,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        let err = vm.op_set_field_typed(&instr).unwrap_err();
+        assert!(matches!(err, VMError::TypeError { .. }));
     }
 }
