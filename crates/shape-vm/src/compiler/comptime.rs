@@ -5,12 +5,17 @@
 
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
+use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
-    AnnotationHandlerParam, Expr, FunctionDef, Item, ObjectTypeField, Program, Span, Statement,
-    TypeAnnotation,
+    AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
+    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind,
+    VariableDecl,
 };
-use shape_ast::error::Result;
-use shape_value::KindedSlot;
+use shape_ast::error::{Result, ShapeError};
+use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
+use shape_value::{KindedSlot, NativeKind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// (name, arity, target_method, return_type)
 const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
@@ -495,101 +500,344 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
 ) -> Result<ComptimeExecutionResult> {
-    let _ = (
-        handler_body,
-        handler_params,
-        target_value,
-        annotation_args,
-        annotation_def_param_names,
-        const_bindings,
-        comptime_helpers,
+    if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
+        return Err(ShapeError::RuntimeError {
+            message: "comptime annotation handlers support at most one variadic parameter"
+                .to_string(),
+            location: None,
+        });
+    }
+    if let Some((idx, _)) = handler_params
+        .iter()
+        .enumerate()
+        .find(|(_, p)| p.is_variadic)
+    {
+        if idx != handler_params.len().saturating_sub(1) {
+            return Err(ShapeError::RuntimeError {
+                message: "variadic comptime annotation handler parameter must be last".to_string(),
+                location: None,
+            });
+        }
+    }
+
+    let params: Vec<FunctionParameter> = handler_params
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| FunctionParameter {
+            pattern: DestructurePattern::Identifier(p.name.clone(), Span::DUMMY),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: if idx == 0 {
+                Some(comptime_target_param_type())
+            } else if idx == 1 {
+                Some(TypeAnnotation::Object(Vec::new()))
+            } else {
+                None
+            },
+            default_value: None,
+        })
+        .collect();
+
+    let mut call_args: Vec<Expr> = Vec::with_capacity(handler_params.len());
+    let mut ann_idx = 0usize;
+    for (idx, param) in handler_params.iter().enumerate() {
+        if idx == 0 {
+            call_args.push(Expr::Identifier("__target_arg__".to_string(), Span::DUMMY));
+            continue;
+        }
+        if idx == 1 {
+            call_args.push(Expr::Identifier("__ctx_arg__".to_string(), Span::DUMMY));
+            continue;
+        }
+        if param.is_variadic {
+            call_args.push(Expr::Array(
+                annotation_args.get(ann_idx..).unwrap_or_default().to_vec(),
+                Span::DUMMY,
+            ));
+            ann_idx = annotation_args.len();
+            continue;
+        }
+        let Some(arg) = annotation_args.get(ann_idx) else {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "missing annotation argument for comptime handler parameter '{}'",
+                    param.name
+                ),
+                location: None,
+            });
+        };
+        call_args.push(arg.clone());
+        ann_idx += 1;
+    }
+    let extra_handler_params = handler_params.len().saturating_sub(2);
+    if extra_handler_params > 0
+        && ann_idx < annotation_args.len()
+        && !handler_params.iter().any(|p| p.is_variadic)
+    {
+        return Err(ShapeError::RuntimeError {
+            message: format!(
+                "too many annotation arguments: expected {}, got {}",
+                ann_idx,
+                annotation_args.len()
+            ),
+            location: None,
+        });
+    }
+
+    // If the handler only has (target, ctx) but the annotation definition has params,
+    // inject them as extra function params so the handler body can reference them by name.
+    let mut params = params;
+    if extra_handler_params == 0 && !annotation_def_param_names.is_empty() {
+        for (i, def_param_name) in annotation_def_param_names.iter().enumerate() {
+            if let Some(arg) = annotation_args.get(i) {
+                params.push(FunctionParameter {
+                    pattern: DestructurePattern::Identifier(def_param_name.clone(), Span::DUMMY),
+                    is_const: false,
+                    is_reference: false,
+                    is_mut_reference: false,
+                    is_out: false,
+                    type_annotation: None,
+                    default_value: None,
+                });
+                call_args.push(arg.clone());
+            }
+        }
+    }
+
+    // Keep comptime ctx structured so annotations can grow into richer APIs.
+    let ctx_nb = shape_runtime::type_schema::typed_object_from_pairs(&[]);
+
+    // Wrap the handler body in a function that takes the target parameter.
+    let func_name = "__comptime_handler_fn__".to_string();
+    let func_def = FunctionDef {
+        name: func_name.clone(),
+        name_span: Span::DUMMY,
+        declaring_module_path: None,
+        doc_comment: None,
+        params,
+        return_type: None,
+        body: vec![Statement::Return(Some(handler_body.clone()), Span::DUMMY)],
+        type_params: Some(Vec::new()),
+        annotations: Vec::new(),
+        where_clause: None,
+        is_async: false,
+        is_comptime: false,
+    };
+
+    let mut items = comptime_builtin_forwarders();
+    items.extend(
+        comptime_helpers
+            .iter()
+            .cloned()
+            .map(|helper| Item::Function(helper, Span::DUMMY)),
+    );
+    for (name, value) in const_bindings {
+        let expr = nb_to_expr(value, Span::DUMMY).map_err(|message| ShapeError::RuntimeError {
+            message: format!(
+                "failed to materialize comptime const binding '{}': {}",
+                name, message
+            ),
+            location: None,
+        })?;
+        items.push(Item::VariableDecl(
+            VariableDecl {
+                kind: VarKind::Const,
+                is_mut: false,
+                pattern: DestructurePattern::Identifier(name.clone(), Span::DUMMY),
+                type_annotation: None,
+                value: Some(expr),
+                ownership: Default::default(),
+            },
+            Span::DUMMY,
+        ));
+    }
+    items.push(Item::Function(func_def, Span::DUMMY));
+    items.push(Item::Expression(
+        Expr::FunctionCall {
+            name: func_name,
+            args: call_args,
+            named_args: Vec::new(),
+            span: Span::DUMMY,
+        },
+        Span::DUMMY,
+    ));
+    let program = Program {
+        items,
+        docs: shape_ast::ast::ProgramDocs::default(),
+    };
+
+    compile_and_execute_comptime_program(
+        &program,
+        vec![
+            "__target_arg__".to_string(),
+            "__ctx_arg__".to_string(),
+            "__comptime__".to_string(),
+        ],
+        vec![
+            ("__target_arg__".to_string(), target_value),
+            ("__ctx_arg__".to_string(), ctx_nb),
+        ],
         extensions,
         trait_impl_keys,
         known_type_symbols,
-        comptime_target_param_type as fn() -> TypeAnnotation,
-        compile_and_execute_comptime_program
-            as fn(
-                &Program,
-                Vec<String>,
-                Vec<(String, KindedSlot)>,
-                &[shape_runtime::module_exports::ModuleExports],
-                std::collections::HashSet<String>,
-                std::collections::HashSet<String>,
-            ) -> Result<ComptimeExecutionResult>,
-    );
-    todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+    )
 }
 
 /// Run compiled bytecode on a fresh VM with extensions and pre-set
 /// module-binding variables.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous body
-/// instantiated a `VirtualMachine`, called the deleted
-/// `set_module_binding_by_name_nb(&str, ValueWord)` per pre-set binding,
-/// invoked `vm.execute()` (which itself returns a synthesized `ValueWord`
-/// via the forbidden `synthesize_value_word_from_raw`), and finally ran
-/// `normalize_comptime_value` over the result to rebuild the comptime VM's
-/// TypedObjects against the module-binding anonymous schema registry. All
-/// three steps depend on the deleted dynamic-word value carrier:
-///
-/// - The kinded set-module-binding API takes `(slot, kind)` and threads
-///   the kind into the parallel module-binding kind track per ADR-006
-///   §2.7.7 / §2.7.8 (cell-storage kind-awareness — Q10).
-/// - The kinded execute path returns `(bits, kind)` from `vm.execute_raw()`
-///   plus `program_top_level_return_kind()`. The synthesis step is
-///   forbidden by playbook §1 and `synthesize_value_word_from_raw` is on
-///   the deletion list.
-/// - The TypedObject normalization walks the comptime VM's
-///   `Arc<TypedObjectStorage>` per ADR-006 §2.3 and rebuilds against the
-///   outer registry, dispatching on `FieldType` per slot. That helper is
-///   part of the comptime-rebuild surface.
-///
-/// Until Phase 2c lands, this function panics rather than running a
-/// placeholder VM execution that would silently corrupt the kind-tracked
-/// stack/binding state. The signature is preserved so the call chain
-/// continues to type-check.
+/// Phase-2c rebuild (C2-comptime-rebuild): the kinded path threads each
+/// pre-set binding into the §2.7.8 / Q10 parallel module-binding kind
+/// track via `module_binding_write_kinded(index, bits, kind)` after
+/// resolving the binding name through `program.module_binding_names`.
+/// `vm.execute(None)` returns a `KindedSlot` directly (ADR-006 §2.7 / Q7)
+/// — no synthesis layer.
 fn execute_in_runtime_with_module_bindings(
     bytecode: BytecodeProgram,
     extensions: &[shape_runtime::module_exports::ModuleExports],
     module_bindings: Vec<(String, KindedSlot)>,
 ) -> Result<ComptimeExecutionResult> {
-    let _ = (bytecode, extensions, module_bindings);
-    todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+    let run = |module_bindings: Vec<(String, KindedSlot)>| -> Result<ComptimeExecutionResult> {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+
+        for ext in extensions {
+            vm.register_extension(ext.clone());
+        }
+        vm.populate_module_objects();
+
+        // Pre-set module bindings (e.g. `__target_arg__`, `__ctx_arg__`).
+        // The name → index lookup uses `program.module_binding_names`;
+        // unknown names are dropped (the compile-side
+        // `register_known_bindings` is responsible for inserting names
+        // before compilation).
+        for (name, value) in module_bindings {
+            let idx = vm
+                .program
+                .module_binding_names
+                .iter()
+                .position(|n| n == &name);
+            match idx {
+                Some(i) => {
+                    let bits = value.slot().raw();
+                    let kind = value.kind();
+                    // Transfer the share into the binding storage; the
+                    // input slot's Drop must not double-release.
+                    std::mem::forget(value);
+                    vm.module_binding_write_kinded(i, bits, kind);
+                }
+                None => {
+                    // Drop the input slot's share (no consumer).
+                    drop(value);
+                }
+            }
+        }
+
+        // 5-second timeout watchdog — bounded comptime budget protects
+        // the host from runaway user code (same shape as the pre-stub
+        // body).
+        let interrupt = Arc::new(AtomicU8::new(0));
+        vm.set_interrupt(interrupt.clone());
+        let timeout_interrupt = interrupt.clone();
+        let _timer_handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            timeout_interrupt.store(1, Ordering::SeqCst);
+        });
+
+        super::comptime_builtins::clear_comptime_directives();
+        let value = vm.execute(None).map_err(|e| ShapeError::RuntimeError {
+            message: format!("Comptime handler execution failed: {}", e),
+            location: None,
+        })?;
+        let directives = super::comptime_builtins::take_comptime_directives();
+
+        Ok(ComptimeExecutionResult { value, directives })
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        run(module_bindings)
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!("Failed to create tokio runtime for comptime: {}", e),
+                location: None,
+            })?;
+        rt.block_on(async { run(module_bindings) })
+    }
 }
 
 /// Convert a comptime execution result to an AST Literal for compilation.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous body
-/// dispatched on the deleted `tag_bits::*` discriminator (`is_tagged`,
-/// `get_tag`, `TAG_INT`, `TAG_BOOL`, `TAG_NONE`, `TAG_UNIT`, `TAG_HEAP`)
-/// reading from `nb.raw_bits()`, plus heap fallbacks via `as_heap_ref` to
-/// inspect `RareHeapData::TypeAnnotation`. After the strict-typing
-/// bulldozer, dispatch is `match slot.kind { NativeKind::* => … }` for
-/// scalars + `slot.as_heap_value()` + `HeapValue::*` match for heap arms
-/// (per ADR-006 §2.7.6 / Q8 — heap dispatch goes through HeapValue, never
-/// per-variant accessors). The kind-side discriminator is the parallel
-/// `Vec<NativeKind>` track per ADR-006 §2.7.7 / Q9.
-///
-/// Used to replace `Expr::Comptime` nodes with their evaluated literal
-/// values. Until Phase 2c lands, this panics rather than emitting a
-/// placeholder Literal that would silently drop type-annotation comptime
-/// returns (the cold-path `RareHeapData::TypeAnnotation` arm — needed for
-/// `@ai`-style structured-output type queries).
+/// Phase-2c rebuild (C2-comptime-rebuild): dispatch is
+/// `match slot.kind { NativeKind::* => … }` for scalars + `slot.as_heap_value()`
+/// + `HeapValue::*` match for heap arms per ADR-006 §2.7.6 / Q8. Heap arms
+/// without a single-literal representation fall through to a
+/// `Literal::String` Debug rendering of the kind (best-effort — the
+/// upstream caller `expressions/mod.rs:1246` tries `nb_to_expr` first and
+/// only falls through to this when the value reduces to a single literal).
 pub(crate) fn vmvalue_to_literal(value: &KindedSlot) -> shape_ast::ast::Literal {
-    let _ = value;
-    todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+    nb_to_literal(value)
 }
 
-/// Convert a comptime execution result to an AST Literal for compilation.
+/// Convert a comptime KindedSlot to an AST Literal for compilation.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.4.** Same surface as
-/// `vmvalue_to_literal`. Used by comptime for-loop unrolling where
-/// elements are already individual KindedSlots (extracted from the
-/// `HeapValue::TypedArray(Arc<TypedArrayData>)` per-element shape per
-/// ADR-006 §2.3).
+/// Same surface as `vmvalue_to_literal`. Used by comptime for-loop
+/// unrolling where elements are already individual KindedSlots
+/// (extracted from the `HeapValue::TypedArray(Arc<TypedArrayData>)`
+/// per-element shape per ADR-006 §2.3).
 pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
-    let _ = nb;
-    todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+    use shape_ast::ast::Literal;
+
+    // Scalar dispatch on NativeKind first (ADR-006 §2.7.7 / Q9 — kind
+    // is the single source of truth for the slot's interpretation).
+    match nb.kind() {
+        NativeKind::Int64 => return Literal::Int(nb.as_i64().unwrap_or(0)),
+        NativeKind::Float64 => return Literal::Number(nb.as_f64().unwrap_or(0.0)),
+        NativeKind::Bool => {
+            // KindedSlot::none() is Bool-kinded zero bits by convention
+            // (`kinded_slot.rs:262`); treat zero-bits as None at the
+            // literal boundary.
+            if nb.raw() == 0 {
+                return Literal::None;
+            }
+            return Literal::Bool(nb.as_bool().unwrap_or(false));
+        }
+        NativeKind::String => {
+            if let Some(s) = nb.as_str() {
+                return Literal::String(s.to_string());
+            }
+            return Literal::None;
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            if let Some(c) = nb.as_char() {
+                return Literal::Char(c);
+            }
+            return Literal::None;
+        }
+        _ => {}
+    }
+
+    // Heap-arm dispatch via `slot.as_heap_value()` + `HeapValue::*`
+    // match per ADR-006 §2.7.6 / Q8.
+    let slot_for_hv = nb.slot();
+    let bits = slot_for_hv.raw();
+    if bits == 0 {
+        return Literal::None;
+    }
+    let hv = slot_for_hv.as_heap_value();
+    match hv {
+        HeapValue::String(s) => Literal::String((**s).clone()),
+        HeapValue::Decimal(d) => Literal::Decimal(**d),
+        HeapValue::BigInt(i) => Literal::Int(**i),
+        HeapValue::Char(c) => Literal::Char(*c),
+        // Complex types (TypedArray / TypedObject / HashMap / etc.) cannot
+        // be represented as a single literal — last-resort Debug string.
+        _ => Literal::String(format!("{}", hv)),
+    }
 }
 
 /// Public entry point for converting a comptime KindedSlot to an AST
@@ -603,29 +851,320 @@ pub(crate) fn nb_to_expr_public(
 
 /// Convert a comptime KindedSlot to an AST expression.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous body
-/// walked the deleted ValueWord shape (`as_any_array`, `as_decimal`,
-/// `as_str`, `as_i64`, `as_f64`, `as_bool`, `is_none`, `is_unit`,
-/// `as_heap_ref`) plus the deleted `typed_object_to_hashmap_nb` helper to
-/// reconstruct `Expr::Array`/`Expr::Object`/`Expr::Literal`. After the
-/// strict-typing bulldozer:
-///
-/// - Dispatch is `match slot.kind { NativeKind::Int64 => … }` per ADR-006
-///   §2.7.7 (Q9), with heap-arm fall-through via `slot.as_heap_value()` +
-///   `HeapValue::*` match (Q8).
-/// - The TypedObject readback (`typed_object_to_hashmap_nb` replacement)
-///   walks `Arc<TypedObjectStorage>` per ADR-006 §2.3, dispatching on
-///   each field's `FieldType` to extract a kinded slot per slot index.
-/// - The `HeapValue::TypedArray(Arc<TypedArrayData>)` arm replaces
-///   `as_any_array` + `view.to_generic()`; element extraction reads the
-///   typed buffer directly per `TypedArrayData::element_kind()`.
-///
-/// Until Phase 2c lands, this panics rather than emitting a placeholder
-/// `Expr` shape that would silently drop array/object structure on
-/// comptime substitution.
+/// Phase-2c rebuild (C2-comptime-rebuild): dispatch is
+/// `match slot.kind { NativeKind::* => … }` for scalars + `slot.as_heap_value()`
+/// + `HeapValue::*` match for heap arms per ADR-006 §2.7.6 / Q8. The
+/// TypedArray walk reads each element via the kinded per-variant pattern
+/// from `array_aggregation::element_kinded` (ADR-005 §1 single-discriminator
+/// — dispatch through `HeapValue` match in the `TypedArrayData::HeapValue`
+/// arm). The TypedObject walk reads slots via the schema's `FieldType` to
+/// recover per-field NativeKind; `FieldType::Any` fields surface explicitly
+/// because slot bits without kind metadata cannot be safely re-typed at
+/// the literal-readback layer (the comptime predeclared schemas use Any).
 fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> {
-    let _ = (nb, span);
-    todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+    // Scalar dispatch first (ADR-006 §2.7.7 / Q9).
+    match nb.kind() {
+        NativeKind::Int64 => {
+            return Ok(Expr::Literal(
+                shape_ast::ast::Literal::Int(nb.as_i64().unwrap_or(0)),
+                span,
+            ));
+        }
+        NativeKind::Float64 => {
+            return Ok(Expr::Literal(
+                shape_ast::ast::Literal::Number(nb.as_f64().unwrap_or(0.0)),
+                span,
+            ));
+        }
+        NativeKind::Bool => {
+            if nb.raw() == 0 {
+                // KindedSlot::none() convention: Bool-kinded zero bits ≡
+                // the unit/none sentinel.
+                return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+            }
+            return Ok(Expr::Literal(
+                shape_ast::ast::Literal::Bool(nb.as_bool().unwrap_or(false)),
+                span,
+            ));
+        }
+        NativeKind::String => {
+            if let Some(s) = nb.as_str() {
+                return Ok(Expr::Literal(
+                    shape_ast::ast::Literal::String(s.to_string()),
+                    span,
+                ));
+            }
+            return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            if let Some(c) = nb.as_char() {
+                return Ok(Expr::Literal(shape_ast::ast::Literal::Char(c), span));
+            }
+            return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+        }
+        _ => {}
+    }
+
+    // Heap-arm dispatch via `slot.as_heap_value()` + `HeapValue` match
+    // (ADR-006 §2.7.6 / Q8). Null bits ≡ None at the literal boundary.
+    let slot_for_hv = nb.slot();
+    let bits = slot_for_hv.raw();
+    if bits == 0 {
+        return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+    }
+    let hv = slot_for_hv.as_heap_value();
+    match hv {
+        HeapValue::String(s) => Ok(Expr::Literal(
+            shape_ast::ast::Literal::String((**s).clone()),
+            span,
+        )),
+        HeapValue::Decimal(d) => Ok(Expr::Literal(shape_ast::ast::Literal::Decimal(**d), span)),
+        HeapValue::BigInt(i) => Ok(Expr::Literal(shape_ast::ast::Literal::Int(**i), span)),
+        HeapValue::Char(c) => Ok(Expr::Literal(shape_ast::ast::Literal::Char(*c), span)),
+        HeapValue::TypedArray(arr) => {
+            let mut elements = Vec::new();
+            for i in 0..typed_array_len(arr.as_ref()) {
+                let element = typed_array_element_kinded(arr.as_ref(), i)?;
+                elements.push(nb_to_expr(&element, span)?);
+            }
+            Ok(Expr::Array(elements, span))
+        }
+        HeapValue::TypedObject(storage) => {
+            // Read fields back via the schema's `FieldType`. The schema
+            // is looked up by id from the ambient registry. Field
+            // ordering follows the schema's declared order.
+            let schema_id = storage.schema_id as u32;
+            let schema = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                .ok_or_else(|| {
+                    format!(
+                        "TypedObject schema id {} not found while materializing \
+                         comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
+                         (schema rebind deferred)",
+                        schema_id
+                    )
+                })?;
+            let mut entries = Vec::with_capacity(schema.fields.len());
+            for field_def in schema.fields.iter() {
+                let idx = field_def.index as usize;
+                if idx >= storage.slots.len() {
+                    return Err(format!(
+                        "TypedObject slot index {} out of bounds (len={}) — \
+                         schema/storage mismatch",
+                        idx,
+                        storage.slots.len()
+                    ));
+                }
+                let slot = storage.slots[idx];
+                let kind = field_kind_for_readback(&field_def.field_type)?;
+                let kinded_slot = read_typed_object_field(slot, kind, storage.heap_mask, idx);
+                let value_expr = nb_to_expr(&kinded_slot, span)?;
+                // `kinded_slot` Drop runs at scope exit and retires its
+                // share (heap arms used `Arc::increment_strong_count` in
+                // the readback — see `read_typed_object_field`).
+                entries.push(ObjectEntry::Field {
+                    key: field_def.name.clone(),
+                    value: value_expr,
+                    type_annotation: None,
+                });
+            }
+            Ok(Expr::Object(entries, span))
+        }
+        // Cold fallthrough — closures, futures, data tables, etc. are
+        // not valid comptime literals.
+        other => Err(format!(
+            "unsupported comptime literal value: HeapValue::{:?}",
+            other.kind()
+        )),
+    }
+}
+
+/// Length of a `TypedArrayData` regardless of variant.
+///
+/// Mirror of `array_aggregation::typed_array_len` (kept private there).
+fn typed_array_len(arr: &TypedArrayData) -> usize {
+    use shape_value::heap_value::TypedArrayData::*;
+    match arr {
+        I64(b) => b.data.len(),
+        F64(b) => b.data.len(),
+        Bool(b) => b.data.len(),
+        I8(b) => b.data.len(),
+        I16(b) => b.data.len(),
+        I32(b) => b.data.len(),
+        U8(b) => b.data.len(),
+        U16(b) => b.data.len(),
+        U32(b) => b.data.len(),
+        U64(b) => b.data.len(),
+        F32(b) => b.data.len(),
+        String(b) => b.data.len(),
+        // TypedArrayData::HeapValue is the unmonomorphized carrier; see
+        // ADR-006 §2.7.24 Q25.A — the W17-typed-carrier-monomorphization
+        // sub-cluster (parallel-dispatched with C2) deletes this arm and
+        // replaces it with specialized per-type variants. Comptime
+        // territory uses it for arrays of TypedObjects (annotation
+        // metadata round-trip). If Q25.A lands first, the readback
+        // rewires onto the specialized arm. Flagged in C2 close report.
+        HeapValue(b) => b.data.len(),
+        Matrix(m) => m.data.len(),
+        FloatSlice { len, .. } => *len as usize,
+    }
+}
+
+/// Read element `idx` of a `TypedArrayData` as a fresh `KindedSlot`,
+/// owning one strong-count share for heap-bearing element kinds.
+///
+/// Mirror of `array_aggregation::element_kinded`; kept local so the
+/// comptime layer doesn't pull in executor-tier visibility. Per-element
+/// kind is uniform per variant (ADR-006 §2.3 / §2.7.24 Q25.A sibling
+/// principle for arrays).
+fn typed_array_element_kinded(
+    arr: &TypedArrayData,
+    idx: usize,
+) -> std::result::Result<KindedSlot, String> {
+    use shape_value::heap_value::TypedArrayData::*;
+    let len = typed_array_len(arr);
+    if idx >= len {
+        return Err(format!("array index {} out of bounds (len={})", idx, len));
+    }
+    Ok(match arr {
+        I64(b) => KindedSlot::from_int(b.data[idx]),
+        F64(b) => KindedSlot::from_number(b.data[idx]),
+        Bool(b) => KindedSlot::from_bool(b.data[idx] != 0),
+        I8(b) => KindedSlot::from_int(b.data[idx] as i64),
+        I16(b) => KindedSlot::from_int(b.data[idx] as i64),
+        I32(b) => KindedSlot::from_int(b.data[idx] as i64),
+        U8(b) => KindedSlot::from_int(b.data[idx] as i64),
+        U16(b) => KindedSlot::from_int(b.data[idx] as i64),
+        U32(b) => KindedSlot::from_int(b.data[idx] as i64),
+        U64(b) => KindedSlot::from_int(b.data[idx] as i64),
+        F32(b) => KindedSlot::from_number(b.data[idx] as f64),
+        FloatSlice { parent, offset, .. } => {
+            KindedSlot::from_number(parent.data[*offset as usize + idx])
+        }
+        String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
+        HeapValue(b) => {
+            // Per-element dispatch through HeapValue (ADR-005 §1
+            // single-discriminator). Mirror of
+            // `array_aggregation::element_kinded`'s `TypedArrayData::HeapValue`
+            // arm.
+            match b.data[idx].as_ref() {
+                shape_value::heap_value::HeapValue::String(s) => {
+                    KindedSlot::from_string_arc(Arc::clone(s))
+                }
+                shape_value::heap_value::HeapValue::TypedArray(a) => {
+                    KindedSlot::from_typed_array(Arc::clone(a))
+                }
+                shape_value::heap_value::HeapValue::TypedObject(o) => {
+                    KindedSlot::from_typed_object(Arc::clone(o))
+                }
+                shape_value::heap_value::HeapValue::HashMap(m) => {
+                    KindedSlot::from_hashmap(Arc::clone(m))
+                }
+                shape_value::heap_value::HeapValue::Decimal(d) => {
+                    KindedSlot::from_decimal(Arc::clone(d))
+                }
+                shape_value::heap_value::HeapValue::BigInt(bi) => {
+                    KindedSlot::from_bigint(Arc::clone(bi))
+                }
+                shape_value::heap_value::HeapValue::Char(c) => KindedSlot::from_char(*c),
+                other => {
+                    return Err(format!(
+                        "comptime literal: heterogeneous array element \
+                         kind {:?} has no kinded per-element constructor \
+                         — ADR-006 §2.7.4 / §2.7.6 Q8 follow-up",
+                        other.kind()
+                    ));
+                }
+            }
+        }
+        Matrix(_) => {
+            return Err("comptime literal: Matrix arrays not yet supported".to_string());
+        }
+    })
+}
+
+/// Project a `FieldType` to the `NativeKind` used to interpret slot bits
+/// at TypedObject readback.
+///
+/// `FieldType::Any` is rejected — comptime predeclared schemas use Any,
+/// and slot bits without kind metadata cannot be safely re-typed at the
+/// literal-readback layer. The caller surfaces this as a structured
+/// error so the comptime substitution fails fast rather than emitting
+/// a placeholder.
+fn field_kind_for_readback(
+    field_type: &shape_runtime::type_schema::FieldType,
+) -> std::result::Result<NativeKind, String> {
+    field_type.to_native_kind().map_err(|_| {
+        format!(
+            "comptime literal: field type {:?} has no kinded projection \
+             (FieldType::Any cannot be read back without kind metadata — \
+             ADR-006 §2.7.4 follow-up to land schema rebind / predeclared \
+             schema kind-narrowing for comptime objects)",
+            field_type
+        )
+    })
+}
+
+/// Read a `TypedObjectStorage` slot at index `idx` as an owned
+/// `KindedSlot`, bumping the heap refcount when applicable so the
+/// returned slot owns one independent strong-count share.
+///
+/// `heap_mask`'s bit `idx` is consulted to decide whether the slot's
+/// bits are a heap pointer that needs retain-on-read, mirroring the
+/// `stack_read_kinded` retain discipline (ADR-006 §2.7.7 / Q9 — kind
+/// drives clone/drop dispatch).
+fn read_typed_object_field(
+    slot: shape_value::ValueSlot,
+    kind: NativeKind,
+    heap_mask: u64,
+    idx: usize,
+) -> KindedSlot {
+    let is_heap_slot = idx < 64 && (heap_mask >> idx) & 1 == 1;
+    let bits = slot.raw();
+    if !is_heap_slot {
+        return KindedSlot::new(slot, kind);
+    }
+    if bits == 0 {
+        return KindedSlot::none();
+    }
+    // Heap-bearing slot: bump the underlying Arc's strong count so the
+    // returned KindedSlot owns one independent share. Same typed
+    // `Arc::increment_strong_count::<T>` dispatch the
+    // `TypedObjectStorage::Drop` impl uses for
+    // `Arc::decrement_strong_count::<T>`.
+    unsafe {
+        match kind {
+            NativeKind::String => {
+                Arc::increment_strong_count(bits as *const String);
+            }
+            NativeKind::Ptr(hk) => match hk {
+                HeapKind::String => {
+                    Arc::increment_strong_count(bits as *const String);
+                }
+                HeapKind::TypedArray => {
+                    Arc::increment_strong_count(bits as *const TypedArrayData);
+                }
+                HeapKind::TypedObject => {
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::TypedObjectStorage,
+                    );
+                }
+                HeapKind::Decimal => {
+                    Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
+                }
+                HeapKind::BigInt => {
+                    Arc::increment_strong_count(bits as *const i64);
+                }
+                _ => {
+                    // Other heap kinds aren't produced by the comptime
+                    // predeclared schemas at landing; surface rather
+                    // than fabricate a refcount bump.
+                    return KindedSlot::new(slot, kind);
+                }
+            },
+            _ => {}
+        }
+    }
+    KindedSlot::new(slot, kind)
 }
 
 // Phase-2c rebuild pending — see ADR-006 §2.4. The comptime test suite
