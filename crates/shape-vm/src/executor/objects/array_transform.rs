@@ -260,6 +260,19 @@ pub(super) fn typed_array_arc_from_kinded(
     }
 }
 
+/// W17-typed-carrier-bundle-A checkpoint 2/4: thin wrapper around
+/// `TypedArrayData::build_specialized_from_heap_arcs` that returns a
+/// `VMError` (shape-vm's error type) rather than a `String`. The shared
+/// dispatch logic lives in shape-value so shape-runtime callers
+/// (marshal.rs / json.rs / xml.rs) can reuse it without depending on
+/// shape-vm.
+pub(crate) fn build_specialized_array_from_heap_arcs(
+    elems: Vec<std::sync::Arc<shape_value::heap_value::HeapValue>>,
+) -> Result<TypedArrayData, VMError> {
+    TypedArrayData::build_specialized_from_heap_arcs(elems)
+        .map_err(VMError::RuntimeError)
+}
+
 /// Per-variant element count for `TypedArrayData`.
 pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
     match arr {

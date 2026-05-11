@@ -17,7 +17,7 @@ pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_value::KindedSlot;
-use shape_value::heap_value::{HeapValue, TypedArrayData};
+use shape_value::heap_value::{HeapValue, TypedArrayData, TypedObjectStorage};
 use shape_value::typed_buffer::TypedBuffer;
 use std::sync::Arc;
 
@@ -259,8 +259,13 @@ impl ComptimeTarget {
         // carrier-monomorphization sub-cluster will swap this for the
         // specialized `TypedArrayData::TypedObject` arm per
         // ADR-006 §2.7.24 Q25.A; flagged in the C2 close report).
+        // W17-typed-carrier-bundle-A checkpoint 2/4: comptime_target.rs::nb_object_array
+        // now writes the specialized `TypedArrayData::TypedObject` arm
+        // per ADR-006 §2.7.24 Q25.A. Each element is unwrapped from
+        // `Arc<HeapValue::TypedObject>` to the inner `Arc<TypedObjectStorage>` —
+        // the storage typed-Arc shape mirrors Q25.A's spec.
         let nb_object_array = |objs: Vec<KindedSlot>| -> KindedSlot {
-            let mut elems: Vec<Arc<HeapValue>> = Vec::with_capacity(objs.len());
+            let mut elems: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(objs.len());
             for obj in objs {
                 let obj_slot = obj.slot();
                 let hv = obj_slot.as_heap_value();
@@ -273,13 +278,13 @@ impl ComptimeTarget {
                     ),
                 };
                 // `obj` Drop will retire its strong-count share; we
-                // cloned the inner Arc above, so the HeapValue wrapper
-                // owns one independent share.
+                // cloned the inner Arc above, so the buffer owns one
+                // independent share per element.
                 drop(obj);
-                elems.push(Arc::new(HeapValue::TypedObject(storage)));
+                elems.push(storage);
             }
             let buf = TypedBuffer::from_vec(elems);
-            KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(Arc::new(buf))))
+            KindedSlot::from_typed_array(Arc::new(TypedArrayData::TypedObject(Arc::new(buf))))
         };
 
         // fields: array of {name, type, annotations, optional} TypedObjects

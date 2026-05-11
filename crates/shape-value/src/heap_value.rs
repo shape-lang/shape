@@ -2757,6 +2757,105 @@ pub enum TypedArrayData {
 }
 
 impl TypedArrayData {
+    /// W17-typed-carrier-bundle-A checkpoint 2/4: build a strict-typed
+    /// `TypedArrayData` variant from a `Vec<Arc<HeapValue>>` of uniform-arm
+    /// elements per ADR-006 §2.7.24 Q25.A. Dispatch on the first element's
+    /// `HeapValue` arm and require all subsequent elements to match. The
+    /// resulting variant carries the element kind at the variant level —
+    /// no parallel kind track, no polymorphic catch-all. Heterogeneous-arm
+    /// inputs surface a structured error.
+    ///
+    /// Returns the variant directly (no Arc wrapper). Callers wrap via
+    /// `Arc::new(...)` then `KindedSlot::from_typed_array(...)` /
+    /// `HeapValue::TypedArray(...)` per their carrier needs.
+    pub fn build_specialized_from_heap_arcs(
+        elems: Vec<Arc<HeapValue>>,
+    ) -> Result<Self, String> {
+        use crate::typed_buffer::TypedBuffer;
+        if elems.is_empty() {
+            let buf: TypedBuffer<Arc<TypedObjectStorage>> = TypedBuffer::from_vec(Vec::new());
+            return Ok(TypedArrayData::TypedObject(Arc::new(buf)));
+        }
+        let first = &elems[0];
+        match first.as_ref() {
+            HeapValue::String(_) => {
+                let mut data: Vec<Arc<String>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::String(s) => data.push(Arc::clone(s)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected String, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::Decimal(_) => {
+                let mut data: Vec<Arc<rust_decimal::Decimal>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::Decimal(d) => data.push(Arc::clone(d)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected Decimal, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::BigInt(_) => {
+                let mut data: Vec<Arc<i64>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::BigInt(b) => data.push(Arc::clone(b)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected BigInt, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::TypedObject(_) => {
+                let mut data: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::TypedObject(s) => data.push(Arc::clone(s)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected TypedObject, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::Char(_) => {
+                let mut data: Vec<char> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::Char(c) => data.push(*c),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected Char, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            other => Err(format!(
+                "TypedArrayData::build_specialized: HeapValue arm {:?} not yet \
+                 supported post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
+                other.kind()
+            )),
+        }
+    }
+
     #[inline]
     pub fn type_name(&self) -> &'static str {
         match self {

@@ -281,8 +281,21 @@ pub(crate) fn handle_to_mat(
         let hv = HeapValue::TypedArray(Arc::new(inner));
         row_arcs.push(Arc::new(hv));
     }
-    let outer_buf = TypedBuffer::from_vec(row_arcs);
-    let outer = TypedArrayData::HeapValue(Arc::new(outer_buf));
+    // W17-typed-carrier-bundle-A checkpoint 2/4: Array<Array<f64>> as a
+    // value-of-array-of-array carrier has no specialized variant in
+    // ADR-006 §2.7.24 Q25.A's spec list. The dispatcher will surface on
+    // the nested-TypedArray HeapValue arm. Out-of-territory follow-up:
+    // either add `TypedArrayData::TypedArray` (Array<Array<T>>) to Q25.A's
+    // list, or route DataTable.toMat through a Matrix carrier directly.
+    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(row_arcs)
+        .map_err(|err| {
+            VMError::NotImplemented(format!(
+                "DataTable.toMat: {} — ADR-006 §2.7.24 Q25.A spec list \
+                 lacks a `TypedArray`-element variant; out-of-territory \
+                 follow-up.",
+                err
+            ))
+        })?;
     Ok(KindedSlot::from_typed_array(Arc::new(outer)))
 }
 
@@ -329,10 +342,19 @@ pub(crate) fn handle_rows(
         let hv = HeapValue::TableView(Arc::new(tv));
         row_arcs.push(Arc::new(hv));
     }
-    let buf = TypedBuffer::from_vec(row_arcs);
-    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(
-        Arc::new(buf),
-    ))))
+    // W17-typed-carrier-bundle-A checkpoint 2/4: `Array<TableView>` has
+    // no specialized variant in ADR-006 §2.7.24 Q25.A's spec list. The
+    // dispatcher will surface on the TableView heap arm. Out-of-territory
+    // follow-up: add `TypedArrayData::TableView` (Array<RowView | ColumnRef>).
+    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(row_arcs)
+        .map_err(|err| {
+            VMError::NotImplemented(format!(
+                "DataTable.rows: {} — ADR-006 §2.7.24 Q25.A spec list lacks \
+                 a `TableView`-element variant; out-of-territory follow-up.",
+                err
+            ))
+        })?;
+    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
 }
 
 /// `dt.columnsRef()` — `Array<ColumnRef>`.
@@ -354,10 +376,17 @@ pub(crate) fn handle_columns_ref(
         let hv = HeapValue::TableView(Arc::new(tv));
         col_arcs.push(Arc::new(hv));
     }
-    let buf = TypedBuffer::from_vec(col_arcs);
-    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(
-        Arc::new(buf),
-    ))))
+    // W17-typed-carrier-bundle-A checkpoint 2/4: same TableView-not-in-Q25.A
+    // gap as `handle_rows` above. Surface-and-stop with cite.
+    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(col_arcs)
+        .map_err(|err| {
+            VMError::NotImplemented(format!(
+                "DataTable.columnsRef: {} — ADR-006 §2.7.24 Q25.A spec list \
+                 lacks a `TableView`-element variant; out-of-territory follow-up.",
+                err
+            ))
+        })?;
+    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
 }
 
 // ── argument coercion helpers ───────────────────────────────────────────────

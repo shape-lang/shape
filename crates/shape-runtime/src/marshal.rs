@@ -512,19 +512,30 @@ impl ToSlot for Vec<Arc<String>> {
 }
 
 /// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::HeapValue`.
+/// slot whose payload is a strict-typed `TypedArrayData` variant per
+/// ADR-006 §2.7.24 Q25.A.
 ///
-/// Phase 2d Array cluster (2026-05-07). Used by the dispatcher's
-/// `ConcreteReturn::ArrayHeapValue → slot push` step. Element-kind
-/// homogeneity is the body's responsibility.
+/// W17-typed-carrier-bundle-A checkpoint 2/4: routed through
+/// `TypedArrayData::build_specialized_from_heap_arcs` — the per-element-kind
+/// dispatcher in shape-value. The prior polymorphic `TypedArrayData::HeapValue`
+/// carrier is replaced by the matching specialized variant; element-kind
+/// uniformity is enforced (heterogeneous-arm inputs panic with a structured
+/// message — would indicate a stdlib body returning a malformed mixed-kind
+/// array, which is a real bug, not a soft error to silently widen).
 impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let buf = shape_value::TypedBuffer::from_vec(self);
-        let data = Arc::new(shape_value::TypedArrayData::HeapValue(Arc::new(buf)));
-        let hv = shape_value::HeapValue::TypedArray(data);
+        let data = shape_value::TypedArrayData::build_specialized_from_heap_arcs(self)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "marshal::ToSlot<Vec<Arc<HeapValue>>>: {} (stdlib body \
+                     returned a malformed mixed-kind Vec<Arc<HeapValue>>)",
+                    err
+                )
+            });
+        let hv = shape_value::HeapValue::TypedArray(Arc::new(data));
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }

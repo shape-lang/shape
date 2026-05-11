@@ -126,12 +126,19 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             true,
         ),
         serde_json::Value::Array(arr) => {
+            // W17-typed-carrier-bundle-A checkpoint 2/4: every JSON array
+            // element is a `Json` enum-TypedObject built by
+            // `build_json_enum_heap_value` — so the array always lowers to
+            // `TypedArrayData::TypedObject` per ADR-006 §2.7.24 Q25.A. The
+            // prior polymorphic `TypedArrayData::HeapValue` carrier is gone.
             let elements: Vec<Arc<HeapValue>> = arr
                 .into_iter()
                 .map(|v| Arc::new(build_json_enum_heap_value(v, json_schema_id)))
                 .collect();
-            let buf = shape_value::TypedBuffer::from_vec(elements);
-            let data = Arc::new(shape_value::TypedArrayData::HeapValue(Arc::new(buf)));
+            let data = Arc::new(
+                shape_value::TypedArrayData::build_specialized_from_heap_arcs(elements)
+                    .expect("json: build_json_enum_heap_value always returns TypedObject"),
+            );
             (JSON_VARIANT_ARRAY, ValueSlot::from_typed_array(data), true)
         }
         serde_json::Value::Object(map) => {

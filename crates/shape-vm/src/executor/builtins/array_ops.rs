@@ -357,9 +357,16 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
     Ok(typed_array_element(arr.as_ref(), len - 1).unwrap_or_else(KindedSlot::none))
 }
 
-/// `zip(a, b)` — pairs elements of two arrays into nested 2-element arrays.
-/// Result element shape is `Vec<heap>` (heterogeneous), since pairs may
-/// contain mixed-kind elements depending on the source arrays.
+/// `zip(a, b)` — pairs elements of two arrays into `Pair<A,B>` TypedObjects.
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
+/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
+/// each pair is constructed as a TypedObject with fields `{first, second}`
+/// rather than the prior 2-element `[a, b]` heterogeneous array. User code
+/// reads `pair.first` / `pair.second` rather than `pair[0]` / `pair[1]` —
+/// breaking change for stdlib + tests. Shape's tuple representation
+/// lowers to TypedObject (`closure_layout.rs:843`) — no distinct tuple
+/// runtime carrier; named fields are the right shape.
 pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("zip() requires 2 arguments"));
@@ -389,18 +396,29 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
     };
     let n = len_a.min(len_b);
 
-    let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    let mut pair_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+        Vec::with_capacity(n);
     for i in 0..n {
         let xa = typed_array_element(a, i).unwrap_or_else(KindedSlot::none);
         let xb = typed_array_element(b, i).unwrap_or_else(KindedSlot::none);
-        let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-            slot_to_heap_arc(&xa)?,
-            slot_to_heap_arc(&xb)?,
-        ])));
-        pairs.push(Arc::new(HeapValue::TypedArray(Arc::new(inner))));
+        let pair_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
+            ("first", xa),
+            ("second", xb),
+        ]);
+        match pair_slot.slot.as_heap_value() {
+            HeapValue::TypedObject(s) => pair_storages.push(Arc::clone(s)),
+            other => {
+                return Err(type_error(format!(
+                    "zip: typed_object_from_pairs returned non-TypedObject: {:?}",
+                    other.kind()
+                )))
+            }
+        }
+        drop(pair_slot);
     }
-    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(pairs)));
-    Ok(typed_array_to_slot(outer))
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(pair_storages))),
+    )))
 }
 
 /// `Array.filled(size, value)` — produce an array of `size` repeats of `value`.
@@ -440,10 +458,43 @@ pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedS
             };
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(vec![s; size])))
         }
-        _ => {
-            // Heterogeneous fallback: HeapValue-element array.
-            let hv = slot_to_heap_arc(value)?;
-            TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![hv; size])))
+        // W17-typed-carrier-bundle-A checkpoint 2/4: heap-kinded value
+        // dispatches to the specialized variant per §2.7.24 Q25.A. Each
+        // arm holds a single Arc cloned `size` times — no HeapValue
+        // catch-all carrier. The element kind is uniform per variant.
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let storage = match value.slot.as_heap_value() {
+                HeapValue::TypedObject(s) => Arc::clone(s),
+                _ => return Err(type_error("KindedSlot kind=Ptr(TypedObject) heap arm mismatched")),
+            };
+            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(vec![storage; size])))
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let d = match value.slot.as_heap_value() {
+                HeapValue::Decimal(d) => Arc::clone(d),
+                _ => return Err(type_error("KindedSlot kind=Ptr(Decimal) heap arm mismatched")),
+            };
+            TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(vec![d; size])))
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let b = match value.slot.as_heap_value() {
+                HeapValue::BigInt(b) => Arc::clone(b),
+                _ => return Err(type_error("KindedSlot kind=Ptr(BigInt) heap arm mismatched")),
+            };
+            TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(vec![b; size])))
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            let c = value.slot.as_char().ok_or_else(|| {
+                type_error("KindedSlot kind=Ptr(Char) but slot bits decode failed")
+            })?;
+            TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(vec![c; size])))
+        }
+        other => {
+            return Err(type_error(format!(
+                "Array.filled() element kind {:?} not supported \
+                 post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
+                other
+            )))
         }
     };
     Ok(typed_array_to_slot(new_arr))

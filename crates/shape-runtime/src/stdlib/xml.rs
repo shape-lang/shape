@@ -76,15 +76,28 @@ impl ElementData {
             Arc::new("attributes".to_string()),
             Arc::new("children".to_string()),
         ];
+        // W17-typed-carrier-bundle-A checkpoint 2/4: `Array<HashMap>`
+        // (each child is `into_heap_value` producing a HashMap) has no
+        // specialized variant in ADR-006 §2.7.24 Q25.A's spec list. The
+        // dispatcher surfaces; for now we route through it so the body
+        // compiles post-Q25.A deletion. Out-of-territory follow-up: refactor
+        // xml.parse to build per-child TypedObject schemas (name/attrs/text/
+        // children) so the array lowers to `TypedArrayData::TypedObject`.
+        let children_array_data = shape_value::TypedArrayData::build_specialized_from_heap_arcs(
+            children_arc,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "xml.parse: {} — ADR-006 §2.7.24 Q25.A spec list lacks a \
+                 `HashMap`-element variant; out-of-territory follow-up. \
+                 Refactor xml.parse to per-child TypedObject schemas.",
+                err
+            )
+        });
         let mut values: Vec<Arc<HeapValue>> = vec![
             Arc::new(HeapValue::String(Arc::new(self.name))),
             Arc::new(HeapValue::HashMap(Arc::new(attrs_data))),
-            {
-                let data = Arc::new(TypedArrayData::HeapValue(Arc::new(
-                    TypedBuffer::from_vec(children_arc),
-                )));
-                Arc::new(HeapValue::TypedArray(data))
-            },
+            Arc::new(HeapValue::TypedArray(Arc::new(children_array_data))),
         ];
         if let Some(text) = self.text {
             keys.push(Arc::new("text".to_string()));

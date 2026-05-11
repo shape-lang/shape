@@ -332,23 +332,43 @@ pub fn v2_to_array(
     build_entries_array(&args[0])
 }
 
-/// Shared body for `entries()` / `toArray()`. Builds the per-entry
-/// 2-element inner arrays + the outer `TypedArrayData::HeapValue` wrapper.
+/// Shared body for `entries()` / `toArray()`. Builds per-entry
+/// `Entry<K,V>` TypedObjects + the outer `TypedArrayData::TypedObject` wrapper.
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
+/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
+/// each entry is constructed as a TypedObject with fields `{key, value}`.
+/// User code reads `entry.key` / `entry.value` rather than `entry[0]` /
+/// `entry[1]` — breaking change for stdlib + tests.
 fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
     let map = as_hashmap(receiver)?;
     let n = map.len();
-    let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    let mut entry_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+        Vec::with_capacity(n);
     for i in 0..n {
         let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
         let value_arc: Arc<HeapValue> = map.values.value_at(i);
-        let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-            Arc::new(HeapValue::String(key_arc)),
-            value_arc,
-        ])));
-        pairs.push(Arc::new(HeapValue::TypedArray(Arc::new(inner))));
+        let key_slot = KindedSlot::from_string_arc(key_arc);
+        let value_slot = heap_value_arc_to_slot(&value_arc);
+        let entry_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
+            ("key", key_slot),
+            ("value", value_slot),
+        ]);
+        match entry_slot.slot.as_heap_value() {
+            HeapValue::TypedObject(storage) => entry_storages.push(Arc::clone(storage)),
+            other => {
+                return Err(type_error(format!(
+                    "HashMap.entries: typed_object_from_pairs returned non-TypedObject: {:?}",
+                    other.kind()
+                )))
+            }
+        }
+        drop(entry_slot);
     }
-    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(pairs)));
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let buf = TypedBuffer::from_vec(entry_storages);
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(buf)),
+    )))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
