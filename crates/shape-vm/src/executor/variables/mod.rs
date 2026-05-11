@@ -3670,10 +3670,6 @@ fn typed_array_element_kind(
         TypedArrayData::String(_) => NativeKind::String,
         // Variants without a single statically-sourceable scalar
         // element kind. Caller surfaces (no fabrication per §2.7.7 #9).
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::FloatSlice { .. }
         | TypedArrayData::Matrix(_) => return None,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
@@ -3786,10 +3782,6 @@ fn typed_array_read_index_raw(
             // bump the strong-count for the pushed slot.
             raw
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::FloatSlice { .. }
         | TypedArrayData::Matrix(_) => {
             return Err(VMError::NotImplemented(

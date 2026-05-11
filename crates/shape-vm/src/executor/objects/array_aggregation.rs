@@ -86,10 +86,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
@@ -191,10 +187,6 @@ fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMErro
             len: _,
         } => KindedSlot::from_number(parent.data[*offset as usize + idx]),
         TypedArrayData::String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(_) => {
             return Err(VMError::NotImplemented(
                 "Array.reduce/count(predicate): Matrix element extraction \
@@ -339,11 +331,11 @@ pub(crate) fn handle_sum_v2(
             Ok(KindedSlot::from_number(s))
         }
         // Decimal/BigInt arrays are not yet a TypedArrayData variant —
-        // would need the `TypedArrayData::HeapValue` heterogeneous arm
+        // would need the `the-deleted-heterogeneous-element-carrier` heterogeneous arm
         // and per-element kind metadata (the same Wave-10 surface that
         // `flatten` flags). Surface explicitly.
         _ => Err(VMError::NotImplemented(
-            "sum: Decimal/BigInt array variants need TypedArrayData::HeapValue \
+            "sum: Decimal/BigInt array variants need the-deleted-heterogeneous-element-carrier \
              per-element kind metadata — Wave-10 / Phase-2c reentry"
                 .to_string(),
         )),
@@ -389,7 +381,7 @@ pub(crate) fn handle_min_v2(
                 Ok(KindedSlot::from_number(s))
             }
             _ => Err(VMError::NotImplemented(
-                "min: Decimal/BigInt arrays need TypedArrayData::HeapValue \
+                "min: Decimal/BigInt arrays need the-deleted-heterogeneous-element-carrier \
                  per-element kind metadata — Wave-10 / Phase-2c reentry"
                     .to_string(),
             )),
@@ -419,7 +411,7 @@ pub(crate) fn handle_max_v2(
                 Ok(KindedSlot::from_number(s))
             }
             _ => Err(VMError::NotImplemented(
-                "max: Decimal/BigInt arrays need TypedArrayData::HeapValue \
+                "max: Decimal/BigInt arrays need the-deleted-heterogeneous-element-carrier \
                  per-element kind metadata — Wave-10 / Phase-2c reentry"
                     .to_string(),
             )),

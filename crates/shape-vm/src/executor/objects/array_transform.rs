@@ -30,7 +30,7 @@
 //! - `concat`: cross-variant concat (e.g. `[i64...].concat([f64...])`)
 //!   is ambiguous under strict typing — no implicit promotion exists.
 //!   Same-variant concat is implemented; cross-variant surfaces.
-//! - `flatten` requires `TypedArrayData::HeapValue` per-element kind
+//! - `flatten` requires `the-deleted-heterogeneous-element-carrier` per-element kind
 //!   metadata to reclassify each entry as scalar-or-nested-array. The
 //!   single-level `FloatSlice` fast-path is implemented; the general
 //!   nested-array case surfaces.
@@ -290,14 +290,10 @@ pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::String(b) => b.data.len(),
         // W17-typed-carrier-bundle-A checkpoint 3/4: HeapValue arm body is
         // structurally unreachable post-§2.7.24 Q25.A — no construction
-        // site produces a `TypedArrayData::HeapValue` anywhere in the
+        // site produces a `the-deleted-heterogeneous-element-carrier` anywhere in the
         // workspace as of checkpoint 2 (verified via rg). Body becomes
         // unreachable!() with the structural-unreachability cite.
         // checkpoint 4 deletes the arm entirely.
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers; checkpoint 2 migrated all sites."
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // §2.7.24 Q25.A specialized arms — checkpoint 3 wires real bodies.
@@ -475,11 +471,6 @@ fn slice_typed_array(
                 TypedBuffer::from_vec(sliced),
             ))))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (slice on TypedArrayData::HeapValue — no construction site \
-             produces one anywhere in the workspace post-checkpoint 2)"
-        ),
         TypedArrayData::FloatSlice {
             parent,
             offset,
@@ -669,11 +660,6 @@ fn concat_typed_array(
                 TypedBuffer::from_vec(out),
             ))))
         }
-        (TypedArrayData::HeapValue(_), TypedArrayData::HeapValue(_)) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (concat on TypedArrayData::HeapValue — no construction site \
-             produces one anywhere in the workspace post-checkpoint 2)"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // same-variant arms. Per-element-kind buffers concat by extending
         // their typed data slices.
@@ -864,11 +850,6 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
             Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
         }
         TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (element_kinded on TypedArrayData::HeapValue — no \
-             construction site produces one post-checkpoint 2)"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms — each builds a `KindedSlot` of the variant's element type.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
@@ -1043,11 +1024,6 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
                 AlignedTypedBuffer::from_aligned(aligned),
             ))))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (project_indices on TypedArrayData::HeapValue — no \
-             construction site produces one post-checkpoint 2)"
-        ),
         TypedArrayData::Matrix(_) => {
             Err(VMError::NotImplemented(format!(
                 "filter: {} variant — SURFACE: projecting a Matrix to a \
@@ -1199,7 +1175,7 @@ pub(super) fn collect_homogeneous_results(
 ///
 /// Heterogeneous-kind result fallback + heap-element receivers surface
 /// per `collect_homogeneous_results` / `element_kinded` (ADR-006 §2.7.4
-/// per-element kind metadata gap on `TypedArrayData::HeapValue`).
+/// per-element kind metadata gap on `the-deleted-heterogeneous-element-carrier`).
 pub(crate) fn handle_map_v2(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -1539,11 +1515,6 @@ fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
                 AlignedTypedBuffer::from_aligned(aligned),
             ))))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (sort on TypedArrayData::HeapValue — no construction site \
-             produces one post-checkpoint 2)"
-        ),
         TypedArrayData::Matrix(_) => {
             Err(VMError::NotImplemented(format!(
                 "sort: {} variant — SURFACE: row-major matrix needs a \
@@ -1691,7 +1662,7 @@ pub(crate) fn handle_skip_v2(
 /// `arr.flatten()` — single-level flatten. Implemented for the
 /// `FloatSlice` fast-path (re-materialize the parent's float region into
 /// a fresh `F64`). The general case (HeapValue array of nested arrays)
-/// needs `TypedArrayData::HeapValue` per-element kind metadata to
+/// needs `the-deleted-heterogeneous-element-carrier` per-element kind metadata to
 /// reclassify each entry; surface that path explicitly.
 pub(crate) fn handle_flatten_v2(
     _vm: &mut VirtualMachine,
@@ -1746,11 +1717,6 @@ pub(crate) fn handle_flatten_v2(
                 NativeKind::Ptr(HeapKind::TypedArray),
             ))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (flatten on TypedArrayData::HeapValue — no construction site \
-             produces one post-checkpoint 2)"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms — flatten over uniform-element arrays is identity (the
         // array isn't nested at the element level). Same shape as the

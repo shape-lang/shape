@@ -105,10 +105,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): new
         // §2.7.24 Q25.A specialized arms — element count via the
         // inner typed-buffer's len(). No construction site for these

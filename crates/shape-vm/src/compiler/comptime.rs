@@ -856,7 +856,7 @@ pub(crate) fn nb_to_expr_public(
 /// + `HeapValue::*` match for heap arms per ADR-006 §2.7.6 / Q8. The
 /// TypedArray walk reads each element via the kinded per-variant pattern
 /// from `array_aggregation::element_kinded` (ADR-005 §1 single-discriminator
-/// — dispatch through `HeapValue` match in the `TypedArrayData::HeapValue`
+/// — dispatch through `HeapValue` match in the `the-deleted-heterogeneous-element-carrier`
 /// arm). The TypedObject walk reads slots via the schema's `FieldType` to
 /// recover per-field NativeKind; `FieldType::Any` fields surface explicitly
 /// because slot bits without kind metadata cannot be safely re-typed at
@@ -996,10 +996,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         U64(b) => b.data.len(),
         F32(b) => b.data.len(),
         String(b) => b.data.len(),
-        HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         Matrix(m) => m.data.len(),
         FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
@@ -1047,10 +1043,6 @@ fn typed_array_element_kinded(
             KindedSlot::from_number(parent.data[*offset as usize + idx])
         }
         String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         Matrix(_) => {
             return Err("comptime literal: Matrix arrays not yet supported".to_string());
         }

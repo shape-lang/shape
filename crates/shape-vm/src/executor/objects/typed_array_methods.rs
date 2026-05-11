@@ -286,10 +286,6 @@ pub fn v2_len(
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.

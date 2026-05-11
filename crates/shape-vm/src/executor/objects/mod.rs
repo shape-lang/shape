@@ -535,10 +535,6 @@ impl VirtualMachine {
                                 method_registry::MATRIX_METHODS.get(method_name).copied()
                             }
                             TypedArrayData::String(_) => None,
-                            TypedArrayData::HeapValue(_) => unreachable!(
-                                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue \
-                                 has no production callers post-checkpoint 2"
-                            ),
                             // W17-typed-carrier-bundle-A checkpoint 3/4:
                             // Q25.A specialized arms — no per-element-type
                             // PHF table (Decimal/BigInt arrays use the

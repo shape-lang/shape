@@ -121,10 +121,6 @@ fn element_to_string(arr: &TypedArrayData, idx: usize, out: &mut String) -> Resu
             out.push_str(buf.data[idx].as_str());
             Ok(())
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => Err(type_error(format!(
             "joinStr: TypedArrayData variant {} not part of the Wave-δ joinStr migration \
              (Phase-2c reentry — matrix / float-slice element stringification needs \
@@ -173,10 +169,6 @@ fn array_len(arr: &TypedArrayData) -> Result<usize, VMError> {
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.

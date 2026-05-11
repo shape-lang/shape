@@ -32,7 +32,7 @@
 //!   receiver's deque is mutated via `Arc::make_mut`.
 //! - `peek_back` / `peek_front` → same as pop without removal — read-only
 //!   borrow re-wrapped via `heap_value_arc_to_slot`.
-//! - `to_array` → build a fresh `TypedArrayData::HeapValue` from the
+//! - `to_array` → build a fresh `the-deleted-heterogeneous-element-carrier` from the
 //!   `VecDeque` items (one Arc bump per element).
 //! - `get(i)` → bounds-check, read-only borrow re-wrapped.
 //!

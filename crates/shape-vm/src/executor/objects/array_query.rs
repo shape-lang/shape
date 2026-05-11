@@ -99,10 +99,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
@@ -288,7 +284,7 @@ fn invoke_predicate(
 ///
 /// Heterogeneous-result handling (mixed-kind closure outputs) still
 /// surfaces via `collect_homogeneous_results`'s SURFACE arm, citing the
-/// `TypedArrayData::HeapValue` per-element kind metadata gap (ADR-006
+/// `the-deleted-heterogeneous-element-carrier` per-element kind metadata gap (ADR-006
 /// §2.7.4). That's a homogeneity contract on the closure return, not
 /// a missing builder.
 

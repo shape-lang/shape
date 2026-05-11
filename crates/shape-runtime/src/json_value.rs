@@ -306,10 +306,6 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
                 .map(|s| JsonValue::String((**s).clone()))
                 .collect(),
         )),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
 
         // Architectural-choice deferred (REFINEMENT-1B-ITEM-A) — first-landing
         // Err. 2D-layout encoding policy not yet decided.

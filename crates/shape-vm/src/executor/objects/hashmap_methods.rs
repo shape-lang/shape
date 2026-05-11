@@ -28,10 +28,10 @@
 //!   `from_typed_array`, etc.) — same `heap_value_to_slot` pattern as
 //!   `executor/builtins/array_ops.rs:156`.
 //! - `keys` → `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`.
-//! - `values` → `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
-//! - `entries` / `toArray` → outer `TypedArrayData::HeapValue` with each
+//! - `values` → `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)`.
+//! - `entries` / `toArray` → outer `the-deleted-heterogeneous-element-carrier` with each
 //!   element a 2-element inner array (`[key, value]`) wrapped as
-//!   `Arc::new(HeapValue::TypedArray(Arc::new(TypedArrayData::HeapValue(
+//!   `Arc::new(HeapValue::TypedArray(Arc::new(the-deleted-heterogeneous-element-carrier(
 //!   ..))))` — same shape as `array_ops::builtin_zip` at line 376.
 //!
 //! ## Wave-9 closure-callback migration
@@ -141,7 +141,7 @@ fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
 /// Convert an `Arc<HeapValue>` value (as stored in `HashMapData::values`)
 /// to a `KindedSlot` via the matching per-FieldType constructor. Mirrors
 /// `executor/builtins/array_ops.rs::heap_value_to_slot` (the canonical
-/// `TypedArrayData::HeapValue` element re-wrapping path).
+/// `the-deleted-heterogeneous-element-carrier` element re-wrapping path).
 fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
     match hv.as_ref() {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
@@ -224,7 +224,7 @@ pub fn v2_keys(
 ///
 /// Returns an `Array<heap>` reusing the receiver's values buffer
 /// (`Arc<TypedBuffer<Arc<HeapValue>>>`) — single Arc bump on the buffer.
-/// Wraps as `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
+/// Wraps as `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)`.
 pub fn v2_values(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -239,10 +239,6 @@ pub fn v2_values(
     // arm via a single Arc::clone on the inner typed buffer.
     use shape_value::heap_value::HashMapValueBuf;
     let arr = match &map.values {
-        HashMapValueBuf::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.B: HashMapValueBuf::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         HashMapValueBuf::I64(b) => TypedArrayData::I64(Arc::clone(b)),
         HashMapValueBuf::F64(b) => {
             // F64 TypedArray uses AlignedTypedBuffer; copy data through.
@@ -268,8 +264,8 @@ pub fn v2_values(
 /// HashMap.entries() -> Array<[key, value]>
 ///
 /// Each entry is a 2-element inner array `[key, value]` stored as
-/// `HeapValue::TypedArray(Arc<TypedArrayData::HeapValue>)`. The outer
-/// array is a `TypedArrayData::HeapValue` of those `Arc<HeapValue>` entries.
+/// `HeapValue::TypedArray(Arc<the-deleted-heterogeneous-element-carrier>)`. The outer
+/// array is a `the-deleted-heterogeneous-element-carrier` of those `Arc<HeapValue>` entries.
 /// Same shape as `array_ops::builtin_zip` (line 376).
 pub fn v2_entries(
     _vm: &mut VirtualMachine,

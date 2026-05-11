@@ -575,10 +575,6 @@ pub fn v2_string_join(
                     .to_string(),
             ));
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => {
             buf.data.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(sep)

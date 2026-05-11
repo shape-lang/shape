@@ -636,10 +636,6 @@ impl<'a> ValueFormatter<'a> {
                     a.iter().map(|s| format!("\"{}\"", s.as_str())).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::HeapValue(_) => unreachable!(
-                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-                 production callers post-checkpoint 2"
-            ),
             // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
             // Each formatter wraps the variant's element type via the
             // matching HeapValue formatter so embedded types render
@@ -851,7 +847,7 @@ impl<'a> ValueFormatter<'a> {
 
     /// Format a `HeapValue` reference (the value side of `HashMapData`'s
     /// `TypedBuffer<Arc<HeapValue>>` and the heterogeneous element arm of
-    /// `TypedArrayData::HeapValue`). Dispatches via the ADR-005 §1
+    /// `the-deleted-heterogeneous-element-carrier`). Dispatches via the ADR-005 §1
     /// single-discriminator `HeapValue` match.
     fn format_heap_value(&self, hv: &HeapValue, depth: usize) -> String {
         if depth > 50 {

@@ -39,7 +39,7 @@
 //!   array-index assignment when the compiler couldn't resolve the
 //!   element kind statically (the `TypedArraySet*` fast path was not
 //!   chosen). Those fallbacks depend on the deleted
-//!   `TypedArrayData::HeapValue` heterogeneous-element carrier
+//!   `the-deleted-heterogeneous-element-carrier` heterogeneous-element carrier
 //!   (ADR-006 §2.7.24 Q25.A); W17-typed-carrier-monomorphization
 //!   territory. Surface-and-stop.
 //!
@@ -314,10 +314,6 @@ impl VirtualMachine {
                 let v = parent.data[offset + index];
                 self.push_kinded(v.to_bits(), NativeKind::Float64)
             }
-            TypedArrayData::HeapValue(_) => unreachable!(
-                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-                 production callers post-checkpoint 2"
-            ),
             TypedArrayData::Matrix(_) => Err(VMError::NotImplemented(format!(
                 "SURFACE: GetProp on TypedArray::{} variant — requires a \
                  Matrix 2D-index opcode (ADR-006 §2.7.24).",
@@ -445,7 +441,7 @@ impl VirtualMachine {
         // `30b9ebf`, ADR-006 §2.7.13 / Q14). Non-TypedObject receivers
         // (HashMap with non-string keys / array keyed by HeapValue /
         // etc.) remain surfaced — those require either the to-be-
-        // deleted `TypedArrayData::HeapValue` carrier (forbidden by
+        // deleted `the-deleted-heterogeneous-element-carrier` carrier (forbidden by
         // playbook line 32 / ADR-006 §2.7.24 Q25.A) or the per-
         // receiver heterogeneous-kind body that the W17-typed-carrier-
         // monomorphization sub-cluster will land.
@@ -526,7 +522,7 @@ impl VirtualMachine {
 
         // Non-TypedObject receivers: drain and surface. The legacy code
         // path used `Arc::make_mut` on the deleted dynamic-word receiver
-        // and the `TypedArrayData::HeapValue` heterogeneous-element
+        // and the `the-deleted-heterogeneous-element-carrier` heterogeneous-element
         // carrier — both forbidden by ADR-006 §2.7.7/§2.7.8 + §2.7.24
         // Q25.A. The replacement work is W17-typed-carrier-
         // monomorphization sub-cluster territory per playbook §2.
@@ -655,14 +651,14 @@ impl VirtualMachine {
     /// array I64/F64/Bool fast path `SetElem*` was not chosen). The
     /// fallback path covers heterogeneous-element arrays (`Array<P>`,
     /// mixed-kind arrays, object-keyed access) — exactly the shapes
-    /// that depended on the `TypedArrayData::HeapValue` heterogeneous-
+    /// that depended on the `the-deleted-heterogeneous-element-carrier` heterogeneous-
     /// element carrier. That carrier is to be deleted per ADR-006
     /// §2.7.24 Q25.A; the replacement work is W17-typed-carrier-
     /// monomorphization sub-cluster territory.
     ///
-    /// Resurrecting `TypedArrayData::HeapValue` here would violate
+    /// Resurrecting `the-deleted-heterogeneous-element-carrier` here would violate
     /// playbook line 32 ("Resurrecting deleted shape under a rename"
-    /// — `TypedArrayData::HeapValue (deleted by §2.7.24 Q25.A)`).
+    /// — `the-deleted-heterogeneous-element-carrier (deleted by §2.7.24 Q25.A)`).
     /// Surface-and-stop is the correct response.
     pub(in crate::executor) fn op_set_local_index(
         &mut self,
@@ -675,7 +671,7 @@ impl VirtualMachine {
         Err(VMError::NotImplemented(format!(
             "SURFACE: SetLocalIndex requires the W17-typed-carrier-\
              monomorphization replacement for the deleted \
-             TypedArrayData::HeapValue heterogeneous-element carrier \
+             the-deleted-heterogeneous-element-carrier heterogeneous-element carrier \
              (ADR-006 §2.7.24 Q25.A). Typed-array fast path \
              (TypedArraySet{{I64,F64,Bool,...}}) is the supported \
              surface today; this opcode covers the fallback shapes \
@@ -705,7 +701,7 @@ impl VirtualMachine {
         Err(VMError::NotImplemented(format!(
             "SURFACE: SetModuleBindingIndex requires the W17-typed-\
              carrier-monomorphization replacement for the deleted \
-             TypedArrayData::HeapValue heterogeneous-element carrier \
+             the-deleted-heterogeneous-element-carrier heterogeneous-element carrier \
              (ADR-006 §2.7.24 Q25.A). Key kind observed: {:?}.",
             key_kind,
         )))
@@ -825,10 +821,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.

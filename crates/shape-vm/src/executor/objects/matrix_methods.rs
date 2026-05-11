@@ -98,7 +98,7 @@
 //!   FilterExpr / §2.7.12 SharedCell / §2.7.13 Reference) — Matrix
 //!   values flow through `slot.as_heap_value()` for receiver
 //!   classification and live in TypedObject slots /
-//!   `TypedArrayData::HeapValue` buffers; pure-discriminator status
+//!   `the-deleted-heterogeneous-element-carrier` buffers; pure-discriminator status
 //!   would re-introduce the §2.7.9 type-confusion pattern at a
 //!   different layer.
 

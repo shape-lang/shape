@@ -8,7 +8,7 @@
 //! `push`/`pop`/`first`/`last`/`zip`/`filled` operate on the typed-array
 //! `HeapValue::TypedArray(Arc<TypedArrayData>)` shape. Each call site
 //! discriminates on `TypedArrayData` arm to pick the right element shape;
-//! a heterogeneous-element path uses `TypedArrayData::HeapValue` as the
+//! a heterogeneous-element path uses `the-deleted-heterogeneous-element-carrier` as the
 //! catch-all storage shape.
 
 use shape_value::{
@@ -44,7 +44,7 @@ fn typed_array_to_slot(arr: TypedArrayData) -> KindedSlot {
 }
 
 /// Convert a `KindedSlot` element to an `Arc<HeapValue>` for storage in
-/// a `TypedArrayData::HeapValue` buffer (catch-all heterogeneous element
+/// a `the-deleted-heterogeneous-element-carrier` buffer (catch-all heterogeneous element
 /// shape). Inline scalars wrap into the matching `HeapValue` arm.
 fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match slot.kind {
@@ -59,7 +59,7 @@ fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
             // No HeapValue::Float arm — Float64 in a heap-element buffer
             // routes through Decimal as a stable representation. (TypedArray
             // for f64 is the F64 arm; this slot_to_heap_arc path is only for
-            // truly heterogeneous arrays via TypedArrayData::HeapValue.)
+            // truly heterogeneous arrays via the-deleted-heterogeneous-element-carrier.)
             Err(type_error(
                 "array element of kind Float64 cannot be heap-wrapped (use Vec<number> instead)",
             ))
@@ -141,10 +141,6 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
             .data
             .get(idx)
             .map(|s| KindedSlot::from_string_arc(Arc::clone(s))),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => buf.data.get(idx).map(|d| KindedSlot::from_decimal(Arc::clone(d))),
         TypedArrayData::BigInt(buf) => buf.data.get(idx).map(|b| KindedSlot::from_bigint(Arc::clone(b))),
@@ -167,7 +163,7 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
 
 /// Re-wrap an `Arc<HeapValue>` as a `KindedSlot` using the per-FieldType
 /// constructor matching the arm. Used when reading elements out of a
-/// `TypedArrayData::HeapValue` buffer.
+/// `the-deleted-heterogeneous-element-carrier` buffer.
 fn heap_value_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
     match hv.as_ref() {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
@@ -253,11 +249,6 @@ pub(in crate::executor) fn builtin_push(args: &[KindedSlot]) -> Result<KindedSlo
             new_data.push(s);
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (push on TypedArrayData::HeapValue — no production caller \
-             produces one post-checkpoint 2)"
-        ),
         // Width-narrowed integer/float arms: not exposed to user-level push
         // today (compiler emits I64/F64 by default). Reject explicitly
         // rather than silently widening.
@@ -300,11 +291,6 @@ pub(in crate::executor) fn builtin_pop(args: &[KindedSlot]) -> Result<KindedSlot
             new_data.pop();
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
         }
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (pop on TypedArrayData::HeapValue — no production caller \
-             produces one post-checkpoint 2)"
-        ),
         _ => {
             return Err(type_error(
                 "pop() not supported for narrow-width or matrix arrays",
@@ -342,10 +328,6 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
@@ -390,10 +372,6 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         _ => 0,
     };
     let len_b = match b {
@@ -401,10 +379,6 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         _ => 0,
     };
     let n = len_a.min(len_b);
@@ -621,10 +595,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::I8(x) => x.len(),
         TypedArrayData::I16(x) => x.len(),
         TypedArrayData::I32(x) => x.len(),
@@ -683,11 +653,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
             TypedArrayData::String(_) => {
                 TypedArrayData::String(Arc::new(TypedBuffer::from_vec(Vec::new())))
             }
-            TypedArrayData::HeapValue(_) => unreachable!(
-                "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-                 (empty-slice on TypedArrayData::HeapValue — no production \
-                 caller produces one post-checkpoint 2)"
-            ),
             _ => {
                 return Err(type_error(
                     "slice() not supported for narrow-width or matrix arrays",
@@ -709,11 +674,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
             TypedArrayData::String(buf) => TypedArrayData::String(Arc::new(
                 TypedBuffer::from_vec(buf.data[start_idx..end_idx].to_vec()),
             )),
-            TypedArrayData::HeapValue(_) => unreachable!(
-                "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-                 (slice on TypedArrayData::HeapValue — no production \
-                 caller produces one post-checkpoint 2)"
-            ),
             _ => {
                 return Err(type_error(
                     "slice() not supported for narrow-width or matrix arrays",

@@ -191,10 +191,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
@@ -234,10 +230,6 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
             Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
         }
         TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
@@ -888,7 +880,7 @@ pub(crate) fn handle_chain(
 /// pipeline into a strict-typed array per ADR-006 §2.7.24 Q25.A.
 ///
 /// W17-typed-carrier-bundle-A checkpoint 2/4: the prior
-/// `TypedArrayData::HeapValue` heterogeneous-element buffer is replaced by
+/// `the-deleted-heterogeneous-element-carrier` heterogeneous-element buffer is replaced by
 /// a per-element-kind specialized variant. Pipeline yields are uniform
 /// per type-checked iterator; the dispatch picks the variant matching the
 /// first yield's `NativeKind` and rejects heterogeneous-kind yields with a

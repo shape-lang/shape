@@ -166,10 +166,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -460,7 +456,7 @@ pub(crate) fn handle_zip_v2(
     Err(VMError::NotImplemented(
         "Array.zip — SURFACE: Wave-γ-followup (D-array-basic-class). \
          Pair construction requires heterogeneous element-kind handling: \
-         TypedArrayData::HeapValue is the only variant that admits mixed \
+         the-deleted-heterogeneous-element-carrier is the only variant that admits mixed \
          per-element kinds, and each pair's two `KindedSlot`s need to be \
          wrapped as Arc<HeapValue::TypedArray(...)> per the §2.7.6 / Q8 \
          per-variant constructor matrix. The pre-Wave-6.5 body materialized \

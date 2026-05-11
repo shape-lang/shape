@@ -450,7 +450,7 @@ impl FromSlot for Vec<Arc<String>> {
 }
 
 /// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::HeapValue`.
+/// slot whose payload is `the-deleted-heterogeneous-element-carrier`.
 ///
 /// Phase 2d Array cluster (2026-05-07). Each element is an opaque
 /// `Arc<HeapValue>` whose inner kind is a body-side type contract.
@@ -473,7 +473,7 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
             match &*arc_hv {
                 shape_value::HeapValue::TypedArray(arc) => {
                     // W17-typed-carrier-bundle-A checkpoint 3/4: the
-                    // prior `TypedArrayData::HeapValue` carrier is
+                    // prior `the-deleted-heterogeneous-element-carrier` carrier is
                     // deleted. Reading `Vec<Arc<HeapValue>>` from a
                     // strict-typed buffer requires re-wrapping each
                     // typed element back into a `HeapValue::*` arm —
@@ -542,10 +542,6 @@ fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_val
             .iter()
             .map(|t| Arc::new(HeapValue::TraitObject(Arc::clone(t))))
             .collect(),
-        shape_value::TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         other => panic!(
             "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \
              be re-wrapped to Vec<Arc<HeapValue>> (no matching HeapValue::* \
@@ -582,7 +578,7 @@ impl ToSlot for Vec<Arc<String>> {
 ///
 /// W17-typed-carrier-bundle-A checkpoint 2/4: routed through
 /// `TypedArrayData::build_specialized_from_heap_arcs` — the per-element-kind
-/// dispatcher in shape-value. The prior polymorphic `TypedArrayData::HeapValue`
+/// dispatcher in shape-value. The prior polymorphic `the-deleted-heterogeneous-element-carrier`
 /// carrier is replaced by the matching specialized variant; element-kind
 /// uniformity is enforced (heterogeneous-arm inputs panic with a structured
 /// message — would indicate a stdlib body returning a malformed mixed-kind

@@ -479,10 +479,6 @@ impl VirtualMachine {
                     TypedArrayData::Matrix(m) => m.data.len(),
                     TypedArrayData::FloatSlice { len, .. } => *len as usize,
                     TypedArrayData::String(buf) => buf.data.len(),
-                    TypedArrayData::HeapValue(_) => unreachable!(
-                        "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has \
-                         no production callers post-checkpoint 2"
-                    ),
                     // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
                     TypedArrayData::Decimal(b) => b.data.len(),
                     TypedArrayData::BigInt(b) => b.data.len(),

@@ -197,10 +197,10 @@ impl ComptimeTarget {
     /// Sub-arrays whose elements are themselves TypedObjects (the per-field
     /// `{name,type,annotations,optional}` rows, per-param rows, and
     /// per-annotation `{name,args}` rows) use
-    /// `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` —
+    /// `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)` —
     /// noting that this is the unmonomorphized carrier shape; the
     /// W17-typed-carrier-monomorphization sub-cluster is parallel-
-    /// dispatched and will delete `TypedArrayData::HeapValue` per
+    /// dispatched and will delete `the-deleted-heterogeneous-element-carrier` per
     /// ADR-006 §2.7.24 Q25.A. If that cluster lands first, this site
     /// rewires onto the specialized `TypedArrayData::TypedObject` arm; the
     /// territory is flagged in the C2 close report so the supervisor can
@@ -255,7 +255,7 @@ impl ComptimeTarget {
         };
 
         // Build an array of typed-object elements. The unmonomorphized
-        // carrier today is `TypedArrayData::HeapValue` (the W17-typed-
+        // carrier today is `the-deleted-heterogeneous-element-carrier` (the W17-typed-
         // carrier-monomorphization sub-cluster will swap this for the
         // specialized `TypedArrayData::TypedObject` arm per
         // ADR-006 §2.7.24 Q25.A; flagged in the C2 close report).

@@ -211,10 +211,6 @@ impl VirtualMachine {
                             TypedArrayData::U64(a) => a.len(),
                             TypedArrayData::F32(a) => a.len(),
                             TypedArrayData::String(a) => a.len(),
-                            TypedArrayData::HeapValue(_) => unreachable!(
-                                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue \
-                                 has no production callers post-checkpoint 2"
-                            ),
                             TypedArrayData::FloatSlice { len, .. } => *len as usize,
                             TypedArrayData::Matrix(m) => m.data.len(),
                             // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
@@ -296,7 +292,7 @@ impl VirtualMachine {
     ///     before being handed to `push_kinded`).
     ///   - `HeapValue::String`                             → `Char` (per
     ///     codepoint), `NativeKind::Ptr(HeapKind::Char)`.
-    ///   - `TypedArrayData::HeapValue`                     → SURFACE
+    ///   - `the-deleted-heterogeneous-element-carrier`                     → SURFACE
     ///     (polymorphic `Arc<HeapValue>` carriers don't have a single
     ///     element kind; phase-2c work — see ADR-006 §2.7.4).
     ///
@@ -400,7 +396,7 @@ impl VirtualMachine {
                     // `[key, value]` two-element array via the deleted
                     // `vmarray_from_vec` constructor. The kinded
                     // equivalent would push a fresh
-                    // `Arc<TypedArrayData::HeapValue>` two-slot buffer —
+                    // `Arc<the-deleted-heterogeneous-element-carrier>` two-slot buffer —
                     // pending typed-buffer-of-heap construction helpers.
                     HeapValue::HashMap(_) => Err(VMError::NotImplemented(
                         "op_iter_next SURFACE: HashMap iteration yields a \
@@ -528,10 +524,6 @@ impl VirtualMachine {
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
-            TypedArrayData::HeapValue(_) => unreachable!(
-                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-                 production callers post-checkpoint 2"
-            ),
             // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
             // Bump the element Arc share before push so the carrier owns
             // an independent strong-count that retires via drop_with_kind.

@@ -48,7 +48,7 @@
 //!   W17-typed-carrier-monomorphization territory for heterogeneous /
 //!   string / object element types.
 //! - **String-element typed arrays** (`TypedArrayData::String` /
-//!   `TypedArrayData::HeapValue`): the §2.7.24 Q25 typed-carrier
+//!   `the-deleted-heterogeneous-element-carrier`): the §2.7.24 Q25 typed-carrier
 //!   monomorphization sub-cluster's territory; surface in the Ptr branch.
 //! - **Sub-i64 integer widths and F32**: still surface — the kind track
 //!   needs to partition int-family pushes by width before in-place
@@ -570,10 +570,6 @@ fn element_kind_of(arc: &Arc<TypedArrayData>) -> NativeKind {
         TypedArrayData::U64(_) => NativeKind::UInt64,
         TypedArrayData::F32(_) => NativeKind::Float64, // narrowed at push site
         TypedArrayData::String(_) => NativeKind::String,
-        TypedArrayData::HeapValue(_) => unreachable!(
-            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
-             production callers post-checkpoint 2"
-        ),
         TypedArrayData::Matrix(_) => NativeKind::Float64,
         TypedArrayData::FloatSlice { .. } => NativeKind::Float64,
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.

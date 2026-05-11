@@ -130,7 +130,7 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             // element is a `Json` enum-TypedObject built by
             // `build_json_enum_heap_value` — so the array always lowers to
             // `TypedArrayData::TypedObject` per ADR-006 §2.7.24 Q25.A. The
-            // prior polymorphic `TypedArrayData::HeapValue` carrier is gone.
+            // prior polymorphic `the-deleted-heterogeneous-element-carrier` carrier is gone.
             let elements: Vec<Arc<HeapValue>> = arr
                 .into_iter()
                 .map(|v| Arc::new(build_json_enum_heap_value(v, json_schema_id)))

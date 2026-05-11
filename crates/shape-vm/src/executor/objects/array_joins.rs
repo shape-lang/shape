@@ -150,7 +150,7 @@ fn key_eq(a: &KindedSlot, b: &KindedSlot, op: &str) -> Result<bool, VMError> {
 ///      `array_transform::collect_homogeneous_results` (same
 ///      per-NativeKind builder matrix as `select` / `map`).
 ///
-/// Heterogeneous-result kinds and `TypedArrayData::HeapValue` receivers
+/// Heterogeneous-result kinds and `the-deleted-heterogeneous-element-carrier` receivers
 /// surface per the §2.7.4 per-element kind metadata gap (the documented
 /// closure-callback homogeneity contract).
 pub(crate) fn handle_inner_join_v2(

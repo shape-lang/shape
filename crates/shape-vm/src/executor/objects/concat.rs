@@ -241,11 +241,6 @@ fn concat_typed_arrays(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }
-        (TypedArrayData::HeapValue(_), TypedArrayData::HeapValue(_)) => unreachable!(
-            "post-§2.7.24 Q25.A: cross-kind arrays unrepresentable \
-             (concat on TypedArrayData::HeapValue — no construction site \
-             produces one post-checkpoint 2)"
-        ),
         // FloatSlice + FloatSlice: materialize into an owned F64 array
         // (matches the slice operator's materialize-not-view semantics
         // in `array_operations.rs::slice_typed_array`).

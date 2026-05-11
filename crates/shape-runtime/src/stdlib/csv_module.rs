@@ -3,7 +3,7 @@
 //! Phase 2d Array cluster migration: `parse`, `stringify`, `read_file`,
 //! and `is_valid` ported to the typed marshal layer using
 //! `TypedArrayData::String` (rows of strings) inside
-//! `TypedArrayData::HeapValue` (array of rows).
+//! `the-deleted-heterogeneous-element-carrier` (array of rows).
 //!
 //! Stage C HashMap-marshal P1(b) activation (2026-05-07): `parse_records`
 //! and `stringify_records` activated using `HeapValue::HashMap(HashMapData)`
