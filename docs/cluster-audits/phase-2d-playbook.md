@@ -508,6 +508,13 @@ print(later)                                         // 2026-01-31
 
 ### W17-snapshot-resume
 
+> **RESCOPED 2026-05-11** (Wave 2.5 close). The original "snapshot/resume round-trip + comptime introspection" scope split into two sub-clusters after the agent's audit identified upstream blockers that prevent a single-session bundled rebuild:
+>
+> - **W17-snapshot-surfaces** (this sub-cluster's actual close — commit `0db5920` merged in Wave 2.5) — converts 27 production `todo!()` panic sites to structured `Err(NotImplemented(W17 surface))` returns. VM no longer process-aborts on snapshot operations; callers receive auditable structured errors. Identifies the `SerializableVMValue` wire-format gap (post-W14/W15/W16 HeapKinds lack arms).
+> - **W17-snapshot-roundtrip** (queued for Wave 2.6 or later) — the actual round-trip rebuild. Blocked on: (a) `invoke_module_fn_id_stub` at `vm_impl/modules.rs:75` (upstream, out of W17-snapshot scope); (b) ADR-006 §2.7.5.1 SerializableVMValue extension for post-W14/W15/W16 HeapKinds (`HashSet`, `Iterator`, `Result`, `Option`, `Deque`, `Channel`, `PriorityQueue`, `Reference`, `FilterExpr`, `SharedCell`) — must land its own §2.7.5.1 amendment; (c) kind-threaded `slot_to_serializable` / `serializable_to_slot` API alignment. Effort estimate: 12-18h.
+>
+> The original `W17-snapshot-resume` row in `AGENTS.md` is marked "rescoped"; see the new `W17-snapshot-surfaces` and `W17-snapshot-roundtrip` rows. The rest of this entry preserved verbatim as historical context.
+
 **Slug:** `w17-snapshot-resume` · **Effort:** 8-16h · **Risk:** medium-high · **Independent.**
 
 **Territory.** Snapshot/resume rebuild — 27 production `todo!()` sites that panic the VM on snapshot/restore operations.
@@ -540,6 +547,20 @@ resume(s)
 ---
 
 ### W17-typed-carrier-monomorphization
+
+> **RESCOPED 2026-05-11** (Wave 2.5 close). The bundled 24-32h single-branch P1+P2+P3 framing was determined unexecutable in a single session after the agent's audit surfaced:
+>
+> - **Scale mismatch**: 119 references to `TypedArrayData::HeapValue` across 33 files (vs playbook's "~18 SURFACE sites"); 1104 total `TypedArrayData` arm references workspace-wide. Adding 9 new variants ripples through exhaustive matches.
+> - **Stale playbook line numbers**: cited array_transform.rs lines (486/547/589/693/722/775/1140/1310) now point at unrelated `concat_typed_array` arms / sort comparators (post-W17-array-closure-callback file shifted).
+> - **P3 upstream gap**: `OpCode::BoxTraitObject` is not emitted by the compiler. The P3 smoke target cannot be exercised without companion compiler-emission work not in original P3 scope.
+>
+> The agent surfaced-and-stopped without commits. ADR-006 §2.7.24 spec itself is correct — only this playbook's scope framing was off. Split into 3 sub-clusters for Wave 2.6:
+>
+> - **W17-typed-carrier-bundle-A** (replaces P1 + P2): single branch, 4 internal checkpoint commits — (1) ADDITIVE: add specialized `TypedArrayData` variants (Decimal/BigInt/DateTime/Timespan/Duration/Instant/Char/TypedObject/TraitObject) + `HashMapValueBuf` enum + `HashMapData` refactor (HeapValue arm still present; clean compile); (2) Migrate construction sites; (3) Migrate match/iteration/marshal/JSON/XML/printing sites to exhaustive-match new variants; (4) DELETE `HeapValue` arm + verify-merge.sh exit 0 + `check-no-dynamic.sh` exit 0. Each checkpoint passes verify-merge.sh independently. Q25.A "no partial migration" satisfied because commit 4 deletes the arm; intermediate compileable states are fine. Effort: ~16-20h. No new HeapKind ordinals.
+> - **W17-trait-object-storage** (replaces P3 storage tier only): pre-assigned HeapKind ord **29 (TraitObject)**. Storage-tier work per §2.7.24 Q25.C — `TraitObjectStorage`, `HeapValue::TraitObject` arm, 4-table lockstep, 6-variant `VTableEntry` enum, `Erase_T` compiler-side type rewriting, per-(impl,method) thunk generation at vtable-construction time. Smoke: storage-tier-only via test harness (`Arc<TraitObjectStorage>` roundtrip). End-to-end deferred to trait-object-emission. Effort: ~8-12h.
+> - **W17-trait-object-emission** (NEW — missed by original P3 framing): compiler-side dyn-coerce grammar (verify or extend), type inference for dyn coercion, bytecode emit for `OpCode::BoxTraitObject` + `DynMethodCall`, compiler-side vtable lookup at coerce-to-dyn time. **BLOCKED BY** `W17-trait-object-storage` (needs the carrier + vtable shapes to exist). Smoke: end-to-end §2.7.24 Q25.C example (`let a: dyn Animal = box(Dog{...}); print(a.name())`). Effort: ~10-14h.
+>
+> ADR-006 §2.7.24 stays unchanged; only this playbook's scope framing was off. The original `W17-typed-carrier-monomorphization` row in `AGENTS.md` is marked "rescoped"; see the three new rows. The rest of this entry preserved verbatim as historical context.
 
 **Slug:** `w17-typed-carrier-monomorphization` · **Effort:** 24-32h · **Risk:** high · **Consumes ADR-006 §2.7.24.**
 
