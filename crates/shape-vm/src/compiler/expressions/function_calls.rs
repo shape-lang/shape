@@ -146,21 +146,41 @@ fn is_compile_time_const_expr(expr: &Expr) -> bool {
 /// (`ensure_const_specialization`) cascade off this stub.
 pub(crate) enum ConstFoldValue {}
 
+// Const-fold projections produce `Option<ConstFoldValue>`, where
+// `ConstFoldValue` is intentionally uninhabited until the phase-2c carrier
+// shape lands (ADR-006 §2.4 — the deleted `ValueWord` shape backed the
+// previous `Literal → Carrier → fingerprint → specialization-key`
+// pipeline). Returning `None` is the type-correct surface-and-stop
+// response: callers branch on `Some`/`None` and the matching arm on the
+// uninhabited type is statically unreachable, so no caller behaviour
+// changes when the kinded carrier lands and `Some(_)` becomes reachable.
+//
+// Returning `None` here is NOT a Bool-default fallback: `None` is a
+// well-defined arm of the function's `Option` return type, semantically
+// meaning "no foldable constant was projected", which is the correct
+// answer while the projection pipeline is dormant. Bool-default would be
+// fabricating a kind for a slot whose kind is unknown — different shape,
+// different rejection per §2.7.7 #4. The cite is preserved as a comment
+// for the phase-2c rebuild grep gate.
+
 #[allow(dead_code)]
 fn literal_to_nanboxed(literal: &Literal) -> Option<ConstFoldValue> {
+    // phase-2c — see ADR-006 §2.4 (kinded literal-to-carrier projection).
     let _ = literal;
-    todo!("phase-2c — see ADR-006 §2.4");
+    None
 }
 
 pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue> {
+    // phase-2c — see ADR-006 §2.4 (kinded const-fold evaluator).
     let _ = expr;
-    todo!("phase-2c — see ADR-006 §2.4");
+    None
 }
 
 #[allow(dead_code)]
 fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
+    // phase-2c — see ADR-006 §2.4 (kinded const-fold fingerprint key).
     let _ = expr;
-    todo!("phase-2c — see ADR-006 §2.4");
+    None
 }
 
 impl BytecodeCompiler {
@@ -427,8 +447,18 @@ impl BytecodeCompiler {
         // surfaced rather than partially migrated. Const specialization
         // is therefore a no-op until the carrier sweep reaches the
         // out-of-territory storage shape.
+        //
+        // Returning `Ok(None)` here means "no specialization was produced
+        // at this call site": the caller (`compile_expr_function_call`)
+        // then keeps the base `call_name` / `call_func_idx` and emits a
+        // plain `Call` against the un-specialized symbol. The literal-
+        // const argument check at the caller (lines 670-686) still runs,
+        // so const-param invariants stay enforced; only the specialized-
+        // body rewrite is dormant. This preserves the public surface
+        // (`Result<Option<(String, usize)>>`) — no caller signature
+        // change is needed when phase-2c re-introduces the carrier.
         let _ = (name, args, const_param_indices);
-        todo!("phase-2c — see ADR-006 §2.4");
+        Ok(None)
     }
 
     /// Compile a function call expression

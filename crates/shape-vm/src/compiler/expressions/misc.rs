@@ -740,15 +740,33 @@ impl BytecodeCompiler {
             return self.compile_expr_for(&for_expr);
         }
 
-        // The comptime evaluator's `ComptimeExecutionResult.value` is
-        // shaped as the deleted `ValueWord` carrier (see
-        // `compiler/comptime.rs`); `nb_to_literal` and `as_any_array` /
-        // `type_name` projections used by the unroll path below also
-        // ride that carrier. The kinded carrier shape lands in phase-2c
-        // (ADR-006 §2.4); until then this site surfaces rather than
-        // routes through the deleted accessors.
-        let _ = (cf, span);
-        todo!("phase-2c — see ADR-006 §2.4");
+        // SURFACE: outside `comptime_mode`, the comptime-for unroll
+        // path needs to evaluate `cf.iterable` at compile time, project
+        // each element back to an AST literal, and re-emit the body
+        // once per element. The evaluator's
+        // `ComptimeExecutionResult.value` was `ValueWord`-shaped
+        // (deleted); the per-element projections (`nb_to_literal`,
+        // `as_any_array`, `type_name`) rode the same carrier. The kinded
+        // replacement (KindedSlot-based ComptimeExecutionResult +
+        // KindedSlot→Literal projection) lands in phase-2c
+        // (ADR-006 §2.4 / §2.7.4). Returning a structured semantic
+        // error rather than panicking keeps the surface honest until
+        // the rebuild lands. Tracked as `c3-expr-lowering-misc` per
+        // playbook §3 (Wave 2.5).
+        //
+        // Note: the in-comptime-mode arm above already rewrites
+        // comptime-for as a runtime for-loop and exits via
+        // `compile_expr_for`, so this branch is only reached for
+        // top-level comptime-for outside a comptime block.
+        let _ = cf;
+        Err(ShapeError::SemanticError {
+            message:
+                "comptime-for unroll outside a comptime block is dormant pending the \
+                 phase-2c ComptimeExecutionResult / Literal-projection rebuild \
+                 (ADR-006 §2.4 / §2.7.4)"
+                    .to_string(),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 }
 
