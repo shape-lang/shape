@@ -214,7 +214,9 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                     );
                 }
                 // Char: inline-scalar payload (codepoint bits). No-op.
-                HeapKind::Char => {}
+                HeapKind::Char => {
+                    // No-op: inline-scalar payload (codepoint bits).
+                }
                 // Round 2.5 W7-closure-retain (ADR-006 §2.7.11 / Q12,
                 // 2026-05-09): a `NativeKind::Ptr(HeapKind::Closure)`
                 // slot carries `Arc::into_raw(Arc<HeapValue>) as u64`
@@ -242,7 +244,9 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<T>` payload). See `async_ops/mod.rs` §"Wave 6.5
                 // / E-async migration" docstring and `printing.rs`
                 // `HeapKind::Future` arm. Same shape as `HeapKind::Char`.
-                HeapKind::Future => {}
+                HeapKind::Future => {
+                    // No-op: future-id inline scalar (no Arc payload).
+                }
                 // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                 // 2026-05-10): the `op_alloc_shared_local` /
                 // `op_alloc_shared_module_binding` push sites emit
@@ -456,7 +460,9 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                     );
                 }
                 // Char: inline-scalar payload. No-op.
-                HeapKind::Char => {}
+                HeapKind::Char => {
+                    // No-op: inline-scalar payload (codepoint bits).
+                }
                 // Round 2.5 W7-closure-retain (ADR-006 §2.7.11 / Q12,
                 // 2026-05-09): mirror of the `clone_with_kind`
                 // `HeapKind::Closure` arm. Retires one `Arc<HeapValue>`
@@ -477,7 +483,9 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 // `Ptr(HeapKind::Future)` is inline future-id u64 — no
                 // refcount work. Mirror of the `clone_with_kind` arm.
-                HeapKind::Future => {}
+                HeapKind::Future => {
+                    // No-op: future-id inline scalar (no Arc payload).
+                }
                 // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                 // 2026-05-10): mirror of the `clone_with_kind`
                 // `HeapKind::SharedCell` arm. Retires one

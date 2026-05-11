@@ -1889,7 +1889,9 @@ impl Drop for TypedObjectStorage {
                         // directly in `bits` (inline scalar — no `Arc<T>`
                         // payload). See `async_ops/mod.rs` §"Wave 6.5 /
                         // E-async migration" docstring.
-                        HeapKind::Future => {}
+                        HeapKind::Future => {
+                            // No-op: future-id inline scalar.
+                        }
                         // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                         // 2026-05-10): when a TypedObject field of kind
                         // `NativeKind::Ptr(HeapKind::SharedCell)` is dropped
