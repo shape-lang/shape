@@ -237,6 +237,49 @@ macro_rules! define_heap_types {
             // from None under null-coding. Slot bits are
             // `Arc::into_raw(Arc<OptionData>)`; full HeapValue arm.
             Option,        // 28  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 24 at merge — Channel already took 24)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Mutex<T> concurrency primitive — a single
+            // typed payload protected by a `Mutex<MutexInner>` for
+            // interior-mutability sharing (mirror of §2.7.20 Channel's
+            // `Mutex<ChannelInner>` shape — two `Arc<MutexData>` shares
+            // observe each other's `set` mutations). Distinct from
+            // §2.7.12 `HeapKind::SharedCell` (which is binding-storage
+            // interior-mutability for `var` binding-form values) —
+            // `MutexData` is a runtime synchronization primitive user
+            // code asks for explicitly. Full HeapValue arm (NOT
+            // pure-discriminator like FilterExpr / SharedCell): Mutex
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`m.lock()` / `m.set(...)`),
+            // can be stored in TypedObject slots. Pre-assigned ordinal
+            // 30 per the wave-2.5 W17-concurrency dispatch contract.
+            Mutex,         // 30  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Atomic<i64> concurrency primitive — wraps
+            // `std::sync::atomic::AtomicI64` for atomic load / store /
+            // fetch_add / fetch_sub / compare_exchange operations.
+            // i64-only at landing per the playbook's "typed-payload
+            // deferral" precedent (W15-priority-queue i64-priority-only,
+            // W13-hashset string-only); typed-payload `Atomic<T>` is a
+            // future Phase-2c amendment with measurement. Full HeapValue
+            // arm — Atomic values flow through `slot.as_heap_value()`
+            // for receiver classification at method dispatch.
+            // Pre-assigned ordinal 31 per the wave-2.5 W17-concurrency
+            // dispatch contract.
+            Atomic,        // 31  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Lazy<T> initialize-once carrier — wraps an
+            // initializer closure (`KindedSlot` of kind
+            // `Ptr(HeapKind::Closure)`) and a cached value slot.
+            // Closure-call path unlocked by W17-make-closure (merged
+            // at `aa47364`). Mirror of §2.7.20 Channel's
+            // `Mutex<inner>` shape so concurrent `get()` calls
+            // serialize cleanly when the runtime grows real
+            // concurrency. Full HeapValue arm — Lazy values flow
+            // through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`l.get()` /
+            // `l.is_initialized()`). Pre-assigned ordinal 32 per the
+            // wave-2.5 W17-concurrency dispatch contract.
+            Lazy,          // 32  (Wave 17 W17-concurrency, 2026-05-11)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -485,6 +528,28 @@ macro_rules! define_heap_types {
             /// `OptionData::none()` at compiler emission sites). Same
             /// kinded-payload discipline as `Result` per §2.7.17.
             Option(std::sync::Arc<$crate::heap_value::OptionData>),
+            // ===== W17-concurrency (ADR-006 §2.7.25, 2026-05-11) =====
+            /// `Mutex<T>` concurrency-primitive carrier
+            /// (`Arc<MutexData>`). The inner `MutexData` wraps a
+            /// `Mutex<MutexInner>` so two `Arc<MutexData>` shares of
+            /// the same mutex observe each other's `set` mutations —
+            /// the same interior-mutability shape as
+            /// `HeapValue::Channel`. Full HeapValue arm — Mutex values
+            /// flow through `slot.as_heap_value()` for receiver
+            /// classification at method dispatch.
+            Mutex(std::sync::Arc<$crate::heap_value::MutexData>),
+            /// `Atomic<i64>` concurrency-primitive carrier
+            /// (`Arc<AtomicData>`). The inner `AtomicData` wraps a
+            /// `std::sync::atomic::AtomicI64` for atomic load / store /
+            /// fetch_add / fetch_sub / compare_exchange. i64-only at
+            /// landing per ADR-006 §2.7.25 — typed-payload `Atomic<T>`
+            /// is a future Phase-2c amendment with measurement.
+            Atomic(std::sync::Arc<$crate::heap_value::AtomicData>),
+            /// `Lazy<T>` initialize-once carrier (`Arc<LazyData>`).
+            /// Wraps an initializer closure and cached value slot.
+            /// Closure-call path is unlocked by W17-make-closure
+            /// (merged at `aa47364`). Full HeapValue arm.
+            Lazy(std::sync::Arc<$crate::heap_value::LazyData>),
         }
 
         impl HeapValue {
@@ -520,6 +585,9 @@ macro_rules! define_heap_types {
                     HeapValue::Range(..) => HeapKind::Range,
                     HeapValue::Result(..) => HeapKind::Result,
                     HeapValue::Option(..) => HeapKind::Option,
+                    HeapValue::Mutex(..) => HeapKind::Mutex,
+                    HeapValue::Atomic(..) => HeapKind::Atomic,
+                    HeapValue::Lazy(..) => HeapKind::Lazy,
                 }
             }
 
@@ -579,6 +647,14 @@ macro_rules! define_heap_types {
                     // tests go through `op_is_ok` / `op_is_err`.
                     HeapValue::Result(_) => true,
                     HeapValue::Option(_) => true,
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // concurrency primitives are always truthy when
+                    // present — a live mutex/atomic/lazy is a usable
+                    // synchronisation handle regardless of inner state.
+                    // Same shape as Channel / Iterator / Reference.
+                    HeapValue::Mutex(_) => true,
+                    HeapValue::Atomic(_) => true,
+                    HeapValue::Lazy(_) => true,
                 }
             }
 
@@ -620,6 +696,9 @@ macro_rules! define_heap_types {
                     HeapValue::Range(_) => "range",
                     HeapValue::Result(_) => "result",
                     HeapValue::Option(_) => "option",
+                    HeapValue::Mutex(_) => "mutex",
+                    HeapValue::Atomic(_) => "atomic",
+                    HeapValue::Lazy(_) => "lazy",
                 }
             }
         }

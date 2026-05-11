@@ -570,6 +570,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10).
         NativeKind::Ptr(HeapKind::Result) => "result",
         NativeKind::Ptr(HeapKind::Option) => "option",
+        // W17-concurrency (ADR-006 §2.7.25, 2026-05-11).
+        NativeKind::Ptr(HeapKind::Mutex) => "mutex",
+        NativeKind::Ptr(HeapKind::Atomic) => "atomic",
+        NativeKind::Ptr(HeapKind::Lazy) => "lazy",
     }
 }
 

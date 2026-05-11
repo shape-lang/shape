@@ -291,6 +291,13 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // same Phase-2c deferral shape as HashMap / HashSet / Iterator.
         HeapValue::Result(_) => WireValue::String("<result:phase-2c>".to_string()),
         HeapValue::Option(_) => WireValue::String("<option:phase-2c>".to_string()),
+        // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
+        // primitives are runtime-tier handles with no wire shape.
+        // Surface as opaque tags — same Phase-2c deferral shape as
+        // Channel / HashMap / HashSet.
+        HeapValue::Mutex(_) => WireValue::String("<mutex:phase-2c>".to_string()),
+        HeapValue::Atomic(_) => WireValue::String("<atomic:phase-2c>".to_string()),
+        HeapValue::Lazy(_) => WireValue::String("<lazy:phase-2c>".to_string()),
     }
 }
 

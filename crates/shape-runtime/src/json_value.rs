@@ -228,6 +228,14 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // Iterator until the policy is decided.
         HeapValue::Result(_) => Err("cannot serialize: Result".into()),
         HeapValue::Option(_) => Err("cannot serialize: Option".into()),
+        // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
+        // primitives carry runtime-mutable interior state (Mutex inner
+        // value, atomic counter, lazy initializer) and don't have a
+        // stable serialized form. Reject in the same shape as
+        // Channel / Iterator.
+        HeapValue::Mutex(_) => Err("cannot serialize: Mutex".into()),
+        HeapValue::Atomic(_) => Err("cannot serialize: Atomic".into()),
+        HeapValue::Lazy(_) => Err("cannot serialize: Lazy".into()),
     }
 }
 

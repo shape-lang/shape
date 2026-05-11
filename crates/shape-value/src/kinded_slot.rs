@@ -41,9 +41,9 @@
 
 // ADR-006 §2.7
 use crate::heap_value::{
-    ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
-    NativeViewData, OptionData, PriorityQueueData, RangeData, ResultData, TableViewData,
-    TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
+    IoHandleData, LazyData, MutexData, NativeViewData, OptionData, PriorityQueueData, RangeData,
+    ResultData, TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -159,6 +159,42 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_channel(c),
             NativeKind::Ptr(HeapKind::Channel),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Mutex)`-kind slot. Mirror of
+    /// `from_channel` per ADR-006 §2.7.25 amendment (Wave 17
+    /// W17-concurrency, 2026-05-11). Full
+    /// `HeapValue::Mutex(Arc<MutexData>)` arm.
+    #[inline]
+    pub fn from_mutex(m: Arc<MutexData>) -> Self {
+        Self::new(
+            ValueSlot::from_mutex(m),
+            NativeKind::Ptr(HeapKind::Mutex),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Atomic)`-kind slot. Mirror of
+    /// `from_channel` per ADR-006 §2.7.25 amendment (Wave 17
+    /// W17-concurrency, 2026-05-11). Full
+    /// `HeapValue::Atomic(Arc<AtomicData>)` arm. i64-only at landing.
+    #[inline]
+    pub fn from_atomic(a: Arc<AtomicData>) -> Self {
+        Self::new(
+            ValueSlot::from_atomic(a),
+            NativeKind::Ptr(HeapKind::Atomic),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Lazy)`-kind slot. Mirror of
+    /// `from_channel` per ADR-006 §2.7.25 amendment (Wave 17
+    /// W17-concurrency, 2026-05-11). Full
+    /// `HeapValue::Lazy(Arc<LazyData>)` arm.
+    #[inline]
+    pub fn from_lazy(l: Arc<LazyData>) -> Self {
+        Self::new(
+            ValueSlot::from_lazy(l),
+            NativeKind::Ptr(HeapKind::Lazy),
         )
     }
 
@@ -423,6 +459,22 @@ impl Drop for KindedSlot {
                     HeapKind::Channel => {
                         Arc::decrement_strong_count(bits as *const ChannelData);
                     }
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // Mutex / Atomic / Lazy mirror the Channel arm.
+                    // Slot bits are `Arc::into_raw(Arc<MutexData>) /
+                    // Arc<AtomicData> / Arc<LazyData>) as u64`. Retires
+                    // one strong-count share — at refcount=0 the inner
+                    // Drop runs and (for Mutex/Lazy) retires the
+                    // protected `KindedSlot` payload via its own Drop.
+                    HeapKind::Mutex => {
+                        Arc::decrement_strong_count(bits as *const MutexData);
+                    }
+                    HeapKind::Atomic => {
+                        Arc::decrement_strong_count(bits as *const AtomicData);
+                    }
+                    HeapKind::Lazy => {
+                        Arc::decrement_strong_count(bits as *const LazyData);
+                    }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);
                     }
@@ -676,6 +728,22 @@ impl Clone for KindedSlot {
                     // shared, NOT cloned).
                     HeapKind::Channel => {
                         Arc::increment_strong_count(bits as *const ChannelData);
+                    }
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // Mutex / Atomic / Lazy mirror the Channel arm.
+                    // Bumps one strong-count share on the shared inner
+                    // Arc — the outer Arc clone hands out a fresh
+                    // endpoint of the same protected cell (Mutex/Lazy)
+                    // or shares observation of the same atomic
+                    // (Atomic). Interior state is NOT cloned.
+                    HeapKind::Mutex => {
+                        Arc::increment_strong_count(bits as *const MutexData);
+                    }
+                    HeapKind::Atomic => {
+                        Arc::increment_strong_count(bits as *const AtomicData);
+                    }
+                    HeapKind::Lazy => {
+                        Arc::increment_strong_count(bits as *const LazyData);
                     }
                     HeapKind::Decimal => {
                         Arc::increment_strong_count(bits as *const rust_decimal::Decimal);

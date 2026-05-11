@@ -619,11 +619,17 @@ pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! 
 // Concurrency primitives — compiler-builtin interior mutability types
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Mutex<T> methods: lock, try_lock, set
+/// Mutex<T> methods: lock, try_lock, set, get
+///
+/// `get` is the read-accessor for the wrapped value (the surface-level
+/// `m.value` property-access form requires GetProp dispatch on heap
+/// receivers — out of scope for W17-concurrency; the method form is the
+/// equivalent accessor user code calls). ADR-006 §2.7.25.
 pub static MUTEX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "lock" => crate::executor::objects::concurrency_methods::v2_mutex_lock,
     "try_lock" => crate::executor::objects::concurrency_methods::v2_mutex_try_lock,
     "set" => crate::executor::objects::concurrency_methods::v2_mutex_set,
+    "get" => crate::executor::objects::concurrency_methods::v2_mutex_get,
 };
 
 /// Atomic<T> methods: load, store, fetch_add, fetch_sub, compare_exchange

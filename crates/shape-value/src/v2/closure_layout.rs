@@ -39,9 +39,9 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
-    ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
-    NativeViewData, PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-    TypedArrayData, TypedObjectStorage,
+    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
+    IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
+    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -394,6 +394,25 @@ impl Drop for SharedCell {
                     // cell-storage parallel-kind track.
                     HeapKind::Channel => {
                         Arc::decrement_strong_count(bits as *const ChannelData);
+                    }
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // Mutex / Atomic / Lazy mirror the Channel arm at
+                    // the §2.7.8 / Q10 cell-storage parallel-kind
+                    // track. A `SharedCell` whose single-slot payload
+                    // is a `NativeKind::Ptr(HeapKind::Mutex/Atomic/Lazy)`
+                    // carries `Arc::into_raw(Arc<MutexData/AtomicData/
+                    // LazyData>) as u64`. Retire one strong-count
+                    // share at cell drop. Same dispatch shape as
+                    // Channel (concurrency primitives, full HeapValue
+                    // arm per §2.7.25).
+                    HeapKind::Mutex => {
+                        Arc::decrement_strong_count(bits as *const MutexData);
+                    }
+                    HeapKind::Atomic => {
+                        Arc::decrement_strong_count(bits as *const AtomicData);
+                    }
+                    HeapKind::Lazy => {
+                        Arc::decrement_strong_count(bits as *const LazyData);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

@@ -28,9 +28,9 @@ use super::super::*;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue, IoHandleData,
-        NativeViewData, PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-        TypedArrayData, TypedObjectStorage,
+        AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
+        IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
+        TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -108,6 +108,22 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // HeapValue arm, not pure-discriminator).
                 HeapKind::Channel => {
                     Arc::increment_strong_count(bits as *const ChannelData);
+                }
+                // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                // Mutex / Atomic / Lazy mirror the Channel arm. Slot
+                // bits are `Arc::into_raw(Arc<MutexData/AtomicData/
+                // LazyData>) as u64`. Bumps one strong-count share —
+                // outer Arc clone is a fresh handle of the same
+                // protected cell (Mutex/Lazy) or shared observer
+                // (Atomic). Interior state shared, not cloned.
+                HeapKind::Mutex => {
+                    Arc::increment_strong_count(bits as *const MutexData);
+                }
+                HeapKind::Atomic => {
+                    Arc::increment_strong_count(bits as *const AtomicData);
+                }
+                HeapKind::Lazy => {
+                    Arc::increment_strong_count(bits as *const LazyData);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -362,6 +378,21 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // heap-bearing payload.
                 HeapKind::Channel => {
                     Arc::decrement_strong_count(bits as *const ChannelData);
+                }
+                // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                // Mutex / Atomic / Lazy mirror the Channel arm.
+                // Retires one strong-count share. At refcount=0 the
+                // inner Mutex/Lazy Drop retires the protected
+                // `KindedSlot` payload via its own Drop; AtomicData
+                // has no Arc-bearing payload.
+                HeapKind::Mutex => {
+                    Arc::decrement_strong_count(bits as *const MutexData);
+                }
+                HeapKind::Atomic => {
+                    Arc::decrement_strong_count(bits as *const AtomicData);
+                }
+                HeapKind::Lazy => {
+                    Arc::decrement_strong_count(bits as *const LazyData);
                 }
                 HeapKind::Decimal => {
                     Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

@@ -1199,6 +1199,272 @@ impl Default for ChannelData {
     }
 }
 
+// ── Mutex / Atomic / Lazy storage (Wave 17 W17-concurrency,
+//    ADR-006 §2.7.25, 2026-05-11) ──────────────────────────────────────────
+//
+// W17-concurrency rebuild: Mutex, Atomic, and Lazy are the three
+// concurrency primitives left SURFACE'd by the strict-typing Phase-2
+// bulldozer (the `HeapValue::Concurrency(ConcurrencyData::*)` enum form
+// was deleted alongside `ValueWord`; see the deletion-fate comment in
+// `executor/objects/concurrency_methods.rs:1-22`). Each lands as its own
+// typed-Arc HeapValue arm per ADR-006 §2.3 / §2.7.25, mirror of the
+// §2.7.20 Channel rebuild structure:
+//
+// - `Mutex<T>` carries a single `KindedSlot` payload protected by a
+//   `Mutex<MutexInner>`. Like `ChannelData`, two `Arc<MutexData>` shares
+//   observe each other's mutations — the canonical "shared cell with
+//   exclusion" shape. `lock()` is a no-op marker at landing (single-
+//   threaded VM); the contract is that the inner value is mutated under
+//   exclusion. `try_lock()` mirrors `lock()`. `set(value)` swaps the
+//   inner payload (KindedSlot Drop retires the prior share).
+// - `Atomic<i64>` carries a `std::sync::atomic::AtomicI64` for the
+//   atomic operations (`load`, `store`, `fetch_add`, `fetch_sub`,
+//   `compare_exchange`). i64-only at landing per the playbook's
+//   "i64-priority" / "string-only" precedents (W15-priority-queue,
+//   W13-hashset). A typed-payload `Atomic<T>` is a future amendment
+//   with measurement.
+// - `Lazy<T>` carries a `Mutex<LazyInner>` wrapping `(initializer:
+//   Option<KindedSlot>, value: Option<KindedSlot>)`. `get()` returns
+//   the cached value or runs the initializer closure (closure-call
+//   path unlocked by W17-make-closure, merged at `aa47364`).
+//   `is_initialized()` returns whether the value has been computed.
+//
+// Forbidden shapes refused (per CLAUDE.md "Renames to refuse on sight"
+// + playbook §3 W17-concurrency forbidden list):
+//
+// - Generic "concurrency primitive" wrapper (`ConcurrencyData` enum
+//   shape from the deleted form). Each primitive is its own typed-Arc
+//   HeapValue arm.
+// - Inline-scalar Mutex/Atomic carriers (these are always heap — the
+//   semantic identity is "this is a shared cell with mutation", which
+//   has no inline-scalar reduction).
+// - Re-using `HeapKind::SharedCell` for Mutex (different semantics —
+//   `SharedCell` is binding-storage interior-mutability for `var`
+//   binding-form values, while `MutexData` is a runtime synchronization
+//   primitive user code asks for explicitly).
+
+/// `Mutex<T>` storage — a single typed payload protected by a Rust
+/// `Mutex` so concurrent `Arc<MutexData>` shares observe each other's
+/// mutations (the canonical "shared cell with exclusion" shape, mirror
+/// of `ChannelData`'s `Mutex<ChannelInner>` interior-mutability shape).
+///
+/// At landing the VM is single-threaded so `lock()` / `try_lock()` are
+/// no-op markers — the contract they preserve is "the inner value is
+/// mutated under exclusion" (the same contract user code reasons
+/// about). When the VM grows real concurrency, the same `Mutex` here
+/// will serialize concurrent `lock()` calls without API churn.
+///
+/// The inner `Option<KindedSlot>` carries one strong-count share for
+/// the wrapped value when present; `take()` / `replace()` discipline
+/// preserves the share-discipline across `set(...)` (the old slot
+/// drops, the new slot is owned by the cell).
+#[derive(Debug)]
+pub struct MutexData {
+    inner: std::sync::Mutex<MutexInner>,
+}
+
+#[derive(Debug)]
+struct MutexInner {
+    /// Wrapped value. `None` only transiently between `take` and replace
+    /// during `set(...)` — never observable externally.
+    value: Option<crate::kinded_slot::KindedSlot>,
+}
+
+impl MutexData {
+    /// Build a `MutexData` wrapping `value`.
+    pub fn new(value: crate::kinded_slot::KindedSlot) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(MutexInner { value: Some(value) }),
+        }
+    }
+
+    /// `lock()` — at landing a no-op marker (single-threaded VM). When
+    /// the runtime grows real concurrency, this is the acquire point
+    /// for the inner `std::sync::Mutex`.
+    pub fn lock(&self) {
+        let _g = self.inner.lock().expect("mutex poisoned");
+    }
+
+    /// `try_lock()` — at landing always returns true (single-threaded
+    /// VM; there's no contention to fail). Mirror of `lock()`.
+    pub fn try_lock(&self) -> bool {
+        self.inner.try_lock().is_ok()
+    }
+
+    /// Read the current value (clone of the inner `KindedSlot`).
+    /// `KindedSlot::Clone` bumps the inner share so the returned slot
+    /// is independently owned.
+    pub fn get(&self) -> crate::kinded_slot::KindedSlot {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner
+            .value
+            .as_ref()
+            .expect("mutex value present")
+            .clone()
+    }
+
+    /// Replace the wrapped value. The prior slot drops here
+    /// (`KindedSlot::Drop` retires its inner share); the new slot is
+    /// owned by the cell.
+    pub fn set(&self, new_value: crate::kinded_slot::KindedSlot) {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.value = Some(new_value);
+    }
+}
+
+/// `Atomic<i64>` storage — wraps a `std::sync::atomic::AtomicI64` for
+/// the atomic operations exposed by the `Atomic.load` / `store` /
+/// `fetch_add` / `fetch_sub` / `compare_exchange` method surface.
+///
+/// **i64-only at landing** per the playbook's typed-payload deferral
+/// precedent (W15-priority-queue i64-priority-only). A typed-payload
+/// `Atomic<T>` is a future Phase-2c amendment with measurement.
+///
+/// Memory ordering is `SeqCst` (sequential consistency) throughout —
+/// the simplest semantically-correct ordering. Relaxed-ordering
+/// optimizations are a measured follow-up.
+#[derive(Debug)]
+pub struct AtomicData {
+    value: std::sync::atomic::AtomicI64,
+}
+
+impl AtomicData {
+    /// Build an `AtomicData` with initial value `init`.
+    pub fn new(init: i64) -> Self {
+        Self {
+            value: std::sync::atomic::AtomicI64::new(init),
+        }
+    }
+
+    /// Atomic load (SeqCst).
+    pub fn load(&self) -> i64 {
+        self.value.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Atomic store (SeqCst).
+    pub fn store(&self, v: i64) {
+        self.value.store(v, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Atomic fetch-add (SeqCst). Returns the prior value.
+    pub fn fetch_add(&self, delta: i64) -> i64 {
+        self.value
+            .fetch_add(delta, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Atomic fetch-sub (SeqCst). Returns the prior value.
+    pub fn fetch_sub(&self, delta: i64) -> i64 {
+        self.value
+            .fetch_sub(delta, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Atomic compare-exchange (SeqCst). Returns the prior value
+    /// regardless of success — callers infer success by comparing to
+    /// `expected`.
+    pub fn compare_exchange(&self, expected: i64, new_v: i64) -> i64 {
+        match self.value.compare_exchange(
+            expected,
+            new_v,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(prev) => prev,
+            Err(prev) => prev,
+        }
+    }
+}
+
+/// `Lazy<T>` storage — wraps an initializer closure (`KindedSlot` of
+/// kind `Ptr(HeapKind::Closure)`) and a cached value slot. `get()`
+/// runs the initializer the first time and caches the result;
+/// subsequent calls return the cached value.
+///
+/// Closure-call dispatch (`vm.call_value_immediate_nb`) is unlocked by
+/// the W17-make-closure partial-gate (merged at `aa47364`); see
+/// `executor/objects/concurrency_methods.rs::v2_lazy_get` for the
+/// closure-call body.
+///
+/// **`Mutex<LazyInner>` for interior mutability**: like `ChannelData`,
+/// two `Arc<LazyData>` shares observe each other's initialization
+/// state. The `OnceCell`-style "init only happens once" guarantee is
+/// preserved by the inner Mutex serializing concurrent `get()` calls
+/// when the runtime grows real concurrency. At landing (single-
+/// threaded VM) the mutex is uncontended.
+#[derive(Debug)]
+pub struct LazyData {
+    inner: std::sync::Mutex<LazyInner>,
+}
+
+#[derive(Debug)]
+struct LazyInner {
+    /// Initializer closure (`KindedSlot` of kind `Ptr(HeapKind::Closure)`).
+    /// `None` after first successful `get()` — the closure is dropped
+    /// once its result is cached.
+    initializer: Option<crate::kinded_slot::KindedSlot>,
+    /// Cached value. `None` before first `get()`, `Some` after.
+    value: Option<crate::kinded_slot::KindedSlot>,
+}
+
+impl LazyData {
+    /// Build a `LazyData` wrapping `initializer` (expected to be a
+    /// closure `KindedSlot`).
+    pub fn new(initializer: crate::kinded_slot::KindedSlot) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(LazyInner {
+                initializer: Some(initializer),
+                value: None,
+            }),
+        }
+    }
+
+    /// Whether `get()` has been called and the value cached.
+    pub fn is_initialized(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("lazy mutex poisoned")
+            .value
+            .is_some()
+    }
+
+    /// Read the cached value if present, else `None`. The closure-call
+    /// path (running the initializer) lives in the handler tier — this
+    /// method is the storage-tier cache lookup. Returns a clone of the
+    /// cached slot (one strong-count share bumped).
+    pub fn cached(&self) -> Option<crate::kinded_slot::KindedSlot> {
+        self.inner
+            .lock()
+            .expect("lazy mutex poisoned")
+            .value
+            .as_ref()
+            .cloned()
+    }
+
+    /// Take the initializer closure (for the handler tier to invoke
+    /// via `vm.call_value_immediate_nb`). Returns `None` if the value
+    /// is already cached (caller should use `cached()` instead).
+    pub fn take_initializer(&self) -> Option<crate::kinded_slot::KindedSlot> {
+        let mut inner = self.inner.lock().expect("lazy mutex poisoned");
+        if inner.value.is_some() {
+            return None;
+        }
+        inner.initializer.take()
+    }
+
+    /// Cache the result of running the initializer. The initializer
+    /// slot has already been dropped (via `take_initializer`); this
+    /// installs the result. If a value was concurrently cached
+    /// (impossible at single-threaded landing, but defensive for
+    /// future concurrency), the new value drops cleanly via
+    /// `KindedSlot::Drop`.
+    pub fn store_result(&self, value: crate::kinded_slot::KindedSlot) {
+        let mut inner = self.inner.lock().expect("lazy mutex poisoned");
+        // The take_initializer caller is the only path that should
+        // reach store_result, so value is None here at the
+        // single-threaded landing.
+        inner.value = Some(value);
+    }
+}
+
 // ── PriorityQueue storage (Wave 15 W15-priority-queue, 2026-05-10) ──────────
 
 /// PriorityQueue storage — i64-priority min-heap.
@@ -1828,6 +2094,22 @@ impl Drop for TypedObjectStorage {
                         // payloads.
                         HeapKind::Channel => {
                             std::sync::Arc::decrement_strong_count(bits as *const ChannelData);
+                        }
+                        // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                        // Mutex / Atomic / Lazy mirror the Channel arm.
+                        // A TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Mutex/Atomic/Lazy)`
+                        // holds slot bits =
+                        // `Arc::into_raw(Arc<MutexData/AtomicData/LazyData>)`.
+                        // Retire one strong-count share at storage drop.
+                        HeapKind::Mutex => {
+                            std::sync::Arc::decrement_strong_count(bits as *const MutexData);
+                        }
+                        HeapKind::Atomic => {
+                            std::sync::Arc::decrement_strong_count(bits as *const AtomicData);
+                        }
+                        HeapKind::Lazy => {
+                            std::sync::Arc::decrement_strong_count(bits as *const LazyData);
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -2664,6 +2946,16 @@ impl Clone for HeapValue {
             // is unwrapped via Arc::make_mut.
             HeapValue::Result(v) => HeapValue::Result(Arc::clone(v)),
             HeapValue::Option(v) => HeapValue::Option(Arc::clone(v)),
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): Mutex /
+            // Atomic / Lazy Arcs share the typed-Arc clone shape —
+            // single strong-count bump on the shared inner Arc, no
+            // payload copy. Cloning a Mutex/Lazy yields a fresh
+            // "endpoint" share of the same protected cell; Atomic
+            // shares observe each other's load/store/fetch
+            // operations. Same shape as Channel.
+            HeapValue::Mutex(v) => HeapValue::Mutex(Arc::clone(v)),
+            HeapValue::Atomic(v) => HeapValue::Atomic(Arc::clone(v)),
+            HeapValue::Lazy(v) => HeapValue::Lazy(Arc::clone(v)),
         }
     }
 }
@@ -2916,6 +3208,19 @@ impl fmt::Display for HeapValue {
                     write!(f, "Some(<...>)")
                 } else {
                     write!(f, "None")
+                }
+            }
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
+            // primitives have no user-facing literal — render as opaque
+            // tags annotated with diagnostic state. Mirror of Channel's
+            // `<channel:state:len>` shape.
+            HeapValue::Mutex(_) => write!(f, "<mutex>"),
+            HeapValue::Atomic(a) => write!(f, "<atomic:{}>", a.load()),
+            HeapValue::Lazy(l) => {
+                if l.is_initialized() {
+                    write!(f, "<lazy:initialized>")
+                } else {
+                    write!(f, "<lazy:pending>")
                 }
             }
         }
@@ -3932,5 +4237,206 @@ mod result_option_storage {
         assert!(arc2.is_ok);
         assert_eq!(arc2.payload.as_i64(), Some(7));
         drop(arc2);
+    }
+}
+
+#[cfg(test)]
+mod concurrency_storage {
+    //! W17-concurrency (ADR-006 §2.7.25, 2026-05-11): pin the `lock`
+    //! / `try_lock` / `set` / `get` API contracts on `MutexData`, the
+    //! `load` / `store` / `fetch_add` / `fetch_sub` /
+    //! `compare_exchange` contracts on `AtomicData`, and the
+    //! `is_initialized` / `cached` / `take_initializer` /
+    //! `store_result` contracts on `LazyData`. Storage-tier only —
+    //! closure-call integration for `Lazy.get` lives at the handler
+    //! tier (`executor/objects/concurrency_methods.rs`).
+    use super::*;
+    use crate::kinded_slot::KindedSlot;
+    use std::sync::Arc;
+
+    // ── MutexData ──────────────────────────────────────────────────
+
+    #[test]
+    fn mutex_new_holds_initial_value() {
+        let m = MutexData::new(KindedSlot::from_int(42));
+        assert_eq!(m.get().as_i64(), Some(42));
+    }
+
+    #[test]
+    fn mutex_lock_is_noop_at_landing() {
+        let m = MutexData::new(KindedSlot::from_int(0));
+        m.lock();
+        // lock returns; observable state unchanged.
+        assert_eq!(m.get().as_i64(), Some(0));
+    }
+
+    #[test]
+    fn mutex_try_lock_returns_true_uncontended() {
+        let m = MutexData::new(KindedSlot::from_int(0));
+        assert!(m.try_lock());
+    }
+
+    #[test]
+    fn mutex_set_replaces_value_and_drops_prior() {
+        // Storage-layer counterpart of the smoke target's
+        // `m.set(5); print(m.value)`.
+        let m = MutexData::new(KindedSlot::from_int(0));
+        m.set(KindedSlot::from_int(5));
+        assert_eq!(m.get().as_i64(), Some(5));
+    }
+
+    #[test]
+    fn mutex_set_with_heap_payload_retires_shares() {
+        // The prior slot drops cleanly when `set` replaces it; no
+        // Arc-leak. A heap-bearing payload's strong-count returns to
+        // zero after `set` and `drop(mutex)`.
+        let s = Arc::new("initial".to_string());
+        let weak = Arc::downgrade(&s);
+        let m = MutexData::new(KindedSlot::from_string_arc(s));
+        assert_eq!(weak.strong_count(), 1);
+        m.set(KindedSlot::from_int(7));
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "Mutex.set must drop prior heap payload share"
+        );
+        drop(m);
+    }
+
+    #[test]
+    fn mutex_shared_arc_observes_set_mutations() {
+        // Two `Arc<MutexData>` shares of the same mutex observe each
+        // other's mutations — the producer/consumer-endpoints shape
+        // (mirror of Channel).
+        let m1 = Arc::new(MutexData::new(KindedSlot::from_int(0)));
+        let m2 = Arc::clone(&m1);
+        m1.set(KindedSlot::from_int(99));
+        assert_eq!(m2.get().as_i64(), Some(99));
+    }
+
+    // ── AtomicData ─────────────────────────────────────────────────
+
+    #[test]
+    fn atomic_new_holds_initial_value() {
+        let a = AtomicData::new(7);
+        assert_eq!(a.load(), 7);
+    }
+
+    #[test]
+    fn atomic_store_replaces_value() {
+        let a = AtomicData::new(0);
+        a.store(42);
+        assert_eq!(a.load(), 42);
+    }
+
+    #[test]
+    fn atomic_fetch_add_returns_prior_and_increments() {
+        // Smoke-target storage layer: a starts at 0, fetch_add(1)
+        // returns 0 (prior), load() returns 1.
+        let a = AtomicData::new(0);
+        let prior = a.fetch_add(1);
+        assert_eq!(prior, 0);
+        assert_eq!(a.load(), 1);
+    }
+
+    #[test]
+    fn atomic_fetch_sub_returns_prior_and_decrements() {
+        let a = AtomicData::new(10);
+        let prior = a.fetch_sub(3);
+        assert_eq!(prior, 10);
+        assert_eq!(a.load(), 7);
+    }
+
+    #[test]
+    fn atomic_compare_exchange_swaps_on_match() {
+        let a = AtomicData::new(5);
+        let prior = a.compare_exchange(5, 99);
+        assert_eq!(prior, 5);
+        assert_eq!(a.load(), 99);
+    }
+
+    #[test]
+    fn atomic_compare_exchange_keeps_on_mismatch() {
+        let a = AtomicData::new(5);
+        let prior = a.compare_exchange(7, 99);
+        assert_eq!(prior, 5);
+        assert_eq!(a.load(), 5);
+    }
+
+    #[test]
+    fn atomic_shared_arc_observes_other_share() {
+        let a1 = Arc::new(AtomicData::new(0));
+        let a2 = Arc::clone(&a1);
+        a1.store(42);
+        assert_eq!(a2.load(), 42);
+        a2.fetch_add(8);
+        assert_eq!(a1.load(), 50);
+    }
+
+    // ── LazyData ───────────────────────────────────────────────────
+
+    #[test]
+    fn lazy_new_is_not_initialized() {
+        let dummy_closure = KindedSlot::from_int(0);
+        // Note: at the storage tier we don't actually call the
+        // closure — that lives at the handler tier. The closure
+        // payload here is just any `KindedSlot`; `is_initialized`
+        // looks at the cached value, not the initializer.
+        let l = LazyData::new(dummy_closure);
+        assert!(!l.is_initialized());
+    }
+
+    #[test]
+    fn lazy_take_initializer_then_store_result_marks_initialized() {
+        // Simulates the handler-tier `lazy.get()` flow: take the
+        // initializer, "run it" (the test substitutes a result), then
+        // cache the result. After store_result, is_initialized=true
+        // and cached() returns the stored value.
+        let l = LazyData::new(KindedSlot::from_int(0));
+        let init = l
+            .take_initializer()
+            .expect("initializer present before first get");
+        assert!(!l.is_initialized());
+        // "Run the initializer" — at storage-tier test we just drop
+        // the initializer slot and synthesize a result.
+        drop(init);
+        l.store_result(KindedSlot::from_int(42));
+        assert!(l.is_initialized());
+        let got = l.cached().expect("cached after store_result");
+        assert_eq!(got.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn lazy_take_initializer_returns_none_after_caching() {
+        // After cache is populated, `take_initializer` returns None
+        // — the handler tier's get() uses this to detect "already
+        // initialized, use cached() instead".
+        let l = LazyData::new(KindedSlot::from_int(0));
+        let _init = l.take_initializer().unwrap();
+        l.store_result(KindedSlot::from_int(7));
+        assert!(l.take_initializer().is_none());
+    }
+
+    #[test]
+    fn lazy_cached_returns_none_before_init() {
+        let l = LazyData::new(KindedSlot::from_int(0));
+        assert!(l.cached().is_none());
+    }
+
+    #[test]
+    fn lazy_dropping_lazy_with_heap_payload_retires_shares() {
+        // Refcount discipline: the cached `KindedSlot` owns one
+        // strong-count share; dropping the LazyData retires it.
+        let s = Arc::new("cached_value".to_string());
+        let weak = Arc::downgrade(&s);
+        let l = LazyData::new(KindedSlot::from_int(0));
+        l.store_result(KindedSlot::from_string_arc(s));
+        assert_eq!(weak.strong_count(), 1);
+        drop(l);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "Dropped LazyData must retire cached KindedSlot's share"
+        );
     }
 }

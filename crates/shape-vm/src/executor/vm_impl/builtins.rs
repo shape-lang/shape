@@ -660,27 +660,93 @@ impl VirtualMachine {
                     let result = KindedSlot::from_channel(empty);
                     self.push_kinded_slot(result)?;
                 }
-                BuiltinFunction::MutexCtor
-                | BuiltinFunction::AtomicCtor
-                | BuiltinFunction::LazyCtor => {
-                    // Phase-2c §2.7.4 SURFACE: Stage C HeapKind family
-                    // rebuild required. Concurrency primitives (Mutex,
-                    // Atomic, Lazy) lost their HeapKind /
-                    // HeapValue arms in the strict-typing Phase-2 pass;
-                    // no kinded carrier exists to represent them. Each
-                    // is a separate Stage C cluster (Channel landed as
-                    // Wave 15 W15-channel-rebuild, ADR-006 §2.7.20 /
-                    // Q21, 2026-05-10).
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(format!(
-                        "{:?} — SURFACE: Stage C HeapKind family rebuild \
-                         required. Mutex/Atomic/Lazy have no \
-                         HeapKind variant after the strict-typing Phase-2 \
-                         deletion. Each is its own Stage C cluster per \
-                         the W13 playbook 'Out of scope' list. ADR-006 \
-                         §2.7.4.",
-                        builtin
-                    )));
+                BuiltinFunction::MutexCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Mutex(initial_value)` builds an `Arc<MutexData>`
+                    // wrapping the initial value `KindedSlot` (any
+                    // kind). The initial-value share moves into the
+                    // MutexInner cell — `pop_builtin_args` already
+                    // consumed the arg's stack share, and
+                    // `MutexData::new` takes ownership of the slot.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Mutex() requires exactly 1 argument \
+                             (initial value), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initial = args.remove(0);
+                    let m = std::sync::Arc::new(
+                        shape_value::heap_value::MutexData::new(initial),
+                    );
+                    let result = KindedSlot::from_mutex(m);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::AtomicCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Atomic(initial)` builds an `Arc<AtomicData>`
+                    // wrapping a `std::sync::atomic::AtomicI64`.
+                    // i64-only at landing — non-int args error.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Atomic() requires exactly 1 argument \
+                             (initial int value), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initial = args[0].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Atomic() argument must be an int (got \
+                             kind {:?}); typed-payload Atomic<T> is a \
+                             future amendment per ADR-006 §2.7.25",
+                            args[0].kind
+                        ))
+                    })?;
+                    let a = std::sync::Arc::new(
+                        shape_value::heap_value::AtomicData::new(initial),
+                    );
+                    let result = KindedSlot::from_atomic(a);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::LazyCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Lazy(|| ...)` builds an `Arc<LazyData>` wrapping
+                    // the initializer closure. The closure share moves
+                    // into the LazyInner cell — the handler tier's
+                    // `lazy.get()` takes the initializer back out via
+                    // `take_initializer()` for the
+                    // `vm.call_value_immediate_nb` invocation.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Lazy() requires exactly 1 argument \
+                             (initializer closure), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initializer = args.remove(0);
+                    // Kind-validate: must be a Closure (closure-call
+                    // path goes through `call_value_immediate_nb` which
+                    // requires Ptr(HeapKind::Closure) callee kind).
+                    if !matches!(
+                        initializer.kind,
+                        shape_value::NativeKind::Ptr(
+                            shape_value::heap_value::HeapKind::Closure
+                        )
+                    ) {
+                        return Err(VMError::RuntimeError(format!(
+                            "Lazy() argument must be a closure (got \
+                             kind {:?})",
+                            initializer.kind
+                        )));
+                    }
+                    let l = std::sync::Arc::new(
+                        shape_value::heap_value::LazyData::new(initializer),
+                    );
+                    let result = KindedSlot::from_lazy(l);
+                    self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::MakeContentText
                 | BuiltinFunction::MakeContentFragment
