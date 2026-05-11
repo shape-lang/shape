@@ -3097,30 +3097,132 @@ impl VirtualMachine {
                 );
                 Ok(())
             }
-            shape_value::RefTarget::TypedField { .. }
-            | shape_value::RefTarget::TypedIndex { .. } => {
-                // Writing through a TypedField / TypedIndex projection
-                // requires mutable access to the receiver's slot buffer.
-                // The current `Arc<TypedObjectStorage>` / `Arc<TypedArrayData>`
-                // shape is shared-immutable; in-place mutation goes
-                // through the same v2-raw-heap aliasing class CLAUDE.md
-                // tracks as a separate workstream (see "v2-raw-heap-audit").
-                // Surface here per playbook §7 REVISED #4 (no Bool-default,
-                // no fabrication) — the kinded RefTarget redesign is
-                // landed; the projection-write path lands when the
-                // raw-heap-mutation rebuild closes that workstream.
-                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
-                Err(VMError::NotImplemented(
-                    "DerefStore / SetIndexRef SURFACE: writing through a \
-                     TypedField / TypedIndex projection requires the v2-raw-heap \
-                     mutation rebuild — Arc<TypedObjectStorage> / \
-                     Arc<TypedArrayData> are shared-immutable carriers \
-                     today. ADR-006 §2.7.13 / Q14 lands the kinded ref \
-                     carrier; the projection-write rebuild is tracked as \
-                     the v2-raw-heap-audit follow-up (CLAUDE.md \"Known \
-                     Constraints\")."
-                        .into(),
-                ))
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                // Q14 / ADR-006 §2.7.13 projection-write: the receiver
+                // `Arc<TypedObjectStorage>` is shared between the ref
+                // carrier and the originating binding, so `Arc::make_mut`
+                // is not applicable (refcount > 1 by construction; the
+                // struct is intentionally not `Clone`). The in-place
+                // writer (`TypedObjectStorage::write_slot_in_place`)
+                // takes the kind-aware projected place and rotates the
+                // slot's share — prior occupant returned for caller
+                // release, new occupant transferred in.
+                let field_idx = *field_offset as usize;
+                if field_idx >= receiver.slots.len() {
+                    crate::executor::vm_impl::stack::drop_with_kind(
+                        val_bits, val_kind,
+                    );
+                    return Err(VMError::RuntimeError(format!(
+                        "DerefStore: TypedField field_offset {} out of bounds \
+                         (slot count {})",
+                        field_idx,
+                        receiver.slots.len()
+                    )));
+                }
+                // Kind invariance contract (§2.7.5.1 post-proof): the
+                // projection's captured `kind` must match the receiver's
+                // `field_kinds[field_idx]` (set at construction time) AND
+                // match the popped value's kind (the producing opcode is
+                // post-proof). Drift = construction-side bug surfaced via
+                // debug_assert; in release this writes through the captured
+                // kind since the place's heap_mask bit was set for that
+                // kind and the prior bits decode under it.
+                debug_assert_eq!(
+                    receiver.field_kinds[field_idx], *kind,
+                    "DerefStore: TypedField field_kinds[{}] = {:?} drift vs \
+                     RefTarget captured kind {:?} — ADR-006 §2.7.13 / Q14",
+                    field_idx, receiver.field_kinds[field_idx], kind,
+                );
+                // Pre-read the prior bits for the write-barrier helper.
+                let prior_bits = receiver.slots[field_idx].raw();
+                write_barrier_slot(prior_bits, val_bits);
+                // SAFETY: single-threaded VM; refs cannot escape across
+                // task boundaries (§3.1); no aliased `&mut ValueSlot`
+                // outstanding (this is the only mutator path in the VM
+                // for typed-object slots, gated by Q14 dispatch); kind
+                // invariance debug_asserted above. Per
+                // `TypedObjectStorage::write_slot_in_place` contract,
+                // returns the same `prior_bits` we just read.
+                let _returned_prior = unsafe {
+                    receiver.write_slot_in_place(field_idx, val_bits)
+                };
+                debug_assert_eq!(
+                    _returned_prior, prior_bits,
+                    "DerefStore: write_slot_in_place prior_bits mismatch — \
+                     concurrent write detected? ADR-006 §2.7.13 / Q14",
+                );
+                // Release the prior occupant's share via the kind-aware
+                // dispatch table (§2.7.7 WB2.4).
+                crate::executor::vm_impl::stack::drop_with_kind(
+                    prior_bits, *kind,
+                );
+                Ok(())
+            }
+            shape_value::RefTarget::TypedIndex {
+                receiver,
+                index,
+                elem_kind,
+            } => {
+                // Q14 / ADR-006 §2.7.13 projection-write (array element):
+                // mirror of the TypedField arm via
+                // `TypedArrayData::write_index_in_place`. The receiver
+                // `Arc<TypedArrayData>` is shared between the ref carrier
+                // and the originating binding — same constraint as
+                // TypedField above. The inner `Arc<TypedBuffer<T>>` /
+                // `Arc<AlignedTypedBuffer>` is also shared; `Arc::make_mut`
+                // there would clone the entire buffer and break ref
+                // semantics. In-place write through the kinded element
+                // is the design.
+                let idx = *index as usize;
+                // Cross-check: the captured elem_kind matches the
+                // popped value's kind (already debug_asserted at the
+                // op_deref_store / op_set_index_ref level for clarity,
+                // mirror it here for write_ref_target call sites).
+                debug_assert_eq!(
+                    val_kind, *elem_kind,
+                    "DerefStore: TypedIndex elem_kind {:?} drift vs popped \
+                     value kind {:?} — ADR-006 §2.7.13 / Q14",
+                    elem_kind, val_kind,
+                );
+                // SAFETY: same contract as the TypedField arm above —
+                // single-threaded VM; refs constrained to non-escaping
+                // task scope; kind invariance asserted. Returns `Some(prior)`
+                // for the scalar / String element-kind arms (the only
+                // arms for which `typed_array_element_kind` returned
+                // `Some` at MakeIndexRef construction time); returns
+                // `None` only for HeapValue / FloatSlice / Matrix —
+                // which means the projection should not have been
+                // constructible in the first place (a
+                // construction-side bug). Defensive surface for the
+                // unreachable-by-construction case.
+                let prior_opt = unsafe {
+                    receiver.write_index_in_place(idx, val_bits)
+                };
+                let Some(prior_bits) = prior_opt else {
+                    crate::executor::vm_impl::stack::drop_with_kind(
+                        val_bits, val_kind,
+                    );
+                    return Err(VMError::NotImplemented(
+                        "DerefStore / SetIndexRef SURFACE: TypedArrayData \
+                         variant has no scalar in-place writer (HeapValue \
+                         / FloatSlice / Matrix) — construction-side \
+                         MakeIndexRef should have rejected per \
+                         typed_array_element_kind. ADR-006 §2.7.13 / Q14."
+                            .into(),
+                    ));
+                };
+                write_barrier_slot(prior_bits, val_bits);
+                // Release the prior occupant's share (no-op for non-heap
+                // element kinds — the kinded dispatch table makes
+                // `drop_with_kind` a no-op for `Int64`, `Float64`, etc.).
+                crate::executor::vm_impl::stack::drop_with_kind(
+                    prior_bits, *elem_kind,
+                );
+                Ok(())
             }
         }
     }

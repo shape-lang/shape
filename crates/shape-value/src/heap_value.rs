@@ -1624,6 +1624,85 @@ impl TypedObjectStorage {
         );
         Self { schema_id, slots, heap_mask, field_kinds }
     }
+
+    /// In-place write of slot `idx` through a shared `&TypedObjectStorage`
+    /// (i.e. through an `Arc<TypedObjectStorage>` with refcount > 1).
+    /// Returns the prior `(bits, kind)` so the caller can run
+    /// `drop_with_kind` on the released share. The caller transfers
+    /// ownership of `new_bits` (one strong-count share for heap kinds) to
+    /// the slot.
+    ///
+    /// This is the Q14 / ADR-006 §2.7.13 in-place write path for
+    /// `RefTarget::TypedField` projection writes — the receiver `Arc`
+    /// is shared between the ref carrier and the originating binding,
+    /// so `Arc::get_mut` / `Arc::make_mut` cannot apply (refcount > 1
+    /// by construction, and `TypedObjectStorage` is intentionally not
+    /// `Clone` per the §2.5 documentation). The `Box<[ValueSlot]>`
+    /// inside the storage is logically owned; the single-word `u64`
+    /// inside each `ValueSlot` is written atomically (single-word
+    /// aligned store on every supported architecture).
+    ///
+    /// # Safety
+    ///
+    /// Callers must guarantee:
+    ///
+    /// 1. **Single-threaded write**: the VM is single-threaded, and the
+    ///    refs that drive this path are constrained by the §3.1
+    ///    ref-escape analysis to stay within their originating task
+    ///    (refs cannot cross task boundaries — error B0014
+    ///    `NonSendableAcrossTaskBoundary`). No other thread may hold an
+    ///    `&Arc<TypedObjectStorage>` to the same storage at the same
+    ///    time the write executes.
+    /// 2. **No aliased `&mut ValueSlot`**: callers must NOT mint a
+    ///    `&mut ValueSlot` to slot `idx` from any path while this write
+    ///    is in flight. The Q14 dispatch in `op_deref_store` /
+    ///    `op_set_index_ref` is the only caller, and it operates on
+    ///    `&TypedObjectStorage` exclusively.
+    /// 3. **Kind invariance**: `new_kind` must equal
+    ///    `self.field_kinds[idx]`. The Q14 RefTarget carries the
+    ///    projected slot's kind at construction (`MakeFieldRef` sources
+    ///    it from `field_type_tag`); the post-proof `§2.7.5.1` contract
+    ///    forbids mid-life kind changes for typed fields. The caller
+    ///    debug_asserts this before calling.
+    /// 4. **`heap_mask` bit consistency**: for heap-kinded slots
+    ///    (NativeKind::String or Ptr(HeapKind::_)), the corresponding
+    ///    `heap_mask` bit must already be set per the `TypedObjectStorage::new`
+    ///    construction-side contract, AND the prior bits must be a
+    ///    valid `Arc::into_raw::<T>` for the slot's kind. The returned
+    ///    `prior_bits` is exactly that share; the caller releases it via
+    ///    `drop_with_kind` after running the post-write barrier.
+    ///
+    /// Q14 / ADR-006 §2.7.13. Mirror of the `clone_with_kind` /
+    /// `drop_with_kind` symmetry used by `RefTarget::Local` and
+    /// `RefTarget::ModuleBinding` writes (`stack_write_kinded` and
+    /// `module_binding_write_kinded` already encapsulate this pattern
+    /// for non-projected places; this is the projected-place mirror).
+    #[inline]
+    pub unsafe fn write_slot_in_place(
+        &self,
+        idx: usize,
+        new_bits: u64,
+    ) -> u64 {
+        debug_assert!(
+            idx < self.slots.len(),
+            "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
+            idx,
+            self.slots.len(),
+        );
+        // SAFETY: see method contract. Single-threaded VM; refs cannot
+        // escape across task boundaries; no aliased `&mut ValueSlot`
+        // outstanding by construction; `Box<[ValueSlot]>` is `Sized`-laid-
+        // out and the slot's `u64` is naturally aligned. We cast through
+        // `&[ValueSlot]` -> `*const ValueSlot` -> `*mut ValueSlot` to
+        // perform the single-word write. The slot's `field_kinds[idx]`
+        // is the kind invariant; the caller already debug_asserted kind
+        // equality, so the slot's heap-mask bit (if set) still applies
+        // to the new bits.
+        let slot_ptr = self.slots.as_ptr().add(idx) as *mut crate::slot::ValueSlot;
+        let prior = (*slot_ptr).raw();
+        *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
+        prior
+    }
 }
 
 impl Drop for TypedObjectStorage {
@@ -2032,6 +2111,178 @@ impl TypedArrayData {
             TypedArrayData::HeapValue(a) => !a.is_empty(),
             TypedArrayData::FloatSlice { len, .. } => *len > 0,
         }
+    }
+
+    /// In-place write of element `idx` through a shared
+    /// `&TypedArrayData` (i.e. through an `Arc<TypedArrayData>` with
+    /// refcount > 1, or via the inner `Arc<TypedBuffer<T>>` likewise
+    /// shared). Returns the prior bits for the heap-pointer arms
+    /// (currently `String`) so the caller can run `drop_with_kind` on
+    /// the released share. For scalar arms, the returned bits are the
+    /// prior scalar's u64 representation (no Arc-share release needed).
+    ///
+    /// This is the Q14 / ADR-006 §2.7.13 in-place write path for
+    /// `RefTarget::TypedIndex` projection writes — same constraints as
+    /// `TypedObjectStorage::write_slot_in_place`. The receiver Arc is
+    /// shared between the ref carrier and the originating binding,
+    /// so `Arc::make_mut` would clone the buffer and break ref
+    /// semantics.
+    ///
+    /// `new_bits` is the kind-encoded element value: integer arms use
+    /// `new_bits as <T>` (two's complement / zero-extension); float
+    /// arms use `f64::from_bits(new_bits)` (matching the
+    /// `typed_array_read_index_raw` symmetry); the `String` arm
+    /// interprets `new_bits` as `Arc::into_raw::<String>` (one share
+    /// transferred to the buffer).
+    ///
+    /// Variants without a single statically-sourceable scalar element
+    /// kind (`HeapValue`, `FloatSlice`, `Matrix`) return `None` —
+    /// `typed_array_element_kind` already rejects construction of a
+    /// `TypedIndex` projection over those variants, so this path is
+    /// unreachable for them. Returning `None` rather than panicking
+    /// preserves a defensive surface for any future projection-builder
+    /// gap.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as `TypedObjectStorage::write_slot_in_place`:
+    ///
+    /// 1. Single-threaded write (VM is single-threaded; refs constrained
+    ///    by §3.1 escape analysis to stay within their originating
+    ///    task).
+    /// 2. No aliased `&mut TypedBuffer<T>` outstanding for the target
+    ///    buffer.
+    /// 3. `new_bits` interprets correctly under the variant's element
+    ///    kind. The caller (`write_ref_target` in `variables/mod.rs`)
+    ///    debug_asserts kind equality between popped `val_kind` and
+    ///    the `RefTarget::TypedIndex { elem_kind, .. }` projection.
+    /// 4. `idx` is within bounds (`idx < self.element_count()`); the
+    ///    caller bounds-checks at `MakeIndexRef` / `SetIndexRef`
+    ///    construction time.
+    ///
+    /// Q14 / ADR-006 §2.7.13.
+    pub unsafe fn write_index_in_place(
+        &self,
+        idx: usize,
+        new_bits: u64,
+    ) -> Option<u64> {
+        // SAFETY (each arm): the buffer `Arc<TypedBuffer<T>>` (or
+        // `Arc<AlignedTypedBuffer>` for F64) is shared via the typed
+        // `Arc` payload. The `TypedBuffer<T>` itself owns a `Vec<T>`,
+        // which is `Sized`-laid-out with contiguous slots. We cast
+        // through `&TypedBuffer<T>` -> `*const TypedBuffer<T>` ->
+        // `*mut TypedBuffer<T>` to access the inner Vec's slot at
+        // `idx`. The element's `T` is naturally aligned per the
+        // platform's Vec invariants, and the write is single-word
+        // (or smaller — i8/u8 are still atomic at machine level via
+        // a sub-word store) given the caller's single-threaded
+        // contract.
+        let prior = match self {
+            TypedArrayData::I64(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i64>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as u64;
+                *slot = new_bits as i64;
+                p
+            }
+            TypedArrayData::F64(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::AlignedTypedBuffer;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = (*slot).to_bits();
+                *slot = f64::from_bits(new_bits);
+                p
+            }
+            TypedArrayData::Bool(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u8>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as u64;
+                *slot = if new_bits != 0 { 1u8 } else { 0u8 };
+                p
+            }
+            TypedArrayData::I8(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i8>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as i64 as u64;
+                *slot = new_bits as i8;
+                p
+            }
+            TypedArrayData::I16(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i16>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as i64 as u64;
+                *slot = new_bits as i16;
+                p
+            }
+            TypedArrayData::I32(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i32>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as i64 as u64;
+                *slot = new_bits as i32;
+                p
+            }
+            TypedArrayData::U8(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u8>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as u64;
+                *slot = new_bits as u8;
+                p
+            }
+            TypedArrayData::U16(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u16>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as u64;
+                *slot = new_bits as u16;
+                p
+            }
+            TypedArrayData::U32(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u32>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot as u64;
+                *slot = new_bits as u32;
+                p
+            }
+            TypedArrayData::U64(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u64>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = *slot;
+                *slot = new_bits;
+                p
+            }
+            TypedArrayData::F32(buf) => {
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<f32>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                let p = (*slot as f64).to_bits();
+                *slot = f64::from_bits(new_bits) as f32;
+                p
+            }
+            TypedArrayData::String(buf) => {
+                // Element type is `Arc<String>`. The slot stores the
+                // current share; `new_bits` is `Arc::into_raw::<String>`
+                // of the incoming share. Reconstruct the prior `Arc<String>`
+                // to surface its `Arc::into_raw` pointer for the caller
+                // to drop, then place the new `Arc<String>` constructed
+                // from `new_bits`.
+                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<Arc<String>>;
+                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
+                // Move-out the prior Arc<String> without dropping (the
+                // caller releases via `drop_with_kind(prior_bits, String)`),
+                // and move-in the new one from `new_bits`.
+                let prior_arc: Arc<String> = std::ptr::read(slot);
+                let prior = Arc::into_raw(prior_arc) as u64;
+                let new_arc: Arc<String> = Arc::from_raw(new_bits as *const String);
+                std::ptr::write(slot, new_arc);
+                prior
+            }
+            // Variants without a single statically-sourceable scalar
+            // element kind. Construction-side `MakeIndexRef` /
+            // `SetIndexRef` already rejects these via
+            // `typed_array_element_kind`'s `None` return; reaching this
+            // arm is a construction-side bug, not a soundness gap.
+            TypedArrayData::HeapValue(_)
+            | TypedArrayData::FloatSlice { .. }
+            | TypedArrayData::Matrix(_) => return None,
+        };
+        Some(prior)
     }
 }
 
