@@ -298,6 +298,12 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         HeapValue::Mutex(_) => WireValue::String("<mutex:phase-2c>".to_string()),
         HeapValue::Atomic(_) => WireValue::String("<atomic:phase-2c>".to_string()),
         HeapValue::Lazy(_) => WireValue::String("<lazy:phase-2c>".to_string()),
+        // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11):
+        // `dyn Trait` carriers have no wire shape — same Phase-2c
+        // deferral as concurrency primitives. A future `Serializable`
+        // trait could route through the vtable, but that's emission-tier
+        // work outside this sub-cluster.
+        HeapValue::TraitObject(_) => WireValue::String("<trait_object:phase-2c>".to_string()),
     }
 }
 

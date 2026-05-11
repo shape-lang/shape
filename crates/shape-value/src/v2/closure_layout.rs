@@ -41,7 +41,8 @@ use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
-    TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
+    TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -413,6 +414,17 @@ impl Drop for SharedCell {
                     }
                     HeapKind::Lazy => {
                         Arc::decrement_strong_count(bits as *const LazyData);
+                    }
+                    // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                    // 2026-05-11): a `SharedCell` whose single-slot
+                    // payload is a `NativeKind::Ptr(HeapKind::TraitObject)`
+                    // carries `Arc::into_raw(Arc<TraitObjectStorage>)
+                    // as u64`. Retire one strong-count share at cell
+                    // drop — auto-derived `TraitObjectStorage::Drop`
+                    // releases the inner value + vtable Arcs at
+                    // refcount=0.
+                    HeapKind::TraitObject => {
+                        Arc::decrement_strong_count(bits as *const TraitObjectStorage);
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

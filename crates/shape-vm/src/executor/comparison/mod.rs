@@ -478,6 +478,11 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Mutex) => "mutex",
         NativeKind::Ptr(HeapKind::Atomic) => "atomic",
         NativeKind::Ptr(HeapKind::Lazy) => "lazy",
+        // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11):
+        // `Arc<TraitObjectStorage>` carrier for `dyn Trait`. Compared
+        // values surface the carrier's display name; user-level
+        // equality goes through trait-method dispatch (Eq trait).
+        NativeKind::Ptr(HeapKind::TraitObject) => "trait_object",
     }
 }
 

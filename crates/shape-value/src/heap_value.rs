@@ -1465,6 +1465,100 @@ impl LazyData {
     }
 }
 
+// ── TraitObject storage (W17-trait-object-storage, ADR-006 §2.7.24 Q25.C,
+//    2026-05-11) ──────────────────────────────────────────────────────────────
+
+/// `dyn Trait` storage — the typed-Arc replacement for the
+/// bulldozer-deleted `HeapValue::TraitObject { value: Box<u64>,
+/// vtable: Arc<VTable> }`. Pairs the boxed data half (always a
+/// `TypedObject` per §Q25.C.4 universal-dyn ruling — scalars/strings
+/// that implement traits are boxed into `TypedObject` first; the
+/// auto-boxing rule lifts Rust's object-safety restrictions at the
+/// cost of one heap indirection per `dyn` coerce) with the vtable
+/// half (shared `Arc<VTable>` so per-impl vtables are constructed
+/// once and IC-cached per §Q25.C.6).
+///
+/// **Forbidden alternative.** `Box<u64>` data half is explicitly
+/// refused (ADR-006 §Q25.E #3 — kind-blind raw-bits storage, same
+/// defection-attractor as the deleted ValueWord). The data half is
+/// kinded by being a typed object with a schema — `Arc<TypedObjectStorage>`
+/// recovers the per-field kind table via the schema_id.
+///
+/// **Identity contract.** `Arc::ptr_eq` on the vtable Arc is the
+/// canonical equality for the §Q25.C.2 `Self`-arg runtime check;
+/// `vtable.concrete_type_id` is the IC-stabilization key per §Q25.C.6.
+///
+/// Mirror of the §2.7.20 / §2.7.25 typed-Arc shape — refcount
+/// discipline goes through the kind label (`HeapKind::TraitObject = 29`)
+/// in `clone_with_kind` / `drop_with_kind`, NOT through `HeapValue`.
+/// Method-receiver classification flows through `slot.as_heap_value()`
+/// → `HeapValue::TraitObject(arc)` per ADR-005 §1 single-discriminator;
+/// the `op_dyn_method_call` opcode handler (compiler-emission tier)
+/// uses the recovered `Arc<TraitObjectStorage>` to look up the method
+/// in `vtable.methods` and dispatch the appropriate `VTableEntry`.
+#[derive(Debug)]
+pub struct TraitObjectStorage {
+    /// The data half of the fat pointer — owned, heap-allocated as a
+    /// `TypedObject`. Always present (never null); universal-dyn
+    /// per-method auto-boxing makes the boxed value a real TypedObject
+    /// even for scalar concrete types (per §Q25.C.1).
+    pub value: Arc<TypedObjectStorage>,
+
+    /// The vtable half of the fat pointer. Shared via `Arc` across
+    /// all `TraitObjectStorage` instances built from the same
+    /// `(impl Trait for Type)` pair — vtable construction happens
+    /// once per impl, the resulting `Arc<VTable>` is cached and
+    /// cloned into each boxing site. IC stabilizes on
+    /// `Arc::as_ptr(&vtable)` per §Q25.C.6.
+    pub vtable: Arc<crate::value::VTable>,
+}
+
+impl TraitObjectStorage {
+    /// Build a `TraitObjectStorage` from its two halves. The caller
+    /// owns one strong-count share on each Arc; the resulting struct
+    /// owns both shares. Wrap in `Arc::new(...)` immediately followed
+    /// by `HeapValue::TraitObject(arc)` or
+    /// `ValueSlot::from_trait_object(arc)`.
+    #[inline]
+    pub fn new(value: Arc<TypedObjectStorage>, vtable: Arc<crate::value::VTable>) -> Self {
+        Self { value, vtable }
+    }
+
+    /// Convenience: look up a method by name in the vtable. Returns
+    /// `None` for an unknown method (the dispatch tier surfaces this
+    /// as a runtime error — under universal-dyn there is no compile-
+    /// time `ETO-002` for "method not in trait" since the trait's
+    /// declared method set is the surface checked at compile time;
+    /// runtime lookup failures indicate a vtable-construction bug).
+    #[inline]
+    pub fn method(&self, name: &str) -> Option<&crate::value::VTableEntry> {
+        self.vtable.methods.get(name)
+    }
+
+    /// Identity check for the §Q25.C.2 `Self`-arg runtime contract.
+    /// `Arc::ptr_eq` on vtable Arcs is the tightest comparison; both
+    /// `TraitObjectStorage` instances must share the same vtable
+    /// allocation (which happens when both came from the same
+    /// `(impl Trait for Type)` pair).
+    #[inline]
+    pub fn vtable_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.vtable, &other.vtable)
+    }
+}
+
+impl Clone for TraitObjectStorage {
+    /// Per-field clone — each `Arc` bumps its strong count by one.
+    /// Cloning a `TraitObjectStorage` produces a fat-pointer carrier
+    /// that observes the same underlying TypedObject and dispatches
+    /// against the same VTable.
+    fn clone(&self) -> Self {
+        Self {
+            value: Arc::clone(&self.value),
+            vtable: Arc::clone(&self.vtable),
+        }
+    }
+}
+
 // ── PriorityQueue storage (Wave 15 W15-priority-queue, 2026-05-10) ──────────
 
 /// PriorityQueue storage — i64-priority min-heap.
@@ -2110,6 +2204,21 @@ impl Drop for TypedObjectStorage {
                         }
                         HeapKind::Lazy => {
                             std::sync::Arc::decrement_strong_count(bits as *const LazyData);
+                        }
+                        // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                        // 2026-05-11): a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::TraitObject)` holds
+                        // slot bits = `Arc::into_raw(Arc<TraitObjectStorage>)`.
+                        // Retire one strong-count share at storage drop;
+                        // the auto-derived `TraitObjectStorage::Drop`
+                        // then releases the inner value + vtable Arcs.
+                        // Same dispatch shape as the Channel / concurrency
+                        // primitives — `dyn` carriers are first-class
+                        // typed-Arc payloads.
+                        HeapKind::TraitObject => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const TraitObjectStorage,
+                            );
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -2946,6 +3055,14 @@ impl Clone for HeapValue {
             // is unwrapped via Arc::make_mut.
             HeapValue::Result(v) => HeapValue::Result(Arc::clone(v)),
             HeapValue::Option(v) => HeapValue::Option(Arc::clone(v)),
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): TraitObject Arcs share the typed-Arc clone
+            // shape — single strong-count bump on the shared
+            // `Arc<TraitObjectStorage>`. Inner Arcs (`value: Arc<TypedObjectStorage>`
+            // + `vtable: Arc<VTable>`) stay shared with the source;
+            // `Arc::ptr_eq` on the vtable preserves the §Q25.C.2
+            // `Self`-arg runtime identity contract across the clone.
+            HeapValue::TraitObject(v) => HeapValue::TraitObject(Arc::clone(v)),
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): Mutex /
             // Atomic / Lazy Arcs share the typed-Arc clone shape —
             // single strong-count bump on the shared inner Arc, no
@@ -3209,6 +3326,28 @@ impl fmt::Display for HeapValue {
                 } else {
                     write!(f, "None")
                 }
+            }
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): `dyn Trait` carriers render as an opaque
+            // tag annotated with the first trait name (multi-trait
+            // inheritance shows just the first) and the inner schema
+            // id of the boxed TypedObject. Pretty-printing via the
+            // boxed receiver's user-defined `Display`-equivalent is
+            // a compiler-emission tier concern (call the trait's
+            // `.format(self)` method through the vtable); the
+            // storage-tier formatter is diagnostic-only.
+            HeapValue::TraitObject(t) => {
+                let trait_name = t
+                    .vtable
+                    .trait_names
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                write!(
+                    f,
+                    "<dyn {} #{}>",
+                    trait_name, t.value.schema_id
+                )
             }
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
             // primitives have no user-facing literal — render as opaque
@@ -4438,5 +4577,263 @@ mod concurrency_storage {
             0,
             "Dropped LazyData must retire cached KindedSlot's share"
         );
+    }
+}
+
+#[cfg(test)]
+mod trait_object_storage {
+    //! W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11):
+    //! pin the `TraitObjectStorage` API + refcount-discipline contracts.
+    //! Storage-tier only — `OpCode::BoxTraitObject` /
+    //! `OpCode::DynMethodCall` emission and end-to-end dyn-coerce smoke
+    //! live in W17-trait-object-emission (round 2 of Wave 2.6).
+    //!
+    //! Coverage:
+    //!   - Construction (`TraitObjectStorage::new`)
+    //!   - vtable / value field access
+    //!   - `method()` lookup
+    //!   - `vtable_eq()` identity contract per §Q25.C.2
+    //!   - Clone bumps both inner Arc strong counts
+    //!   - Drop retires both inner Arc strong counts
+    //!   - `KindedSlot::from_trait_object` retain-on-clone parity
+    //!   - `KindedSlot::from_trait_object` drop-decrement parity
+    //!   - `Arc<TraitObjectStorage>` clone roundtrip (via clone_with_kind
+    //!     contract through the kind label, not through HeapValue)
+    //!   - End-to-end retain/drop balance over multiple clones
+    use super::*;
+    use crate::kinded_slot::KindedSlot;
+    use crate::native_kind::NativeKind;
+    use crate::value::{VTable, VTableEntry};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Build a minimal `TypedObjectStorage` for tests — single i64 field,
+    /// no heap-typed slots. Mirror of the shape used by concurrency
+    /// tests' `KindedSlot::from_int` payloads.
+    fn make_object(value: i64) -> Arc<TypedObjectStorage> {
+        let mut slots: Vec<crate::slot::ValueSlot> = Vec::with_capacity(1);
+        slots.push(crate::slot::ValueSlot::from_int(value));
+        let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        Arc::new(TypedObjectStorage::new(
+            42, // schema_id — arbitrary
+            slots.into_boxed_slice(),
+            0,  // heap_mask: no heap slots
+            field_kinds,
+        ))
+    }
+
+    /// Build a minimal `VTable` for tests — one `Direct` method entry.
+    fn make_vtable(trait_name: &str, concrete_type_id: u32, method: &str) -> Arc<VTable> {
+        let mut methods: HashMap<String, VTableEntry> = HashMap::new();
+        methods.insert(
+            method.to_string(),
+            VTableEntry::Direct { function_id: 7 },
+        );
+        Arc::new(VTable {
+            trait_names: vec![trait_name.to_string()],
+            concrete_type_id,
+            methods,
+        })
+    }
+
+    #[test]
+    fn new_holds_value_and_vtable_arcs() {
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = TraitObjectStorage::new(Arc::clone(&obj), Arc::clone(&vt));
+        // Both halves remain accessible; vtable's concrete_type_id
+        // matches what the impl declared.
+        assert_eq!(storage.value.schema_id, 42);
+        assert_eq!(storage.vtable.concrete_type_id, 100);
+        assert_eq!(storage.vtable.trait_names[0], "Animal");
+    }
+
+    #[test]
+    fn method_lookup_returns_entry_for_known_method() {
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = TraitObjectStorage::new(obj, vt);
+        let entry = storage
+            .method("name")
+            .expect("known method present in vtable");
+        match entry {
+            VTableEntry::Direct { function_id } => assert_eq!(*function_id, 7),
+            _ => panic!("expected Direct entry"),
+        }
+    }
+
+    #[test]
+    fn method_lookup_returns_none_for_unknown_method() {
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = TraitObjectStorage::new(obj, vt);
+        assert!(storage.method("speak").is_none());
+    }
+
+    #[test]
+    fn vtable_eq_identifies_same_vtable_share() {
+        // Per §Q25.C.2, vtable-identity check uses `Arc::ptr_eq`. Two
+        // carriers built from the same vtable Arc compare equal.
+        let obj1 = make_object(1);
+        let obj2 = make_object(2);
+        let vt = make_vtable("Animal", 100, "name");
+        let s1 = TraitObjectStorage::new(obj1, Arc::clone(&vt));
+        let s2 = TraitObjectStorage::new(obj2, Arc::clone(&vt));
+        assert!(s1.vtable_eq(&s2));
+    }
+
+    #[test]
+    fn vtable_eq_rejects_distinct_vtables() {
+        // Two carriers built from distinct vtables — even if the
+        // trait name matches — fail the identity check.
+        let obj1 = make_object(1);
+        let obj2 = make_object(2);
+        let vt1 = make_vtable("Animal", 100, "name");
+        let vt2 = make_vtable("Animal", 100, "name");
+        let s1 = TraitObjectStorage::new(obj1, vt1);
+        let s2 = TraitObjectStorage::new(obj2, vt2);
+        assert!(!s1.vtable_eq(&s2));
+    }
+
+    #[test]
+    fn clone_bumps_both_inner_arcs() {
+        // TraitObjectStorage::clone is a pair of Arc bumps. Verify
+        // each inner Arc's strong-count increases by one.
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let obj_weak = Arc::downgrade(&obj);
+        let vt_weak = Arc::downgrade(&vt);
+        let storage = TraitObjectStorage::new(Arc::clone(&obj), Arc::clone(&vt));
+        // Now: external obj/vt + storage's clones = 2 strong each.
+        // Drop the externals so we can observe the storage's owned shares.
+        drop(obj);
+        drop(vt);
+        assert_eq!(obj_weak.strong_count(), 1);
+        assert_eq!(vt_weak.strong_count(), 1);
+
+        // Clone storage — both inner Arcs should bump.
+        let storage2 = storage.clone();
+        assert_eq!(obj_weak.strong_count(), 2);
+        assert_eq!(vt_weak.strong_count(), 2);
+
+        drop(storage);
+        assert_eq!(obj_weak.strong_count(), 1);
+        assert_eq!(vt_weak.strong_count(), 1);
+
+        drop(storage2);
+        assert_eq!(obj_weak.strong_count(), 0);
+        assert_eq!(vt_weak.strong_count(), 0);
+    }
+
+    #[test]
+    fn kinded_slot_from_trait_object_drop_decrement() {
+        // The §2.7.7 retain-on-read protocol via `KindedSlot::Drop`
+        // must retire one `Arc<TraitObjectStorage>` share when the
+        // slot drops. Verify the strong-count returns to zero after
+        // both the original Arc and the KindedSlot drop.
+        let obj = make_object(99);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = Arc::new(TraitObjectStorage::new(obj, vt));
+        let weak = Arc::downgrade(&storage);
+        let slot = KindedSlot::from_trait_object(Arc::clone(&storage));
+        // External: 1 share. Slot: 1 share. Total: 2.
+        assert_eq!(weak.strong_count(), 2);
+
+        // Drop the external Arc — slot still holds one share.
+        drop(storage);
+        assert_eq!(weak.strong_count(), 1);
+
+        // Drop the slot — retires the last share.
+        drop(slot);
+        assert_eq!(weak.strong_count(), 0);
+    }
+
+    #[test]
+    fn kinded_slot_clone_bumps_share() {
+        // KindedSlot::Clone retains via clone_with_kind — verify the
+        // share count tracks correctly across clones.
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = Arc::new(TraitObjectStorage::new(obj, vt));
+        let weak = Arc::downgrade(&storage);
+        let slot1 = KindedSlot::from_trait_object(Arc::clone(&storage));
+        let slot2 = slot1.clone();
+        let slot3 = slot2.clone();
+        // External + 3 slots = 4 shares.
+        assert_eq!(weak.strong_count(), 4);
+
+        drop(storage);
+        drop(slot1);
+        drop(slot2);
+        // 1 slot remaining.
+        assert_eq!(weak.strong_count(), 1);
+        drop(slot3);
+        assert_eq!(weak.strong_count(), 0);
+    }
+
+    #[test]
+    fn kinded_slot_kind_label_is_ptr_trait_object() {
+        // The kind label must be `NativeKind::Ptr(HeapKind::TraitObject)`
+        // for the §2.7.7 dispatch tables (clone_with_kind /
+        // drop_with_kind) to find the correct arm. This pins the
+        // construction-side contract.
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = Arc::new(TraitObjectStorage::new(obj, vt));
+        let slot = KindedSlot::from_trait_object(storage);
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TraitObject));
+    }
+
+    #[test]
+    fn slot_bits_recover_to_typed_arc_via_canonical_pattern() {
+        // The canonical recovery pattern (per `3ac2f11` precedent):
+        // bits = slot.raw(), Arc::from_raw, clone, into_raw. Verify
+        // that round-tripping the raw bits through Arc::from_raw
+        // recovers an Arc with the expected vtable identity.
+        let obj = make_object(7);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = Arc::new(TraitObjectStorage::new(obj, vt));
+        let original_vt_ptr = Arc::as_ptr(&storage.vtable);
+        let slot = KindedSlot::from_trait_object(Arc::clone(&storage));
+        let bits = slot.slot().raw();
+
+        // SAFETY: bits came from KindedSlot::from_trait_object which
+        // stores `Arc::into_raw(Arc<TraitObjectStorage>)`. The slot
+        // owns the share; we leak the recovered Arc back to keep the
+        // slot's share intact for normal drop discipline.
+        let recovered: Arc<TraitObjectStorage> =
+            unsafe { Arc::from_raw(bits as *const TraitObjectStorage) };
+        let cloned = Arc::clone(&recovered);
+        let _ = Arc::into_raw(recovered); // restore slot's share
+
+        // Recovered Arc points to the same storage — same vtable Arc.
+        assert!(Arc::ptr_eq(&cloned.vtable, &storage.vtable));
+        // Pointer-equality on the inner vtable's raw pointer matches.
+        assert_eq!(Arc::as_ptr(&cloned.vtable), original_vt_ptr);
+
+        drop(cloned);
+        drop(slot);
+        drop(storage);
+    }
+
+    #[test]
+    fn dropping_trait_object_with_typed_object_payload_retires_payload_share() {
+        // Refcount discipline at the carrier level: drop the
+        // TraitObjectStorage Arc to zero strong count, and verify
+        // the inner TypedObject Arc's strong count returns to zero
+        // too. This is the end-to-end retain/drop balance for the
+        // fat-pointer carrier.
+        let obj = make_object(99);
+        let vt = make_vtable("Animal", 100, "name");
+        let obj_weak = Arc::downgrade(&obj);
+        let vt_weak = Arc::downgrade(&vt);
+        let storage = Arc::new(TraitObjectStorage::new(obj, vt));
+        // After move: storage holds the only shares of obj + vt.
+        assert_eq!(obj_weak.strong_count(), 1);
+        assert_eq!(vt_weak.strong_count(), 1);
+
+        drop(storage);
+        assert_eq!(obj_weak.strong_count(), 0, "TypedObject share must retire");
+        assert_eq!(vt_weak.strong_count(), 0, "VTable share must retire");
     }
 }

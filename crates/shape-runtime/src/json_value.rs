@@ -236,6 +236,15 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::Mutex(_) => Err("cannot serialize: Mutex".into()),
         HeapValue::Atomic(_) => Err("cannot serialize: Atomic".into()),
         HeapValue::Lazy(_) => Err("cannot serialize: Lazy".into()),
+        // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11):
+        // a `dyn Trait` carrier has no stable JSON form — the boxed
+        // value's schema is dynamic, and serializing through the
+        // vtable would require a `to_json()` trait method that
+        // doesn't exist at the language level. Reject in the same
+        // shape as the concurrency primitives. The compiler-emission
+        // tier may later add a `Serializable` trait whose impls
+        // self-serialize through the vtable — that's a follow-up.
+        HeapValue::TraitObject(_) => Err("cannot serialize: TraitObject".into()),
     }
 }
 
