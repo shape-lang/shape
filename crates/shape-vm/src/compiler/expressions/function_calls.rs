@@ -1702,6 +1702,37 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-006 §2.7.24 Q25.C: detect dyn-typed receiver and emit
+        // `OpCode::DynMethodCall` (bypassing the standard CallMethod
+        // path). Detection runs BEFORE receiver compilation because
+        // `compile_expr` overwrites the compiler-state we'd otherwise
+        // need (the `last_expr_*` family), and the dispatch shape is
+        // determined by the receiver's compile-time `dyn T` annotation,
+        // not the runtime kind.
+        //
+        // Round-2 scope: only `Identifier`-shaped receivers are dyn-tracked
+        // (the locals registered in `dyn_locals` / `dyn_module_bindings`).
+        // Wider receiver shapes (`(foo()).method()` where `foo()`
+        // returns `dyn T`) need return-type propagation through
+        // `last_expr_type_info`; deferred to a follow-up sub-cluster
+        // per ADR-006 §2.7.24 Q25.C.6 (IC layer would consume this for
+        // devirtualization).
+        let dyn_trait_name: Option<String> = if let Expr::Identifier(name, _) = receiver {
+            if let Some(local_idx) = self.resolve_local(name) {
+                self.dyn_locals.get(&local_idx).cloned()
+            } else {
+                let scoped = self
+                    .resolve_scoped_module_binding_name(name)
+                    .unwrap_or_else(|| name.to_string());
+                self.module_bindings
+                    .get(&scoped)
+                    .copied()
+                    .and_then(|idx| self.dyn_module_bindings.get(&idx).cloned())
+            }
+        } else {
+            None
+        };
+
         // Compile receiver (the object/series being called)
         self.compile_expr(receiver)?;
         let receiver_schema = self.last_expr_schema;
@@ -1804,6 +1835,29 @@ impl BytecodeCompiler {
         self.closure_row_schema = None;
         // Clear closure-arg type hints in case the closure literal was never reached.
         self.pending_closure_param_types = None;
+
+        // ADR-006 §2.7.24 Q25.C: emit `DynMethodCall` for dyn-typed
+        // receivers. Stack at this point is `[receiver, arg1, ...,
+        // argN]`. The opcode consumes them plus a string id for the
+        // method name and an arg-count, and dispatches through the
+        // receiver's vtable per §Q25.C.5 `VTableEntry`.
+        if let Some(_trait_name) = dyn_trait_name.as_ref() {
+            let string_idx = self.program.add_string(method.to_string());
+            self.emit(Instruction::new(
+                OpCode::DynMethodCall,
+                Some(Operand::TypedMethodCall {
+                    method_id: shape_value::MethodId::from_name(method).0,
+                    arg_count: args.len() as u16,
+                    string_id: string_idx,
+                    receiver_type_tag: 0xFF,
+                }),
+            ));
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            self.clear_last_expr_reference_result();
+            return Ok(());
+        }
 
         // UFCS: If a user-defined function exists with this name, prefer it over built-in methods.
         // This allows `extend` blocks to override built-in methods for specific types.

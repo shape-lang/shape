@@ -354,6 +354,42 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
+        // ADR-006 §2.7.24 Q25.C: when the receiver is a trait object,
+        // route through the DynMethodCall dispatch shell instead of the
+        // standard CallMethod path. This handles the case where the
+        // compiler couldn't determine at compile-time that the receiver
+        // is a `dyn T` (e.g. `let b = a.clone_me()` where `clone_me`
+        // returns `Self` through a `BoxedReturn` thunk — the result is
+        // a trait object but the compiler emits the standard CallMethod
+        // opcode without a `dyn_locals` entry for `b`). Round-2: this
+        // fallback ensures correctness; a future amendment can teach
+        // type-inference to propagate `dyn T` through method-call
+        // result types and emit `DynMethodCall` at the compile site.
+        if self.sp >= arg_count + 1 {
+            let receiver_idx_check = self.sp - arg_count - 1;
+            let (_, receiver_kind_peek) = self.stack_read_kinded_raw(receiver_idx_check);
+            if receiver_kind_peek
+                == NativeKind::Ptr(shape_value::HeapKind::TraitObject)
+            {
+                // Reconstruct the instruction with `arg_count` /
+                // `string_id` operands and call into the dyn dispatch
+                // path. The TypedMethodCall operand layout matches
+                // exactly what `op_dyn_method_call` expects.
+                return self.exec_trait_object_ops(
+                    &Instruction::new(
+                        crate::bytecode::OpCode::DynMethodCall,
+                        Some(Operand::TypedMethodCall {
+                            method_id: _method_id,
+                            arg_count: arg_count as u16,
+                            string_id: string_id as u16,
+                            receiver_type_tag: _receiver_type_tag,
+                        }),
+                    ),
+                    ctx,
+                );
+            }
+        }
+
         // Pop receiver + arg_count call args. Each pop_kinded transfers
         // one share into the returned (bits, kind); the KindedSlot
         // carrier takes ownership and releases via drop_with_kind on

@@ -51,6 +51,8 @@ impl BytecodeCompiler {
             module_binding_callable_return_types: HashMap::new(),
             local_array_callable_return_types: HashMap::new(),
             module_binding_array_callable_return_types: HashMap::new(),
+            dyn_locals: HashMap::new(),
+            dyn_module_bindings: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
@@ -494,6 +496,12 @@ impl BytecodeCompiler {
                     }
                     map
                 },
+                // ADR-006 §2.7.24 Q25.C: propagate trait-object vtables
+                // through the content-addressed path so the linker
+                // forwards them to `LinkedProgram.trait_vtables` and the
+                // VM `op_box_trait_object` handler can look them up at
+                // runtime.
+                trait_vtables: self.program.trait_vtables.clone(),
             });
         }
     }

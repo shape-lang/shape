@@ -362,6 +362,21 @@ pub struct BytecodeProgram {
     #[serde(skip, default)]
     pub closure_function_layouts:
         Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry.
+    ///
+    /// Keyed by `"Trait::ConcreteType"` (matching the existing
+    /// `trait_method_symbols` key prefix). Built at impl-block
+    /// compilation per `(impl Trait for Type)` pair; consumed at runtime
+    /// by `op_box_trait_object` to allocate `Arc<TraitObjectStorage>`.
+    /// Not serialised because `Arc<VTable>` is not a stable wire shape;
+    /// vtables are rebuilt on cached-program reload from
+    /// `trait_method_symbols`.
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        Arc<shape_value::value::VTable>,
+    >,
 }
 
 /// Constants in the constant pool
