@@ -380,7 +380,7 @@ pub struct VirtualMachine {
     /// Runtime function name → index lookup for UFCS dispatch.
     /// Populated after program load. Used by handle_object_method to find
     /// type-scoped impl methods (e.g., "DuckDbQuery::filter") at runtime.
-    function_name_index: HashMap<String, u16>,
+    pub(crate) function_name_index: HashMap<String, u16>,
 
     /// Method intrinsics for fast dispatch on typed Objects.
     /// Populated from ModuleExports.method_intrinsics during module registration.

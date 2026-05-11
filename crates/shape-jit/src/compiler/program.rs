@@ -310,6 +310,7 @@ impl JITCompiler {
                 function_blob_hashes: Vec::new(),
                 monomorphization_keys: Vec::new(),
                 closure_function_layouts: program.closure_function_layouts.clone(),
+                trait_vtables: program.trait_vtables.clone(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).

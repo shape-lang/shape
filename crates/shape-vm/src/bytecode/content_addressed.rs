@@ -226,6 +226,19 @@ pub struct Program {
         String,
         std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
     >,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry. Keyed by
+    /// `"Trait::ConcreteType"` strings (matching the existing
+    /// `trait_method_symbols` key prefix). Built at impl-block
+    /// compilation; consumed at `op_box_trait_object` runtime to build
+    /// `Arc<TraitObjectStorage>`. Not serialised because `Arc<VTable>`
+    /// is not a stable wire shape; in cached-program-load mode the
+    /// vtables are rebuilt at link time from `trait_method_symbols`.
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_value::value::VTable>,
+    >,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -344,4 +357,15 @@ pub struct LinkedProgram {
     #[serde(skip, default)]
     pub closure_function_layouts:
         Vec<Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry. Keyed by
+    /// `"Trait::ConcreteType"`. Threaded through from the
+    /// content-addressed Program at link time so the VM `op_box_trait_object`
+    /// handler can look up the vtable to build `Arc<TraitObjectStorage>`.
+    /// Not serialised (Arc<VTable> is not a stable wire shape).
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_value::value::VTable>,
+    >,
 }

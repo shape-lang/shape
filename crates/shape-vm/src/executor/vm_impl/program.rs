@@ -191,6 +191,10 @@ impl VirtualMachine {
             // `vm.execute()` synthesises a tagged ValueWord at the host
             // boundary per the program's declared return kind.
             top_level_frame: linked.top_level_frame,
+            // ADR-006 §2.7.24 Q25.C: propagate the linker's trait-object
+            // vtable registry so `op_box_trait_object` can resolve
+            // `(concrete_type, trait)` → `Arc<VTable>` at runtime.
+            trait_vtables: linked.trait_vtables.clone(),
             ..BytecodeProgram::default()
         };
 

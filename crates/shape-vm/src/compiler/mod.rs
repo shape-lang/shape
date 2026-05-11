@@ -58,6 +58,7 @@ pub(crate) mod monomorphization;
 mod patterns;
 mod statements;
 pub mod string_interpolation;
+mod trait_object_emission;
 
 /// Loop compilation context
 pub(crate) struct LoopContext {
@@ -677,6 +678,19 @@ pub struct BytecodeCompiler {
     /// Sweep phase 3c.x: inferred return-type names for arrays of closures
     /// stored in module-binding slots (top-level `let arr = [|x| ..., ...]`).
     pub(crate) module_binding_array_callable_return_types: HashMap<u16, String>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object emission (Wave 2.6 round-2):
+    /// per-local-slot trait name for `let a: dyn Animal = ...` bindings.
+    /// Consumed by `compile_expr_method_call` (`expressions/function_calls.rs`)
+    /// to route method dispatch through `OpCode::DynMethodCall` instead
+    /// of the standard `OpCode::CallMethod` path. Empty for non-dyn
+    /// locals.
+    pub(crate) dyn_locals: HashMap<u16, String>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object emission: per-module-binding
+    /// trait name for top-level `let a: dyn Animal = ...` declarations.
+    /// Same role as `dyn_locals` but for the module-binding slot space.
+    pub(crate) dyn_module_bindings: HashMap<u16, String>,
 
     /// Named functions that safely return one reference parameter unchanged.
     pub(crate) function_return_reference_summaries: HashMap<String, FunctionReturnReferenceSummary>,

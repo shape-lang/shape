@@ -480,6 +480,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                 program,
                 &blobs,
             ),
+            trait_vtables: program.trait_vtables.clone(),
         });
     }
 
@@ -584,6 +585,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         native_struct_layouts: program.native_struct_layouts.clone(),
         total_required_permissions,
         closure_function_layouts: remap_closure_function_layouts(program, &blobs),
+        trait_vtables: program.trait_vtables.clone(),
     })
 }
 
@@ -674,6 +676,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
             .collect(),
         monomorphization_keys: Vec::new(),
         closure_function_layouts: linked.closure_function_layouts.clone(),
+        trait_vtables: linked.trait_vtables.clone(),
     }
 }
 
