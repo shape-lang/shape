@@ -840,11 +840,22 @@ impl VirtualMachine {
                     ));
                 }
                 BuiltinFunction::EvalDateTimeExpr => {
-                    // SURFACE — Phase-2c §2.7.4 boundary (HeapKind::Temporal
-                    // carrier dispatch). Drains stack args first to keep
-                    // the parallel-kind track balanced.
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return self.handle_eval_datetime_expr(_ctx);
+                    // C1-temporal-lowering (Phase 2d Wave 2): the
+                    // `compiler/expressions/temporal.rs::compile_expr_datetime`
+                    // emit sequence is PushConst(DateTimeExpr) +
+                    // BuiltinCall(EvalDateTimeExpr). The
+                    // `Constant::DateTimeExpr` arm in `op_push_const`
+                    // (`stack_ops/mod.rs`) now evaluates the AST via
+                    // `eval_datetime_expr_recursive` and pushes a
+                    // `NativeKind::Ptr(HeapKind::Temporal)` Temporal::DateTime
+                    // slot directly. There is therefore no work for this
+                    // builtin to do — the value the legacy semantics
+                    // produced ("pop DateTimeExpr Temporal, evaluate, push
+                    // DateTime Temporal") is already on the stack. Skip
+                    // arg-count pop: the compiler does not emit one, and
+                    // re-adding it would require changing the legacy emit
+                    // shape compiler-side without an upstream benefit.
+                    // ADR-006 §2.7.4.
                 }
                 BuiltinFunction::EvalDataDateTimeRef
                 | BuiltinFunction::EvalDataSet

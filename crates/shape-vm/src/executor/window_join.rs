@@ -394,11 +394,14 @@ impl VirtualMachine {
 
     /// Recursively evaluate a DateTimeExpr into a chrono DateTime.
     ///
-    /// Pure-AST helper retained for the eventual body re-implementation
-    /// of `handle_eval_datetime_expr`; consumes no VM stack state and
-    /// uses no forbidden patterns.
-    #[allow(dead_code)]
-    fn eval_datetime_expr_recursive(
+    /// Pure-AST helper. Consumes no VM stack state and uses no forbidden
+    /// patterns. Live caller: `op_push_const`'s `Constant::DateTimeExpr`
+    /// arm (`executor/stack_ops/mod.rs`) — C1-temporal-lowering moved
+    /// DateTimeExpr evaluation to push time so the temporal value is
+    /// produced before the matching `BuiltinCall(EvalDateTimeExpr)`
+    /// identity passthrough fires. `@now` / `@today` still evaluate at
+    /// execution time because `op_push_const` runs at VM execution time.
+    pub(crate) fn eval_datetime_expr_recursive(
         &self,
         expr: &shape_ast::ast::DateTimeExpr,
     ) -> Result<chrono::DateTime<chrono::FixedOffset>, VMError> {

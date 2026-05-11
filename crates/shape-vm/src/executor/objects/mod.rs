@@ -540,22 +540,51 @@ impl VirtualMachine {
                     };
                     typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
                 }
-                HeapKind::Temporal => match receiver.slot.as_heap_value() {
-                    HeapValue::Temporal(arc) => match arc.as_ref() {
-                        TemporalData::DateTime(_) => {
-                            method_registry::DATETIME_METHODS.get(method_name).copied()
+                HeapKind::Temporal => {
+                    // C1-temporal-lowering (Phase 2d Wave 2): Temporal
+                    // slots are `Arc::into_raw::<TemporalData>` — NOT a
+                    // `Box<HeapValue>` allocation. `as_heap_value()` would
+                    // be wrong-type recovery (5-arm receiver-recovery
+                    // soundness rule, CLAUDE.md / handover §0). Sub-
+                    // classify by directly borrowing `&TemporalData` from
+                    // the slot's Arc-raw pointer, mirroring
+                    // `objects/datetime_methods.rs::recv_temporal`.
+                    //
+                    // SAFETY: when receiver.kind == Ptr(HeapKind::Temporal),
+                    // receiver.slot.raw() is `Arc::into_raw::<TemporalData>`
+                    // (set by `op_push_const::Constant::Duration` /
+                    // `Constant::DateTimeExpr` arms, by
+                    // `temporal_result()` in datetime_methods.rs, and by
+                    // the §2.7.7 stack parallel-kind track). The carrier
+                    // owns one strong-count share for the dispatch
+                    // duration; the &TemporalData borrow's lifetime is
+                    // bounded by `args[0]`'s share ownership.
+                    let bits = receiver.slot.raw();
+                    if bits == 0 {
+                        None
+                    } else {
+                        let td: &TemporalData =
+                            unsafe { &*(bits as *const TemporalData) };
+                        match td {
+                            TemporalData::DateTime(_) => {
+                                method_registry::DATETIME_METHODS
+                                    .get(method_name)
+                                    .copied()
+                            }
+                            TemporalData::TimeSpan(_) | TemporalData::Duration(_) => {
+                                method_registry::TIMESPAN_METHODS
+                                    .get(method_name)
+                                    .copied()
+                            }
+                            // Timeframe / TimeReference / DateTimeExpr /
+                            // DataDateTimeRef have no method PHF — they
+                            // are language-level metadata, not method-
+                            // call targets. Fall through to
+                            // UnknownMethod.
+                            _ => None,
                         }
-                        TemporalData::TimeSpan(_) | TemporalData::Duration(_) => {
-                            method_registry::TIMESPAN_METHODS.get(method_name).copied()
-                        }
-                        // Timeframe / TimeReference / DateTimeExpr /
-                        // DataDateTimeRef have no method PHF — they are
-                        // language-level metadata, not method-call
-                        // targets. Fall through to UnknownMethod.
-                        _ => None,
-                    },
-                    _ => None,
-                },
+                    }
+                }
                 HeapKind::TypedObject => {
                     // User-defined object methods land here. The
                     // built-in DataTable PHF covers shared table-shape
