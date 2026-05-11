@@ -46,7 +46,33 @@ impl BytecodeCache {
     }
 
     /// Store compiled bytecode for the given source content.
+    ///
+    /// **W17-make-closure note.** Programs whose compiler produced any
+    /// `closure_function_layouts` entries (i.e. the source contains at
+    /// least one closure literal) are not cached. The `ClosureLayout`
+    /// side-table is currently `#[serde(skip)]` on `BytecodeProgram`
+    /// and `ContentAddressedProgram` — a deserialized program would
+    /// load with an empty layouts vector, and `op_make_closure` would
+    /// then surface `no ClosureLayout registered for function N`
+    /// (`crates/shape-vm/src/executor/control_flow/mod.rs:447`). Until
+    /// `ClosureLayout` (+ `ConcreteType` / `FieldInfo` / `NativeKind` /
+    /// `CaptureKind`) grow `Serialize`/`Deserialize` derives, the safe
+    /// disposition is to skip caching for closure-bearing programs.
+    /// Caching for closure-free programs remains in force.
     pub fn put(&self, source: &str, program: &BytecodeProgram) -> std::io::Result<()> {
+        let has_closure_layouts = program
+            .closure_function_layouts
+            .iter()
+            .any(|opt| opt.is_some());
+        let has_ca_closure_layouts = program
+            .content_addressed
+            .as_ref()
+            .map(|ca| !ca.closure_function_layouts_by_name.is_empty())
+            .unwrap_or(false);
+        if has_closure_layouts || has_ca_closure_layouts {
+            // Skip caching for closure-bearing programs (see fn doc).
+            return Ok(());
+        }
         let key = Self::cache_key(source);
         let path = self.cache_path(&key);
         let data = rmp_serde::to_vec(program)
