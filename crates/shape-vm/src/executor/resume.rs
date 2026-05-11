@@ -52,10 +52,25 @@ use shape_value::VMError;
 use super::VirtualMachine;
 
 /// Surface message common to all stubs in this module.
+///
+/// Retains the legacy `PHASE_2C_SNAPSHOT_SURFACE` constant name (callers
+/// in the playbook §3 W17-snapshot-resume entry track it by name) but
+/// the body is rewritten to match the W17 surface shape: cite the
+/// cluster name, the playbook §, both ADR-006 sections, and the
+/// deletion-list of carriers that the kinded rebuild must replace.
 const PHASE_2C_SNAPSHOT_SURFACE: &str =
-    "phase-2c snapshot rebuild — ValueWord / ValueWordExt / Upvalue / value_word_drop / \
-     stack_write_raw / binding_write_raw deleted; see ADR-006 §2.7.4 (API rebuild scope) \
-     and docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md §10 (E-snapshot)";
+    "W17-snapshot-resume surface — resume reconstruction needs the \
+     kinded counterparts of the deleted snapshot-tier carriers \
+     (ValueWord / ValueWordExt / Upvalue / value_word_drop / \
+     stack_write_raw / binding_write_raw) plus the §2.7.8 / Q10 \
+     cell-storage parallel-kind track on `CallFrame.upvalues` and \
+     `module_bindings`, plus the AnyError-shaped exception payload. \
+     Tracked as W17-snapshot-resume per \
+     docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
+     (API rebuild scope) + §2.7.5.1 (post-proof wire-format shape for \
+     new HeapKinds). Historical cross-ref: \
+     docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md §10 \
+     (E-snapshot).";
 
 impl VirtualMachine {
     /// Apply a pending full VM state resume from `state.resume()`.
