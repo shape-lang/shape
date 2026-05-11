@@ -30,7 +30,8 @@ use shape_value::{
     heap_value::{
         AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
         IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
-        TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+        TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
+        TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -124,6 +125,19 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::Lazy => {
                     Arc::increment_strong_count(bits as *const LazyData);
+                }
+                // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                // 2026-05-11): TraitObject mirrors the typed-Arc
+                // dispatch shape. Slot bits are
+                // `Arc::into_raw(Arc<TraitObjectStorage>) as u64`.
+                // Bumps one strong-count share on the outer Arc —
+                // the inner `Arc<TypedObjectStorage>` value half and
+                // `Arc<VTable>` vtable half stay shared with the
+                // source. `Arc::ptr_eq` on the vtable preserves the
+                // §Q25.C.2 `Self`-arg identity contract across the
+                // clone.
+                HeapKind::TraitObject => {
+                    Arc::increment_strong_count(bits as *const TraitObjectStorage);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -393,6 +407,17 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::Lazy => {
                     Arc::decrement_strong_count(bits as *const LazyData);
+                }
+                // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                // 2026-05-11): TraitObject mirrors the typed-Arc
+                // dispatch shape. Retires one strong-count share. At
+                // refcount=0 the auto-derived
+                // `TraitObjectStorage::Drop` releases its inner
+                // `Arc<TypedObjectStorage>` value half +
+                // `Arc<VTable>` vtable half — each a single
+                // `Arc::drop` decrement per the typed-Arc shape.
+                HeapKind::TraitObject => {
+                    Arc::decrement_strong_count(bits as *const TraitObjectStorage);
                 }
                 HeapKind::Decimal => {
                     Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

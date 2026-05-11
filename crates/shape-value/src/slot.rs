@@ -222,6 +222,18 @@ impl ValueSlot {
         Self(Arc::into_raw(r) as u64)
     }
 
+    /// Store an `Arc<TraitObjectStorage>` directly. Mirrors
+    /// `HeapValue::TraitObject(Arc<TraitObjectStorage>)`. ADR-006
+    /// §2.7.24 / Q25.C amendment (Wave 17 W17-trait-object-storage,
+    /// 2026-05-11). Re-introduces the bulldozer-deleted trait-object
+    /// carrier under the typed-Arc shape — `TraitObjectStorage` holds
+    /// an `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
+    /// vtable half. The `Box<u64>` data-half is explicitly forbidden
+    /// per §Q25.E #3 (kind-blind raw-bits storage).
+    pub fn from_trait_object(t: Arc<crate::heap_value::TraitObjectStorage>) -> Self {
+        Self(Arc::into_raw(t) as u64)
+    }
+
     /// Store an `Arc<OptionData>` directly. Mirrors
     /// `HeapValue::Option(Arc<OptionData>)`. ADR-006 §2.7.17 / Q18
     /// amendment (Wave 14 W14-variant-codegen).
