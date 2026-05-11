@@ -28,6 +28,8 @@
 
 use crate::bytecode::{Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
+use crate::executor::printing::ValueFormatter;
+use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
@@ -382,10 +384,22 @@ fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
 }
 
 /// Format a `KindedSlot` to a `String` for `as string` casts. Inline
-/// scalars and the simple heap-numeric kinds (`Decimal`, `BigInt`) are
-/// formatted in-place; identity (`String` source) clones the inner
-/// `Arc<String>`'s payload.
-fn read_as_string(slot: &KindedSlot) -> Result<String, VMError> {
+/// scalars and the simple heap-numeric kinds (`Decimal`, `BigInt`,
+/// `Char`) are formatted in-place; identity (`String` source) clones
+/// the inner `Arc<String>`'s payload. Heterogeneous heap kinds
+/// (TypedObject, TypedArray, HashMap, HashSet, Content, DataTable,
+/// Result, Option, Range, …) dispatch through the kinded
+/// `ValueFormatter::format_kinded` per ADR-006 §2.7.6 / Q8 — heap
+/// arms are read via the typed `Arc<T>` payload and `KindedSlot.kind`
+/// drives the per-arm formatter (no decode-from-bits, no
+/// `is_heap()` probe, no `Arc<HeapValue>` catch-all carrier).
+///
+/// The fallback expects the schema registry; pass it via the
+/// `schema_registry` parameter so `TypedObject` field names resolve.
+fn read_as_string(
+    slot: &KindedSlot,
+    schema_registry: Option<&TypeSchemaRegistry>,
+) -> Result<String, VMError> {
     match slot.kind {
         NativeKind::Bool => Ok(slot.slot.as_bool().to_string()),
         NativeKind::Int8
@@ -440,20 +454,55 @@ fn read_as_string(slot: &KindedSlot) -> Result<String, VMError> {
                 .map(|c| c.to_string())
                 .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
         }
+        // ── Heap-pointer kinds whose `format_heap_kind` arm is itself
+        // still SURFACE — surface-and-stop with the §-cite so the gap
+        // is visible at the cast site rather than panicking deep in
+        // the formatter. Per playbook §2 W17-builtin-coercions:
+        // "Surface-and-stop if format_heap_kind is itself SURFACE."
+        NativeKind::Ptr(HeapKind::Temporal) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::Temporal)` cascades on \
+             `executor/printing.rs::format_heap_kind` Temporal arm \
+             (still SURFACE pending Wave 5e DateTime ctor body \
+             migration). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        NativeKind::Ptr(HeapKind::Closure) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::Closure)` cascades on \
+             `executor/printing.rs::format_heap_kind` Closure arm \
+             (still SURFACE pending §2.7.8 / Q10 B7-closure-cells \
+             extension for kinded ClosureRaw read). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        NativeKind::Ptr(HeapKind::NativeScalar) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::NativeScalar)` cascades on \
+             `executor/printing.rs::format_heap_kind` NativeScalar arm \
+             (still SURFACE pending Wave 5c native-interop carrier \
+             body migration). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        // ── Heterogeneous heap kinds whose `format_heap_kind` arm
+        // has been rebuilt: dispatch through the kinded
+        // `ValueFormatter::format_kinded` per ADR-006 §2.7.6 / Q8
+        // heterogeneous-kind body pattern. The formatter walks the
+        // typed `Arc<T>` payload and reads `KindedSlot.kind` for
+        // dispatch — no decode-from-bits, no `is_heap()` probe, no
+        // `Arc<HeapValue>` catch-all carrier (forbidden per the
+        // playbook's defection-attractor list).
         _ => {
-            // Heterogeneous heap kinds (TypedObject, TypedArray, HashMap,
-            // Content, Temporal, …) need the full kinded formatter
-            // (`executor/printing.rs::ValueFormatter`), which is itself
-            // partially Phase-2c (TypedObject / HashMap / Temporal arms
-            // surface to `todo!("phase-2c")`). Surface here so the gap
-            // is visible at the cast site rather than panicking deep
-            // inside the formatter.
-            Err(VMError::NotImplemented(format!(
-                "phase-2c — `as string` cast for kind {:?} depends on the \
-                 ValueFormatter Phase-2c heap-arm rebuild \
-                 (executor/printing.rs `format_heap_kind`). ADR-006 §2.7.4.",
-                slot.kind
-            )))
+            let Some(registry) = schema_registry else {
+                return Err(VMError::NotImplemented(format!(
+                    "`as string` for kind {:?} needs the type schema \
+                     registry; call site did not thread one through. \
+                     ADR-006 §2.7.4.",
+                    slot.kind
+                )));
+            };
+            let formatter = ValueFormatter::new(registry);
+            // Borrow-only — `format_kinded` reads through the typed
+            // `Arc<T>` payload via `&KindedSlot`; ownership of the
+            // carrier remains with the caller (the `op_convert*` body
+            // drops it after this returns).
+            Ok(formatter.format_kinded(slot))
         }
     }
 }
@@ -476,15 +525,38 @@ impl VirtualMachine {
     /// names; the runtime resolves the matching `into()` / `tryInto()`
     /// trait method symbol and calls it.
     ///
-    /// SURFACE (Phase-2c per ADR-006 §2.7.4): wiring this end-to-end
-    /// requires (1) the kinded trait-dispatch resolution path
-    /// (`lookup_trait_method_symbol` + a kinded `call_value_immediate_nb`
-    /// shape on the resolved closure), and (2) the AnyError TypedObject
-    /// builder for fallible-path failures (currently a Phase-2c
-    /// surface in `executor/exceptions/mod.rs::build_any_error`). Until
-    /// both land the dispatch shell stays a NotImplemented surface
-    /// rather than reintroducing the deleted W-series dispatch
-    /// pattern.
+    /// SURFACE (Phase-2c per ADR-006 §2.7.4 + §2.7.11): wiring this
+    /// end-to-end depends on two cross-cluster pieces that are
+    /// themselves still SURFACE at HEAD:
+    ///
+    /// 1. **Kinded trait-method resolution.** Resolving the
+    ///    `__IntoDispatch` / `__TryIntoDispatch` selectors emitted by
+    ///    `compiler/expressions/type_ops.rs::conversion_dispatch_annotation`
+    ///    to a callable closure needs a kinded
+    ///    `lookup_trait_method_symbol` shape on the trait registry plus
+    ///    the kinded `call_value_immediate_nb` value-call shape on the
+    ///    resolved callee. The latter is the §2.7.11 / Q12 value-call
+    ///    ABI, which is the territory of W17-make-closure / W17-array-
+    ///    closure-callback; until those land here, dispatching on a
+    ///    resolved closure carrier would re-introduce the deleted
+    ///    kind-blind value-call ABI shape (refused per CLAUDE.md
+    ///    "Renames to refuse on sight").
+    ///
+    /// 2. **AnyError TypedObject builder.** Fallible-path
+    ///    (`__TryIntoDispatch`) failure values need to be wrapped as
+    ///    `AnyError` TypedObject instances; the builder
+    ///    (`executor/exceptions/mod.rs::build_any_error`) is itself a
+    ///    Phase-2c surface (W17-method-bodies-misc territory).
+    ///
+    /// Until both land the dispatch shell stays a `NotImplemented`
+    /// surface — surface-and-stop rather than reintroducing the
+    /// deleted W-series dispatch pattern.
+    ///
+    /// The primitive-target path (`as int` / `as number` / `as string`
+    /// / `as bool` / `as decimal` / `as char`) does NOT route through
+    /// this opcode — the compiler emits the dedicated `ConvertTo*`
+    /// opcodes for those targets, with the corresponding kinded bodies
+    /// at `op_convert_to_*` in this module.
     pub(in crate::executor) fn op_convert(
         &mut self,
         instruction: &Instruction,
@@ -501,9 +573,12 @@ impl VirtualMachine {
             other => format!("{:?}", other),
         };
         Err(VMError::NotImplemented(format!(
-            "phase-2c — `Convert` opcode (TryInto/Into trait dispatch) \
-             needs the kinded trait-method lookup + AnyError TypedObject \
-             builder. ADR-006 §2.7.4. target_desc={}",
+            "`Convert` opcode (TryInto/Into trait dispatch) cascades on \
+             two still-SURFACE dependencies: (1) kinded trait-method \
+             resolution + §2.7.11/Q12 value-call dispatch on the \
+             resolved closure, (2) `build_any_error` AnyError \
+             TypedObject builder in `executor/exceptions/mod.rs`. \
+             ADR-006 §2.7.4 / §2.7.11. target_desc={}",
             target_desc
         )))
     }
@@ -534,10 +609,15 @@ impl VirtualMachine {
 
     /// `ConvertToString` (`expr as string`): pop, format to `String`,
     /// push as a fresh `Arc<String>` with `NativeKind::String`.
+    ///
+    /// Heap-fallback kinds (TypedObject, TypedArray, HashMap, …)
+    /// dispatch through `ValueFormatter::format_kinded` per the
+    /// §2.7.6 / Q8 carrier-API bound — the schema registry threads
+    /// from `self.program` so `TypedObject` field names resolve.
     #[inline]
     pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
         let src = pop_one_kinded(self)?;
-        let s = read_as_string(&src)?;
+        let s = read_as_string(&src, Some(&self.program.type_schema_registry))?;
         drop(src);
         let arc = Arc::new(s);
         let bits = Arc::into_raw(arc) as u64;
@@ -683,13 +763,13 @@ mod tests {
     #[test]
     fn read_as_string_from_int() {
         let s = KindedSlot::from_int(42);
-        assert_eq!(read_as_string(&s).unwrap(), "42");
+        assert_eq!(read_as_string(&s, None).unwrap(), "42");
     }
 
     #[test]
     fn read_as_string_from_bool() {
         let s = KindedSlot::from_bool(true);
-        assert_eq!(read_as_string(&s).unwrap(), "true");
+        assert_eq!(read_as_string(&s, None).unwrap(), "true");
     }
 
     #[test]
@@ -717,5 +797,58 @@ mod tests {
         use std::sync::Arc;
         let s = KindedSlot::from_string_arc(Arc::new("AB".to_string()));
         assert!(read_as_char(&s).is_err());
+    }
+
+    #[test]
+    fn read_as_string_from_decimal_heap_kind() {
+        // Heap-numeric `Decimal` kind has an inline arm in the proven
+        // set — formats without needing the schema registry fallback.
+        // The slot OWNS one strong-count share via `KindedSlot::Drop`;
+        // `read_as_string` borrows only.
+        let registry = TypeSchemaRegistry::new();
+        let d = Arc::new(rust_decimal::Decimal::new(314, 2));
+        let bits = Arc::into_raw(d) as u64;
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Decimal),
+        );
+        let out = read_as_string(&slot, Some(&registry)).unwrap();
+        assert_eq!(out, "3.14");
+        // `slot` drops here — retires the one strong-count share.
+    }
+
+    #[test]
+    fn read_as_string_temporal_surfaces() {
+        // Temporal arm in `format_heap_kind` is still SURFACE; the
+        // wildcard heap fallback must surface-and-stop rather than
+        // panic deep in the formatter.
+        let registry = TypeSchemaRegistry::new();
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(0),
+            NativeKind::Ptr(HeapKind::Temporal),
+        );
+        let err = read_as_string(&slot, Some(&registry)).unwrap_err();
+        assert!(
+            matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Temporal")),
+            "expected Temporal SURFACE, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn read_as_string_closure_surfaces() {
+        // Closure arm in `format_heap_kind` is still SURFACE per
+        // §2.7.8 / Q10 B7-closure-cells extension dependency.
+        let registry = TypeSchemaRegistry::new();
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(0),
+            NativeKind::Ptr(HeapKind::Closure),
+        );
+        let err = read_as_string(&slot, Some(&registry)).unwrap_err();
+        assert!(
+            matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Closure")),
+            "expected Closure SURFACE, got: {:?}",
+            err
+        );
     }
 }
