@@ -195,10 +195,27 @@ impl BytecodeCompiler {
                 .and_then(|m| m.get(property))
                 .is_some()
             {
-                // Projecting a stored comptime field carrier to a
-                // `Constant` lands in phase-2c (ADR-006 §2.4); the
-                // ValueWord-shaped accessor it used is deleted.
-                todo!("phase-2c — see ADR-006 §2.4");
+                // SURFACE: the kinded `KindedSlot → Constant` projection
+                // for comptime field reads lives in phase-2c (ADR-006
+                // §2.4). The carrier-tier `comptime_fields` registry is
+                // already `HashMap<String, HashMap<String, KindedSlot>>`,
+                // but the producer side that bakes comptime defaults into
+                // it is dormant (see `statements.rs:2450-2512` —
+                // recognised-literal arms are validated but never stored),
+                // so this branch is currently unreachable in real
+                // programs. Returning a structured semantic error rather
+                // than a panic keeps the surface honest when a future
+                // phase-2c commit wires the producer side but lands ahead
+                // of the projector. Tracked as `c3-expr-lowering-misc`
+                // per playbook §3 (Wave 2.5).
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "comptime field access '{}.{}' is dormant pending the phase-2c \
+                         KindedSlot-to-Constant projection rebuild (ADR-006 §2.4 / §2.7.4)",
+                        type_name, property
+                    ),
+                    location: Some(self.span_to_source_location(object.span())),
+                });
             }
         }
 
@@ -319,11 +336,22 @@ impl BytecodeCompiler {
                     .cloned();
 
                 if comptime_value.is_some() {
-                    // Comptime field projection from a stored carrier
-                    // value to a `Constant` lands in phase-2c
-                    // (ADR-006 §2.4); the ValueWord-shaped accessor it
-                    // used is deleted.
-                    todo!("phase-2c — see ADR-006 §2.4");
+                    // SURFACE: same boundary as the static-path branch
+                    // above. The kinded `KindedSlot → Constant`
+                    // projection for comptime field reads lives in
+                    // phase-2c (ADR-006 §2.4 / §2.7.4); the producer side
+                    // (`statements.rs:2450-2512`) is dormant so this
+                    // branch is currently unreachable. Tracked as
+                    // `c3-expr-lowering-misc` per playbook §3.
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "comptime field access '{}.{}' (via schema lookup) is dormant \
+                             pending the phase-2c KindedSlot-to-Constant projection rebuild \
+                             (ADR-006 §2.4 / §2.7.4)",
+                            type_name, property
+                        ),
+                        location: Some(self.span_to_source_location(object.span())),
+                    });
                 }
             }
         }
