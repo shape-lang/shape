@@ -79,7 +79,7 @@ pub enum ConcreteReturn {
     ///
     /// Discriminator-level homogeneity: there is **one**
     /// `ConcreteReturn::ArrayHeapValue` (matching one
-    /// `TypedArrayData::HeapValue` storage variant). Per-element-kind
+    /// `the-deleted-heterogeneous-element-carrier` storage variant). Per-element-kind
     /// variants (`ArrayDataTable` / `ArrayIoHandle` / etc.) are
     /// rejected on the same grounds as the parametric-NativeKind
     /// pattern — see `docs/defections.md` Phase 2d Array cluster

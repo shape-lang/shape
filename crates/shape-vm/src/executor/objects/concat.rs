@@ -241,19 +241,6 @@ fn concat_typed_arrays(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }
-        (TypedArrayData::HeapValue(la), TypedArrayData::HeapValue(lb)) => {
-            let mut data: Vec<Arc<shape_value::heap_value::HeapValue>> =
-                Vec::with_capacity(la.data.len() + lb.data.len());
-            for h in la.data.iter() {
-                data.push(Arc::clone(h));
-            }
-            for h in lb.data.iter() {
-                data.push(Arc::clone(h));
-            }
-            Ok(Arc::new(TypedArrayData::HeapValue(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
         // FloatSlice + FloatSlice: materialize into an owned F64 array
         // (matches the slice operator's materialize-not-view semantics
         // in `array_operations.rs::slice_typed_array`).
@@ -328,6 +315,81 @@ fn concat_typed_arrays(
                  is a 2D view, not a 1D Vec; concat semantics undefined \
                  (mirrors slice_typed_array in array_operations.rs)."
             )))
+        }
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // same-variant arms. Per-element Arc::clone preserves refcount
+        // discipline.
+        (TypedArrayData::Decimal(la), TypedArrayData::Decimal(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::BigInt(la), TypedArrayData::BigInt(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::DateTime(la), TypedArrayData::DateTime(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::Timespan(la), TypedArrayData::Timespan(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::Duration(la), TypedArrayData::Duration(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::Duration(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::Instant(la), TypedArrayData::Instant(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::Instant(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::Char(la), TypedArrayData::Char(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            data.extend_from_slice(&la.data);
+            data.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::Char(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::TypedObject(la), TypedArrayData::TypedObject(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
+        }
+        (TypedArrayData::TraitObject(la), TypedArrayData::TraitObject(lb)) => {
+            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(Arc::clone(d)); }
+            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(data),
+            ))))
         }
         // Cross-variant: mismatched element kinds. Compiler should
         // have caught this at type-check; surface as a runtime type

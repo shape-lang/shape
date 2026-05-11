@@ -462,7 +462,170 @@ impl IoHandleData {
     }
 }
 
+// ── TraitObjectStorage now lives at lines ~1790+ (W17-trait-object-storage merge) ──
+// The placeholder shape from W17-typed-carrier-bundle-A checkpoint 1 is
+// superseded by the real `TraitObjectStorage { value: Arc<TypedObjectStorage>,
+// vtable: Arc<VTable> }` from W17-trait-object-storage's close commit
+// (`e58218c`). 4-table lockstep landed there; HeapKind::TraitObject = 29
+// is the assigned ordinal.
+
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
+
+/// Parametric value-buffer for `HashMapData`, per ADR-006 §2.7.24 Q25.B.
+///
+/// W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): replaces the previous
+/// `Arc<TypedBuffer<Arc<HeapValue>>>` shape with a discriminated enum where
+/// each arm pins the per-value kind at the variant level. No parallel kind
+/// track is needed at this layer — the variant tag IS the kind.
+///
+/// The `HeapValue` arm is retained during commits 1-3 to keep existing
+/// readers/writers compiling; commit 4 deletes it (Q25.A/B forbidden-pattern
+/// list). Construction sites migrate to the specialized arms in commit 2;
+/// read sites add per-arm dispatch in commit 3.
+#[derive(Debug)]
+pub enum HashMapValueBuf {
+    // Scalar-keyed value arms (mirror of TypedArrayData scalar arms).
+    I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
+    F64(Arc<crate::typed_buffer::TypedBuffer<f64>>),
+    Bool(Arc<crate::typed_buffer::TypedBuffer<u8>>),
+    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
+    // Heap-typed value arms — payload type mirrors the matching `HeapValue`
+    // variant's `Arc<T>` payload so refcount discipline reuses the existing
+    // `Arc::clone` / `Arc::drop` paths.
+    Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
+    BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
+    DateTime(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Timespan(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Duration(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Instant(Arc<crate::typed_buffer::TypedBuffer<Arc<std::time::Instant>>>),
+    Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
+    TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
+    TraitObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TraitObjectStorage>>>),
+    // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
+    // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
+    // §2.7.24 Q25.B. Same discipline as Q25.A for TypedArrayData — no
+    // production caller produces this shape; the value buffer is fully
+    // per-variant strict-typed.
+}
+
+impl HashMapValueBuf {
+    /// Number of values in the buffer.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            HashMapValueBuf::I64(b) => b.data.len(),
+            HashMapValueBuf::F64(b) => b.data.len(),
+            HashMapValueBuf::Bool(b) => b.data.len(),
+            HashMapValueBuf::String(b) => b.data.len(),
+            HashMapValueBuf::Decimal(b) => b.data.len(),
+            HashMapValueBuf::BigInt(b) => b.data.len(),
+            HashMapValueBuf::DateTime(b) => b.data.len(),
+            HashMapValueBuf::Timespan(b) => b.data.len(),
+            HashMapValueBuf::Duration(b) => b.data.len(),
+            HashMapValueBuf::Instant(b) => b.data.len(),
+            HashMapValueBuf::Char(b) => b.data.len(),
+            HashMapValueBuf::TypedObject(b) => b.data.len(),
+            HashMapValueBuf::TraitObject(b) => b.data.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Iterate over all values materialized as `Arc<HeapValue>`. Helper
+    /// for callers that need to walk the buffer once during the
+    /// W17-typed-carrier-bundle-A transition. Commit 3 audits readers and
+    /// converts hot paths to per-arm dispatch; this generic helper covers
+    /// cold paths (Display, JSON/XML marshal) that don't need per-element
+    /// specialisation.
+    pub fn iter_heap_arcs(&self) -> impl Iterator<Item = Arc<HeapValue>> + '_ {
+        let n = self.len();
+        (0..n).map(move |i| self.value_at(i))
+    }
+
+    /// Materialize the value at index `i` as an owned `Arc<HeapValue>`.
+    /// Cheap thin Arc::clone for the HeapValue arm; for typed arms the
+    /// element is wrapped into a freshly-constructed HeapValue.
+    ///
+    /// This is the read-side accessor used by callers that haven't yet
+    /// migrated to per-arm dispatch (commits 1-3 of W17-typed-carrier-
+    /// bundle-A). Commit 3 audits and rewrites match-on-HeapValue sites
+    /// into exhaustive HashMapValueBuf matches; commit 4 deletes the
+    /// HeapValue arm.
+    pub fn value_at(&self, i: usize) -> Arc<HeapValue> {
+        match self {
+            HashMapValueBuf::I64(b) => {
+                Arc::new(HeapValue::NativeScalar(NativeScalar::I64(b.data[i])))
+            }
+            HashMapValueBuf::F64(_) => {
+                // NativeScalar has no F64 arm (only F32); F64 values need to
+                // round-trip through a Temporal-style typed payload or the
+                // caller migrates to per-arm dispatch in commit 3. No
+                // construction site for HashMapValueBuf::F64 on this branch,
+                // so reaching this arm is a wiring bug.
+                unreachable!(
+                    "HashMapValueBuf::F64 read via value_at — no construction \
+                     site on this branch (W17-typed-carrier-bundle-A commit 1)"
+                )
+            }
+            HashMapValueBuf::Bool(_) => {
+                // NativeScalar has no Bool arm. Same disposition as F64
+                // above — caller migrates to per-arm dispatch.
+                unreachable!(
+                    "HashMapValueBuf::Bool read via value_at — no construction \
+                     site on this branch (W17-typed-carrier-bundle-A commit 1)"
+                )
+            }
+            HashMapValueBuf::String(b) => Arc::new(HeapValue::String(Arc::clone(&b.data[i]))),
+            HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
+            HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
+            HashMapValueBuf::DateTime(b)
+            | HashMapValueBuf::Timespan(b)
+            | HashMapValueBuf::Duration(b) => {
+                Arc::new(HeapValue::Temporal(Arc::clone(&b.data[i])))
+            }
+            HashMapValueBuf::Instant(b) => Arc::new(HeapValue::Instant(Arc::clone(&b.data[i]))),
+            HashMapValueBuf::Char(b) => Arc::new(HeapValue::Char(b.data[i])),
+            HashMapValueBuf::TypedObject(b) => {
+                Arc::new(HeapValue::TypedObject(Arc::clone(&b.data[i])))
+            }
+            HashMapValueBuf::TraitObject(_) => {
+                // No construction site for the TraitObject arm on this
+                // branch. Reaching this point indicates the
+                // W17-trait-object-storage carrier landed independently;
+                // surface-and-stop until the boxing thunk and HeapValue
+                // arm are in place (§2.7.24 Q25.C).
+                unreachable!(
+                    "HashMapValueBuf::TraitObject reader called before \
+                     W17-trait-object-storage / W17-trait-object-emission landed; \
+                     ADR-006 §2.7.24 Q25.C"
+                )
+            }
+        }
+    }
+}
+
+impl Clone for HashMapValueBuf {
+    fn clone(&self) -> Self {
+        match self {
+            HashMapValueBuf::I64(b) => HashMapValueBuf::I64(Arc::clone(b)),
+            HashMapValueBuf::F64(b) => HashMapValueBuf::F64(Arc::clone(b)),
+            HashMapValueBuf::Bool(b) => HashMapValueBuf::Bool(Arc::clone(b)),
+            HashMapValueBuf::String(b) => HashMapValueBuf::String(Arc::clone(b)),
+            HashMapValueBuf::Decimal(b) => HashMapValueBuf::Decimal(Arc::clone(b)),
+            HashMapValueBuf::BigInt(b) => HashMapValueBuf::BigInt(Arc::clone(b)),
+            HashMapValueBuf::DateTime(b) => HashMapValueBuf::DateTime(Arc::clone(b)),
+            HashMapValueBuf::Timespan(b) => HashMapValueBuf::Timespan(Arc::clone(b)),
+            HashMapValueBuf::Duration(b) => HashMapValueBuf::Duration(Arc::clone(b)),
+            HashMapValueBuf::Instant(b) => HashMapValueBuf::Instant(Arc::clone(b)),
+            HashMapValueBuf::Char(b) => HashMapValueBuf::Char(Arc::clone(b)),
+            HashMapValueBuf::TypedObject(b) => HashMapValueBuf::TypedObject(Arc::clone(b)),
+            HashMapValueBuf::TraitObject(b) => HashMapValueBuf::TraitObject(Arc::clone(b)),
+        }
+    }
+}
 
 /// HashMap storage — two parallel Phase 2d Array buffers (string keys +
 /// heap-allocated values) plus an eager bucket-index for O(1) lookup.
@@ -490,9 +653,9 @@ impl IoHandleData {
 pub struct HashMapData {
     /// Insertion-ordered keys (string-typed buffer).
     pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
-    /// Insertion-ordered values (heap-allocated, polymorphic at the
-    /// HeapValue arm — body-side `FromSlot` impl pins the element shape).
-    pub values: Arc<crate::typed_buffer::TypedBuffer<Arc<HeapValue>>>,
+    /// Insertion-ordered values, parametric per ADR-006 §2.7.24 Q25.B.
+    /// Variant tag IS the per-value kind — no parallel kind track.
+    pub values: HashMapValueBuf,
     /// Eager bucket-index: hash → list of indices into `keys`/`values`
     /// arrays. Enables O(1) lookup at the user-facing `map.get(key)`
     /// path. Hash is computed via FNV-1a over the key string bytes.
@@ -501,16 +664,33 @@ pub struct HashMapData {
 
 impl HashMapData {
     /// Build an empty HashMapData with no entries.
+    ///
+    /// W17-typed-carrier-bundle-A checkpoint 4/4: the post-§2.7.24 Q25.B
+    /// default arm is `HashMapValueBuf::TypedObject` — when callers
+    /// `.set(key, value)` for the first time, the per-value-kind dispatch
+    /// in `insert` selects the matching specialized arm. The TypedObject
+    /// default lets cold callers that never write (just read empty
+    /// entries/values arrays) avoid panicking on an unselected arm.
     pub fn new() -> Self {
         Self {
             keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
-            values: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            values: HashMapValueBuf::TypedObject(Arc::new(
+                crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+            )),
             index: std::collections::HashMap::new(),
         }
     }
 
     /// Build from parallel `Vec`s of keys and values, computing the
     /// bucket index eagerly. Panics if `keys.len() != values.len()`.
+    ///
+    /// W17-typed-carrier-bundle-A checkpoint 4/4: dispatches to a
+    /// specialized `HashMapValueBuf` arm via per-element `HeapValue`
+    /// inspection per ADR-006 §2.7.24 Q25.B (mirror of
+    /// `TypedArrayData::build_specialized_from_heap_arcs`). Heterogeneous-
+    /// arm value vectors surface (production callers that produced mixed
+    /// HeapValue arms migrate by either uniform-typing the input or
+    /// using a typed-arm constructor).
     pub fn from_pairs(keys: Vec<Arc<String>>, values: Vec<Arc<HeapValue>>) -> Self {
         assert_eq!(
             keys.len(),
@@ -525,10 +705,101 @@ impl HashMapData {
                 .or_default()
                 .push(i as u32);
         }
+        let values_buf = Self::specialize_values(values);
         Self {
             keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(keys)),
-            values: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(values)),
+            values: values_buf,
             index,
+        }
+    }
+
+    /// W17-typed-carrier-bundle-A checkpoint 4/4: dispatch a
+    /// `Vec<Arc<HeapValue>>` into the matching specialized
+    /// `HashMapValueBuf` arm. Empty inputs default to `TypedObject`.
+    /// Mirror of `TypedArrayData::build_specialized_from_heap_arcs`.
+    fn specialize_values(values: Vec<Arc<HeapValue>>) -> HashMapValueBuf {
+        use crate::typed_buffer::TypedBuffer;
+        if values.is_empty() {
+            return HashMapValueBuf::TypedObject(Arc::new(TypedBuffer::from_vec(Vec::new())));
+        }
+        let first = &values[0];
+        match first.as_ref() {
+            HeapValue::String(_) => {
+                let data: Vec<Arc<String>> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::String(s) => Arc::clone(s),
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected String, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::String(Arc::new(TypedBuffer::from_vec(data)))
+            }
+            HeapValue::Decimal(_) => {
+                let data: Vec<Arc<rust_decimal::Decimal>> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::Decimal(d) => Arc::clone(d),
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected Decimal, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::Decimal(Arc::new(TypedBuffer::from_vec(data)))
+            }
+            HeapValue::BigInt(_) => {
+                let data: Vec<Arc<i64>> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::BigInt(b) => Arc::clone(b),
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected BigInt, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::BigInt(Arc::new(TypedBuffer::from_vec(data)))
+            }
+            HeapValue::TypedObject(_) => {
+                let data: Vec<Arc<TypedObjectStorage>> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::TypedObject(s) => Arc::clone(s),
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected TypedObject, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
+            }
+            HeapValue::Char(_) => {
+                let data: Vec<char> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::Char(c) => *c,
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected Char, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::Char(Arc::new(TypedBuffer::from_vec(data)))
+            }
+            other => panic!(
+                "HashMapData::from_pairs: HeapValue arm {:?} not yet \
+                 supported post-§2.7.24 Q25.B — add a specialized \
+                 HashMapValueBuf arm.",
+                other.kind()
+            ),
         }
     }
 
@@ -546,13 +817,20 @@ impl HashMapData {
 
     /// Look up a value by string key. O(1) via the bucket index plus a
     /// short bucket scan for collision disambiguation.
-    pub fn get(&self, key: &str) -> Option<&Arc<HeapValue>> {
+    ///
+    /// Returns an **owned** `Arc<HeapValue>` rather than a borrow because
+    /// post-§2.7.24 the value buffer can be a specialized variant
+    /// (`HashMapValueBuf::I64`, etc.) where there is no underlying
+    /// `Arc<HeapValue>` to borrow — the materialized HeapValue is
+    /// freshly constructed by `HashMapValueBuf::value_at`. For the
+    /// HeapValue arm this is a thin atomic refcount bump.
+    pub fn get(&self, key: &str) -> Option<Arc<HeapValue>> {
         let hash = fnv1a_hash(key.as_bytes());
         let bucket = self.index.get(&hash)?;
         for &idx in bucket {
             let i = idx as usize;
             if self.keys.data[i].as_str() == key {
-                return Some(&self.values.data[i]);
+                return Some(self.values.value_at(i));
             }
         }
         None
@@ -587,6 +865,13 @@ impl HashMapData {
     /// the value is replaced in-place (the old `Arc<HeapValue>` is dropped,
     /// releasing its refcount). Otherwise the entry is appended to the
     /// insertion-ordered buffers and registered in the bucket index.
+    ///
+    /// Per ADR-006 §2.7.24 Q25.B this mutation entry-point assumes the
+    /// values buffer is the `HashMapValueBuf::HeapValue` arm. Specialized
+    /// arms get their own typed mutation entry-points in commit 2; until
+    /// the migration completes, attempting to insert into a specialized
+    /// arm panics (unreachable in current callers — commit 4 deletes the
+    /// HeapValue arm and the specialized paths replace this entry-point).
     pub fn insert(&mut self, key: Arc<String>, value: Arc<HeapValue>) {
         let hash = fnv1a_hash(key.as_bytes());
         // Look for an existing entry under the same hash bucket.
@@ -594,12 +879,10 @@ impl HashMapData {
             for &idx in bucket {
                 let i = idx as usize;
                 if self.keys.data[i].as_str() == key.as_str() {
-                    // Overwrite in place. `Arc::make_mut` on the values
-                    // buffer is the §2.7.4 / playbook clone-on-write path:
-                    // a shared buffer is cloned (cheap — element-wise Arc
-                    // bumps), a uniquely-owned buffer is mutated directly.
-                    let values_buf = Arc::make_mut(&mut self.values);
-                    values_buf.data[i] = value;
+                    // Overwrite in place via the HeapValue-arm-aware
+                    // helper. Specialized arms have their own typed
+                    // insert paths (commit 2 / commit 3).
+                    self.insert_heap_overwrite_at(i, value);
                     return;
                 }
             }
@@ -607,8 +890,101 @@ impl HashMapData {
         // New entry: append to keys + values, then register in the index.
         let new_idx = self.keys.data.len();
         Arc::make_mut(&mut self.keys).data.push(key);
-        Arc::make_mut(&mut self.values).data.push(value);
+        self.push_heap_value(value);
         self.index.entry(hash).or_default().push(new_idx as u32);
+    }
+
+    /// W17-typed-carrier-bundle-A checkpoint 4/4: per-arm overwrite-in-place
+    /// at index `i`. Dispatches on the current `HashMapValueBuf` arm and
+    /// requires `value`'s HeapValue arm to match.
+    fn insert_heap_overwrite_at(&mut self, i: usize, value: Arc<HeapValue>) {
+        match (&mut self.values, value.as_ref()) {
+            (HashMapValueBuf::String(buf), HeapValue::String(s)) => {
+                Arc::make_mut(buf).data[i] = Arc::clone(s);
+            }
+            (HashMapValueBuf::Decimal(buf), HeapValue::Decimal(d)) => {
+                Arc::make_mut(buf).data[i] = Arc::clone(d);
+            }
+            (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
+                Arc::make_mut(buf).data[i] = Arc::clone(b);
+            }
+            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
+                Arc::make_mut(buf).data[i] = Arc::clone(s);
+            }
+            (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
+                Arc::make_mut(buf).data[i] = *c;
+            }
+            (existing, incoming) => panic!(
+                "HashMapData::insert: value arm mismatch (buf={:?}, value={:?}) — \
+                 callers must produce values of the same kind as the existing entries; \
+                 ADR-006 §2.7.24 Q25.B forbids mid-life arm changes",
+                std::mem::discriminant(existing),
+                incoming.kind()
+            ),
+        }
+    }
+
+    /// W17-typed-carrier-bundle-A checkpoint 4/4: append a value to the
+    /// current arm. On an empty map (TypedObject default from `new()`),
+    /// the first push selects the arm; subsequent pushes require the
+    /// same HeapValue kind.
+    fn push_heap_value(&mut self, value: Arc<HeapValue>) {
+        // Empty-values first-push: re-target the arm to match `value`'s
+        // kind. `keys` may already have the new key pushed by `insert`
+        // (the caller `insert` pushes key first, then this); the values
+        // arm-selection key is the buffer's own emptiness.
+        if matches!(&self.values, HashMapValueBuf::TypedObject(b) if b.data.is_empty()) {
+            self.values = match value.as_ref() {
+                HeapValue::String(_) => HashMapValueBuf::String(Arc::new(
+                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+                )),
+                HeapValue::Decimal(_) => HashMapValueBuf::Decimal(Arc::new(
+                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+                )),
+                HeapValue::BigInt(_) => HashMapValueBuf::BigInt(Arc::new(
+                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+                )),
+                HeapValue::TypedObject(_) => HashMapValueBuf::TypedObject(Arc::new(
+                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+                )),
+                HeapValue::Char(_) => HashMapValueBuf::Char(Arc::new(
+                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
+                )),
+                _ => {
+                    // Other kinds default to TypedObject (already set);
+                    // the next match arm will panic with the precise reason.
+                    return self.push_heap_value_typed_arm(value);
+                }
+            };
+        }
+        self.push_heap_value_typed_arm(value)
+    }
+
+    /// Append to the (already-selected) typed arm.
+    fn push_heap_value_typed_arm(&mut self, value: Arc<HeapValue>) {
+        match (&mut self.values, value.as_ref()) {
+            (HashMapValueBuf::String(buf), HeapValue::String(s)) => {
+                Arc::make_mut(buf).data.push(Arc::clone(s));
+            }
+            (HashMapValueBuf::Decimal(buf), HeapValue::Decimal(d)) => {
+                Arc::make_mut(buf).data.push(Arc::clone(d));
+            }
+            (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
+                Arc::make_mut(buf).data.push(Arc::clone(b));
+            }
+            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
+                Arc::make_mut(buf).data.push(Arc::clone(s));
+            }
+            (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
+                Arc::make_mut(buf).data.push(*c);
+            }
+            (existing, incoming) => panic!(
+                "HashMapData::push: value arm {:?} does not match buf {:?} \
+                 (ADR-006 §2.7.24 Q25.B — values buffer is monomorphic)",
+                incoming.kind(),
+                std::mem::discriminant(existing),
+            ),
+        }
     }
 
     /// Remove the entry under `key`. Returns `true` if the key was present
@@ -644,7 +1020,7 @@ impl HashMapData {
         };
         // Remove from the parallel buffers via Arc::make_mut.
         Arc::make_mut(&mut self.keys).data.remove(removed_idx);
-        Arc::make_mut(&mut self.values).data.remove(removed_idx);
+        self.remove_value_at(removed_idx);
         // Shift down every index in the bucket map that pointed at a
         // position past `removed_idx`.
         for bucket in self.index.values_mut() {
@@ -657,6 +1033,49 @@ impl HashMapData {
         true
     }
 
+    /// Per-arm remove-at-index for the values buffer. Each arm reaches
+    /// into its typed buffer via `Arc::make_mut`. Refcount discipline is
+    /// per-arm at compile time — no `Arc<HeapValue>` dispatch hop.
+    fn remove_value_at(&mut self, i: usize) {
+        match &mut self.values {
+            HashMapValueBuf::I64(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::F64(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::Bool(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::String(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::Decimal(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::BigInt(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::DateTime(b)
+            | HashMapValueBuf::Timespan(b)
+            | HashMapValueBuf::Duration(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::Instant(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::Char(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::TypedObject(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+            HashMapValueBuf::TraitObject(b) => {
+                Arc::make_mut(b).data.remove(i);
+            }
+        }
+    }
+
     /// Merge entries from `other` into `self`. Keys present in both maps
     /// take the value from `other` (last-write-wins, matching `Object.assign`
     /// / `dict.update` semantics). Per-entry insert path — the bucket index
@@ -665,7 +1084,7 @@ impl HashMapData {
         let n = other.len();
         for i in 0..n {
             let key = Arc::clone(&other.keys.data[i]);
-            let value = Arc::clone(&other.values.data[i]);
+            let value = other.values.value_at(i);
             self.insert(key, value);
         }
     }
@@ -682,10 +1101,11 @@ impl Clone for HashMapData {
         // Arc::clone on the buffers (shared structural sharing is fine —
         // HashMapData is treated as immutable at the marshal boundary;
         // mutation goes through Arc::make_mut on the shape-vm side, out
-        // of this crate's scope).
+        // of this crate's scope). The value-buffer enum's hand-written
+        // Clone impl Arc::clones the inner typed buffer per arm.
         Self {
             keys: Arc::clone(&self.keys),
-            values: Arc::clone(&self.values),
+            values: self.values.clone(),
             index: self.index.clone(),
         }
     }
@@ -2455,7 +2875,32 @@ pub enum TypedArrayData {
     U64(Arc<crate::typed_buffer::TypedBuffer<u64>>),
     F32(Arc<crate::typed_buffer::TypedBuffer<f32>>),
     String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
-    HeapValue(Arc<crate::typed_buffer::TypedBuffer<Arc<crate::heap_value::HeapValue>>>),
+    // ── ADR-006 §2.7.24 Q25.A monomorphic specializations ─────────────────
+    // W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): added alongside
+    // the legacy HeapValue arm. Construction sites migrate in commit 2;
+    // read sites in commit 3; commit 4 deletes the HeapValue arm. Per-element
+    // kind is uniform per variant — variant tag IS the kind, no parallel
+    // kind track.
+    Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
+    BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
+    DateTime(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Timespan(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Duration(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
+    Instant(Arc<crate::typed_buffer::TypedBuffer<Arc<std::time::Instant>>>),
+    Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
+    TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
+    /// Trait-object element array. Carrier shape mirrors §Q25.C's
+    /// `Arc<TraitObjectStorage>`. **No construction site on this branch** —
+    /// `HeapKind::TraitObject = 29` and `TraitObjectStorage`'s real
+    /// fat-pointer shape come from W17-trait-object-storage (parallel
+    /// dispatch). The variant exists here for type-shape completeness.
+    TraitObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TraitObjectStorage>>>),
+    // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
+    // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
+    // §2.7.24 Q25.A. Every construction site migrated to a specialized
+    // variant in checkpoint 2; every reader was filled with real per-arm
+    // bodies in checkpoint 3. Do not reintroduce under any rename — see
+    // §Q25.E #1 forbidden pattern list.
     FloatSlice {
         parent: Arc<MatrixData>,
         offset: u32,
@@ -2464,6 +2909,105 @@ pub enum TypedArrayData {
 }
 
 impl TypedArrayData {
+    /// W17-typed-carrier-bundle-A checkpoint 2/4: build a strict-typed
+    /// `TypedArrayData` variant from a `Vec<Arc<HeapValue>>` of uniform-arm
+    /// elements per ADR-006 §2.7.24 Q25.A. Dispatch on the first element's
+    /// `HeapValue` arm and require all subsequent elements to match. The
+    /// resulting variant carries the element kind at the variant level —
+    /// no parallel kind track, no polymorphic catch-all. Heterogeneous-arm
+    /// inputs surface a structured error.
+    ///
+    /// Returns the variant directly (no Arc wrapper). Callers wrap via
+    /// `Arc::new(...)` then `KindedSlot::from_typed_array(...)` /
+    /// `HeapValue::TypedArray(...)` per their carrier needs.
+    pub fn build_specialized_from_heap_arcs(
+        elems: Vec<Arc<HeapValue>>,
+    ) -> Result<Self, String> {
+        use crate::typed_buffer::TypedBuffer;
+        if elems.is_empty() {
+            let buf: TypedBuffer<Arc<TypedObjectStorage>> = TypedBuffer::from_vec(Vec::new());
+            return Ok(TypedArrayData::TypedObject(Arc::new(buf)));
+        }
+        let first = &elems[0];
+        match first.as_ref() {
+            HeapValue::String(_) => {
+                let mut data: Vec<Arc<String>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::String(s) => data.push(Arc::clone(s)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected String, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::Decimal(_) => {
+                let mut data: Vec<Arc<rust_decimal::Decimal>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::Decimal(d) => data.push(Arc::clone(d)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected Decimal, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::BigInt(_) => {
+                let mut data: Vec<Arc<i64>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::BigInt(b) => data.push(Arc::clone(b)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected BigInt, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::TypedObject(_) => {
+                let mut data: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::TypedObject(s) => data.push(Arc::clone(s)),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected TypedObject, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            HeapValue::Char(_) => {
+                let mut data: Vec<char> = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    match e.as_ref() {
+                        HeapValue::Char(c) => data.push(*c),
+                        other => return Err(format!(
+                            "TypedArrayData::build_specialized: heterogeneous \
+                             heap arms (expected Char, got {:?})",
+                            other.kind()
+                        )),
+                    }
+                }
+                Ok(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
+            }
+            other => Err(format!(
+                "TypedArrayData::build_specialized: HeapValue arm {:?} not yet \
+                 supported post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
+                other.kind()
+            )),
+        }
+    }
+
     #[inline]
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -2480,7 +3024,15 @@ impl TypedArrayData {
             TypedArrayData::U64(_) => "Vec<u64>",
             TypedArrayData::F32(_) => "Vec<f32>",
             TypedArrayData::String(_) => "Vec<string>",
-            TypedArrayData::HeapValue(_) => "Vec<heap>",
+            TypedArrayData::Decimal(_) => "Vec<decimal>",
+            TypedArrayData::BigInt(_) => "Vec<int>",
+            TypedArrayData::DateTime(_) => "Vec<datetime>",
+            TypedArrayData::Timespan(_) => "Vec<timespan>",
+            TypedArrayData::Duration(_) => "Vec<duration>",
+            TypedArrayData::Instant(_) => "Vec<instant>",
+            TypedArrayData::Char(_) => "Vec<char>",
+            TypedArrayData::TypedObject(_) => "Vec<object>",
+            TypedArrayData::TraitObject(_) => "Vec<dyn>",
             TypedArrayData::FloatSlice { .. } => "Vec<number>",
         }
     }
@@ -2501,7 +3053,15 @@ impl TypedArrayData {
             TypedArrayData::U64(a) => !a.is_empty(),
             TypedArrayData::F32(a) => !a.is_empty(),
             TypedArrayData::String(a) => !a.is_empty(),
-            TypedArrayData::HeapValue(a) => !a.is_empty(),
+            TypedArrayData::Decimal(a) => !a.is_empty(),
+            TypedArrayData::BigInt(a) => !a.is_empty(),
+            TypedArrayData::DateTime(a) => !a.is_empty(),
+            TypedArrayData::Timespan(a) => !a.is_empty(),
+            TypedArrayData::Duration(a) => !a.is_empty(),
+            TypedArrayData::Instant(a) => !a.is_empty(),
+            TypedArrayData::Char(a) => !a.is_empty(),
+            TypedArrayData::TypedObject(a) => !a.is_empty(),
+            TypedArrayData::TraitObject(a) => !a.is_empty(),
             TypedArrayData::FloatSlice { len, .. } => *len > 0,
         }
     }
@@ -2671,9 +3231,25 @@ impl TypedArrayData {
             // `SetIndexRef` already rejects these via
             // `typed_array_element_kind`'s `None` return; reaching this
             // arm is a construction-side bug, not a soundness gap.
-            TypedArrayData::HeapValue(_)
-            | TypedArrayData::FloatSlice { .. }
-            | TypedArrayData::Matrix(_) => return None,
+            //
+            // W17-typed-carrier-bundle-A commit 1/4: the new
+            // §2.7.24 Q25.A specialized arms (Decimal / BigInt /
+            // DateTime / Timespan / Duration / Instant / Char /
+            // TypedObject / TraitObject) are also rejected here — they
+            // are heap-typed-Arc-element buffers whose write paths go
+            // through dedicated per-arm typed entry-points (commit 2-3
+            // wiring; commit 4 deletes the HeapValue arm).
+            TypedArrayData::FloatSlice { .. }
+            | TypedArrayData::Matrix(_)
+            | TypedArrayData::Decimal(_)
+            | TypedArrayData::BigInt(_)
+            | TypedArrayData::DateTime(_)
+            | TypedArrayData::Timespan(_)
+            | TypedArrayData::Duration(_)
+            | TypedArrayData::Instant(_)
+            | TypedArrayData::Char(_)
+            | TypedArrayData::TypedObject(_)
+            | TypedArrayData::TraitObject(_) => return None,
         };
         Some(prior)
     }
@@ -2809,8 +3385,11 @@ impl fmt::Display for TypedArrayData {
                 }
                 write!(f, "]")
             }
-            TypedArrayData::HeapValue(a) => {
-                write!(f, "Vec<heap>[")?;
+            // ── ADR-006 §2.7.24 Q25.A specialized arms ──────────────────
+            // W17-typed-carrier-bundle-A commit 1/4: Display impls per
+            // arm matching the per-variant `HeapValue::*` Display shape.
+            TypedArrayData::Decimal(a) => {
+                write!(f, "Vec<decimal>[")?;
                 for (i, v) in a.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -2818,6 +3397,69 @@ impl fmt::Display for TypedArrayData {
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
+            }
+            TypedArrayData::BigInt(a) => {
+                write!(f, "Vec<int>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", **v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::DateTime(a)
+            | TypedArrayData::Timespan(a)
+            | TypedArrayData::Duration(a) => {
+                let label = match self {
+                    TypedArrayData::DateTime(_) => "Vec<datetime>",
+                    TypedArrayData::Timespan(_) => "Vec<timespan>",
+                    TypedArrayData::Duration(_) => "Vec<duration>",
+                    _ => unreachable!(),
+                };
+                write!(f, "{}[", label)?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::Instant(a) => {
+                write!(f, "Vec<instant>[")?;
+                for (i, _v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "<instant>")?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::Char(a) => {
+                write!(f, "Vec<char>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "'{}'", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::TypedObject(a) => {
+                write!(f, "Vec<object>[")?;
+                for (i, _v) in a.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{{...}}")?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::TraitObject(a) => {
+                // No construction site on this branch; this arm is
+                // unreachable until W17-trait-object-storage lands.
+                write!(f, "Vec<dyn>[<{} elements>]", a.data.len())
             }
             TypedArrayData::FloatSlice {
                 parent,
@@ -3213,10 +3855,13 @@ impl fmt::Display for HeapValue {
             HeapValue::TypedArray(ta) => write!(f, "{}", ta),
             HeapValue::HashMap(d) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in d.keys.data.iter().zip(d.values.data.iter()).enumerate() {
+                let n = d.keys.data.len();
+                for i in 0..n {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
+                    let k = &d.keys.data[i];
+                    let v = d.values.value_at(i);
                     write!(f, "\"{}\": {}", k, v)?;
                 }
                 write!(f, "}}")

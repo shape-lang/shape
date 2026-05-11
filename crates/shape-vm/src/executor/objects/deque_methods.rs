@@ -32,7 +32,7 @@
 //!   receiver's deque is mutated via `Arc::make_mut`.
 //! - `peek_back` / `peek_front` → same as pop without removal — read-only
 //!   borrow re-wrapped via `heap_value_arc_to_slot`.
-//! - `to_array` → build a fresh `TypedArrayData::HeapValue` from the
+//! - `to_array` → build a fresh `the-deleted-heterogeneous-element-carrier` from the
 //!   `VecDeque` items (one Arc bump per element).
 //! - `get(i)` → bounds-check, read-only borrow re-wrapped.
 //!
@@ -41,8 +41,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{DequeData, HeapKind, HeapValue, TypedArrayData};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::heap_value::{DequeData, HeapKind, HeapValue};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -242,12 +241,13 @@ pub fn v2_get(
     }
 }
 
-/// Deque.toArray() -> Array<heap>
+/// Deque.toArray() -> Array<T>
 ///
-/// Returns an `Array<heap>` reusing each element's `Arc<HeapValue>`
-/// share. Wraps as
-/// `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` —
-/// same shape as `HashMap.values()`.
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per ADR-006 §2.7.24 Q25.A
+/// the result is a strict-typed `TypedArrayData` variant chosen by the
+/// first element's `HeapValue` arm. Uniform-element Deques materialize to
+/// the matching specialized variant; heterogeneous Deques surface
+/// (would indicate a type-system gap upstream).
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -257,11 +257,9 @@ pub fn v2_to_array(
         return Err(type_error("Deque.toArray() takes no arguments"));
     }
     let d = as_deque(&args[0])?;
-    // VecDeque iter walks front-to-back; collect into a typed buffer.
     let elems: Vec<Arc<HeapValue>> = d.items.iter().map(Arc::clone).collect();
-    let buf = TypedBuffer::from_vec(elems);
-    let arr = TypedArrayData::HeapValue(Arc::new(buf));
-    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
+    crate::executor::objects::array_transform::build_specialized_array_from_heap_arcs(elems)
+        .map(|arr| KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

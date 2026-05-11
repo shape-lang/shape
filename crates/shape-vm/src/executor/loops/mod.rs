@@ -211,9 +211,18 @@ impl VirtualMachine {
                             TypedArrayData::U64(a) => a.len(),
                             TypedArrayData::F32(a) => a.len(),
                             TypedArrayData::String(a) => a.len(),
-                            TypedArrayData::HeapValue(a) => a.len(),
                             TypedArrayData::FloatSlice { len, .. } => *len as usize,
                             TypedArrayData::Matrix(m) => m.data.len(),
+                            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+                            TypedArrayData::Decimal(b) => b.len(),
+                            TypedArrayData::BigInt(b) => b.len(),
+                            TypedArrayData::DateTime(b) => b.len(),
+                            TypedArrayData::Timespan(b) => b.len(),
+                            TypedArrayData::Duration(b) => b.len(),
+                            TypedArrayData::Instant(b) => b.len(),
+                            TypedArrayData::Char(b) => b.len(),
+                            TypedArrayData::TypedObject(b) => b.len(),
+                            TypedArrayData::TraitObject(b) => b.len(),
                         };
                         Ok(idx < 0 || idx as usize >= len)
                     }
@@ -283,7 +292,7 @@ impl VirtualMachine {
     ///     before being handed to `push_kinded`).
     ///   - `HeapValue::String`                             → `Char` (per
     ///     codepoint), `NativeKind::Ptr(HeapKind::Char)`.
-    ///   - `TypedArrayData::HeapValue`                     → SURFACE
+    ///   - `the-deleted-heterogeneous-element-carrier`                     → SURFACE
     ///     (polymorphic `Arc<HeapValue>` carriers don't have a single
     ///     element kind; phase-2c work — see ADR-006 §2.7.4).
     ///
@@ -387,7 +396,7 @@ impl VirtualMachine {
                     // `[key, value]` two-element array via the deleted
                     // `vmarray_from_vec` constructor. The kinded
                     // equivalent would push a fresh
-                    // `Arc<TypedArrayData::HeapValue>` two-slot buffer —
+                    // `Arc<the-deleted-heterogeneous-element-carrier>` two-slot buffer —
                     // pending typed-buffer-of-heap construction helpers.
                     HeapValue::HashMap(_) => Err(VMError::NotImplemented(
                         "op_iter_next SURFACE: HashMap iteration yields a \
@@ -515,16 +524,57 @@ impl VirtualMachine {
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
-            // Polymorphic Arc<HeapValue> buffer — element kind cannot be
-            // determined without inspecting each element's HeapValue arm,
-            // and the kinded element redesign is phase-2c. Surface per
-            // playbook §7 #4 + §2.7.4.
-            TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-                "op_iter_next SURFACE: TypedArrayData::HeapValue (Arc<HeapValue> \
-                 polymorphic element buffer) — phase-2c, see ADR-006 §2.7.4 \
-                 (per-element kinded carrier pending)"
-                    .to_string(),
-            )),
+            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+            // Bump the element Arc share before push so the carrier owns
+            // an independent strong-count that retires via drop_with_kind.
+            TypedArrayData::Decimal(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::BigInt(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::DateTime(a) | TypedArrayData::Timespan(a) | TypedArrayData::Duration(a) => {
+                match a.get(u) {
+                    Some(arc) => {
+                        let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                        vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal))
+                    }
+                    None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+                }
+            }
+            TypedArrayData::Instant(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::Char(a) => match a.get(u) {
+                Some(&c) => vm.push_kinded(c as u32 as u64, NativeKind::Ptr(shape_value::heap_value::HeapKind::Char)),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::TypedObject(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::TraitObject(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TraitObject))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
         }
     }
 }

@@ -30,7 +30,7 @@
 //! - `concat`: cross-variant concat (e.g. `[i64...].concat([f64...])`)
 //!   is ambiguous under strict typing — no implicit promotion exists.
 //!   Same-variant concat is implemented; cross-variant surfaces.
-//! - `flatten` requires `TypedArrayData::HeapValue` per-element kind
+//! - `flatten` requires `the-deleted-heterogeneous-element-carrier` per-element kind
 //!   metadata to reclassify each entry as scalar-or-nested-array. The
 //!   single-level `FloatSlice` fast-path is implemented; the general
 //!   nested-array case surfaces.
@@ -260,6 +260,19 @@ pub(super) fn typed_array_arc_from_kinded(
     }
 }
 
+/// W17-typed-carrier-bundle-A checkpoint 2/4: thin wrapper around
+/// `TypedArrayData::build_specialized_from_heap_arcs` that returns a
+/// `VMError` (shape-vm's error type) rather than a `String`. The shared
+/// dispatch logic lives in shape-value so shape-runtime callers
+/// (marshal.rs / json.rs / xml.rs) can reuse it without depending on
+/// shape-vm.
+pub(crate) fn build_specialized_array_from_heap_arcs(
+    elems: Vec<std::sync::Arc<shape_value::heap_value::HeapValue>>,
+) -> Result<TypedArrayData, VMError> {
+    TypedArrayData::build_specialized_from_heap_arcs(elems)
+        .map_err(VMError::RuntimeError)
+}
+
 /// Per-variant element count for `TypedArrayData`.
 pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
     match arr {
@@ -275,9 +288,24 @@ pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(b) => b.data.len(),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: HeapValue arm body is
+        // structurally unreachable post-§2.7.24 Q25.A — no construction
+        // site produces a `the-deleted-heterogeneous-element-carrier` anywhere in the
+        // workspace as of checkpoint 2 (verified via rg). Body becomes
+        // unreachable!() with the structural-unreachability cite.
+        // checkpoint 4 deletes the arm entirely.
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // §2.7.24 Q25.A specialized arms — checkpoint 3 wires real bodies.
+        TypedArrayData::Decimal(b) => b.data.len(),
+        TypedArrayData::BigInt(b) => b.data.len(),
+        TypedArrayData::DateTime(b) => b.data.len(),
+        TypedArrayData::Timespan(b) => b.data.len(),
+        TypedArrayData::Duration(b) => b.data.len(),
+        TypedArrayData::Instant(b) => b.data.len(),
+        TypedArrayData::Char(b) => b.data.len(),
+        TypedArrayData::TypedObject(b) => b.data.len(),
+        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -443,18 +471,6 @@ fn slice_typed_array(
                 TypedBuffer::from_vec(sliced),
             ))))
         }
-        TypedArrayData::HeapValue(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e {
-                buf.data[s..e].to_vec()
-            } else {
-                Vec::new()
-            };
-            Ok(Arc::new(TypedArrayData::HeapValue(Arc::new(
-                TypedBuffer::from_vec(sliced),
-            ))))
-        }
         TypedArrayData::FloatSlice {
             parent,
             offset,
@@ -479,6 +495,63 @@ fn slice_typed_array(
              yet specified."
                 .to_string(),
         )),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: §2.7.24 Q25.A
+        // specialized arms — homogeneous per-element-kind buffers all use
+        // the same `buf.data[s..e].to_vec()` slice pattern.
+        TypedArrayData::Decimal(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::BigInt(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::DateTime(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::Timespan(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::Duration(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::Instant(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::Char(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::TypedObject(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
+        TypedArrayData::TraitObject(buf) => {
+            let len = buf.data.len() as i64;
+            let (s, e) = clamp_range(start, end, len);
+            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
+            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(sliced)))))
+        }
     }
 }
 
@@ -587,13 +660,62 @@ fn concat_typed_array(
                 TypedBuffer::from_vec(out),
             ))))
         }
-        (TypedArrayData::HeapValue(la), TypedArrayData::HeapValue(lb)) => {
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // same-variant arms. Per-element-kind buffers concat by extending
+        // their typed data slices.
+        (TypedArrayData::Decimal(la), TypedArrayData::Decimal(lb)) => {
             let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
             out.extend_from_slice(&la.data);
             out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::HeapValue(Arc::new(
-                TypedBuffer::from_vec(out),
-            ))))
+            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::BigInt(la), TypedArrayData::BigInt(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::DateTime(la), TypedArrayData::DateTime(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::Timespan(la), TypedArrayData::Timespan(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::Duration(la), TypedArrayData::Duration(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::Instant(la), TypedArrayData::Instant(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::Char(la), TypedArrayData::Char(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::TypedObject(la), TypedArrayData::TypedObject(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(out)))))
+        }
+        (TypedArrayData::TraitObject(la), TypedArrayData::TraitObject(lb)) => {
+            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend_from_slice(&la.data);
+            out.extend_from_slice(&lb.data);
+            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(out)))))
         }
         // FloatSlice is a view into a parent matrix's F64 region; both
         // arms below materialize to a flat F64 result. Same-side and
@@ -728,17 +850,46 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
             Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
         }
         TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
-        TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-            "closure-callback over HeapValue array — SURFACE: each \
-             element's NativeKind needs to be sourced from a \
-             per-element parallel-kind track that does not yet exist on \
-             `TypedArrayData::HeapValue` (ADR-006 §2.7.4 — same gap that \
-             surfaces in `flatten`'s HeapValue arm). The closure-callback \
-             ABI is live; the blocker is the missing per-element kind \
-             metadata. Wave-10 / Phase-2c reentry."
-                .to_string(),
-        )),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // arms — each builds a `KindedSlot` of the variant's element type.
+        TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::DateTime(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Timespan(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Duration(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Instant(buf) => Ok(kinded_from_instant_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
+        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
+}
+
+/// W17-typed-carrier-bundle-A checkpoint 3/4: build a `KindedSlot`
+/// carrying `NativeKind::Ptr(HeapKind::Temporal)` from an
+/// `Arc<TemporalData>`. KindedSlot lacks a per-FieldType `from_temporal`
+/// constructor at landing; this helper inlines the canonical
+/// `Arc::into_raw` + `KindedSlot::new` shape used by the temporal
+/// constant-push path in `executor/stack_ops/mod.rs:153`.
+#[inline]
+fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
+    use shape_value::heap_value::HeapKind;
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        shape_value::NativeKind::Ptr(HeapKind::Temporal),
+    )
+}
+
+/// Mirror of `kinded_from_temporal_arc` for `Arc<std::time::Instant>` →
+/// `NativeKind::Ptr(HeapKind::Instant)`.
+#[inline]
+fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
+    use shape_value::heap_value::HeapKind;
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        shape_value::NativeKind::Ptr(HeapKind::Instant),
+    )
 }
 
 /// Stringify a `KindedSlot` for `groupBy` bucket keys. Dispatches on
@@ -873,14 +1024,58 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
                 AlignedTypedBuffer::from_aligned(aligned),
             ))))
         }
-        TypedArrayData::HeapValue(_) | TypedArrayData::Matrix(_) => {
+        TypedArrayData::Matrix(_) => {
             Err(VMError::NotImplemented(format!(
-                "filter: {} variant — SURFACE: per-element projection on \
-                 HeapValue / Matrix needs the same per-element kind \
-                 metadata gap that `flatten` flags (ADR-006 §2.7.4). \
+                "filter: {} variant — SURFACE: projecting a Matrix to a \
+                 flat array needs a reshape contract (ADR-006 §2.7.4). \
                  Wave-10 / Phase-2c reentry.",
                 arr.type_name()
             )))
+        }
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms
+        // — uniform-element-kind project via per-element Arc::clone.
+        TypedArrayData::Decimal(buf) => {
+            let v: Vec<Arc<rust_decimal::Decimal>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::BigInt(buf) => {
+            let v: Vec<Arc<i64>> = keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::DateTime(buf) => {
+            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::Timespan(buf) => {
+            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::Duration(buf) => {
+            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::Instant(buf) => {
+            let v: Vec<Arc<std::time::Instant>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::Char(buf) => {
+            let v: Vec<char> = keep.iter().map(|&i| buf.data[i]).collect();
+            Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::TypedObject(buf) => {
+            let v: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::TraitObject(buf) => {
+            let v: Vec<Arc<shape_value::heap_value::TraitObjectStorage>> =
+                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(v)))))
         }
     }
 }
@@ -980,7 +1175,7 @@ pub(super) fn collect_homogeneous_results(
 ///
 /// Heterogeneous-kind result fallback + heap-element receivers surface
 /// per `collect_homogeneous_results` / `element_kinded` (ADR-006 §2.7.4
-/// per-element kind metadata gap on `TypedArrayData::HeapValue`).
+/// per-element kind metadata gap on `the-deleted-heterogeneous-element-carrier`).
 pub(crate) fn handle_map_v2(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -1320,15 +1515,46 @@ fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
                 AlignedTypedBuffer::from_aligned(aligned),
             ))))
         }
-        TypedArrayData::Matrix(_) | TypedArrayData::HeapValue(_) => {
+        TypedArrayData::Matrix(_) => {
             Err(VMError::NotImplemented(format!(
-                "sort: {} variant — SURFACE: row-major matrix and \
-                 HeapValue arrays need the per-element kind metadata gap \
-                 flagged on `flatten` (ADR-006 §2.7.4) for an order \
-                 contract. Wave-10 / Phase-2c reentry.",
+                "sort: {} variant — SURFACE: row-major matrix needs a \
+                 reshape contract (ADR-006 §2.7.4). Wave-10 / Phase-2c reentry.",
                 arr.type_name()
             )))
         }
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // sort arms. Decimal / BigInt / Char have natural total orders;
+        // DateTime / Timespan / Duration / Instant share `TemporalData`
+        // which has a partial-order shape per its inner variant. The
+        // TypedObject / TraitObject arms surface — sorting heterogeneous
+        // record schemas requires a user-supplied comparator (handled by
+        // `orderBy` / `sortBy`, not bare `sort`).
+        TypedArrayData::Decimal(buf) => {
+            let mut v: Vec<Arc<rust_decimal::Decimal>> = buf.data.to_vec();
+            v.sort_by(|a, b| a.cmp(b));
+            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::BigInt(buf) => {
+            let mut v: Vec<Arc<i64>> = buf.data.to_vec();
+            v.sort_by(|a, b| a.cmp(b));
+            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::Char(buf) => {
+            let mut v: Vec<char> = buf.data.to_vec();
+            v.sort();
+            Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(v)))))
+        }
+        TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => Err(VMError::NotImplemented(format!(
+            "sort: {} variant — SURFACE: ordering needs a user-supplied \
+             comparator. Use `.orderBy(|x| ...)` instead of bare `sort()` \
+             (ADR-006 §2.7.24).",
+            arr.type_name()
+        ))),
     }
 }
 
@@ -1436,7 +1662,7 @@ pub(crate) fn handle_skip_v2(
 /// `arr.flatten()` — single-level flatten. Implemented for the
 /// `FloatSlice` fast-path (re-materialize the parent's float region into
 /// a fresh `F64`). The general case (HeapValue array of nested arrays)
-/// needs `TypedArrayData::HeapValue` per-element kind metadata to
+/// needs `the-deleted-heterogeneous-element-carrier` per-element kind metadata to
 /// reclassify each entry; surface that path explicitly.
 pub(crate) fn handle_flatten_v2(
     _vm: &mut VirtualMachine,
@@ -1491,13 +1717,28 @@ pub(crate) fn handle_flatten_v2(
                 NativeKind::Ptr(HeapKind::TypedArray),
             ))
         }
-        TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-            "flatten: HeapValue array variant — SURFACE: nested-array \
-             reclassification needs TypedArrayData::HeapValue per-element \
-             kind metadata to dispatch element-by-element on \
-             scalar-or-nested-array shape. Wave-10 / Phase-2c reentry."
-                .to_string(),
-        )),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // arms — flatten over uniform-element arrays is identity (the
+        // array isn't nested at the element level). Same shape as the
+        // I64/F64/Bool identity clone above.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => {
+            let bits = args[0].slot.raw();
+            unsafe {
+                Arc::increment_strong_count(bits as *const TypedArrayData);
+            }
+            Ok(KindedSlot::new(
+                args[0].slot,
+                NativeKind::Ptr(HeapKind::TypedArray),
+            ))
+        }
     })
 }
 

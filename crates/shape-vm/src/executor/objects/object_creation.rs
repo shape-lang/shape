@@ -22,7 +22,7 @@
 //! - **`op_new_typed_array`**: pops N elements with their kinds; if all
 //!   elements share `Int64` / `Float64` / `Bool` kind, builds the matching
 //!   `TypedArrayData::*` variant. Mixed-kind arrays would require
-//!   `TypedArrayData::HeapValue` (heterogeneous, see `op_new_array`) and
+//!   `the-deleted-heterogeneous-element-carrier` (heterogeneous, see `op_new_array`) and
 //!   are surfaced.
 //!
 //! Two opcode bodies remain Phase-2c surfaces:
@@ -32,7 +32,7 @@
 //!   shaped helper, retired by Phase 2c per ADR-006 §2.7.4 / Q5).
 //! - **`op_new_array`** (untyped heterogeneous) needs a kinded projection
 //!   from `(bits, kind)` into `Arc<HeapValue>` for the
-//!   `TypedArrayData::HeapValue` variant. There is no such projection
+//!   `the-deleted-heterogeneous-element-carrier` variant. There is no such projection
 //!   helper today; the natural site is in `shape-value` next to the
 //!   `TypedArrayData` variants, and adding it requires a per-kind
 //!   `Arc::from_raw` + `HeapValue::*` arm wrapper that is itself a
@@ -293,7 +293,7 @@ impl VirtualMachine {
     /// is per-kind dispatch into a `TypedArrayData::*` variant matching
     /// the elements' actual `NativeKind` — but a truly heterogeneous-
     /// array constructor (mixed kinds) requires
-    /// `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` on
+    /// `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)` on
     /// the back end, plus rebuilding the per-element `Arc<HeapValue>`
     /// projection from `(bits, kind)` pairs (a `HeapValue::*`-arm match
     /// that today's emit path doesn't yet supply). This is Phase 2c
@@ -314,7 +314,7 @@ impl VirtualMachine {
             }
             Err(VMError::NotImplemented(
                 "op_new_array: generic untyped-array construction depends \
-                 on the kinded TypedArrayData::HeapValue emit path \
+                 on the kinded the-deleted-heterogeneous-element-carrier emit path \
                  (Phase 2c reentry — see ADR-006 §2.7.4)"
                     .to_string(),
             ))
@@ -329,7 +329,7 @@ impl VirtualMachine {
     /// element kind directly — no runtime tag-bit classifier. If all N
     /// popped elements share `Int64` / `Float64` / `Bool`, the op
     /// constructs the matching `TypedArrayData::*` variant. Mixed-kind
-    /// arrays would require `TypedArrayData::HeapValue` (heterogeneous
+    /// arrays would require `the-deleted-heterogeneous-element-carrier` (heterogeneous
     /// `Arc<HeapValue>` payload — same Phase-2c surface as `op_new_array`).
     ///
     /// Empty arrays default to `TypedArrayData::I64` (an arbitrary but
@@ -377,7 +377,7 @@ impl VirtualMachine {
         let all_match = popped.iter().all(|(_, k)| *k == first_kind);
 
         if !all_match {
-            // Heterogeneous — would require TypedArrayData::HeapValue
+            // Heterogeneous — would require the-deleted-heterogeneous-element-carrier
             // projection. Surface per playbook §7.4: same gap as
             // op_new_array.
             for (b, k) in popped.drain(..) {
@@ -385,7 +385,7 @@ impl VirtualMachine {
             }
             return Err(VMError::NotImplemented(format!(
                 "op_new_typed_array({}): heterogeneous element kinds — \
-                 needs TypedArrayData::HeapValue projection from (bits, \
+                 needs the-deleted-heterogeneous-element-carrier projection from (bits, \
                  kind) into Arc<HeapValue> (Phase-2c — see ADR-006 §2.7.4)",
                 count
             )));
@@ -486,7 +486,7 @@ impl VirtualMachine {
             }
             // Other heap-kind / scalar-kind element-arrays (Char,
             // Decimal, BigInt, TypedObject, …) require the
-            // `TypedArrayData::HeapValue` projection — same Phase-2c
+            // `the-deleted-heterogeneous-element-carrier` projection — same Phase-2c
             // dependency as `op_new_array`'s heterogeneous case (the
             // `Arc<HeapValue>`-arm wrapper that today's emit path
             // doesn't supply per-`(bits, kind)`).

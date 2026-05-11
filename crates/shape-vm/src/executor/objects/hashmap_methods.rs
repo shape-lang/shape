@@ -28,10 +28,10 @@
 //!   `from_typed_array`, etc.) — same `heap_value_to_slot` pattern as
 //!   `executor/builtins/array_ops.rs:156`.
 //! - `keys` → `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`.
-//! - `values` → `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
-//! - `entries` / `toArray` → outer `TypedArrayData::HeapValue` with each
+//! - `values` → `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)`.
+//! - `entries` / `toArray` → outer `the-deleted-heterogeneous-element-carrier` with each
 //!   element a 2-element inner array (`[key, value]`) wrapped as
-//!   `Arc::new(HeapValue::TypedArray(Arc::new(TypedArrayData::HeapValue(
+//!   `Arc::new(HeapValue::TypedArray(Arc::new(the-deleted-heterogeneous-element-carrier(
 //!   ..))))` — same shape as `array_ops::builtin_zip` at line 376.
 //!
 //! ## Wave-9 closure-callback migration
@@ -141,7 +141,7 @@ fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
 /// Convert an `Arc<HeapValue>` value (as stored in `HashMapData::values`)
 /// to a `KindedSlot` via the matching per-FieldType constructor. Mirrors
 /// `executor/builtins/array_ops.rs::heap_value_to_slot` (the canonical
-/// `TypedArrayData::HeapValue` element re-wrapping path).
+/// `the-deleted-heterogeneous-element-carrier` element re-wrapping path).
 fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
     match hv.as_ref() {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
@@ -176,7 +176,11 @@ pub fn v2_get(
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
     match map.get(key) {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        // W17-typed-carrier-bundle-A: HashMapData::get now returns
+        // Option<Arc<HeapValue>> (owned) per Q25.B specialized arms, since
+        // the value buffer may be a per-variant typed buffer with no
+        // underlying `&Arc<HeapValue>` to borrow.
+        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
         None => Ok(KindedSlot::none()),
     }
 }
@@ -220,7 +224,7 @@ pub fn v2_keys(
 ///
 /// Returns an `Array<heap>` reusing the receiver's values buffer
 /// (`Arc<TypedBuffer<Arc<HeapValue>>>`) — single Arc bump on the buffer.
-/// Wraps as `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)`.
+/// Wraps as `the-deleted-heterogeneous-element-carrier(Arc<TypedBuffer<Arc<HeapValue>>>)`.
 pub fn v2_values(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -230,15 +234,38 @@ pub fn v2_values(
         return Err(type_error("HashMap.values() takes no arguments"));
     }
     let map = as_hashmap(&args[0])?;
-    let arr = TypedArrayData::HeapValue(Arc::clone(&map.values));
+    // W17-typed-carrier-bundle-A checkpoint 3/4: HashMapValueBuf per-arm
+    // dispatch — each variant projects to its matching TypedArrayData
+    // arm via a single Arc::clone on the inner typed buffer.
+    use shape_value::heap_value::HashMapValueBuf;
+    let arr = match &map.values {
+        HashMapValueBuf::I64(b) => TypedArrayData::I64(Arc::clone(b)),
+        HashMapValueBuf::F64(b) => {
+            // F64 TypedArray uses AlignedTypedBuffer; copy data through.
+            let data: Vec<f64> = b.data.to_vec();
+            let av = shape_value::AlignedVec::from_vec(data);
+            TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
+        }
+        HashMapValueBuf::Bool(b) => TypedArrayData::Bool(Arc::clone(b)),
+        HashMapValueBuf::String(b) => TypedArrayData::String(Arc::clone(b)),
+        HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
+        HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
+        HashMapValueBuf::DateTime(b) => TypedArrayData::DateTime(Arc::clone(b)),
+        HashMapValueBuf::Timespan(b) => TypedArrayData::Timespan(Arc::clone(b)),
+        HashMapValueBuf::Duration(b) => TypedArrayData::Duration(Arc::clone(b)),
+        HashMapValueBuf::Instant(b) => TypedArrayData::Instant(Arc::clone(b)),
+        HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
+        HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
+        HashMapValueBuf::TraitObject(b) => TypedArrayData::TraitObject(Arc::clone(b)),
+    };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
 /// HashMap.entries() -> Array<[key, value]>
 ///
 /// Each entry is a 2-element inner array `[key, value]` stored as
-/// `HeapValue::TypedArray(Arc<TypedArrayData::HeapValue>)`. The outer
-/// array is a `TypedArrayData::HeapValue` of those `Arc<HeapValue>` entries.
+/// `HeapValue::TypedArray(Arc<the-deleted-heterogeneous-element-carrier>)`. The outer
+/// array is a `the-deleted-heterogeneous-element-carrier` of those `Arc<HeapValue>` entries.
 /// Same shape as `array_ops::builtin_zip` (line 376).
 pub fn v2_entries(
     _vm: &mut VirtualMachine,
@@ -294,7 +321,7 @@ pub fn v2_get_or_default(
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
     match map.get(key) {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
         None => Ok(args[2].clone()),
     }
 }
@@ -313,23 +340,54 @@ pub fn v2_to_array(
     build_entries_array(&args[0])
 }
 
-/// Shared body for `entries()` / `toArray()`. Builds the per-entry
-/// 2-element inner arrays + the outer `TypedArrayData::HeapValue` wrapper.
+/// Shared body for `entries()` / `toArray()`. Builds per-entry
+/// `Entry<K,V>` TypedObjects + the outer `TypedArrayData::TypedObject` wrapper.
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
+/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
+/// each entry is constructed as a TypedObject with fields `{key, value}`.
+/// User code reads `entry.key` / `entry.value` rather than `entry[0]` /
+/// `entry[1]` — breaking change for stdlib + tests.
 fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
     let map = as_hashmap(receiver)?;
     let n = map.len();
-    let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    let mut entry_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+        Vec::with_capacity(n);
     for i in 0..n {
         let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
-        let value_arc: Arc<HeapValue> = Arc::clone(&map.values.data[i]);
-        let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-            Arc::new(HeapValue::String(key_arc)),
-            value_arc,
-        ])));
-        pairs.push(Arc::new(HeapValue::TypedArray(Arc::new(inner))));
+        let value_arc: Arc<HeapValue> = map.values.value_at(i);
+        let key_slot = KindedSlot::from_string_arc(key_arc);
+        let value_slot = heap_value_arc_to_slot(&value_arc);
+        let entry_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
+            ("key", key_slot),
+            ("value", value_slot),
+        ]);
+        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
+        // kind is `Ptr(HeapKind::TypedObject)` and whose bits are
+        // `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT `*const HeapValue`
+        // — using `as_heap_value()` here is wrong-type recovery per the
+        // 5-arm receiver-recovery soundness rule). Recover the typed Arc
+        // directly, clone the inner share into the buffer, and consume
+        // the original via `Arc::from_raw` to release entry_slot's share
+        // without dropping the KindedSlot (which would also decrement).
+        let bits = entry_slot.slot.raw();
+        let storage = unsafe {
+            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
+                bits as *const shape_value::heap_value::TypedObjectStorage,
+            );
+            let cloned = Arc::clone(&arc);
+            // Re-raw the original so entry_slot's Drop's decrement runs
+            // cleanly on the still-owned share.
+            let _ = Arc::into_raw(arc);
+            cloned
+        };
+        entry_storages.push(storage);
+        drop(entry_slot); // releases the original share via Drop's kind-aware path
     }
-    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(pairs)));
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let buf = TypedBuffer::from_vec(entry_storages);
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(buf)),
+    )))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -461,7 +519,7 @@ pub fn v2_for_each(
     let n = map.len();
     for i in 0..n {
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         // Result share released via `KindedSlot::drop` at end of scope.
         let _ = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
     }
@@ -490,7 +548,7 @@ pub fn v2_filter(
     let mut out_values: Vec<Arc<HeapValue>> = Vec::new();
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = Arc::clone(&map.values.data[i]);
+        let value_arc = map.values.value_at(i);
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let value_slot = heap_value_arc_to_slot(&value_arc);
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
@@ -531,7 +589,7 @@ pub fn v2_map(
     let mut out_values: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
         let new_value = result_slot_to_heap_value_arc(&result)?;
@@ -562,7 +620,7 @@ pub fn v2_reduce(
     let n = map.len();
     for i in 0..n {
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         acc = vm.call_value_immediate_nb(
             closure,
             &[acc, key_slot, value_slot],
@@ -601,7 +659,7 @@ pub fn v2_group_by(
 
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = Arc::clone(&map.values.data[i]);
+        let value_arc = map.values.value_at(i);
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let value_slot = heap_value_arc_to_slot(&value_arc);
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;

@@ -450,7 +450,7 @@ impl FromSlot for Vec<Arc<String>> {
 }
 
 /// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::HeapValue`.
+/// slot whose payload is `the-deleted-heterogeneous-element-carrier`.
 ///
 /// Phase 2d Array cluster (2026-05-07). Each element is an opaque
 /// `Arc<HeapValue>` whose inner kind is a body-side type contract.
@@ -471,15 +471,16 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::HeapValue(buf) => buf.data.clone(),
-                    other => panic!(
-                        "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                         not HeapValue. Body's parameter type Vec<Arc<HeapValue>> requires the \
-                         HeapValue element-width variant. Marshal kind contract violated by caller.",
-                        other.type_name()
-                    ),
-                },
+                shape_value::HeapValue::TypedArray(arc) => {
+                    // W17-typed-carrier-bundle-A checkpoint 3/4: the
+                    // prior `the-deleted-heterogeneous-element-carrier` carrier is
+                    // deleted. Reading `Vec<Arc<HeapValue>>` from a
+                    // strict-typed buffer requires re-wrapping each
+                    // typed element back into a `HeapValue::*` arm —
+                    // mirror of the construction-side dispatcher in
+                    // `TypedArrayData::build_specialized_from_heap_arcs`.
+                    materialize_heap_arcs(&**arc)
+                }
                 other => panic!(
                     "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -487,6 +488,66 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
                 ),
             }
         }
+    }
+}
+
+/// W17-typed-carrier-bundle-A checkpoint 3/4: reverse of
+/// `TypedArrayData::build_specialized_from_heap_arcs` — given a
+/// strict-typed `TypedArrayData`, materialize each element as
+/// `Arc<HeapValue::*>` for callers that take `Vec<Arc<HeapValue>>`
+/// (legacy stdlib body signatures).
+fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_value::HeapValue>> {
+    use shape_value::heap_value::HeapValue;
+    use shape_value::TypedArrayData;
+    match arr {
+        TypedArrayData::String(buf) => buf
+            .data
+            .iter()
+            .map(|s| Arc::new(HeapValue::String(Arc::clone(s))))
+            .collect(),
+        TypedArrayData::Decimal(buf) => buf
+            .data
+            .iter()
+            .map(|d| Arc::new(HeapValue::Decimal(Arc::clone(d))))
+            .collect(),
+        TypedArrayData::BigInt(buf) => buf
+            .data
+            .iter()
+            .map(|b| Arc::new(HeapValue::BigInt(Arc::clone(b))))
+            .collect(),
+        TypedArrayData::DateTime(buf)
+        | TypedArrayData::Timespan(buf)
+        | TypedArrayData::Duration(buf) => buf
+            .data
+            .iter()
+            .map(|td| Arc::new(HeapValue::Temporal(Arc::clone(td))))
+            .collect(),
+        TypedArrayData::Instant(buf) => buf
+            .data
+            .iter()
+            .map(|inst| Arc::new(HeapValue::Instant(Arc::clone(inst))))
+            .collect(),
+        TypedArrayData::Char(buf) => buf
+            .data
+            .iter()
+            .map(|c| Arc::new(HeapValue::Char(*c)))
+            .collect(),
+        TypedArrayData::TypedObject(buf) => buf
+            .data
+            .iter()
+            .map(|o| Arc::new(HeapValue::TypedObject(Arc::clone(o))))
+            .collect(),
+        TypedArrayData::TraitObject(buf) => buf
+            .data
+            .iter()
+            .map(|t| Arc::new(HeapValue::TraitObject(Arc::clone(t))))
+            .collect(),
+        other => panic!(
+            "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \
+             be re-wrapped to Vec<Arc<HeapValue>> (no matching HeapValue::* \
+             arm — body parameter type assumes a heap-element array)",
+            other.type_name()
+        ),
     }
 }
 
@@ -512,19 +573,30 @@ impl ToSlot for Vec<Arc<String>> {
 }
 
 /// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::HeapValue`.
+/// slot whose payload is a strict-typed `TypedArrayData` variant per
+/// ADR-006 §2.7.24 Q25.A.
 ///
-/// Phase 2d Array cluster (2026-05-07). Used by the dispatcher's
-/// `ConcreteReturn::ArrayHeapValue → slot push` step. Element-kind
-/// homogeneity is the body's responsibility.
+/// W17-typed-carrier-bundle-A checkpoint 2/4: routed through
+/// `TypedArrayData::build_specialized_from_heap_arcs` — the per-element-kind
+/// dispatcher in shape-value. The prior polymorphic `the-deleted-heterogeneous-element-carrier`
+/// carrier is replaced by the matching specialized variant; element-kind
+/// uniformity is enforced (heterogeneous-arm inputs panic with a structured
+/// message — would indicate a stdlib body returning a malformed mixed-kind
+/// array, which is a real bug, not a soft error to silently widen).
 impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let buf = shape_value::TypedBuffer::from_vec(self);
-        let data = Arc::new(shape_value::TypedArrayData::HeapValue(Arc::new(buf)));
-        let hv = shape_value::HeapValue::TypedArray(data);
+        let data = shape_value::TypedArrayData::build_specialized_from_heap_arcs(self)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "marshal::ToSlot<Vec<Arc<HeapValue>>>: {} (stdlib body \
+                     returned a malformed mixed-kind Vec<Arc<HeapValue>>)",
+                    err
+                )
+            });
+        let hv = shape_value::HeapValue::TypedArray(Arc::new(data));
         Arc::into_raw(Arc::new(hv)) as u64
     }
 }
@@ -583,12 +655,15 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
                 shape_value::HeapValue::HashMap(d) => {
-                    d.keys
-                        .data
-                        .iter()
-                        .zip(d.values.data.iter())
-                        .map(|(k, v)| match &**v {
-                            shape_value::HeapValue::String(s) => (Arc::clone(k), Arc::clone(s)),
+                    let n = d.keys.data.len();
+                    let mut out: Vec<(Arc<String>, Arc<String>)> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let k = &d.keys.data[i];
+                        let v = d.values.value_at(i);
+                        match &*v {
+                            shape_value::HeapValue::String(s) => {
+                                out.push((Arc::clone(k), Arc::clone(s)));
+                            }
                             other => panic!(
                                 "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap value at \
                                  key '{}' is HeapValue::{:?}, not String. Body's parameter \
@@ -597,8 +672,9 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
                                 k,
                                 other.kind()
                             ),
-                        })
-                        .collect()
+                        }
+                    }
+                    out
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
@@ -630,13 +706,16 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(d) => d
-                    .keys
-                    .data
-                    .iter()
-                    .zip(d.values.data.iter())
-                    .map(|(k, v)| (Arc::clone(k), Arc::clone(v)))
-                    .collect(),
+                shape_value::HeapValue::HashMap(d) => {
+                    let n = d.keys.data.len();
+                    let mut out: Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> =
+                        Vec::with_capacity(n);
+                    for i in 0..n {
+                        let k = &d.keys.data[i];
+                        out.push((Arc::clone(k), d.values.value_at(i)));
+                    }
+                    out
+                }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \
                      HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",

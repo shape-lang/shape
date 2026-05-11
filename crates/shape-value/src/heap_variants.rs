@@ -128,7 +128,7 @@ macro_rules! define_heap_types {
             // values flow through `slot.as_heap_value()` for receiver
             // classification at method dispatch (`set.add(...)` /
             // `set.has(...)` / `set.union(other)`), can be stored in
-            // TypedObject slots and `TypedArrayData::HeapValue` buffers.
+            // TypedObject slots and `the-deleted-heterogeneous-element-carrier` buffers.
             // See §2.7.15 for the full justification + the rejected Path
             // B (`TypedSet<T>` per element kind) alternative.
             HashSet,       // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
@@ -179,7 +179,7 @@ macro_rules! define_heap_types {
             // Full HeapValue arm (NOT pure-discriminator) — Channel
             // values flow through `slot.as_heap_value()` for receiver
             // classification at method dispatch (`c.send(...)` / `c.recv()`),
-            // can be stored in TypedObject slots and `TypedArrayData::HeapValue`
+            // can be stored in TypedObject slots and `the-deleted-heterogeneous-element-carrier`
             // buffers.
             Channel,       // 24  (Wave 15 W15-channel-rebuild, 2026-05-10; bumped from drafted 23 at merge — Deque already took 23)
             // ADR-006 §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue,
@@ -413,7 +413,7 @@ macro_rules! define_heap_types {
             /// HashMap with string keys + heap-allocated values.
             /// Two-buffer storage reusing Phase 2d Array shapes (keys via
             /// `TypedArrayData::String`-equivalent buffer; values via
-            /// `TypedArrayData::HeapValue`-equivalent buffer) plus an eager
+            /// `the-deleted-heterogeneous-element-carrier`-equivalent buffer) plus an eager
             /// bucket-index for O(1) `map.get(key)`. See
             /// `$crate::heap_value::HashMapData` for the storage shape.
             /// Stage C P1(b), 2026-05-07.

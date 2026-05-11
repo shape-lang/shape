@@ -76,15 +76,28 @@ impl ElementData {
             Arc::new("attributes".to_string()),
             Arc::new("children".to_string()),
         ];
+        // W17-typed-carrier-bundle-A checkpoint 2/4: `Array<HashMap>`
+        // (each child is `into_heap_value` producing a HashMap) has no
+        // specialized variant in ADR-006 §2.7.24 Q25.A's spec list. The
+        // dispatcher surfaces; for now we route through it so the body
+        // compiles post-Q25.A deletion. Out-of-territory follow-up: refactor
+        // xml.parse to build per-child TypedObject schemas (name/attrs/text/
+        // children) so the array lowers to `TypedArrayData::TypedObject`.
+        let children_array_data = shape_value::TypedArrayData::build_specialized_from_heap_arcs(
+            children_arc,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "xml.parse: {} — ADR-006 §2.7.24 Q25.A spec list lacks a \
+                 `HashMap`-element variant; out-of-territory follow-up. \
+                 Refactor xml.parse to per-child TypedObject schemas.",
+                err
+            )
+        });
         let mut values: Vec<Arc<HeapValue>> = vec![
             Arc::new(HeapValue::String(Arc::new(self.name))),
             Arc::new(HeapValue::HashMap(Arc::new(attrs_data))),
-            {
-                let data = Arc::new(TypedArrayData::HeapValue(Arc::new(
-                    TypedBuffer::from_vec(children_arc),
-                )));
-                Arc::new(HeapValue::TypedArray(data))
-            },
+            Arc::new(HeapValue::TypedArray(Arc::new(children_array_data))),
         ];
         if let Some(text) = self.text {
             keys.push(Arc::new("text".to_string()));
@@ -258,10 +271,19 @@ fn write_node_pairs(
                 }
             }
             "children" => {
-                if let HeapValue::TypedArray(arc) = &**v {
-                    if let TypedArrayData::HeapValue(buf) = &**arc {
-                        children = Some(buf);
-                    }
+                // W17-typed-carrier-bundle-A checkpoint 3/4 / 4: the
+                // construction-side counterpart in `into_heap_value`
+                // surfaces post-Q25.A (`Array<HashMap>` has no specialized
+                // variant in Q25.A's spec list — that's the out-of-territory
+                // follow-up cite there). The reader here cannot bind a
+                // `the-deleted-heterogeneous-element-carrier` after checkpoint 4 deletes
+                // the variant. Setting `children = None` lets the parent
+                // node serialize as `<name>...</name>` with no children —
+                // the writer surfaces upstream if the producer body
+                // actually runs. Refactor to per-child TypedObject schemas
+                // to fix end-to-end (out of bundle-A territory).
+                if let HeapValue::TypedArray(_) = &**v {
+                    // intentional no-op: dead-arm pending xml refactor
                 }
             }
             "text" => {
@@ -278,8 +300,11 @@ fn write_node_pairs(
     let mut elem = BytesStart::new(name.to_string());
 
     if let Some(attrs) = attrs {
-        for (ak, av) in attrs.keys.data.iter().zip(attrs.values.data.iter()) {
-            if let HeapValue::String(av_s) = &**av {
+        let n = attrs.keys.data.len();
+        for i in 0..n {
+            let ak = &attrs.keys.data[i];
+            let av = attrs.values.value_at(i);
+            if let HeapValue::String(av_s) = &*av {
                 elem.push_attribute((ak.as_str(), av_s.as_str()));
             }
         }
@@ -325,13 +350,12 @@ fn write_node_heap(
     node: &Arc<HeapValue>,
 ) -> Result<(), String> {
     if let HeapValue::HashMap(d) = &**node {
-        let pairs: Vec<(Arc<String>, Arc<HeapValue>)> = d
-            .keys
-            .data
-            .iter()
-            .zip(d.values.data.iter())
-            .map(|(k, v)| (Arc::clone(k), Arc::clone(v)))
-            .collect();
+        let n = d.keys.data.len();
+        let mut pairs: Vec<(Arc<String>, Arc<HeapValue>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let k = &d.keys.data[i];
+            pairs.push((Arc::clone(k), d.values.value_at(i)));
+        }
         write_node_pairs(writer, &pairs)
     } else {
         Err(format!(

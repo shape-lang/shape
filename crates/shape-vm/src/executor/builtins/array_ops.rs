@@ -8,7 +8,7 @@
 //! `push`/`pop`/`first`/`last`/`zip`/`filled` operate on the typed-array
 //! `HeapValue::TypedArray(Arc<TypedArrayData>)` shape. Each call site
 //! discriminates on `TypedArrayData` arm to pick the right element shape;
-//! a heterogeneous-element path uses `TypedArrayData::HeapValue` as the
+//! a heterogeneous-element path uses `the-deleted-heterogeneous-element-carrier` as the
 //! catch-all storage shape.
 
 use shape_value::{
@@ -44,7 +44,7 @@ fn typed_array_to_slot(arr: TypedArrayData) -> KindedSlot {
 }
 
 /// Convert a `KindedSlot` element to an `Arc<HeapValue>` for storage in
-/// a `TypedArrayData::HeapValue` buffer (catch-all heterogeneous element
+/// a `the-deleted-heterogeneous-element-carrier` buffer (catch-all heterogeneous element
 /// shape). Inline scalars wrap into the matching `HeapValue` arm.
 fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match slot.kind {
@@ -59,7 +59,7 @@ fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
             // No HeapValue::Float arm — Float64 in a heap-element buffer
             // routes through Decimal as a stable representation. (TypedArray
             // for f64 is the F64 arm; this slot_to_heap_arc path is only for
-            // truly heterogeneous arrays via TypedArrayData::HeapValue.)
+            // truly heterogeneous arrays via the-deleted-heterogeneous-element-carrier.)
             Err(type_error(
                 "array element of kind Float64 cannot be heap-wrapped (use Vec<number> instead)",
             ))
@@ -141,18 +141,29 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
             .data
             .get(idx)
             .map(|s| KindedSlot::from_string_arc(Arc::clone(s))),
-        TypedArrayData::HeapValue(buf) => buf.data.get(idx).map(|hv_arc| {
-            // Re-wrap the inner HeapValue arm to a per-FieldType KindedSlot
-            // constructor where possible. For most arms this is a clone.
-            heap_value_to_slot(hv_arc)
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(buf) => buf.data.get(idx).map(|d| KindedSlot::from_decimal(Arc::clone(d))),
+        TypedArrayData::BigInt(buf) => buf.data.get(idx).map(|b| KindedSlot::from_bigint(Arc::clone(b))),
+        TypedArrayData::DateTime(buf) | TypedArrayData::Timespan(buf) | TypedArrayData::Duration(buf) => {
+            buf.data.get(idx).map(|td| {
+                let bits = Arc::into_raw(Arc::clone(td)) as u64;
+                KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::Temporal))
+            })
+        }
+        TypedArrayData::Instant(buf) => buf.data.get(idx).map(|inst| {
+            let bits = Arc::into_raw(Arc::clone(inst)) as u64;
+            KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::Instant))
         }),
+        TypedArrayData::Char(buf) => buf.data.get(idx).copied().map(KindedSlot::from_char),
+        TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object(Arc::clone(o))),
+        TypedArrayData::TraitObject(buf) => buf.data.get(idx).map(|t| KindedSlot::from_trait_object(Arc::clone(t))),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => None,
     }
 }
 
 /// Re-wrap an `Arc<HeapValue>` as a `KindedSlot` using the per-FieldType
 /// constructor matching the arm. Used when reading elements out of a
-/// `TypedArrayData::HeapValue` buffer.
+/// `the-deleted-heterogeneous-element-carrier` buffer.
 fn heap_value_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
     match hv.as_ref() {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
@@ -238,12 +249,6 @@ pub(in crate::executor) fn builtin_push(args: &[KindedSlot]) -> Result<KindedSlo
             new_data.push(s);
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
         }
-        TypedArrayData::HeapValue(buf) => {
-            let hv = slot_to_heap_arc(value)?;
-            let mut new_data = buf.data.clone();
-            new_data.push(hv);
-            TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
         // Width-narrowed integer/float arms: not exposed to user-level push
         // today (compiler emits I64/F64 by default). Reject explicitly
         // rather than silently widening.
@@ -286,11 +291,6 @@ pub(in crate::executor) fn builtin_pop(args: &[KindedSlot]) -> Result<KindedSlot
             new_data.pop();
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
         }
-        TypedArrayData::HeapValue(buf) => {
-            let mut new_data = buf.data.clone();
-            new_data.pop();
-            TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
         _ => {
             return Err(type_error(
                 "pop() not supported for narrow-width or matrix arrays",
@@ -328,7 +328,16 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::HeapValue(b) => b.len(),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
+        TypedArrayData::Decimal(b) => b.len(),
+        TypedArrayData::BigInt(b) => b.len(),
+        TypedArrayData::DateTime(b) => b.len(),
+        TypedArrayData::Timespan(b) => b.len(),
+        TypedArrayData::Duration(b) => b.len(),
+        TypedArrayData::Instant(b) => b.len(),
+        TypedArrayData::Char(b) => b.len(),
+        TypedArrayData::TypedObject(b) => b.len(),
+        TypedArrayData::TraitObject(b) => b.len(),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
     };
     if len == 0 {
@@ -337,9 +346,16 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
     Ok(typed_array_element(arr.as_ref(), len - 1).unwrap_or_else(KindedSlot::none))
 }
 
-/// `zip(a, b)` — pairs elements of two arrays into nested 2-element arrays.
-/// Result element shape is `Vec<heap>` (heterogeneous), since pairs may
-/// contain mixed-kind elements depending on the source arrays.
+/// `zip(a, b)` — pairs elements of two arrays into `Pair<A,B>` TypedObjects.
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
+/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
+/// each pair is constructed as a TypedObject with fields `{first, second}`
+/// rather than the prior 2-element `[a, b]` heterogeneous array. User code
+/// reads `pair.first` / `pair.second` rather than `pair[0]` / `pair[1]` —
+/// breaking change for stdlib + tests. Shape's tuple representation
+/// lowers to TypedObject (`closure_layout.rs:843`) — no distinct tuple
+/// runtime carrier; named fields are the right shape.
 pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("zip() requires 2 arguments"));
@@ -356,7 +372,6 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(x) => x.len(),
         _ => 0,
     };
     let len_b = match b {
@@ -364,23 +379,39 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(x) => x.len(),
         _ => 0,
     };
     let n = len_a.min(len_b);
 
-    let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
+    let mut pair_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+        Vec::with_capacity(n);
     for i in 0..n {
         let xa = typed_array_element(a, i).unwrap_or_else(KindedSlot::none);
         let xb = typed_array_element(b, i).unwrap_or_else(KindedSlot::none);
-        let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-            slot_to_heap_arc(&xa)?,
-            slot_to_heap_arc(&xb)?,
-        ])));
-        pairs.push(Arc::new(HeapValue::TypedArray(Arc::new(inner))));
+        let pair_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
+            ("first", xa),
+            ("second", xb),
+        ]);
+        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
+        // bits are `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT
+        // `*const HeapValue`) — `as_heap_value()` is wrong-type recovery.
+        // Recover the typed Arc directly per the 5-arm soundness rule;
+        // see `hashmap_methods.rs::build_entries_array` for the canonical form.
+        let bits = pair_slot.slot.raw();
+        let storage = unsafe {
+            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
+                bits as *const shape_value::heap_value::TypedObjectStorage,
+            );
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        };
+        pair_storages.push(storage);
+        drop(pair_slot);
     }
-    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(pairs)));
-    Ok(typed_array_to_slot(outer))
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(pair_storages))),
+    )))
 }
 
 /// `Array.filled(size, value)` — produce an array of `size` repeats of `value`.
@@ -420,10 +451,43 @@ pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedS
             };
             TypedArrayData::String(Arc::new(TypedBuffer::from_vec(vec![s; size])))
         }
-        _ => {
-            // Heterogeneous fallback: HeapValue-element array.
-            let hv = slot_to_heap_arc(value)?;
-            TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![hv; size])))
+        // W17-typed-carrier-bundle-A checkpoint 2/4: heap-kinded value
+        // dispatches to the specialized variant per §2.7.24 Q25.A. Each
+        // arm holds a single Arc cloned `size` times — no HeapValue
+        // catch-all carrier. The element kind is uniform per variant.
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let storage = match value.slot.as_heap_value() {
+                HeapValue::TypedObject(s) => Arc::clone(s),
+                _ => return Err(type_error("KindedSlot kind=Ptr(TypedObject) heap arm mismatched")),
+            };
+            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(vec![storage; size])))
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let d = match value.slot.as_heap_value() {
+                HeapValue::Decimal(d) => Arc::clone(d),
+                _ => return Err(type_error("KindedSlot kind=Ptr(Decimal) heap arm mismatched")),
+            };
+            TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(vec![d; size])))
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let b = match value.slot.as_heap_value() {
+                HeapValue::BigInt(b) => Arc::clone(b),
+                _ => return Err(type_error("KindedSlot kind=Ptr(BigInt) heap arm mismatched")),
+            };
+            TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(vec![b; size])))
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            let c = value.slot.as_char().ok_or_else(|| {
+                type_error("KindedSlot kind=Ptr(Char) but slot bits decode failed")
+            })?;
+            TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(vec![c; size])))
+        }
+        other => {
+            return Err(type_error(format!(
+                "Array.filled() element kind {:?} not supported \
+                 post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
+                other
+            )))
         }
     };
     Ok(typed_array_to_slot(new_arr))
@@ -537,7 +601,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         TypedArrayData::F64(x) => x.len(),
         TypedArrayData::Bool(x) => x.len(),
         TypedArrayData::String(x) => x.len(),
-        TypedArrayData::HeapValue(x) => x.len(),
         TypedArrayData::I8(x) => x.len(),
         TypedArrayData::I16(x) => x.len(),
         TypedArrayData::I32(x) => x.len(),
@@ -546,6 +609,16 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         TypedArrayData::U32(x) => x.len(),
         TypedArrayData::U64(x) => x.len(),
         TypedArrayData::F32(x) => x.len(),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
+        TypedArrayData::Decimal(x) => x.len(),
+        TypedArrayData::BigInt(x) => x.len(),
+        TypedArrayData::DateTime(x) => x.len(),
+        TypedArrayData::Timespan(x) => x.len(),
+        TypedArrayData::Duration(x) => x.len(),
+        TypedArrayData::Instant(x) => x.len(),
+        TypedArrayData::Char(x) => x.len(),
+        TypedArrayData::TypedObject(x) => x.len(),
+        TypedArrayData::TraitObject(x) => x.len(),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
     } as isize;
 
@@ -586,9 +659,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
             TypedArrayData::String(_) => {
                 TypedArrayData::String(Arc::new(TypedBuffer::from_vec(Vec::new())))
             }
-            TypedArrayData::HeapValue(_) => {
-                TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(Vec::new())))
-            }
             _ => {
                 return Err(type_error(
                     "slice() not supported for narrow-width or matrix arrays",
@@ -608,9 +678,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
                 buf.data[start_idx..end_idx].to_vec(),
             ))),
             TypedArrayData::String(buf) => TypedArrayData::String(Arc::new(
-                TypedBuffer::from_vec(buf.data[start_idx..end_idx].to_vec()),
-            )),
-            TypedArrayData::HeapValue(buf) => TypedArrayData::HeapValue(Arc::new(
                 TypedBuffer::from_vec(buf.data[start_idx..end_idx].to_vec()),
             )),
             _ => {

@@ -570,7 +570,22 @@ impl VirtualMachine {
                             TypedArrayData::Matrix(_) => {
                                 method_registry::MATRIX_METHODS.get(method_name).copied()
                             }
-                            TypedArrayData::String(_) | TypedArrayData::HeapValue(_) => None,
+                            TypedArrayData::String(_) => None,
+                            // W17-typed-carrier-bundle-A checkpoint 3/4:
+                            // Q25.A specialized arms — no per-element-type
+                            // PHF table (Decimal/BigInt arrays use the
+                            // generic ARRAY_METHODS fallback below). The
+                            // None return falls through to the .or_else
+                            // ARRAY_METHODS lookup.
+                            TypedArrayData::Decimal(_)
+                            | TypedArrayData::BigInt(_)
+                            | TypedArrayData::DateTime(_)
+                            | TypedArrayData::Timespan(_)
+                            | TypedArrayData::Duration(_)
+                            | TypedArrayData::Instant(_)
+                            | TypedArrayData::Char(_)
+                            | TypedArrayData::TypedObject(_)
+                            | TypedArrayData::TraitObject(_) => None,
                         },
                         _ => None,
                     };

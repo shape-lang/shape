@@ -31,6 +31,7 @@ use shape_value::heap_value::{
     HashMapData, HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
 };
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
+use std::sync::Arc;
 
 // Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
 // formatter consumers — keeps the post-§2.7.4 import path coherent for
@@ -635,14 +636,57 @@ impl<'a> ValueFormatter<'a> {
                     a.iter().map(|s| format!("\"{}\"", s.as_str())).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::HeapValue(buf) => {
-                // ADR-005 §1 single-discriminator: each element is an
-                // `Arc<HeapValue>` carried directly in the buffer; recurse
-                // through `HeapValue` match.
+            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+            // Each formatter wraps the variant's element type via the
+            // matching HeapValue formatter so embedded types render
+            // consistently with their standalone forms.
+            TypedArrayData::Decimal(buf) => {
                 let elems: Vec<String> = buf
                     .data
                     .iter()
-                    .map(|hv| self.format_heap_value(hv.as_ref(), depth + 1))
+                    .map(|d| self.format_heap_value(&HeapValue::Decimal(Arc::clone(d)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::BigInt(buf) => {
+                let elems: Vec<String> = buf.data.iter().map(|b| b.to_string()).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::DateTime(buf)
+            | TypedArrayData::Timespan(buf)
+            | TypedArrayData::Duration(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|td| self.format_heap_value(&HeapValue::Temporal(Arc::clone(td)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::Instant(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|inst| self.format_heap_value(&HeapValue::Instant(Arc::clone(inst)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::Char(buf) => {
+                let elems: Vec<String> = buf.data.iter().map(|c| format!("'{}'", c)).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::TypedObject(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|o| self.format_heap_value(&HeapValue::TypedObject(Arc::clone(o)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::TraitObject(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|to| self.format_heap_value(&HeapValue::TraitObject(Arc::clone(to)), depth + 1))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
@@ -781,7 +825,10 @@ impl<'a> ValueFormatter<'a> {
     /// Each value is an `Arc<HeapValue>` — dispatched through the
     /// canonical ADR-005 §1 single-discriminator `HeapValue` match.
     fn format_hashmap(&self, map: &HashMapData, depth: usize) -> String {
-        let n = map.keys.data.len().min(map.values.data.len());
+        // W17-typed-carrier-bundle-A commit 1/4: HashMapData::values is
+        // now a HashMapValueBuf enum per Q25.B. Iterate via the parallel
+        // keys.len() bound and materialise per-index through value_at.
+        let n = map.keys.data.len().min(map.values.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
         for i in 0..n {
@@ -791,7 +838,8 @@ impl<'a> ValueFormatter<'a> {
             let key = &map.keys.data[i];
             out.push_str(&format!("\"{}\"", key));
             out.push_str(": ");
-            out.push_str(&self.format_heap_value(&map.values.data[i], depth + 1));
+            let v = map.values.value_at(i);
+            out.push_str(&self.format_heap_value(&v, depth + 1));
         }
         out.push('}');
         out
@@ -799,7 +847,7 @@ impl<'a> ValueFormatter<'a> {
 
     /// Format a `HeapValue` reference (the value side of `HashMapData`'s
     /// `TypedBuffer<Arc<HeapValue>>` and the heterogeneous element arm of
-    /// `TypedArrayData::HeapValue`). Dispatches via the ADR-005 §1
+    /// `the-deleted-heterogeneous-element-carrier`). Dispatches via the ADR-005 §1
     /// single-discriminator `HeapValue` match.
     fn format_heap_value(&self, hv: &HeapValue, depth: usize) -> String {
         if depth > 50 {

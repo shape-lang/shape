@@ -3670,9 +3670,19 @@ fn typed_array_element_kind(
         TypedArrayData::String(_) => NativeKind::String,
         // Variants without a single statically-sourceable scalar
         // element kind. Caller surfaces (no fabrication per §2.7.7 #9).
-        TypedArrayData::HeapValue(_)
-        | TypedArrayData::FloatSlice { .. }
+        TypedArrayData::FloatSlice { .. }
         | TypedArrayData::Matrix(_) => return None,
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // arms — each variant's element kind is the matching heap pointer.
+        TypedArrayData::Decimal(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal),
+        TypedArrayData::BigInt(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt),
+        TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal),
+        TypedArrayData::Instant(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant),
+        TypedArrayData::Char(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Char),
+        TypedArrayData::TypedObject(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject),
+        TypedArrayData::TraitObject(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::TraitObject),
     })
 }
 
@@ -3772,15 +3782,59 @@ fn typed_array_read_index_raw(
             // bump the strong-count for the pushed slot.
             raw
         }
-        TypedArrayData::HeapValue(_)
-        | TypedArrayData::FloatSlice { .. }
+        TypedArrayData::FloatSlice { .. }
         | TypedArrayData::Matrix(_) => {
             return Err(VMError::NotImplemented(
-                "DerefLoad through TypedIndex SURFACE: HeapValue / \
-                 FloatSlice / Matrix variants don't support raw-bits \
-                 element read — ADR-006 §2.7.13 / Q14"
+                "DerefLoad through TypedIndex SURFACE: FloatSlice / Matrix \
+                 variants don't support raw-bits element read — ADR-006 §2.7.13 / Q14"
                     .into(),
             ));
+        }
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
+        // arms — each Arc element has `Arc::as_ptr(arc) as u64` as the
+        // raw-bits encoding (mirror of the String arm above). Same
+        // borrow-only contract: caller bumps the share via clone_with_kind.
+        TypedArrayData::Decimal(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
+        }
+        TypedArrayData::BigInt(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
+        }
+        TypedArrayData::DateTime(buf) | TypedArrayData::Timespan(buf) | TypedArrayData::Duration(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
+        }
+        TypedArrayData::Instant(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
+        }
+        TypedArrayData::Char(buf) => {
+            let c = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            *c as u64
+        }
+        TypedArrayData::TypedObject(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
+        }
+        TypedArrayData::TraitObject(buf) => {
+            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+                index: index as i32, length: buf.data.len(),
+            })?;
+            std::sync::Arc::as_ptr(arc) as u64
         }
     };
     Ok(bits)

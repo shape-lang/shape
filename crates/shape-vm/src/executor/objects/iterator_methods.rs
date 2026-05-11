@@ -191,9 +191,18 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(b) => b.data.len(),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(b) => b.data.len(),
+        TypedArrayData::BigInt(b) => b.data.len(),
+        TypedArrayData::DateTime(b) => b.data.len(),
+        TypedArrayData::Timespan(b) => b.data.len(),
+        TypedArrayData::Duration(b) => b.data.len(),
+        TypedArrayData::Instant(b) => b.data.len(),
+        TypedArrayData::Char(b) => b.data.len(),
+        TypedArrayData::TypedObject(b) => b.data.len(),
+        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -221,14 +230,35 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
             Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
         }
         TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
-        TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-            "iter over Array<heap> — SURFACE: per-element NativeKind needs \
-             to be sourced from a per-element parallel-kind track that \
-             does not yet exist on `TypedArrayData::HeapValue` (ADR-006 \
-             §2.7.4)."
-                .into(),
-        )),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::DateTime(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Timespan(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Duration(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Instant(buf) => Ok(kinded_from_instant_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
+        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
+}
+
+#[inline]
+fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::Temporal),
+    )
+}
+
+#[inline]
+fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::Instant),
+    )
 }
 
 /// Read codepoint `idx` from a string source as a single-character
@@ -248,16 +278,44 @@ fn range_elem_at(start: i64, _end: i64, step: i64, idx: usize) -> KindedSlot {
     KindedSlot::from_int(start + (idx as i64) * step)
 }
 
-/// Read entry `idx` from a HashMap source as a 2-element
-/// `[key, value]` inner array (mirrors `HashMap.entries()`).
+/// Read entry `idx` from a HashMap source as an `Entry<K,V>` TypedObject
+/// (mirrors `HashMap.entries()`).
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
+/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
+/// the prior `[key, value]` 2-element array representation is replaced with
+/// a TypedObject `{key, value}` schema. Access becomes `entry.key` /
+/// `entry.value` rather than `entry[0]` / `entry[1]` — breaking change for
+/// stdlib + user callers. Shape's tuple representation lowers to
+/// TypedObject (`closure_layout.rs:843` maps `ConcreteType::Tuple` →
+/// `NativeKind::Ptr(HeapKind::TypedObject)`); there is no distinct tuple
+/// runtime carrier, so named fields are the right shape.
 fn hashmap_elem_at(m: &HashMapData, idx: usize) -> KindedSlot {
     let key_arc = Arc::clone(&m.keys.data[idx]);
-    let value_arc = Arc::clone(&m.values.data[idx]);
-    let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-        Arc::new(HeapValue::String(key_arc)),
-        value_arc,
-    ])));
-    KindedSlot::from_typed_array(Arc::new(inner))
+    let value_arc = m.values.value_at(idx);
+    let key_slot = KindedSlot::from_string_arc(key_arc);
+    let value_slot = heap_value_arc_to_slot(&value_arc);
+    shape_runtime::type_schema::typed_object_from_pairs(&[
+        ("key", key_slot),
+        ("value", value_slot),
+    ])
+}
+
+/// Convert an `Arc<HeapValue>` to a `KindedSlot` via the matching per-
+/// FieldType constructor. Mirrors `hashmap_methods::heap_value_arc_to_slot`
+/// (kept as a local copy to avoid a cross-module dependency cycle).
+#[inline]
+fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
+    match hv.as_ref() {
+        HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
+        HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
+        HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
+        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        HeapValue::Char(c) => KindedSlot::from_char(*c),
+        _ => KindedSlot::none(),
+    }
 }
 
 /// Yield element `idx` from an `IteratorSource`. Returns the kinded
@@ -378,13 +436,17 @@ fn apply_stage(
         IteratorTransform::Enumerate => {
             let idx_slot = KindedSlot::from_int(*enumerate_index as i64);
             *enumerate_index += 1;
-            // Wrap [idx, elem] as a 2-element TypedArrayData::HeapValue
-            // (matches the HashMap.entries() shape).
-            let pair = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
-                kinded_slot_to_heap_arc(&idx_slot)?,
-                kinded_slot_to_heap_arc(&elem)?,
-            ])));
-            Ok(StageResult::Keep(KindedSlot::from_typed_array(Arc::new(pair))))
+            // W17-typed-carrier-bundle-A checkpoint 2/4: per C+ resolution
+            // (playbook §3 Bundle-A checkpoint-2 amendment), enumerate now
+            // yields TypedObject `Pair {first, second}` rather than a
+            // 2-element heterogeneous array — matching the HashMap.entries()
+            // record-access shape. User code reads `pair.first` (index) and
+            // `pair.second` (element).
+            let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
+                ("first", idx_slot),
+                ("second", elem),
+            ]);
+            Ok(StageResult::Keep(pair))
         }
         IteratorTransform::Chain(_) => {
             // `Chain` is handled at the iterate_to_vec driver level
@@ -396,50 +458,12 @@ fn apply_stage(
     }
 }
 
-/// Project an element `KindedSlot` to an `Arc<HeapValue>` for
-/// heterogeneous-element array storage (used by `enumerate`'s inner
-/// pair construction). Mirrors `hashmap_methods::result_slot_to_heap_value_arc`.
-fn kinded_slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
-    if slot.kind.is_integer_family() {
-        return Ok(Arc::new(HeapValue::BigInt(Arc::new(slot.slot.raw() as i64))));
-    }
-    match slot.kind {
-        NativeKind::Float64 | NativeKind::NullableFloat64 => {
-            let v = slot.slot.as_f64();
-            let dec = rust_decimal::Decimal::from_f64_retain(v).ok_or_else(|| {
-                type_error("enumerate: Float64 element cannot round-trip to Decimal")
-            })?;
-            Ok(Arc::new(HeapValue::Decimal(Arc::new(dec))))
-        }
-        NativeKind::Bool => Ok(Arc::new(HeapValue::BigInt(Arc::new(
-            if slot.slot.as_bool() { 1 } else { 0 },
-        )))),
-        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-            let bits = slot.slot.raw();
-            if bits == 0 {
-                return Err(type_error("enumerate: String slot bits null"));
-            }
-            // SAFETY: per the construction-side contract, both string
-            // kinds store `Arc::into_raw::<String>` and the slot owns
-            // one strong-count share. Bump and reconstruct.
-            let arc = unsafe {
-                Arc::increment_strong_count(bits as *const String);
-                Arc::from_raw(bits as *const String)
-            };
-            Ok(Arc::new(HeapValue::String(arc)))
-        }
-        NativeKind::Ptr(_) => {
-            let hv: &HeapValue = slot.slot.as_heap_value();
-            Ok(Arc::new(hv.clone()))
-        }
-        // Catch-all (covers any future NativeKind additions like new
-        // nullable variants). Surface rather than fabricate.
-        other => Err(type_error(format!(
-            "enumerate/collect: cannot wrap kind {:?} into a HeapValue arm",
-            other
-        ))),
-    }
-}
+// `kinded_slot_to_heap_arc` removed in W17-typed-carrier-bundle-A
+// checkpoint 2/4: per ADR-006 §2.7.24 Q25.A enumerate and collect no
+// longer materialize `Arc<HeapValue>` carriers — they construct
+// strict-typed `TypedArrayData` variants directly (TypedObject Pair for
+// enumerate; the dispatching `build_specialized_array_from_yields` for
+// collect).
 
 /// Walk a `(source, transforms, cursor)` triple to completion, applying
 /// every transform to each source element and pushing the surviving
@@ -852,19 +876,15 @@ pub(crate) fn handle_chain(
 // Eager terminals — walk the pipeline and emit a result
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Re-pack a yielded `KindedSlot` as `Arc<HeapValue>` for storage in a
-/// homogeneous-element output buffer (`TypedArrayData::HeapValue`). Used
-/// by `collect` since iterator pipelines yield heterogeneous-kind
-/// elements.
-fn yield_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
-    kinded_slot_to_heap_arc(slot)
-}
-
 /// `Iterator.collect()` / `Iterator.toArray()` — materialise the
-/// pipeline into an `Array<heap>` (heterogeneous element storage via
-/// `TypedArrayData::HeapValue`). Each yielded element is re-packed into
-/// an `Arc<HeapValue>` per `kinded_slot_to_heap_arc`; the resulting
-/// outer array is wrapped as `KindedSlot::from_typed_array`.
+/// pipeline into a strict-typed array per ADR-006 §2.7.24 Q25.A.
+///
+/// W17-typed-carrier-bundle-A checkpoint 2/4: the prior
+/// `the-deleted-heterogeneous-element-carrier` heterogeneous-element buffer is replaced by
+/// a per-element-kind specialized variant. Pipeline yields are uniform
+/// per type-checked iterator; the dispatch picks the variant matching the
+/// first yield's `NativeKind` and rejects heterogeneous-kind yields with a
+/// structured error (would indicate a type-system inconsistency upstream).
 pub(crate) fn handle_collect(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -875,12 +895,99 @@ pub(crate) fn handle_collect(
     }
     let state = Arc::clone(as_iterator(&args[0])?);
     let yields = iterate_to_vec(vm, ctx, &state)?;
-    let mut out: Vec<Arc<HeapValue>> = Vec::with_capacity(yields.len());
-    for slot in yields.iter() {
-        out.push(yield_to_heap_arc(slot)?);
+    build_specialized_array_from_yields(yields)
+}
+
+/// Build a strict-typed `TypedArrayData` variant from a `Vec<KindedSlot>`
+/// of per-element yields. Dispatches on the first yield's `NativeKind` and
+/// requires the rest to match (homogeneous per Q25.A "per-element kind
+/// uniform per variant").
+fn build_specialized_array_from_yields(yields: Vec<KindedSlot>) -> Result<KindedSlot, VMError> {
+    if yields.is_empty() {
+        // Empty pipeline — pick a default (empty TypedObject array) which
+        // satisfies the "no HeapValue arm" gate post-Q25.A.
+        let buf: TypedBuffer<Arc<shape_value::heap_value::TypedObjectStorage>> =
+            TypedBuffer::from_vec(Vec::new());
+        return Ok(KindedSlot::from_typed_array(Arc::new(
+            TypedArrayData::TypedObject(Arc::new(buf)),
+        )));
     }
-    let outer = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(out)));
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let first_kind = yields[0].kind;
+    // Validate homogeneity. Mixed-kind yields indicate a type-system gap
+    // upstream — surface, never silently coerce.
+    for (i, y) in yields.iter().enumerate().skip(1) {
+        if y.kind != first_kind {
+            return Err(type_error(format!(
+                "Iterator.collect: heterogeneous-kind yields not supported \
+                 post-§2.7.24 Q25.A (element 0 kind={:?}, element {} kind={:?})",
+                first_kind, i, y.kind
+            )));
+        }
+    }
+    match first_kind {
+        NativeKind::Int64 => {
+            let data: Vec<i64> = yields.iter().map(|y| y.slot.as_i64()).collect();
+            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::I64(
+                Arc::new(TypedBuffer::from_vec(data)),
+            ))))
+        }
+        NativeKind::Float64 => {
+            let data: Vec<f64> = yields.iter().map(|y| y.slot.as_f64()).collect();
+            let av = shape_value::AlignedVec::from_vec(data);
+            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::F64(
+                Arc::new(shape_value::AlignedTypedBuffer::from(av)),
+            ))))
+        }
+        NativeKind::Bool => {
+            let data: Vec<u8> = yields
+                .iter()
+                .map(|y| if y.slot.as_bool() { 1u8 } else { 0u8 })
+                .collect();
+            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::Bool(
+                Arc::new(TypedBuffer::from_vec(data)),
+            ))))
+        }
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            let mut data: Vec<Arc<String>> = Vec::with_capacity(yields.len());
+            for y in yields.iter() {
+                match y.slot.as_heap_value() {
+                    HeapValue::String(s) => data.push(Arc::clone(s)),
+                    other => {
+                        return Err(type_error(format!(
+                            "Iterator.collect: String-kinded yield with non-String heap arm: {:?}",
+                            other.kind()
+                        )))
+                    }
+                }
+            }
+            Ok(KindedSlot::from_typed_array(Arc::new(
+                TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))),
+            )))
+        }
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let mut data: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+                Vec::with_capacity(yields.len());
+            for y in yields.iter() {
+                match y.slot.as_heap_value() {
+                    HeapValue::TypedObject(o) => data.push(Arc::clone(o)),
+                    other => {
+                        return Err(type_error(format!(
+                            "Iterator.collect: TypedObject-kinded yield with mismatched heap arm: {:?}",
+                            other.kind()
+                        )))
+                    }
+                }
+            }
+            Ok(KindedSlot::from_typed_array(Arc::new(
+                TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))),
+            )))
+        }
+        other => Err(type_error(format!(
+            "Iterator.collect: element kind {:?} not yet supported \
+             post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
+            other
+        ))),
+    }
 }
 
 /// `Iterator.forEach(closure)` — invokes the closure per yielded
