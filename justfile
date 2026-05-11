@@ -95,6 +95,16 @@ ci-test:
 check-no-dynamic:
 	bash scripts/check-no-dynamic.sh
 
+# Phase 2d merge gate. Run before merging any sub-cluster branch into
+# bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
+# See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
+verify-merge:
+	bash scripts/verify-merge.sh
+
+# Same as `just verify-merge` but skips the --tests pass (faster).
+verify-merge-fast:
+	bash scripts/verify-merge.sh --fast
+
 # Phase 2 gate: shape-runtime --lib compiles cleanly.
 # Reports the current error count; exits non-zero if > 0.
 verify-phase-2:

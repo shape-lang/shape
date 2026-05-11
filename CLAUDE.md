@@ -306,6 +306,15 @@ See `docs/adr/006-value-and-memory-model.md`. Code touchpoints carry a `// ADR-0
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
 - `just check-no-dynamic` recipe greps for forbidden symbols on every CI run and pre-commit. Build fails on hit.
 - Sentinel test `crates/shape-vm/src/executor/tests/no_dynamic.rs` asserts forbidden symbols are absent.
+- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (11 checks, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic).
+
+### Phase 2d entry points (binding for Phase 2d sub-cluster work)
+
+- **Handover doc:** `docs/cluster-audits/phase-2d-handover.md` — §0 rules (forbidden patterns, 4-table lockstep, 5-arm receiver-recovery, surface-and-stop discipline). Required reading for every agent.
+- **Inventory:** `docs/cluster-audits/phase-2d-stub-inventory.md` — source-of-truth for sites and sub-cluster grouping.
+- **Playbook:** `docs/cluster-audits/phase-2d-playbook.md` — per-sub-cluster agent prompts (territory / sites / smoke / required reading / close gate).
+- **ADR amendment:** `docs/adr/006-value-and-memory-model.md` §2.7.24 — typed-carrier monomorphization bundle (Q25.A/B/C). Binding for W17-typed-carrier-monomorphization + everything downstream.
+- **Roster:** `AGENTS.md` — live sub-cluster rows + HeapKind ordinal table.
 
 ### Known Constraints
 - **TypeVar loss in `Type::to_annotation()`**: `BuiltinTypes::function()` preserves `Type::Variable` correctly (regression test in `constraints.rs:1193`). The lossy step is `Type::Function`'s `to_annotation()` in `core.rs:218`: unresolved param/return vars are converted to `"unknown"`, losing type variable identity.

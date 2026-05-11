@@ -4349,6 +4349,312 @@ flows are recognised by the discriminator handlers via the
 `is_null_sentinel` helper. A future cluster migrates the compiler
 emit to the kinded `OptionData` carrier exclusively.
 
+#### 2.7.24 Typed-carrier monomorphization bundle — `TypedArrayData::HeapValue` deletion, `HashMapData` parametric value buffer, `HeapKind::TraitObject` re-introduction with universal `dyn Trait` (Phase 2d Q25 ruling, 2026-05-11)
+
+This amendment is the architectural foundation Phase 2d sub-clusters consume.
+It bundles three coordinated changes that share design DNA:
+
+1. `TypedArrayData::HeapValue` arm is **deleted** and replaced by monomorphic specialization variants per built-in heap type plus a single `TypedObject` catch-all for user-defined types (Q25.A).
+2. `HashMapData` becomes parametric over its value type via a new `HashMapValueBuf` enum (Q25.B).
+3. `HeapKind::TraitObject = 29` is **re-introduced** with a fat-pointer `Arc<TraitObjectStorage>` carrier; **all traits are dyn-able** under a runtime auto-boxing rule (Q25.C).
+
+The three changes land as one ADR amendment because they share the same forbidden-pattern (polymorphic catch-all arms with kind-blind raw-bits decode at use site) and the same replacement discipline (kind known at the variant level, runtime dispatch through typed Arcs).
+
+##### Q25.A — `TypedArrayData::HeapValue` deletion + monomorphic specialization
+
+**Decision:** the `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` arm is deleted. `TypedArrayData` gains specialized variants for every built-in heap type:
+
+```rust
+pub enum TypedArrayData {
+    // Existing scalar / native-buffer variants — kept verbatim:
+    I64, F64, Bool, I8, I16, I32, U8, U16, U32, U64, F32, String,
+    Matrix(Arc<MatrixData>),
+    FloatSlice { parent: Arc<MatrixData>, offset: u32, len: u32 },
+
+    // NEW — specialized variants per built-in heap type:
+    Decimal(Arc<TypedBuffer<Decimal>>),
+    BigInt(Arc<TypedBuffer<BigInt>>),
+    DateTime(Arc<TypedBuffer<DateTimeData>>),
+    Timespan(Arc<TypedBuffer<TimespanData>>),
+    Duration(Arc<TypedBuffer<DurationData>>),
+    Instant(Arc<TypedBuffer<InstantData>>),
+    Char(Arc<TypedBuffer<u32>>),     // unicode scalar values
+
+    // NEW — single catch-all for user-defined types (structs, enums):
+    TypedObject(Arc<TypedBuffer<Arc<TypedObjectStorage>>>),
+
+    // NEW — single catch-all for trait-object element types:
+    TraitObject(Arc<TypedBuffer<Arc<TraitObjectStorage>>>),
+}
+```
+
+**Per-element kind is uniform per variant.** `Array<int>` carries `NativeKind::I64` for every element; `Array<DateTime>` carries `NativeKind::Ptr(HeapKind::Temporal)` for every element; `Array<EnumX>` carries `NativeKind::Ptr(HeapKind::TypedObject)` for every element (with the enum schema discriminating variants inside each `TypedObjectStorage`).
+
+**No parallel `Vec<NativeKind>` track.** The variant tag IS the kind. This is the structural difference from §2.7.7 (stack) and §2.7.8 (cells), which DO carry parallel kind tracks because their *call patterns* admit truly heterogeneous slots. Arrays do not.
+
+**Rust-style enum layout.** Shape enums compile to a fixed-size-per-type layout (discriminator + max-payload-bytes, heap variants stored as pointers). `Array<MyEnum>` is therefore uniform per element — no polymorphism at the array level.
+
+**Forbidden:** re-introducing `TypedArrayData::HeapValue` as a "polymorphic fallback" / "catch-all element buffer" / "any-shaped array carrier" — same defection-attractor family as the deleted ValueWord; refuse on sight. If a hypothetical use case appears, surface and amend.
+
+**Method-handler implications.** Every SURFACE site at `objects/array_transform.rs`, `objects/array_aggregation.rs`, `objects/array_basic.rs`, `objects/iterator_methods.rs`, `objects/string_methods.rs` that today returns `NotImplemented(SURFACE)` on `TypedArrayData::HeapValue` becomes either:
+
+- **Filled** with the corresponding specialized variant's body (e.g. `TypedArrayData::Decimal(arr)` → direct Decimal-aware sum/max/etc.); or
+- **Replaced** with a per-variant exhaustive match (no `_` catch-all) where each arm dispatches monomorphically; or
+- **Re-routed** through `TypedObject` / `TraitObject` for the user-type cases, where the schema or vtable carries the dispatch decision.
+
+##### Q25.B — `HashMapData` parametric value buffer
+
+**Decision:** `HashMapData` is refactored from a single struct with `values: Arc<TypedBuffer<Arc<HeapValue>>>` to a struct with a parametric `HashMapValueBuf` enum:
+
+```rust
+pub struct HashMapData {
+    pub keys: Arc<TypedBuffer<Arc<String>>>,
+    pub values: HashMapValueBuf,
+    pub index: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+pub enum HashMapValueBuf {
+    // Specialized per common value type — mirrors TypedArrayData variants:
+    I64(Arc<TypedBuffer<i64>>),
+    F64(Arc<TypedBuffer<f64>>),
+    Bool(Arc<TypedBuffer<u8>>),
+    String(Arc<TypedBuffer<Arc<String>>>),
+    Decimal(Arc<TypedBuffer<Decimal>>),
+    BigInt(Arc<TypedBuffer<BigInt>>),
+    DateTime(Arc<TypedBuffer<DateTimeData>>),
+    Timespan(Arc<TypedBuffer<TimespanData>>),
+    Duration(Arc<TypedBuffer<DurationData>>),
+    Instant(Arc<TypedBuffer<InstantData>>),
+
+    // User-defined value types:
+    TypedObject(Arc<TypedBuffer<Arc<TypedObjectStorage>>>),
+    TraitObject(Arc<TypedBuffer<Arc<TraitObjectStorage>>>),
+}
+```
+
+**Same discipline as Q25.A.** Per-value kind known at variant level. No parallel kind track. No `Arc<HeapValue>` catch-all. The `index` field (FNV-1a bucket index) is unchanged — it operates on keys.
+
+**Resolves the `datetime_methods.rs:426` cascade.** `v2_diff` returning `HashMap<String, int>` is now a `HashMapValueBuf::I64` construction — no architectural amendment beyond this one.
+
+**Keys remain string-typed at landing.** `HashMap<K, V>` with non-String K is deferred to a follow-up amendment if/when the use case appears. Today's stdlib + tests only use String keys.
+
+##### Q25.C — `HeapKind::TraitObject = 29` with `Arc<TraitObjectStorage>` carrier
+
+**Decision:** the bulldozer-deleted `HeapValue::TraitObject { value: Box<u64>, vtable: Arc<VTable> }` is replaced by a kinded `HeapValue::TraitObject(Arc<TraitObjectStorage>)` arm, mirroring §2.3 typed-Arc shape:
+
+```rust
+pub struct TraitObjectStorage {
+    /// The data half of the fat pointer — owned, heap-allocated.
+    /// Always heap (no inline-scalar trait objects at landing — scalars
+    /// that implement traits are boxed into TypedObject first; see §Q25.C.4).
+    pub value: Arc<TypedObjectStorage>,
+
+    /// The vtable half of the fat pointer.
+    pub vtable: Arc<VTable>,
+}
+```
+
+**Ordinal:** `HeapKind::TraitObject = 29` (next free after Option=28). Pre-assigned for the W17-trait-object-rebuild sub-cluster. Bump-on-collision per §0 ordinal-collision rule.
+
+###### Q25.C.1 — Universal `dyn Trait` (no object-safety rule)
+
+**Decision:** every trait in Shape is dyn-able. Rust's object-safety restrictions (no generic methods, no `Self` in non-receiver position, no associated types without bounds, no associated functions) are **lifted**, at the cost of runtime indirection that is recoverable via JIT IC devirtualization.
+
+The substitution operator `Erase_T(τ)` (the auto-boxing rule) determines how a method signature is rewritten when the trait is used as `dyn T`:
+
+| Input `τ` | `Erase_T(τ)` |
+|---|---|
+| `Self` | `dyn T` (carrier: `Arc<TraitObjectStorage>` with same `trait_id`) |
+| `&Self` | `&dyn T` |
+| `&mut Self` | `&mut dyn T` |
+| `Self::A` where `trait T { type A: Bound; }` | `dyn Bound` |
+| `Self::A` where `trait T { type A; }` (no bound) | **compile error ETO-001** |
+| `G<τ₁, τ₂, …>` where `G ∈ {Option, Result, Vec, Box, Arc, HashMap, HashSet, tuples, user-#[erasure_safe]}` | `G<Erase_T(τ₁), Erase_T(τ₂), …>` (recursive) |
+| `&G<…>` / `&mut G<…>` | reference unchanged, recurse into payload |
+| method-generic `G` | `KindedSlot` + runtime `&TypeInfo` parameter |
+| any concrete or builtin type | unchanged |
+
+**Worked examples:**
+
+```text
+fn clone(&self) -> Self
+  → fn clone(&self) -> dyn T
+
+fn try_clone(&self) -> Result<Self, Error>
+  → fn try_clone(&self) -> Result<dyn T, Error>
+
+fn iter(&self) -> Self::Iter   // trait declares `type Iter: Iterator`
+  → fn iter(&self) -> dyn Iterator
+
+fn split(self) -> (Self, Self)
+  → fn split(self) -> (dyn T, dyn T)
+```
+
+###### Q25.C.2 — `Self` in argument position: runtime vtable-identity check
+
+A method `fn merge(&mut self, other: Self)` through a `dyn T` receiver is exposed to the caller as `fn merge(&mut self, other: dyn T)`. The thunk performs a runtime check at dispatch time:
+
+```rust
+if !Arc::ptr_eq(&self_storage.vtable, &other_storage.vtable) {
+    return Err(VMError::TraitObjectIdentityMismatch {
+        method: "merge",
+        self_impl: self_storage.vtable.concrete_type_id,
+        other_impl: other_storage.vtable.concrete_type_id,
+    });
+}
+```
+
+Cost: one pointer comparison per `Self`-typed argument. Same rule applies to multi-argument cases (`fn foo(&self, a: Self, b: Self)` — two checks).
+
+###### Q25.C.3 — Generic method parameters: runtime type-info
+
+A method `fn method<G: Bound>(&self, g: G) -> R` becomes, through `dyn T`:
+
+```text
+fn method(&self, g: KindedSlot, g_type_info: &TypeInfo) -> Erase_T(R)
+```
+
+`TypeInfo` carries `{ concrete_type_id: u32, vtable_for_bound: Option<Arc<VTable>>, size_align: (u32, u32) }`. The thunk body uses `g_type_info` to dispatch operations on `g`.
+
+The IC at this call site records `(self_vtable_arc_id, g_type_info.concrete_type_id)`. When it stabilizes, the optimizing tier emits a direct call.
+
+###### Q25.C.4 — `#[static_only]` per-method opt-out
+
+A method marked `#[static_only]` is dispatchable only through static call sites (`<X as T>::method(&x)`) and is **excluded** from the vtable entirely. Calling it through `dyn T` is **compile error ETO-002**:
+
+```text
+error[ETO-002]: method `cold_path` is marked `#[static_only]` and cannot be
+  called through `dyn T`. Use a static call site (`<X as T>::cold_path(&x)`)
+  or remove the `#[static_only]` attribute.
+```
+
+This is the trait author's cost-control surface. Default is universal-dyn; opt-out is per-method, explicit.
+
+###### Q25.C.5 — `VTable` and `VTableEntry` final shape
+
+```rust
+pub struct VTable {
+    pub trait_names: Vec<String>,            // multi-trait inheritance support
+    pub concrete_type_id: u32,                // enables Self-arg runtime check
+    pub methods: HashMap<String, VTableEntry>,
+}
+
+pub enum VTableEntry {
+    /// No Erase_T rewriting: no Self in non-receiver position, no generics.
+    Direct { function_id: u16 },
+
+    /// Pre-existing closure entry (W7 closure trait impls).
+    Closure { function_id: u32, type_id: u32 },
+
+    /// Self / Self::Assoc in return position. Thunk wraps return value.
+    BoxedReturn {
+        thunk_id: u16,
+        wrap_targets: SmallVec<[WrapTarget; 2]>,
+    },
+
+    /// Self in argument position. Thunk checks vtable identity per Self-arg.
+    SelfArg {
+        thunk_id: u16,
+        self_arg_positions: SmallVec<[u8; 4]>,
+    },
+
+    /// Generic method. Thunk consumes TypeInfo per generic param.
+    Generic {
+        thunk_id: u16,
+        type_param_count: u8,
+    },
+
+    /// Combinations of the above three. Thunk dispatches per flag set.
+    Compound {
+        thunk_id: u16,
+        flags: VTableEntryFlags,                 // bitfield
+        wrap_targets: SmallVec<[WrapTarget; 2]>,
+        self_arg_positions: SmallVec<[u8; 4]>,
+        type_param_count: u8,
+    },
+}
+
+pub struct WrapTarget {
+    /// Generic-arg-index path into the structural return type.
+    /// E.g. for `Result<Self, Error>`, path = `[0]`.
+    /// For `HashMap<int, Self>`, path = `[1]`.
+    pub path: SmallVec<[u8; 4]>,
+    /// Trait to wrap as. Usually `self.trait_id`; for Self::Assoc the bound's trait.
+    pub wrap_as_trait_id: u32,
+}
+
+bitflags::bitflags! {
+    pub struct VTableEntryFlags: u8 {
+        const BOXED_RETURN  = 0b0000_0001;
+        const SELF_ARG      = 0b0000_0010;
+        const GENERIC       = 0b0000_0100;
+    }
+}
+```
+
+###### Q25.C.6 — IC devirtualization
+
+The JIT IC (`feedback.rs:9-128`) at each `dyn T` call site records `(self_vtable_arc_id, g_type_info.concrete_type_id_per_generic)`. State transitions:
+
+- **Uninitialized** → first call records the tuple.
+- **Monomorphic** → tuple matches stored. Optimizing tier emits direct call to the impl's method, eliding vtable lookup, auto-boxing on return, SelfArg check, and TypeInfo dispatch. Deopt on mismatch.
+- **Polymorphic** (2-4 entries) → first-match dispatch via inlined comparisons.
+- **Megamorphic** → fall back to vtable + thunk path.
+
+The cost model degenerates to "zero-cost dyn Trait at hot call sites" — same end state Rust achieves via LLVM devirtualization, but explicit through Shape's IC.
+
+###### Q25.C.7 — LSP cost-class inlay hints
+
+The LSP annotates each `dyn T` call site with its cost class for developer visibility:
+
+| Class | Means |
+|---|---|
+| `[direct]` | IC stabilized; optimizing tier devirtualizes. Zero overhead. |
+| `[vtable]` | Plain dispatch — one indirect call. ~1ns. |
+| `[boxed-return]` | Self/Self::Assoc in return; one boxing per call. ~10ns. |
+| `[generic-type-info]` | Generic param; TypeInfo lookup. ~5ns per generic arg. |
+| `[self-arg-check]` | Self in arg; pointer compare per Self-typed arg. ~1ns. |
+
+Multiple classes combine (`[vtable + boxed-return + generic-type-info]`).
+
+##### Q25.D — Erasure-safe generic types
+
+`Erase_T` recurses through a fixed set of "erasure-safe" generic constructors: `Option`, `Result`, `Vec`/`Array`, `Box`, `Arc`, `HashMap`, `HashSet`, tuples (any arity). User-defined generic types opt in via the `#[erasure_safe]` attribute on the type definition:
+
+```shape
+@erasure_safe
+type Pair<A, B> { first: A, second: B }
+```
+
+Without the attribute, a user-defined `G<Self>` does NOT participate in `Erase_T` recursion — `Erase_T(G<Self>) = G<Self>` (unchanged), which then propagates as a compile error at the trait-object site because `Self` is unbound there.
+
+This is the safety mechanism: erasure-safety is opt-in for user types, automatic for the stdlib.
+
+##### Q25.E — Forbidden patterns (new entries)
+
+The following are added to the codebase's forbidden-pattern list (`docs/check-no-dynamic-baseline.txt`, CLAUDE.md "Forbidden Patterns"):
+
+1. **Resurrection of `TypedArrayData::HeapValue`** as a "polymorphic fallback", "catch-all element buffer", "any-shaped array carrier", or any synonym. Refuse on sight.
+2. **`HashMapData::values: Arc<TypedBuffer<Arc<HeapValue>>>`** field shape — replaced by `HashMapValueBuf`; the old shape is forbidden under any alias.
+3. **`Box<u64>` data half of trait-object carrier** — kind-blind raw-bits storage, same defection-attractor as the deleted `ValueWord`. The kinded shape is `Arc<TypedObjectStorage>`.
+4. **"Object-safety check" emitted as a compile-time rejection** of a trait based on its method shapes — under Q25.C.1 every trait is dyn-able; the rejection path is replaced by the auto-boxing rule + the ETO-001/ETO-002 narrow error cases.
+5. **Defection-attractor descriptors** for the deleted polymorphic array carrier: `(array|hashmap|trait.object) (catchall|polymorphic.fallback|any.element|heap.value.element|generic.element) (arm|variant|carrier|buffer)`.
+
+##### Q25.F — Migration cluster scope
+
+This amendment is consumed by Phase 2d sub-cluster **W17-typed-carrier-monomorphization** (merger of the prior W17-array-heap-element-kind + W17-hashmap-typed-buffer + W17-trait-object-rebuild sub-clusters). Estimated 24-32h elapsed; landed as a single coordinated branch because the three changes share carrier shape and dispatch-table updates.
+
+The W17-typed-carrier sub-cluster's gates include:
+- `TypedArrayData::HeapValue` arm grep returns zero hits in source trees.
+- `HashMapData::values: Arc<TypedBuffer<Arc<HeapValue>>>` grep returns zero hits.
+- `HeapKind::TraitObject = 29` arm present in all 4 lockstep dispatch tables (`clone_with_kind` / `drop_with_kind` / `KindedSlot::Clone+Drop` / `TypedObjectStorage::drop`).
+- All ~33 SURFACE sites in the three sub-clusters land (full list in `docs/cluster-audits/phase-2d-stub-inventory.md`).
+- ADR's `docs/defections.md` gets a fresh entry referencing this section + the W17-typed-carrier close commit.
+
+##### Status
+
+Binding for Phase 2d onward.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-
