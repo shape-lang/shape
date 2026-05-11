@@ -25,7 +25,7 @@ impl BytecodeCompiler {
         match format_spec {
             None => {
                 // Args: [value]
-                let count = self.program.add_constant(Constant::Number(1.0));
+                let count = self.program.add_constant(Constant::Int(1));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(count)),
@@ -47,7 +47,7 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(precision)),
                 ));
-                let count = self.program.add_constant(Constant::Number(3.0));
+                let count = self.program.add_constant(Constant::Int(3));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(count)),
@@ -120,7 +120,7 @@ impl BytecodeCompiler {
                     Some(Operand::Const(border)),
                 ));
 
-                let count = self.program.add_constant(Constant::Number(7.0));
+                let count = self.program.add_constant(Constant::Int(7));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(count)),
@@ -134,7 +134,7 @@ impl BytecodeCompiler {
                 // Content style specs are handled at the content rendering level,
                 // not during string interpolation compilation.
                 // For now, treat as plain format (no spec).
-                let count = self.program.add_constant(Constant::Number(1.0));
+                let count = self.program.add_constant(Constant::Int(1));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(count)),
@@ -279,7 +279,7 @@ impl BytecodeCompiler {
                     }
 
                     // Convert value to string first (ToString builtin)
-                    let count = self.program.add_constant(Constant::Number(1.0));
+                    let count = self.program.add_constant(Constant::Int(1));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count)),
@@ -318,7 +318,7 @@ impl BytecodeCompiler {
     fn emit_content_builtin(&mut self, builtin: BuiltinFunction, arg_count: usize) -> Result<()> {
         let count = self
             .program
-            .add_constant(Constant::Number(arg_count as f64));
+            .add_constant(Constant::Int(arg_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count)),

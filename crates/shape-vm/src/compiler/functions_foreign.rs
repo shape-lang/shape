@@ -201,7 +201,7 @@ impl BytecodeCompiler {
             }
             let arg_count_const = self
                 .program
-                .add_constant(Constant::Number(arg_count as f64));
+                .add_constant(Constant::Int(arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count_const)),
@@ -471,7 +471,7 @@ impl BytecodeCompiler {
         // Helper to emit a builtin call with arg count
         macro_rules! emit_builtin {
             ($builtin:expr, $argc:expr) => {{
-                let argc_const = self.program.add_constant(Constant::Number($argc as f64));
+                let argc_const = self.program.add_constant(Constant::Int($argc as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(argc_const)),
@@ -529,7 +529,7 @@ impl BytecodeCompiler {
         // 3. Call foreign function with total C arg count
         let c_arg_count_const = self
             .program
-            .add_constant(Constant::Number(total_c_args as f64));
+            .add_constant(Constant::Int(total_c_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(c_arg_count_const)),

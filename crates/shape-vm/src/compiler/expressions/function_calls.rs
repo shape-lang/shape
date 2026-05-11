@@ -504,7 +504,7 @@ impl BytecodeCompiler {
             } else {
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(args.len() as f64));
+                    .add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -754,7 +754,7 @@ impl BytecodeCompiler {
             }
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(effective_total_arity as f64));
+                .add_constant(Constant::Int(effective_total_arity as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -901,7 +901,7 @@ impl BytecodeCompiler {
             if self.builtin_requires_arg_count(builtin) {
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(args.len() as f64));
+                    .add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -1086,7 +1086,7 @@ impl BytecodeCompiler {
         }
         let count = self
             .program
-            .add_constant(Constant::Number(args.len() as f64));
+            .add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count)),
@@ -1340,7 +1340,7 @@ impl BytecodeCompiler {
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(args.len() as f64));
+                .add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -1587,7 +1587,7 @@ impl BytecodeCompiler {
 
             self.compile_expr(receiver)?;
 
-            let count = self.program.add_constant(Constant::Number(1.0));
+            let count = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(count)),
@@ -1739,7 +1739,7 @@ impl BytecodeCompiler {
 
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(args.len() as f64));
+                .add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -1831,7 +1831,7 @@ impl BytecodeCompiler {
 
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(call_arity as f64));
+                .add_constant(Constant::Int(call_arity as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -1932,7 +1932,7 @@ impl BytecodeCompiler {
 
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(call_arity as f64));
+                    .add_constant(Constant::Int(call_arity as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -1981,7 +1981,7 @@ impl BytecodeCompiler {
                 // UFCS to builtin: receiver + args already on stack
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number((args.len() + 1) as f64));
+                    .add_constant(Constant::Int((args.len() + 1) as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -2416,7 +2416,7 @@ impl BytecodeCompiler {
 
         let arg_count = self
             .program
-            .add_constant(Constant::Number(args.len() as f64));
+            .add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -2512,7 +2512,7 @@ impl BytecodeCompiler {
         // Push arg count and call print
         let arg_count = self
             .program
-            .add_constant(Constant::Number(processed_args as f64));
+            .add_constant(Constant::Int(processed_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),

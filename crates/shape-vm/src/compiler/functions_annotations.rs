@@ -179,7 +179,7 @@ impl BytecodeCompiler {
             }
         }
 
-        let ac = self.program.add_constant(Constant::Number(arity as f64));
+        let ac = self.program.add_constant(Constant::Int(arity as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac)),
@@ -1482,7 +1482,7 @@ impl BytecodeCompiler {
             let before_arg_count = 1 + ann_arg_exprs.len() + 2;
             let before_ac = self
                 .program
-                .add_constant(Constant::Number(before_arg_count as f64));
+                .add_constant(Constant::Int(before_arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(before_ac)),
@@ -1504,7 +1504,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(before_result)),
             ));
-            let one_const = self.program.add_constant(Constant::Number(1.0));
+            let one_const = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(one_const)),
@@ -1533,7 +1533,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(before_result)),
             ));
-            let one_const2 = self.program.add_constant(Constant::Number(1.0));
+            let one_const2 = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(one_const2)),
@@ -1723,7 +1723,7 @@ impl BytecodeCompiler {
         }
         let impl_ac = self
             .program
-            .add_constant(Constant::Number(func_def.params.len() as f64));
+            .add_constant(Constant::Int(func_def.params.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(impl_ac)),
@@ -1804,7 +1804,7 @@ impl BytecodeCompiler {
             let after_arg_count = 1 + ann_arg_exprs.len() + 3;
             let after_ac = self
                 .program
-                .add_constant(Constant::Number(after_arg_count as f64));
+                .add_constant(Constant::Int(after_arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(after_ac)),

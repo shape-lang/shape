@@ -109,7 +109,7 @@ impl BytecodeCompiler {
             OpCode::NewArray,
             Some(Operand::Count(excluded_keys.len() as u16)),
         ));
-        let arg_count = self.program.add_constant(Constant::Number(2.0));
+        let arg_count = self.program.add_constant(Constant::Int(2));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
