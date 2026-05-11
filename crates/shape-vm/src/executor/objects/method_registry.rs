@@ -557,13 +557,18 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// and delegate to the typed element primitives in
 /// `executor::v2_handlers::v2_array_detect` (read/write/push/pop/sum).
 ///
-/// **Methods:** len, length, push, pop, sum, first, last, get, set.
+/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
+/// get, set.
 pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_int_array_methods::len,
     "length" => crate::executor::objects::typed_int_array_methods::len,
     "push" => crate::executor::objects::typed_int_array_methods::push,
     "pop" => crate::executor::objects::typed_int_array_methods::pop,
     "sum" => crate::executor::objects::typed_int_array_methods::sum,
+    "avg" => crate::executor::objects::typed_int_array_methods::avg,
+    "mean" => crate::executor::objects::typed_int_array_methods::avg,
+    "min" => crate::executor::objects::typed_int_array_methods::min,
+    "max" => crate::executor::objects::typed_int_array_methods::max,
     "first" => crate::executor::objects::typed_int_array_methods::first,
     "last" => crate::executor::objects::typed_int_array_methods::last,
     "get" => crate::executor::objects::typed_int_array_methods::get,
@@ -577,13 +582,18 @@ pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_
 /// [`TYPED_INT_ARRAY_METHODS`] for the dispatch contract; this map is the
 /// `f64` counterpart.
 ///
-/// **Methods:** len, length, push, pop, sum, first, last, get, set.
+/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
+/// get, set.
 pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_number_array_methods::len,
     "length" => crate::executor::objects::typed_number_array_methods::len,
     "push" => crate::executor::objects::typed_number_array_methods::push,
     "pop" => crate::executor::objects::typed_number_array_methods::pop,
     "sum" => crate::executor::objects::typed_number_array_methods::sum,
+    "avg" => crate::executor::objects::typed_number_array_methods::avg,
+    "mean" => crate::executor::objects::typed_number_array_methods::avg,
+    "min" => crate::executor::objects::typed_number_array_methods::min,
+    "max" => crate::executor::objects::typed_number_array_methods::max,
     "first" => crate::executor::objects::typed_number_array_methods::first,
     "last" => crate::executor::objects::typed_number_array_methods::last,
     "get" => crate::executor::objects::typed_number_array_methods::get,

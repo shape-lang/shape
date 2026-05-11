@@ -51,28 +51,28 @@ fn test_float_array_sum() {
 
 #[test]
 fn test_float_array_avg() {
-    // SURFACE — `avg` is not yet wired for the v2 typed-number-array
-    // receiver (the v2 path stores the array as a raw `UInt64`-kinded
-    // pointer; `typed_number_array_methods.rs` rejects `avg` with
-    // "expected Array receiver, got kind UInt64"). Filling this body
-    // requires the W17-array-typed-receiver sub-cluster (per playbook §2)
-    // to route the receiver through the v2 typed-array PHF. Tracked there;
-    // out of T1's host-tier marshal territory. ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-number-array `avg` receiver not wired (see playbook §2)")
+    // W17-array-typed-receiver: v2 typed-number-array `avg` PHF entry
+    // wired in this sub-cluster. The receiver is a v2 `TypedArray<f64>`
+    // pointer (`NativeKind::UInt64` carrier); the body delegates to
+    // `v2_array_detect::avg_elements`.
+    let result = eval("[2.0, 4.0, 6.0, 8.0].avg()");
+    assert_eq!(result.as_f64(), Some(5.0));
 }
 
 #[test]
 fn test_float_array_min() {
-    // SURFACE — `min` not wired for v2 typed-number-array receiver
-    // (Wave 2 / W17-array-typed-receiver). ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-number-array `min` receiver not wired")
+    // W17-array-typed-receiver: v2 typed-number-array `min` PHF entry
+    // wired in this sub-cluster.
+    let result = eval("[3.5, 1.5, 4.5, 2.5].min()");
+    assert_eq!(result.as_f64(), Some(1.5));
 }
 
 #[test]
 fn test_float_array_max() {
-    // SURFACE — `max` not wired for v2 typed-number-array receiver
-    // (Wave 2 / W17-array-typed-receiver). ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-number-array `max` receiver not wired")
+    // W17-array-typed-receiver: v2 typed-number-array `max` PHF entry
+    // wired in this sub-cluster.
+    let result = eval("[3.5, 1.5, 4.5, 2.5].max()");
+    assert_eq!(result.as_f64(), Some(4.5));
 }
 
 #[test]
@@ -125,23 +125,27 @@ fn test_int_array_sum() {
 
 #[test]
 fn test_int_array_avg() {
-    // SURFACE — v2 typed-int-array receiver routing for `avg`. Wave 2 /
-    // W17-array-typed-receiver. ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-int-array `avg` receiver not wired")
+    // W17-array-typed-receiver: v2 typed-int-array `avg` PHF entry
+    // wired in this sub-cluster. Result kind is `Float64` (mean of an
+    // integer array is a float).
+    let result = eval("[2, 4, 6, 8].avg()");
+    assert_eq!(result.as_f64(), Some(5.0));
 }
 
 #[test]
 fn test_int_array_min() {
-    // SURFACE — v2 typed-int-array `min` receiver. Wave 2 /
-    // W17-array-typed-receiver. ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-int-array `min` receiver not wired")
+    // W17-array-typed-receiver: v2 typed-int-array `min` PHF entry
+    // wired in this sub-cluster.
+    let result = eval("[3, 1, 4, 1, 5, 9, 2, 6].min()");
+    assert_eq!(result.as_i64(), Some(1));
 }
 
 #[test]
 fn test_int_array_max() {
-    // SURFACE — v2 typed-int-array `max` receiver. Wave 2 /
-    // W17-array-typed-receiver. ADR-006 §2.7.4 / §2.7.10.
-    todo!("Wave 2 / W17-array-typed-receiver: v2 typed-int-array `max` receiver not wired")
+    // W17-array-typed-receiver: v2 typed-int-array `max` PHF entry
+    // wired in this sub-cluster.
+    let result = eval("[3, 1, 4, 1, 5, 9, 2, 6].max()");
+    assert_eq!(result.as_i64(), Some(9));
 }
 
 #[test]

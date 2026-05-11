@@ -167,6 +167,57 @@ pub fn sum(
     }
 }
 
+/// `arr.avg()` — arithmetic mean of all elements. Result kind
+/// `Float64`. Empty arrays return `NaN` (matches the v2_array_detect
+/// primitive contract).
+pub fn avg(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_f64(&view)?;
+    match v2_array_detect::avg_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<number>.avg: avg_elements returned None for F64 receiver".into(),
+        )),
+    }
+}
+
+/// `arr.min()` — minimum element. Result kind `Float64` for F64-element
+/// arrays; empty arrays return `NaN`.
+pub fn min(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_f64(&view)?;
+    match v2_array_detect::min_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<number>.min: min_elements returned None for F64 receiver".into(),
+        )),
+    }
+}
+
+/// `arr.max()` — maximum element. Same shape as [`min`].
+pub fn max(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let view = extract_view(&args[0])?;
+    require_f64(&view)?;
+    match v2_array_detect::max_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Vec<number>.max: max_elements returned None for F64 receiver".into(),
+        )),
+    }
+}
+
 /// `arr.first()` — first element, or null sentinel if empty.
 pub fn first(
     _vm: &mut VirtualMachine,
