@@ -107,22 +107,22 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::HeapValue(b) => b.len(),
+        TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-        ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(b) => b.len(),
+        TypedArrayData::BigInt(b) => b.len(),
+        TypedArrayData::DateTime(b) => b.len(),
+        TypedArrayData::Timespan(b) => b.len(),
+        TypedArrayData::Duration(b) => b.len(),
+        TypedArrayData::Instant(b) => b.len(),
+        TypedArrayData::Char(b) => b.len(),
+        TypedArrayData::TypedObject(b) => b.len(),
+        TypedArrayData::TraitObject(b) => b.len(),
     }
 }
 

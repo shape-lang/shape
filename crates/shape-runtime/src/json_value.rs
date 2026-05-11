@@ -306,13 +306,10 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
                 .map(|s| JsonValue::String((**s).clone()))
                 .collect(),
         )),
-        TypedArrayData::HeapValue(buf) => {
-            let mut elems: Vec<JsonValue> = Vec::with_capacity(buf.data.len());
-            for child in buf.data.iter() {
-                elems.push(heap_to_json_value(child)?);
-            }
-            Ok(JsonValue::Array(elems))
-        }
+        TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
 
         // Architectural-choice deferred (REFINEMENT-1B-ITEM-A) — first-landing
         // Err. 2D-layout encoding policy not yet decided.
@@ -355,8 +352,23 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
                 .map(|c| JsonValue::String(c.to_string()))
                 .collect(),
         )),
-        TypedArrayData::TypedObject(_) | TypedArrayData::TraitObject(_) => Err(
-            "TypedObject/TraitObject array JSON serialization deferred to commit 3 (ADR-006 §2.7.24 Q25.A; needs per-element schema/vtable dispatch)"
+        TypedArrayData::TypedObject(buf) => {
+            // W17-typed-carrier-bundle-A checkpoint 3/4: each element is
+            // an `Arc<TypedObjectStorage>` carrying a schema-keyed record.
+            // Recurse through `typed_object_to_json_value` for per-element
+            // schema dispatch.
+            let mut elems: Vec<JsonValue> = Vec::with_capacity(buf.data.len());
+            for storage in buf.data.iter() {
+                elems.push(typed_object_to_json_value(
+                    storage.schema_id,
+                    &storage.slots,
+                    storage.heap_mask,
+                )?);
+            }
+            Ok(JsonValue::Array(elems))
+        }
+        TypedArrayData::TraitObject(_) => Err(
+            "TraitObject array JSON serialization deferred (needs per-vtable schema dispatch; ADR-006 §2.7.24 Q25.C)"
                 .into(),
         ),
     }

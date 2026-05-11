@@ -2881,7 +2881,10 @@ impl TypedArrayData {
             TypedArrayData::Char(_) => "Vec<char>",
             TypedArrayData::TypedObject(_) => "Vec<object>",
             TypedArrayData::TraitObject(_) => "Vec<dyn>",
-            TypedArrayData::HeapValue(_) => "Vec<heap>",
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
+            ),
             TypedArrayData::FloatSlice { .. } => "Vec<number>",
         }
     }
@@ -2911,7 +2914,10 @@ impl TypedArrayData {
             TypedArrayData::Char(a) => !a.is_empty(),
             TypedArrayData::TypedObject(a) => !a.is_empty(),
             TypedArrayData::TraitObject(a) => !a.is_empty(),
-            TypedArrayData::HeapValue(a) => !a.is_empty(),
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
+            ),
             TypedArrayData::FloatSlice { len, .. } => *len > 0,
         }
     }
@@ -3089,8 +3095,11 @@ impl TypedArrayData {
             // are heap-typed-Arc-element buffers whose write paths go
             // through dedicated per-arm typed entry-points (commit 2-3
             // wiring; commit 4 deletes the HeapValue arm).
-            TypedArrayData::HeapValue(_)
-            | TypedArrayData::FloatSlice { .. }
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
+            ),
+            TypedArrayData::FloatSlice { .. }
             | TypedArrayData::Matrix(_)
             | TypedArrayData::Decimal(_)
             | TypedArrayData::BigInt(_)
@@ -3236,16 +3245,10 @@ impl fmt::Display for TypedArrayData {
                 }
                 write!(f, "]")
             }
-            TypedArrayData::HeapValue(a) => {
-                write!(f, "Vec<heap>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
+            ),
             // ── ADR-006 §2.7.24 Q25.A specialized arms ──────────────────
             // W17-typed-carrier-bundle-A commit 1/4: Display impls per
             // arm matching the per-variant `HeapValue::*` Display shape.

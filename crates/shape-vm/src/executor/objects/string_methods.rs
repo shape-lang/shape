@@ -575,27 +575,33 @@ pub fn v2_string_join(
                     .to_string(),
             ));
         }
-        TypedArrayData::HeapValue(_) => {
-            return Err(VMError::NotImplemented(
-                "Array<heap>.join: heterogeneous-element join needs \
-                 per-element HeapValue display routing (Phase-2c — see \
-                 ADR-006 §2.7.4)"
-                    .to_string(),
-            ));
+        TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(buf) => {
+            buf.data.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(sep)
         }
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
+        TypedArrayData::BigInt(buf) => {
+            buf.data.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(sep)
+        }
+        TypedArrayData::Char(buf) => {
+            buf.data.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(sep)
+        }
+        TypedArrayData::DateTime(_)
         | TypedArrayData::Timespan(_)
         | TypedArrayData::Duration(_)
         | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
         | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-        ),
+        | TypedArrayData::TraitObject(_) => {
+            return Err(VMError::NotImplemented(format!(
+                "Array<{}>.join: per-element stringification needs the \
+                 kinded output-adapter — use .map(|x| x.toString()).join() \
+                 form (ADR-006 §2.7.4)",
+                arr_ref.type_name()
+            )));
+        }
     };
 
     Ok(string_result(joined))

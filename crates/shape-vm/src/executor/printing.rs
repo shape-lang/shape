@@ -31,6 +31,7 @@ use shape_value::heap_value::{
     HashMapData, HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
 };
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
+use std::sync::Arc;
 
 // Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
 // formatter consumers — keeps the post-§2.7.4 import path coherent for
@@ -635,30 +636,64 @@ impl<'a> ValueFormatter<'a> {
                     a.iter().map(|s| format!("\"{}\"", s.as_str())).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::HeapValue(buf) => {
-                // ADR-005 §1 single-discriminator: each element is an
-                // `Arc<HeapValue>` carried directly in the buffer; recurse
-                // through `HeapValue` match.
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
+            ),
+            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+            // Each formatter wraps the variant's element type via the
+            // matching HeapValue formatter so embedded types render
+            // consistently with their standalone forms.
+            TypedArrayData::Decimal(buf) => {
                 let elems: Vec<String> = buf
                     .data
                     .iter()
-                    .map(|hv| self.format_heap_value(hv.as_ref(), depth + 1))
+                    .map(|d| self.format_heap_value(&HeapValue::Decimal(Arc::clone(d)), depth + 1))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-            // No construction sites on this branch — surface-and-stop until commit 3.
-            TypedArrayData::Decimal(_)
-            | TypedArrayData::BigInt(_)
-            | TypedArrayData::DateTime(_)
-            | TypedArrayData::Timespan(_)
-            | TypedArrayData::Duration(_)
-            | TypedArrayData::Instant(_)
-            | TypedArrayData::Char(_)
-            | TypedArrayData::TypedObject(_)
-            | TypedArrayData::TraitObject(_) => unreachable!(
-                "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-            ),
+            TypedArrayData::BigInt(buf) => {
+                let elems: Vec<String> = buf.data.iter().map(|b| b.to_string()).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::DateTime(buf)
+            | TypedArrayData::Timespan(buf)
+            | TypedArrayData::Duration(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|td| self.format_heap_value(&HeapValue::Temporal(Arc::clone(td)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::Instant(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|inst| self.format_heap_value(&HeapValue::Instant(Arc::clone(inst)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::Char(buf) => {
+                let elems: Vec<String> = buf.data.iter().map(|c| format!("'{}'", c)).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::TypedObject(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|o| self.format_heap_value(&HeapValue::TypedObject(Arc::clone(o)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            TypedArrayData::TraitObject(buf) => {
+                let elems: Vec<String> = buf
+                    .data
+                    .iter()
+                    .map(|to| self.format_heap_value(&HeapValue::TraitObject(Arc::clone(to)), depth + 1))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
         }
     }
 

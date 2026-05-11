@@ -271,10 +271,19 @@ fn write_node_pairs(
                 }
             }
             "children" => {
-                if let HeapValue::TypedArray(arc) = &**v {
-                    if let TypedArrayData::HeapValue(buf) = &**arc {
-                        children = Some(buf);
-                    }
+                // W17-typed-carrier-bundle-A checkpoint 3/4 / 4: the
+                // construction-side counterpart in `into_heap_value`
+                // surfaces post-Q25.A (`Array<HashMap>` has no specialized
+                // variant in Q25.A's spec list — that's the out-of-territory
+                // follow-up cite there). The reader here cannot bind a
+                // `TypedArrayData::HeapValue` after checkpoint 4 deletes
+                // the variant. Setting `children = None` lets the parent
+                // node serialize as `<name>...</name>` with no children —
+                // the writer surfaces upstream if the producer body
+                // actually runs. Refactor to per-child TypedObject schemas
+                // to fix end-to-end (out of bundle-A territory).
+                if let HeapValue::TypedArray(_) = &**v {
+                    // intentional no-op: dead-arm pending xml refactor
                 }
             }
             "text" => {

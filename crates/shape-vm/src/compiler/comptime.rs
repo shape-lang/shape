@@ -996,29 +996,22 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         U64(b) => b.data.len(),
         F32(b) => b.data.len(),
         String(b) => b.data.len(),
-        // TypedArrayData::HeapValue is the unmonomorphized carrier; see
-        // ADR-006 §2.7.24 Q25.A — the W17-typed-carrier-monomorphization
-        // sub-cluster (parallel-dispatched with C2) deletes this arm and
-        // replaces it with specialized per-type variants. Comptime
-        // territory uses it for arrays of TypedObjects (annotation
-        // metadata round-trip). If Q25.A lands first, the readback
-        // rewires onto the specialized arm. Flagged in C2 close report.
-        HeapValue(b) => b.data.len(),
+        HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
         Matrix(m) => m.data.len(),
         FloatSlice { len, .. } => *len as usize,
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-        ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(b) => b.data.len(),
+        TypedArrayData::BigInt(b) => b.data.len(),
+        TypedArrayData::DateTime(b) => b.data.len(),
+        TypedArrayData::Timespan(b) => b.data.len(),
+        TypedArrayData::Duration(b) => b.data.len(),
+        TypedArrayData::Instant(b) => b.data.len(),
+        TypedArrayData::Char(b) => b.data.len(),
+        TypedArrayData::TypedObject(b) => b.data.len(),
+        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -1054,57 +1047,37 @@ fn typed_array_element_kinded(
             KindedSlot::from_number(parent.data[*offset as usize + idx])
         }
         String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        HeapValue(b) => {
-            // Per-element dispatch through HeapValue (ADR-005 §1
-            // single-discriminator). Mirror of
-            // `array_aggregation::element_kinded`'s `TypedArrayData::HeapValue`
-            // arm.
-            match b.data[idx].as_ref() {
-                shape_value::heap_value::HeapValue::String(s) => {
-                    KindedSlot::from_string_arc(Arc::clone(s))
-                }
-                shape_value::heap_value::HeapValue::TypedArray(a) => {
-                    KindedSlot::from_typed_array(Arc::clone(a))
-                }
-                shape_value::heap_value::HeapValue::TypedObject(o) => {
-                    KindedSlot::from_typed_object(Arc::clone(o))
-                }
-                shape_value::heap_value::HeapValue::HashMap(m) => {
-                    KindedSlot::from_hashmap(Arc::clone(m))
-                }
-                shape_value::heap_value::HeapValue::Decimal(d) => {
-                    KindedSlot::from_decimal(Arc::clone(d))
-                }
-                shape_value::heap_value::HeapValue::BigInt(bi) => {
-                    KindedSlot::from_bigint(Arc::clone(bi))
-                }
-                shape_value::heap_value::HeapValue::Char(c) => KindedSlot::from_char(*c),
-                other => {
-                    return Err(format!(
-                        "comptime literal: heterogeneous array element \
-                         kind {:?} has no kinded per-element constructor \
-                         — ADR-006 §2.7.4 / §2.7.6 Q8 follow-up",
-                        other.kind()
-                    ));
-                }
-            }
-        }
+        HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
         Matrix(_) => {
             return Err("comptime literal: Matrix arrays not yet supported".to_string());
         }
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-        ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
+        TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
+        TypedArrayData::DateTime(b)
+        | TypedArrayData::Timespan(b)
+        | TypedArrayData::Duration(b) => {
+            let arc = Arc::clone(&b.data[idx]);
+            let bits = Arc::into_raw(arc) as u64;
+            KindedSlot::new(
+                shape_value::ValueSlot::from_raw(bits),
+                shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal),
+            )
+        }
+        TypedArrayData::Instant(b) => {
+            let arc = Arc::clone(&b.data[idx]);
+            let bits = Arc::into_raw(arc) as u64;
+            KindedSlot::new(
+                shape_value::ValueSlot::from_raw(bits),
+                shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant),
+            )
+        }
+        TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
+        TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object(Arc::clone(&b.data[idx])),
+        TypedArrayData::TraitObject(b) => KindedSlot::from_trait_object(Arc::clone(&b.data[idx])),
     })
 }
 

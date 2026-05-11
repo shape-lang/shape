@@ -534,9 +534,17 @@ impl VirtualMachine {
                             TypedArrayData::Matrix(_) => {
                                 method_registry::MATRIX_METHODS.get(method_name).copied()
                             }
-                            TypedArrayData::String(_) | TypedArrayData::HeapValue(_) => None,
-                            // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-                            // No construction sites on this branch — surface-and-stop until commit 3.
+                            TypedArrayData::String(_) => None,
+                            TypedArrayData::HeapValue(_) => unreachable!(
+                                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue \
+                                 has no production callers post-checkpoint 2"
+                            ),
+                            // W17-typed-carrier-bundle-A checkpoint 3/4:
+                            // Q25.A specialized arms — no per-element-type
+                            // PHF table (Decimal/BigInt arrays use the
+                            // generic ARRAY_METHODS fallback below). The
+                            // None return falls through to the .or_else
+                            // ARRAY_METHODS lookup.
                             TypedArrayData::Decimal(_)
                             | TypedArrayData::BigInt(_)
                             | TypedArrayData::DateTime(_)
@@ -545,9 +553,7 @@ impl VirtualMachine {
                             | TypedArrayData::Instant(_)
                             | TypedArrayData::Char(_)
                             | TypedArrayData::TypedObject(_)
-                            | TypedArrayData::TraitObject(_) => unreachable!(
-                                "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-                            ),
+                            | TypedArrayData::TraitObject(_) => None,
                         },
                         _ => None,
                     };

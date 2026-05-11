@@ -99,6 +99,11 @@ fn test_hashmap_entries_are_pairs() {
 }
 
 /// Verifies entry pair contents.
+///
+/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.entries()` returns
+/// `Array<Entry<K,V>>` where Entry is a TypedObject `{key, value}` per
+/// ADR-006 §2.7.24 Q25.A's C+ resolution. Previously `entry[0]` /
+/// `entry[1]`; now `entry.key` / `entry.value`. Breaking change.
 #[test]
 fn test_hashmap_entries_pair_values() {
     ShapeTest::new(
@@ -106,8 +111,8 @@ fn test_hashmap_entries_pair_values() {
         let m = HashMap().set("only", 42)
         let e = m.entries()
         let pair = e[0]
-        print(pair[0])
-        print(pair[1])
+        print(pair.key)
+        print(pair.value)
     }"#,
     )
     .expect_run_ok()
@@ -592,6 +597,11 @@ fn test_hashmap_to_array_produces_pairs() {
 }
 
 /// Verifies toArray pair content.
+///
+/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.toArray()` is an
+/// alias for `entries()` — returns `Array<Entry<K,V>>` (TypedObject
+/// `{key, value}`) per the C+ resolution. Was `pair[0]` / `pair[1]`,
+/// now `pair.key` / `pair.value`.
 #[test]
 fn test_hashmap_to_array_pair_content() {
     ShapeTest::new(
@@ -599,8 +609,8 @@ fn test_hashmap_to_array_pair_content() {
         let m = HashMap().set("key", 99)
         let arr = m.toArray()
         let pair = arr[0]
-        print(pair[0])
-        print(pair[1])
+        print(pair.key)
+        print(pair.value)
     }"#,
     )
     .expect_run_ok()

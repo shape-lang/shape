@@ -479,20 +479,20 @@ impl VirtualMachine {
                     TypedArrayData::Matrix(m) => m.data.len(),
                     TypedArrayData::FloatSlice { len, .. } => *len as usize,
                     TypedArrayData::String(buf) => buf.data.len(),
-                    TypedArrayData::HeapValue(buf) => buf.data.len(),
-                    // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-                    // No construction sites on this branch — surface-and-stop until commit 3.
-                    TypedArrayData::Decimal(_)
-                    | TypedArrayData::BigInt(_)
-                    | TypedArrayData::DateTime(_)
-                    | TypedArrayData::Timespan(_)
-                    | TypedArrayData::Duration(_)
-                    | TypedArrayData::Instant(_)
-                    | TypedArrayData::Char(_)
-                    | TypedArrayData::TypedObject(_)
-                    | TypedArrayData::TraitObject(_) => unreachable!(
-                        "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+                    TypedArrayData::HeapValue(_) => unreachable!(
+                        "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has \
+                         no production callers post-checkpoint 2"
                     ),
+                    // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+                    TypedArrayData::Decimal(b) => b.data.len(),
+                    TypedArrayData::BigInt(b) => b.data.len(),
+                    TypedArrayData::DateTime(b) => b.data.len(),
+                    TypedArrayData::Timespan(b) => b.data.len(),
+                    TypedArrayData::Duration(b) => b.data.len(),
+                    TypedArrayData::Instant(b) => b.data.len(),
+                    TypedArrayData::Char(b) => b.data.len(),
+                    TypedArrayData::TypedObject(b) => b.data.len(),
+                    TypedArrayData::TraitObject(b) => b.data.len(),
                 };
                 let _ = Arc::into_raw(arc);
                 len

@@ -211,22 +211,22 @@ impl VirtualMachine {
                             TypedArrayData::U64(a) => a.len(),
                             TypedArrayData::F32(a) => a.len(),
                             TypedArrayData::String(a) => a.len(),
-                            TypedArrayData::HeapValue(a) => a.len(),
+                            TypedArrayData::HeapValue(_) => unreachable!(
+                                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue \
+                                 has no production callers post-checkpoint 2"
+                            ),
                             TypedArrayData::FloatSlice { len, .. } => *len as usize,
                             TypedArrayData::Matrix(m) => m.data.len(),
-                            // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-                            // No construction sites on this branch — surface-and-stop until commit 3.
-                            TypedArrayData::Decimal(_)
-                            | TypedArrayData::BigInt(_)
-                            | TypedArrayData::DateTime(_)
-                            | TypedArrayData::Timespan(_)
-                            | TypedArrayData::Duration(_)
-                            | TypedArrayData::Instant(_)
-                            | TypedArrayData::Char(_)
-                            | TypedArrayData::TypedObject(_)
-                            | TypedArrayData::TraitObject(_) => unreachable!(
-                                "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-                            ),
+                            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+                            TypedArrayData::Decimal(b) => b.len(),
+                            TypedArrayData::BigInt(b) => b.len(),
+                            TypedArrayData::DateTime(b) => b.len(),
+                            TypedArrayData::Timespan(b) => b.len(),
+                            TypedArrayData::Duration(b) => b.len(),
+                            TypedArrayData::Instant(b) => b.len(),
+                            TypedArrayData::Char(b) => b.len(),
+                            TypedArrayData::TypedObject(b) => b.len(),
+                            TypedArrayData::TraitObject(b) => b.len(),
                         };
                         Ok(idx < 0 || idx as usize >= len)
                     }
@@ -528,29 +528,61 @@ impl VirtualMachine {
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
-            // Polymorphic Arc<HeapValue> buffer — element kind cannot be
-            // determined without inspecting each element's HeapValue arm,
-            // and the kinded element redesign is phase-2c. Surface per
-            // playbook §7 #4 + §2.7.4.
-            TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-                "op_iter_next SURFACE: TypedArrayData::HeapValue (Arc<HeapValue> \
-                 polymorphic element buffer) — phase-2c, see ADR-006 §2.7.4 \
-                 (per-element kinded carrier pending)"
-                    .to_string(),
-            )),
-            // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-            // No construction sites on this branch — surface-and-stop until commit 3.
-            TypedArrayData::Decimal(_)
-            | TypedArrayData::BigInt(_)
-            | TypedArrayData::DateTime(_)
-            | TypedArrayData::Timespan(_)
-            | TypedArrayData::Duration(_)
-            | TypedArrayData::Instant(_)
-            | TypedArrayData::Char(_)
-            | TypedArrayData::TypedObject(_)
-            | TypedArrayData::TraitObject(_) => unreachable!(
-                "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+            TypedArrayData::HeapValue(_) => unreachable!(
+                "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+                 production callers post-checkpoint 2"
             ),
+            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+            // Bump the element Arc share before push so the carrier owns
+            // an independent strong-count that retires via drop_with_kind.
+            TypedArrayData::Decimal(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::BigInt(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::DateTime(a) | TypedArrayData::Timespan(a) | TypedArrayData::Duration(a) => {
+                match a.get(u) {
+                    Some(arc) => {
+                        let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                        vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal))
+                    }
+                    None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+                }
+            }
+            TypedArrayData::Instant(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::Char(a) => match a.get(u) {
+                Some(&c) => vm.push_kinded(c as u32 as u64, NativeKind::Ptr(shape_value::heap_value::HeapKind::Char)),
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::TypedObject(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
+            TypedArrayData::TraitObject(a) => match a.get(u) {
+                Some(arc) => {
+                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TraitObject))
+                }
+                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
+            },
         }
     }
 }

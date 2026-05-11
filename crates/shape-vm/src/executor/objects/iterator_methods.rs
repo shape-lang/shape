@@ -191,22 +191,22 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::HeapValue(b) => b.data.len(),
+        TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
-        ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(b) => b.data.len(),
+        TypedArrayData::BigInt(b) => b.data.len(),
+        TypedArrayData::DateTime(b) => b.data.len(),
+        TypedArrayData::Timespan(b) => b.data.len(),
+        TypedArrayData::Duration(b) => b.data.len(),
+        TypedArrayData::Instant(b) => b.data.len(),
+        TypedArrayData::Char(b) => b.data.len(),
+        TypedArrayData::TypedObject(b) => b.data.len(),
+        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -234,27 +234,39 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
             Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
         }
         TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
-        TypedArrayData::HeapValue(_) => Err(VMError::NotImplemented(
-            "iter over Array<heap> — SURFACE: per-element NativeKind needs \
-             to be sourced from a per-element parallel-kind track that \
-             does not yet exist on `TypedArrayData::HeapValue` (ADR-006 \
-             §2.7.4)."
-                .into(),
-        )),
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
-        // No construction sites on this branch — surface-and-stop until commit 3.
-        TypedArrayData::Decimal(_)
-        | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => unreachable!(
-            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
         ),
+        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
+        TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::DateTime(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Timespan(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Duration(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Instant(buf) => Ok(kinded_from_instant_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
+        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
+}
+
+#[inline]
+fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::Temporal),
+    )
+}
+
+#[inline]
+fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
+    let bits = Arc::into_raw(arc) as u64;
+    KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::Instant),
+    )
 }
 
 /// Read codepoint `idx` from a string source as a single-character

@@ -471,15 +471,16 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::HeapValue(buf) => buf.data.clone(),
-                    other => panic!(
-                        "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                         not HeapValue. Body's parameter type Vec<Arc<HeapValue>> requires the \
-                         HeapValue element-width variant. Marshal kind contract violated by caller.",
-                        other.type_name()
-                    ),
-                },
+                shape_value::HeapValue::TypedArray(arc) => {
+                    // W17-typed-carrier-bundle-A checkpoint 3/4: the
+                    // prior `TypedArrayData::HeapValue` carrier is
+                    // deleted. Reading `Vec<Arc<HeapValue>>` from a
+                    // strict-typed buffer requires re-wrapping each
+                    // typed element back into a `HeapValue::*` arm —
+                    // mirror of the construction-side dispatcher in
+                    // `TypedArrayData::build_specialized_from_heap_arcs`.
+                    materialize_heap_arcs(&**arc)
+                }
                 other => panic!(
                     "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::{:?}, \
                      not TypedArray. Marshal kind contract violated by caller.",
@@ -487,6 +488,70 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
                 ),
             }
         }
+    }
+}
+
+/// W17-typed-carrier-bundle-A checkpoint 3/4: reverse of
+/// `TypedArrayData::build_specialized_from_heap_arcs` — given a
+/// strict-typed `TypedArrayData`, materialize each element as
+/// `Arc<HeapValue::*>` for callers that take `Vec<Arc<HeapValue>>`
+/// (legacy stdlib body signatures).
+fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_value::HeapValue>> {
+    use shape_value::heap_value::HeapValue;
+    use shape_value::TypedArrayData;
+    match arr {
+        TypedArrayData::String(buf) => buf
+            .data
+            .iter()
+            .map(|s| Arc::new(HeapValue::String(Arc::clone(s))))
+            .collect(),
+        TypedArrayData::Decimal(buf) => buf
+            .data
+            .iter()
+            .map(|d| Arc::new(HeapValue::Decimal(Arc::clone(d))))
+            .collect(),
+        TypedArrayData::BigInt(buf) => buf
+            .data
+            .iter()
+            .map(|b| Arc::new(HeapValue::BigInt(Arc::clone(b))))
+            .collect(),
+        TypedArrayData::DateTime(buf)
+        | TypedArrayData::Timespan(buf)
+        | TypedArrayData::Duration(buf) => buf
+            .data
+            .iter()
+            .map(|td| Arc::new(HeapValue::Temporal(Arc::clone(td))))
+            .collect(),
+        TypedArrayData::Instant(buf) => buf
+            .data
+            .iter()
+            .map(|inst| Arc::new(HeapValue::Instant(Arc::clone(inst))))
+            .collect(),
+        TypedArrayData::Char(buf) => buf
+            .data
+            .iter()
+            .map(|c| Arc::new(HeapValue::Char(*c)))
+            .collect(),
+        TypedArrayData::TypedObject(buf) => buf
+            .data
+            .iter()
+            .map(|o| Arc::new(HeapValue::TypedObject(Arc::clone(o))))
+            .collect(),
+        TypedArrayData::TraitObject(buf) => buf
+            .data
+            .iter()
+            .map(|t| Arc::new(HeapValue::TraitObject(Arc::clone(t))))
+            .collect(),
+        shape_value::TypedArrayData::HeapValue(_) => unreachable!(
+            "post-§2.7.24 Q25.A: TypedArrayData::HeapValue has no \
+             production callers post-checkpoint 2"
+        ),
+        other => panic!(
+            "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \
+             be re-wrapped to Vec<Arc<HeapValue>> (no matching HeapValue::* \
+             arm — body parameter type assumes a heap-element array)",
+            other.type_name()
+        ),
     }
 }
 
