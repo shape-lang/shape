@@ -45,6 +45,12 @@ use shape_value::{
 };
 use std::sync::Arc;
 
+use crate::executor::objects::array_transform::{
+    bump_closure_share, element_kinded as transform_element_kinded,
+    project_indices as transform_project_indices, typed_array_arc_from_kinded,
+    typed_array_len as transform_typed_array_len,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Local helpers — no shim usage; pure dispatch on `TypedArrayData` variants.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -515,39 +521,124 @@ pub(crate) fn handle_distinct_v2(
     handle_unique_v2(vm, args, ctx)
 }
 
+/// Test whether two `KindedSlot` keys are equal under strict typing.
+/// Heterogeneous kinds always compare unequal; same-kind comparison
+/// dispatches on `NativeKind` per the §2.7.6 / Q8 heterogeneous-kind
+/// body pattern (mirrors `cmp_key_kinded` in `array_sort.rs`).
+fn key_eq(a: &KindedSlot, b: &KindedSlot) -> Result<bool, VMError> {
+    if a.kind != b.kind {
+        // Strict typing: no implicit promotion. Different-kind keys are
+        // never equal (matches the IEEE 754 NaN != NaN convention used
+        // elsewhere in the dedup pass — `already_seen`).
+        return Ok(false);
+    }
+    Ok(match a.kind {
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize => (a.slot.raw() as i64) == (b.slot.raw() as i64),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => a.slot.raw() == b.slot.raw(),
+        // IEEE 754 semantics: NaN never compares equal — `==` on f64
+        // matches the pre-Wave-6 set-op behaviour.
+        NativeKind::Float64 => a.slot.as_f64() == b.slot.as_f64(),
+        NativeKind::Bool => a.slot.as_bool() == b.slot.as_bool(),
+        NativeKind::String => {
+            let sa = a.as_str().unwrap_or("");
+            let sb = b.as_str().unwrap_or("");
+            sa == sb
+        }
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "distinctBy: key equality for kind {:?} — SURFACE: only \
+                 inline-scalar / String key kinds dispatched in \
+                 W17-array-closure-callback. Heap-typed keys (Decimal, \
+                 BigInt, ...) need an ADR-006 §2.7.6 / Q8 per-kind \
+                 equality table; Phase-2c reentry.",
+                other
+            )));
+        }
+    })
+}
+
 /// v2 `distinctBy` — deduplicate by a key function (order-preserving).
 ///
 /// args: [array, key_fn]
 ///
-/// **SURFACE — `op_make_closure` upstream gate.** Per playbook §7.4
-/// REVISED, the kinded value-call path (`call_value_immediate_nb` in
-/// `call_convention.rs:767`, `dispatch_call_value_immediate` in
-/// `control_flow/mod.rs:389`) is live post-W7 (ADR-006 §2.7.11 / Q12).
-/// The upstream gate is `op_make_closure` in
-/// `control_flow/mod.rs:447`, still
-/// `NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE)` pending the kinded
-/// capture-read + closure-block construction rebuild (ADR-006 §2.7.4 /
-/// §2.7.5 / §2.7.8). Without it, no user `key_fn` `KindedSlot` carrier
-/// reaches `args[1]`. The body shape would otherwise mirror
-/// `handle_unique_v2` with a per-element `key_fn(elem)` callback driving
-/// a stable dedup over computed keys.
+/// W17-array-closure-callback: body filled now that `op_make_closure`
+/// (W17-make-closure close `aa47364`) and `call_value_immediate_nb`
+/// (W7 close `06cdfce`, ADR-006 §2.7.11 / Q12) are both live. Mirrors
+/// `handle_unique_v2`'s order-preserving dedup, but the equality probe
+/// runs on `key_fn(elem)` keys rather than on element identity. The
+/// keys are computed up-front in a single closure-callback pass; the
+/// dedup then walks the cached keys to build a kept-index permutation,
+/// which `array_transform::project_indices` materializes against the
+/// receiver to produce the result `TypedArrayData` of the same arm.
 pub(crate) fn handle_distinct_by_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "distinctBy — SURFACE: op_make_closure upstream gate. \
-         The kinded MethodFnV2 ABI landed (ADR-006 §2.7.10 / Q11), \
-         and the kinded value-call path `call_value_immediate_nb` / \
-         `dispatch_call_value_immediate` is live post-W7 (ADR-006 \
-         §2.7.11 / Q12). The upstream gate is `op_make_closure` in \
-         executor/control_flow/mod.rs:447, still \
-         NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE) per ADR-006 \
-         §2.7.4 / §2.7.5 / §2.7.8 — without it no user closure \
-         KindedSlot reaches args[1]. Body shape would mirror \
-         handle_unique_v2 with a per-element `key_fn(elem)` callback \
-         driving a stable dedup over computed keys."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(type_error(
+            "distinctBy() requires 2 arguments (array, key_fn)",
+        ));
+    }
+    // Receiver: accept both array carriers (heap-Arc + v2 raw-pointer)
+    // via the shared helper. The returned Arc is an independent share —
+    // safe to use across `call_value_immediate_nb`.
+    let receiver_arc: Arc<TypedArrayData> = typed_array_arc_from_kinded(&args[0], "distinctBy")?;
+
+    // Validate the closure callee kind. Same shape as
+    // `array_query::closure_arg`; only Closure / function-ref accepted.
+    let closure = match args[1].kind {
+        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => &args[1],
+        other => {
+            return Err(type_error(format!(
+                "distinctBy: key function must be a closure or function ref, got kind {:?}",
+                other
+            )));
+        }
+    };
+
+    let len = transform_typed_array_len(&receiver_arc);
+
+    // Compute one key per element via the closure callback. Each call
+    // bumps the closure share because the frame teardown's
+    // `drop_with_kind(closure_heap_bits, ...)` would otherwise consume
+    // the dispatch-shell-owned share, leaving the carrier dangling on
+    // subsequent iterations. Same pattern as `array_sort.rs::sort_by_key_fn`.
+    let mut keys: Vec<KindedSlot> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = transform_element_kinded(&receiver_arc, i)?;
+        bump_closure_share(closure);
+        let key = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        keys.push(key);
+    }
+
+    // Order-preserving dedup: walk indices, keep the first occurrence
+    // of each key. O(n^2) on the kept-set size — matches the existing
+    // `unique_indices` pattern; a hash-keyed variant would require a
+    // per-NativeKind hasher matrix and is deferred to the
+    // §2.7.6/Q8 follow-up.
+    let mut keep_idxs: Vec<usize> = Vec::with_capacity(len);
+    for i in 0..len {
+        let mut already = false;
+        for &j in keep_idxs.iter() {
+            if key_eq(&keys[i], &keys[j])? {
+                already = true;
+                break;
+            }
+        }
+        if !already {
+            keep_idxs.push(i);
+        }
+    }
+
+    let out = transform_project_indices(&receiver_arc, &keep_idxs)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
