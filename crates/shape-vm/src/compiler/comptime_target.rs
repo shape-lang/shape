@@ -17,6 +17,9 @@ pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_value::KindedSlot;
+use shape_value::heap_value::{HeapValue, TypedArrayData};
+use shape_value::typed_buffer::TypedBuffer;
+use std::sync::Arc;
 
 /// Check if a type string looks like `Option<T>` or `T?`.
 fn is_option_type(type_str: &str) -> bool {
@@ -187,24 +190,168 @@ impl ComptimeTarget {
     ///   the comptime-rebuild surface and is deferred to Phase 2c (per
     ///   playbook §7 #4).
     ///
-    /// Until Phase 2c lands, `to_nanboxed` panics rather than emitting a
-    /// placeholder TypedObject that would silently drop `optional` flags,
-    /// `field_annotations`, or `captures` — comptime annotation handlers
-    /// rely on these for AI-first metadata propagation, so partial output
-    /// would corrupt downstream `@ai`/`@description`/`@range` resolution.
+    /// Phase-2c rebuild (C2-comptime-rebuild): the kinded replacement uses
+    /// `typed_object_from_pairs(&[(&str, KindedSlot)])` per ADR-006 §2.4
+    /// (the per-FieldType constructor surface). Sub-arrays of string-typed
+    /// elements use `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`.
+    /// Sub-arrays whose elements are themselves TypedObjects (the per-field
+    /// `{name,type,annotations,optional}` rows, per-param rows, and
+    /// per-annotation `{name,args}` rows) use
+    /// `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` —
+    /// noting that this is the unmonomorphized carrier shape; the
+    /// W17-typed-carrier-monomorphization sub-cluster is parallel-
+    /// dispatched and will delete `TypedArrayData::HeapValue` per
+    /// ADR-006 §2.7.24 Q25.A. If that cluster lands first, this site
+    /// rewires onto the specialized `TypedArrayData::TypedObject` arm; the
+    /// territory is flagged in the C2 close report so the supervisor can
+    /// verify lockstep.
     pub fn to_nanboxed(&self) -> KindedSlot {
-        let _ = (
-            &self.kind,
-            &self.name,
-            &self.fields,
-            &self.params,
-            &self.return_type,
-            &self.annotations,
-            &self.captures,
-            is_option_type as fn(&str) -> bool,
-            unwrap_option_type as fn(&str) -> String,
-        );
-        todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
+        use shape_runtime::type_schema::{
+            register_predeclared_any_schema, typed_object_from_pairs,
+        };
+
+        let nb_str = |s: &str| KindedSlot::from_string_arc(Arc::new(s.to_string()));
+        let nb_string = |s: String| KindedSlot::from_string_arc(Arc::new(s));
+        let ensure_schema = |names: &[&str]| {
+            let field_names: Vec<String> =
+                names.iter().map(|name| (*name).to_string()).collect();
+            let _ = register_predeclared_any_schema(&field_names);
+        };
+
+        // Pre-register the field schemas used below so
+        // `typed_object_from_pairs` can resolve them.
+        ensure_schema(&["name", "args"]);
+        ensure_schema(&["name", "type", "const"]);
+        ensure_schema(&["name", "type", "annotations", "optional"]);
+        ensure_schema(&[
+            "kind",
+            "name",
+            "fields",
+            "params",
+            "return_type",
+            "annotations",
+            "captures",
+        ]);
+
+        let kind_str = match self.kind {
+            AnnotationTargetKind::Function => "function",
+            AnnotationTargetKind::Type => "type",
+            AnnotationTargetKind::Module => "module",
+            AnnotationTargetKind::Expression => "expression",
+            AnnotationTargetKind::Block => "block",
+            AnnotationTargetKind::AwaitExpr => "await_expr",
+            AnnotationTargetKind::Binding => "binding",
+        };
+
+        // Build an array of string elements as a typed `Arc<String>`
+        // buffer (per-element kind = NativeKind::String, single
+        // specialized variant — no parallel kind track per ADR-006
+        // §2.7.24 Q25.A's sibling principle for arrays).
+        let nb_string_array = |strings: Vec<String>| -> KindedSlot {
+            let arcs: Vec<Arc<String>> =
+                strings.into_iter().map(Arc::new).collect();
+            let buf = TypedBuffer::from_vec(arcs);
+            KindedSlot::from_typed_array(Arc::new(TypedArrayData::String(Arc::new(buf))))
+        };
+
+        // Build an array of typed-object elements. The unmonomorphized
+        // carrier today is `TypedArrayData::HeapValue` (the W17-typed-
+        // carrier-monomorphization sub-cluster will swap this for the
+        // specialized `TypedArrayData::TypedObject` arm per
+        // ADR-006 §2.7.24 Q25.A; flagged in the C2 close report).
+        let nb_object_array = |objs: Vec<KindedSlot>| -> KindedSlot {
+            let mut elems: Vec<Arc<HeapValue>> = Vec::with_capacity(objs.len());
+            for obj in objs {
+                let obj_slot = obj.slot();
+                let hv = obj_slot.as_heap_value();
+                let storage = match hv {
+                    HeapValue::TypedObject(s) => Arc::clone(s),
+                    other => panic!(
+                        "ComptimeTarget::to_nanboxed: nested object element \
+                         is not a TypedObject: {:?}",
+                        other.kind()
+                    ),
+                };
+                // `obj` Drop will retire its strong-count share; we
+                // cloned the inner Arc above, so the HeapValue wrapper
+                // owns one independent share.
+                drop(obj);
+                elems.push(Arc::new(HeapValue::TypedObject(storage)));
+            }
+            let buf = TypedBuffer::from_vec(elems);
+            KindedSlot::from_typed_array(Arc::new(TypedArrayData::HeapValue(Arc::new(buf))))
+        };
+
+        // fields: array of {name, type, annotations, optional} TypedObjects
+        let field_objs: Vec<KindedSlot> = self
+            .fields
+            .iter()
+            .map(|(fname, ftype, fanns)| {
+                // Each annotation becomes {name, args} where args is an
+                // array of stringified arg values.
+                let ann_objs: Vec<KindedSlot> = fanns
+                    .iter()
+                    .map(|(aname, aargs)| {
+                        let args_arr = nb_string_array(aargs.clone());
+                        typed_object_from_pairs(&[
+                            ("name", nb_string(aname.clone())),
+                            ("args", args_arr),
+                        ])
+                    })
+                    .collect();
+                let anns_arr = nb_object_array(ann_objs);
+                let is_optional = is_option_type(ftype);
+                let effective_type = if is_optional {
+                    unwrap_option_type(ftype)
+                } else {
+                    ftype.clone()
+                };
+                typed_object_from_pairs(&[
+                    ("name", nb_string(fname.clone())),
+                    ("type", nb_string(effective_type)),
+                    ("annotations", anns_arr),
+                    ("optional", KindedSlot::from_bool(is_optional)),
+                ])
+            })
+            .collect();
+        let fields_arr = nb_object_array(field_objs);
+
+        // params: array of {name, type, const} TypedObjects
+        let param_objs: Vec<KindedSlot> = self
+            .params
+            .iter()
+            .map(|(pname, ptype, is_const)| {
+                typed_object_from_pairs(&[
+                    ("name", nb_string(pname.clone())),
+                    ("type", nb_string(ptype.clone())),
+                    ("const", KindedSlot::from_bool(*is_const)),
+                ])
+            })
+            .collect();
+        let params_arr = nb_object_array(param_objs);
+
+        // return_type: optional string
+        let ret = self
+            .return_type
+            .as_ref()
+            .map(|r| nb_string(r.clone()))
+            .unwrap_or_else(KindedSlot::none);
+
+        // annotations: array of strings (names only)
+        let ann_arr = nb_string_array(self.annotations.clone());
+
+        // captures: array of strings (captured names)
+        let captures_arr = nb_string_array(self.captures.clone());
+
+        typed_object_from_pairs(&[
+            ("kind", nb_str(kind_str)),
+            ("name", nb_string(self.name.clone())),
+            ("fields", fields_arr),
+            ("params", params_arr),
+            ("return_type", ret),
+            ("annotations", ann_arr),
+            ("captures", captures_arr),
+        ])
     }
 }
 
