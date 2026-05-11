@@ -472,10 +472,15 @@ pub struct VirtualMachine {
     /// the `set_pending_resume` callback on `ModuleContext`. Consumed by the
     /// dispatch loop after the current instruction completes.
     ///
-    /// SURFACE (phase-2c): the snapshot subsystem (§2.7.4) is deferred —
-    /// `apply_pending_resume` is a `todo!("phase-2c")` stub. The carrier
-    /// is `Option<KindedSlot>` so callers thread the snapshot's
-    /// `NativeKind` through the rebuild boundary.
+    /// W17-snapshot-resume surface (§2.7.4 + §2.7.5.1): the snapshot
+    /// subsystem is deferred — `apply_pending_resume` returns a
+    /// structured `VMError::NotImplemented` carrying the
+    /// `PHASE_2C_SNAPSHOT_SURFACE` string (`executor/resume.rs:55`).
+    /// W17 retains the carrier shape `Option<KindedSlot>` so callers can
+    /// thread the snapshot's `NativeKind` through the rebuild boundary
+    /// when Phase-2c lands. Today the `.take()` on `apply_pending_resume`
+    /// releases the queued payload via `KindedSlot::Drop` dispatch even
+    /// though the resume itself surface-stops.
     pub(crate) pending_resume: Option<KindedSlot>,
 
     /// Pending single-frame resume data. Set by `state.resume_frame()` to

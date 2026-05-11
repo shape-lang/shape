@@ -1,6 +1,6 @@
 //! VM snapshot and restore for suspending/resuming execution.
 //!
-//! # Phase-2c deferral (ADR-006 §2.7.4)
+//! # W17-snapshot-resume surface (ADR-006 §2.7.4 + §2.7.5.1)
 //!
 //! `snapshot()` and `from_snapshot()` previously consumed the slot-(de)
 //! serialization helpers from `shape-runtime::snapshot` (and their `enum_*`
@@ -11,8 +11,11 @@
 //! session per ADR-006 §2.7.4**. The deferral is binding: papering over the
 //! gap with a placeholder serializer or a hand-rolled byte format would
 //! silently corrupt persisted state, which §2.7.4 forbids verbatim. Instead,
-//! both methods panic loudly via `todo!()` so the broken capability surfaces
-//! rather than masquerading as a working roundtrip.
+//! both methods return `VMError::NotImplemented` carrying a structured
+//! W17-snapshot-resume surface string (see [`w17_snapshot_surface`]); the
+//! prior `todo!()` macro-driven VM-thread abort is replaced with a
+//! recoverable runtime error so callers can detect the missing capability
+//! without crashing.
 //!
 //! `resolve_function_identity` is pure, value-tier-independent logic
 //! (operates only on `FunctionHash` / `Function` / IDs) and is kept
@@ -90,51 +93,67 @@ pub(crate) fn resolve_function_identity(
     ))
 }
 
+/// W17-snapshot-resume surface text for `VirtualMachine::snapshot()` /
+/// `VirtualMachine::from_snapshot()`. Both methods return
+/// `Result<..., VMError>`, so they return a structured
+/// `VMError::NotImplemented` rather than panicking — the strict
+/// improvement over the prior `todo!()` macros that aborted the VM
+/// thread on first invocation.
+fn w17_snapshot_surface(op: &str) -> String {
+    format!(
+        "VirtualMachine::{op}: W17-snapshot-resume surface — \
+         kind-threaded `slot_to_serializable(bits, kind, store)` / \
+         inverse `serializable_to_slot(sv, expected_kind, store)` \
+         replacement for the deleted `nanboxed_to_serializable` / \
+         `serializable_to_nanboxed` pair has not landed. The design \
+         must (a) project every `NativeKind::Ptr(HeapKind::*)` slot to a \
+         `SerializableVMValue` arm of the right shape via \
+         `slot.as_heap_value()` + `HeapValue::*` match (§2.7.6 Q8 \
+         carrier-API bound), (b) reconstruct the parallel kind tracks \
+         from the persisted discriminator on restore (§2.7.7 / §2.7.8), \
+         (c) extend `SerializableVMValue` for the post-W14/W15 \
+         HeapKinds that have no current wire-format arm: HashSet, \
+         Iterator, Result, Option, Deque, Channel, PriorityQueue, \
+         Range, Reference, FilterExpr, SharedCell — the §2.7.5.1 \
+         wire-format extension question. Tracked as W17-snapshot-resume \
+         per docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 \
+         §2.7.4 + §2.7.5.1.",
+    )
+}
+
 impl super::VirtualMachine {
     /// Create a serializable snapshot of VM state.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The pre-bulldozer
-    /// implementation walked the unified stack and module bindings via
-    /// deleted Wave-6.5-substep-1 raw-bits readers and passed each result
-    /// to the now-deleted runtime-side slot-serialization helpers. The
-    /// post-§2.7.7 replacement reads `(bits, kind)` from the parallel kind
-    /// tracks and dispatches a kind-threaded
-    /// `slot_to_serializable(bits, kind, store)`. That helper is part of
-    /// the §2.7.4-deferred Phase-2c snapshot rebuild — its design must
-    /// account for `HeapKind` payload variants (TypedArray, TypedObject,
-    /// HashMap, Decimal, BigInt, ...) that each need their own serialized
-    /// shape, and for upvalue capture state that depends on §2.7.8
-    /// cell-storage kind-awareness. Until that lands, this method panics
-    /// rather than emitting a placeholder serialization that would silently
-    /// corrupt persisted state on round-trip.
+    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
+    /// Returns `VMError::NotImplemented` until the kind-threaded
+    /// `slot_to_serializable` lands. See [`w17_snapshot_surface`] for
+    /// the structured error string.
     pub fn snapshot(
         &self,
         _store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<shape_runtime::snapshot::VmSnapshot, VMError> {
-        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
+        Err(VMError::NotImplemented(w17_snapshot_surface("snapshot")))
     }
 
     /// Restore a VM from a snapshot and bytecode program.
     ///
-    /// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** Symmetric to
-    /// `snapshot()`: the deleted runtime-side slot-deserialization helper
-    /// is replaced by a kind-threaded `serializable_to_slot(sv,
-    /// expected_kind, store) -> (u64, NativeKind)` that reconstructs the
-    /// parallel kind tracks from the persisted `SerializableVMValue`
-    /// discriminator. The design and consumer migration are Phase-2c scope
-    /// per ADR-006 §2.7.4. This method panics until the rebuild lands.
+    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
+    /// Symmetric to `snapshot()`: the deleted runtime-side
+    /// slot-deserialization helper is replaced by a kind-threaded
+    /// `serializable_to_slot(sv, expected_kind, store) -> (u64,
+    /// NativeKind)` that reconstructs the parallel kind tracks from the
+    /// persisted `SerializableVMValue` discriminator. B9-callframe-kind's
+    /// `CallFrame.closure_heap_kind: Option<NativeKind>` companion is
+    /// already in place to receive the threaded kind on the restore
+    /// side. Returns `VMError::NotImplemented` until that lands.
     pub fn from_snapshot(
         _program: crate::bytecode::BytecodeProgram,
         _snapshot: &shape_runtime::snapshot::VmSnapshot,
         _store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<Self, VMError> {
-        // The snapshot/restore body is deferred to Phase 2c per ADR-006
-        // §2.7.4. B9-callframe-kind's CallFrame.closure_heap_kind: Option<NativeKind>
-        // companion (added in this same merge round) will be threaded
-        // through the rebuild path when Phase 2c lands; for now the entire
-        // body panics until the snapshot rebuild is reimplemented against
-        // the kinded VM state.
-        todo!("phase-2c snapshot rebuild — see ADR-006 §2.7.4")
+        Err(VMError::NotImplemented(w17_snapshot_surface(
+            "from_snapshot",
+        )))
     }
 }
 
@@ -385,5 +404,43 @@ mod tests {
         assert!(snapshot.ip_blob_hash.is_none());
         assert!(snapshot.ip_local_offset.is_none());
         assert!(snapshot.ip_function_id.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // W17-snapshot-resume gate tests
+    // -----------------------------------------------------------------
+    //
+    // VM-level `snapshot()` / `from_snapshot()` return a structured
+    // `VMError::NotImplemented` carrying the W17 surface text, never
+    // the pre-W17 `todo!()` panic that would abort the VM thread.
+
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    use shape_runtime::snapshot::SnapshotStore;
+
+    #[test]
+    fn test_w17_vm_snapshot_returns_structured_error() {
+        let vm = VirtualMachine::new(VMConfig::default());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let result = vm.snapshot(&store);
+        let err = match result {
+            Ok(_) => panic!("expected Err(VMError::NotImplemented), got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("W17-snapshot-resume surface"),
+            "missing W17 marker; got: {msg}"
+        );
+        assert!(
+            msg.contains("§2.7.4"),
+            "missing ADR-006 §2.7.4 cite; got: {msg}"
+        );
+        assert!(
+            msg.contains("§2.7.5.1"),
+            "missing ADR-006 §2.7.5.1 cite; got: {msg}"
+        );
     }
 }

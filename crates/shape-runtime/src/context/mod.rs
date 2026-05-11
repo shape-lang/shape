@@ -442,13 +442,13 @@ impl ExecutionContext {
 
     /// Create a serializable snapshot of the dynamic execution state.
     ///
-    /// Per ADR-006 §2.7.4 (snapshot rebuild ruling), the kind-threaded
-    /// `slot_to_serializable(slot, store)` replacement for the deleted
-    /// `nanboxed_to_serializable` is deferred to a Phase 2c snapshot
-    /// rebuild session. Until that lands, taking a snapshot is a
-    /// known-broken capability — hand-rolled placeholder serializers
-    /// would silently corrupt persisted state, so the body
-    /// `todo!()`s rather than guess.
+    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
+    /// The kind-threaded `slot_to_serializable(slot, store)` replacement
+    /// for the deleted `nanboxed_to_serializable` is deferred to the
+    /// Phase 2c snapshot rebuild. W17 converts the previous `todo!()`
+    /// panic to a structured `anyhow!` error so the broken capability
+    /// surfaces as a runtime error rather than crashing the host
+    /// process.
     pub fn snapshot(&self, _store: &SnapshotStore) -> Result<ContextSnapshot> {
         let _ = (
             &self.variable_scopes,
@@ -460,19 +460,36 @@ impl ExecutionContext {
         let _: Option<SuspensionStateSnapshot> = None;
         let _: Option<TypeAliasRuntimeEntrySnapshot> = None;
         let _: Option<VariableSnapshot> = None;
-        todo!("phase-2c snapshot rebuild — see snapshot.rs:648 deferral")
+        Err(anyhow!(
+            "ExecutionContext::snapshot: W17-snapshot-resume surface — \
+             kind-threaded `slot_to_serializable(slot, store)` replacement \
+             for the deleted `nanboxed_to_serializable` has not landed. \
+             Tracked as W17-snapshot-resume per \
+             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
+             (snapshot serialization deferral) + §2.7.5.1 (post-proof \
+             wire-format shape for new HeapKinds: HashSet, Iterator, \
+             Result, Option, Deque, Channel, PriorityQueue, Range, \
+             Reference, FilterExpr, SharedCell)."
+        ))
     }
 
     /// Restore execution state from a snapshot.
     ///
-    /// See [`Self::snapshot`] — Phase 2c rebuild deferral.
+    /// See [`Self::snapshot`] — W17-snapshot-resume surface.
     pub fn restore_from_snapshot(
         &mut self,
         _snapshot: ContextSnapshot,
         _store: &SnapshotStore,
     ) -> Result<()> {
-        let _ = anyhow!("placeholder — replaced by Phase 2c rebuild");
-        todo!("phase-2c snapshot rebuild — see snapshot.rs:648 deferral")
+        Err(anyhow!(
+            "ExecutionContext::restore_from_snapshot: W17-snapshot-resume \
+             surface — symmetric to `snapshot()`. The kinded \
+             `serializable_to_slot(sv, expected_kind, store)` inverse \
+             reconstructs scope-binding parallel kind tracks from the \
+             persisted discriminator. Tracked as W17-snapshot-resume per \
+             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
+             + §2.7.5.1."
+        ))
     }
 
     /// Set indicator cache
@@ -714,5 +731,28 @@ mod tests {
         _atomic: AtomicUsize,
         _ordering: Ordering,
     ) {
+    }
+
+    /// W17-snapshot-resume gate: `ExecutionContext::snapshot` and
+    /// `ExecutionContext::restore_from_snapshot` both return a
+    /// structured `anyhow::Error` carrying the W17 surface marker,
+    /// never a `todo!()` panic that would abort the host process.
+    #[test]
+    fn test_w17_execution_context_snapshot_returns_structured_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let ctx = ExecutionContext::new_empty();
+
+        let result = ctx.snapshot(&store);
+        let err = result.expect_err("expected Err, got Ok");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("W17-snapshot-resume surface"),
+            "missing W17 marker; got: {msg}"
+        );
+        assert!(
+            msg.contains("§2.7.4"),
+            "missing ADR-006 §2.7.4 cite; got: {msg}"
+        );
     }
 }

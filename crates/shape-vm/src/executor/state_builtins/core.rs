@@ -1,23 +1,25 @@
 // Content-addressed VM state primitives (`std::state` module).
 //
-// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The body of every
-// `state.*` builtin in this module depended on the deleted `ValueWord`
-// type, the deleted `state_diff` runtime module (1486 LoC of
-// ValueWord-typed value-diff/patch logic), and the deleted
+// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
+// body of every `state.*` builtin in this module depended on the
+// deleted `ValueWord` type, the deleted `state_diff` runtime module
+// (1486 LoC of ValueWord-typed value-diff/patch logic), and the deleted
 // `nanboxed_to_serializable` / `serializable_to_nanboxed` snapshot
 // helpers. Per ADR-006 §2.7.4, snapshot serialization is deferred to a
 // Phase-2c rebuild session that can design a kind-threaded
-// `slot_to_serializable(bits, kind, store)` / inverse pair. Phase 1.B
-// surfaces the broken capability via `todo!("phase-2c —
-// state-snapshot rebuild — see ADR-006 §2.7.4")` rather than papering
-// over with placeholder serializers that would silently corrupt
-// persisted state on round-trip (CLAUDE.md "Forbidden
-// rationalizations" — placeholder serializer is forbidden by §2.7.4).
+// `slot_to_serializable(bits, kind, store)` / inverse pair. W17
+// converts the previous `todo!()`-driven VM-thread abort into a
+// structured `Err(String)` surface return so the broken capability
+// surfaces as a recoverable runtime error rather than crashing the VM.
+// Placeholder serializers stay forbidden per CLAUDE.md "Forbidden
+// rationalizations" (silent persisted-state corruption is the bug
+// §2.7.4 explicitly rules out).
 //
 // The module-construction surface (`create_state_module`) stays so the
 // `std::core::state` module continues to register with the runtime —
 // the schema metadata is consumable by tooling/LSP. The function
-// bodies all panic until the Phase-2c rebuild lands.
+// bodies all return W17 surface errors until the Phase-2c rebuild
+// lands.
 
 use super::introspection::{
     state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
@@ -36,10 +38,10 @@ use shape_value::KindedSlot;
 
 /// Create the `state` extension module with all content-addressed builtins.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The schemas and
-/// registration surface are intact so the module is discoverable; the
-/// per-function bodies panic via `todo!()` until the snapshot/diff
-/// rebuild lands.
+/// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
+/// schemas and registration surface are intact so the module is
+/// discoverable; the per-function bodies return structured W17 surface
+/// errors until the snapshot/diff rebuild lands.
 pub fn create_state_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::state");
     module.description = "Content-addressed VM state primitives".to_string();
@@ -353,22 +355,40 @@ pub fn create_state_module() -> ModuleExports {
 // Content addressing implementations
 // ===========================================================================
 //
-// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** Every body below
-// depended on the deleted `ValueWord` type, `state_diff` runtime
-// module, or `nanboxed_to_serializable` / `serializable_to_nanboxed`
+// **W17-snapshot-resume surface-and-stop — see ADR-006 §2.7.4 + §2.7.5.1.**
+// Every body below depended on the deleted `ValueWord` type, `state_diff`
+// runtime module, or `nanboxed_to_serializable` / `serializable_to_nanboxed`
 // snapshot helpers. The replacement design — a kind-threaded slot
 // content-hash + slot diff/patch + slot serialization triple, all
 // taking `(bits, kind)` or `KindedSlot` directly and dispatching on
-// `HeapKind` payload variants — is Phase-2c scope. Bodies panic via
-// `todo!()` until the rebuild lands so the broken capability surfaces
-// loudly rather than silently corrupting persisted state.
+// `HeapKind` payload variants — is Phase-2c scope. W17 converts the
+// previous `todo!()` panics to structured `Err(...)` returns so callers
+// observe a runtime error rather than a VM-thread abort.
+
+/// Common W17-snapshot-resume surface-and-stop message for the
+/// content-addressing / serialize / diff family. The `op` parameter
+/// names the specific stdlib function so the error message points the
+/// caller at the exact entry point.
+fn content_surface(op: &str) -> String {
+    format!(
+        "{op}: W17-snapshot-resume surface — kind-threaded \
+         slot_to_serializable / serializable_to_slot replacement for the \
+         deleted nanboxed_to_serializable / serializable_to_nanboxed \
+         pair has not landed; state.diff / state.patch additionally \
+         depend on the deleted 1486-LoC `state_diff` runtime module's \
+         kind-threaded rebuild. Tracked as W17-snapshot-resume per \
+         docs/cluster-audits/phase-2d-playbook.md §3. \
+         ADR-006 §2.7.4 (snapshot serialization deferral) + §2.7.5.1 \
+         (post-proof wire-format shape for new HeapKinds).",
+    )
+}
 
 /// `state.hash(value) -> string`
 pub(crate) fn state_hash(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.hash"))
 }
 
 /// `state.fn_hash(f) -> string`
@@ -376,7 +396,7 @@ pub(crate) fn state_fn_hash(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.fn_hash"))
 }
 
 /// `state.schema_hash(type_name) -> string`
@@ -384,7 +404,7 @@ pub(crate) fn state_schema_hash(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.schema_hash"))
 }
 
 // ===========================================================================
@@ -396,7 +416,7 @@ pub(crate) fn state_serialize(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.serialize"))
 }
 
 /// `state.deserialize(bytes) -> Any`
@@ -404,7 +424,7 @@ pub(crate) fn state_deserialize(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.deserialize"))
 }
 
 // ===========================================================================
@@ -416,7 +436,7 @@ pub(crate) fn state_diff(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.diff"))
 }
 
 /// `state.patch(base, delta) -> Any`
@@ -424,7 +444,7 @@ pub(crate) fn state_patch(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    todo!("phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4")
+    Err(content_surface("state.patch"))
 }
 
 #[cfg(test)]

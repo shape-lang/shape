@@ -119,6 +119,98 @@ fn test_state_patch_root_replacement_legacy_array() {}
 #[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
 fn test_state_diff_patch_roundtrip() {}
 
+/// W17-snapshot-resume gate test: every `state.*` body returns a
+/// structured `Err(...)` carrying the W17 surface text, never a
+/// `todo!()` panic that would abort the VM thread.
+///
+/// The pre-W17 bodies were `todo!()` macros; this test would have
+/// aborted the test process. Post-W17 they return `Err(String)` with
+/// a structured surface message — this test exercises every entry
+/// point in `state_builtins/introspection.rs` and the content/serialize/
+/// diff family in `state_builtins/core.rs` and asserts that:
+///   (a) the call returns `Err(_)` rather than panicking, and
+///   (b) the error message carries the W17 surface marker so audit
+///       trails can locate the deferral.
+#[test]
+fn test_w17_state_bodies_return_structured_errors() {
+    use crate::executor::state_builtins::core::{
+        state_deserialize, state_diff, state_fn_hash, state_hash, state_patch,
+        state_schema_hash, state_serialize,
+    };
+    use crate::executor::state_builtins::introspection::{
+        state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
+        state_capture_module_stub, state_capture_stub, state_locals_stub,
+        state_resume_frame_stub, state_resume_stub,
+    };
+    use shape_runtime::module_exports::ModuleContext;
+    use shape_runtime::type_schema::TypeSchemaRegistry;
+
+    let schemas = TypeSchemaRegistry::default();
+    let ctx = ModuleContext {
+        schemas: &schemas,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: None,
+        scope_constraints: None,
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+
+    // Every state body returns Err(String) with the W17 marker. We
+    // pass an empty slot slice — none of these bodies actually inspect
+    // their args, they surface-stop immediately.
+    let empty_args: &[shape_value::KindedSlot] = &[];
+
+    let fixtures: &[(
+        &str,
+        fn(
+            &[shape_value::KindedSlot],
+            &ModuleContext,
+        ) -> Result<
+            shape_runtime::typed_module_exports::TypedReturn,
+            String,
+        >,
+    )] = &[
+        ("state.capture", state_capture_stub),
+        ("state.capture_all", state_capture_all_stub),
+        ("state.capture_module", state_capture_module_stub),
+        ("state.capture_call", state_capture_call_stub),
+        ("state.resume", state_resume_stub),
+        ("state.resume_frame", state_resume_frame_stub),
+        ("state.caller", state_caller_stub),
+        ("state.args", state_args_stub),
+        ("state.locals", state_locals_stub),
+        ("state.hash", state_hash),
+        ("state.fn_hash", state_fn_hash),
+        ("state.schema_hash", state_schema_hash),
+        ("state.serialize", state_serialize),
+        ("state.deserialize", state_deserialize),
+        ("state.diff", state_diff),
+        ("state.patch", state_patch),
+    ];
+
+    for (name, body) in fixtures {
+        let result = body(empty_args, &ctx);
+        let err = result.as_ref().err().unwrap_or_else(|| {
+            panic!(
+                "{name}: expected Err(...) surface, got Ok(...) — W17 \
+                 surface-and-stop expects every state.* body to return \
+                 a structured error until Phase-2c rebuild lands"
+            )
+        });
+        assert!(
+            err.contains("W17-snapshot-resume surface"),
+            "{name}: error message missing W17 surface marker; got: {err}"
+        );
+        assert!(
+            err.contains("§2.7.4"),
+            "{name}: error message missing ADR-006 §2.7.4 cite; got: {err}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
 fn test_capture_stubs_return_errors() {}

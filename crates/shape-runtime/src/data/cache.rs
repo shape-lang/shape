@@ -442,12 +442,13 @@ impl DataCache {
 
     /// Create a snapshot of the data cache (historical + live buffers).
     ///
-    /// Per ADR-006 §2.7.4 (snapshot rebuild ruling), the DataFrame
-    /// (de)serializers were deleted alongside the broader nanboxed-slot
-    /// snapshot helpers. The kind-threaded replacement lands in the
-    /// Phase 2c snapshot rebuild session; until then, snapshotting the
-    /// data cache `todo!()`s rather than emit a placeholder serializer
-    /// that silently corrupts persisted rows.
+    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
+    /// The DataFrame (de)serializers were deleted alongside the broader
+    /// nanboxed-slot snapshot helpers. The kind-threaded replacement
+    /// lands in the Phase 2c snapshot rebuild session; until then, this
+    /// method returns a structured `anyhow!` error rather than panicking
+    /// via `todo!()` (the strict improvement over a `todo!()`-driven
+    /// process abort).
     pub fn snapshot(&self, store: &SnapshotStore) -> AnyResult<DataCacheSnapshot> {
         let _ = (
             store,
@@ -459,19 +460,36 @@ impl DataCache {
         let _: Option<CachedDataSnapshot> = None;
         let _: Option<LiveBufferSnapshot> = None;
         let _ = store_chunked_vec::<u8>;
-        todo!("phase-2c snapshot rebuild — see snapshot.rs:648 deferral")
+        anyhow::bail!(
+            "DataCache::snapshot: W17-snapshot-resume surface — \
+             DataFrame / cached-row (de)serializers were deleted alongside \
+             the kind-threaded `slot_to_serializable` rebuild. The kinded \
+             replacement uses `store_chunked_vec` over the parallel \
+             (bits, NativeKind) per-row track. Tracked as \
+             W17-snapshot-resume per docs/cluster-audits/phase-2d-playbook.md §3. \
+             ADR-006 §2.7.4 (snapshot serialization deferral) + §2.7.5.1 \
+             (post-proof wire-format shape for new HeapKinds).",
+        );
     }
 
     /// Restore data cache contents from a snapshot.
     ///
-    /// See [`Self::snapshot`] — Phase 2c rebuild deferral.
+    /// See [`Self::snapshot`] — W17-snapshot-resume surface.
     pub fn restore_from_snapshot(
         &self,
         _snapshot: DataCacheSnapshot,
         _store: &SnapshotStore,
     ) -> AnyResult<()> {
         let _ = load_chunked_vec::<OwnedDataRow>;
-        todo!("phase-2c snapshot rebuild — see snapshot.rs:648 deferral")
+        anyhow::bail!(
+            "DataCache::restore_from_snapshot: W17-snapshot-resume \
+             surface — symmetric to `snapshot()`. The kinded \
+             `serializable_to_slot(sv, expected_kind, store)` inverse \
+             reconstructs row-storage parallel kind tracks from the \
+             persisted discriminator. Tracked as W17-snapshot-resume per \
+             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 \
+             §2.7.4 + §2.7.5.1.",
+        );
     }
 }
 
@@ -570,5 +588,28 @@ mod tests {
         _ordering: Ordering,
     ) {
         let _ = (SystemTime::UNIX_EPOCH, UNIX_EPOCH);
+    }
+
+    /// W17-snapshot-resume gate: `DataCache::snapshot` and
+    /// `DataCache::restore_from_snapshot` both return a structured
+    /// `anyhow::Error` carrying the W17 surface marker, never a
+    /// `todo!()` panic that would abort the host process.
+    #[test]
+    fn test_w17_data_cache_snapshot_returns_structured_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let cache = DataCache::from_test_data(HashMap::new());
+
+        let result = cache.snapshot(&store);
+        let err = result.expect_err("expected Err, got Ok");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("W17-snapshot-resume surface"),
+            "missing W17 marker; got: {msg}"
+        );
+        assert!(
+            msg.contains("§2.7.4"),
+            "missing ADR-006 §2.7.4 cite; got: {msg}"
+        );
     }
 }
