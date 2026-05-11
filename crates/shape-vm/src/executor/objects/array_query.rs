@@ -44,11 +44,24 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapKind, TypedArrayData};
 use shape_value::{KindedSlot, NativeKind, VMError};
+use std::sync::Arc;
+
+use crate::executor::objects::array_transform::{
+    bump_closure_share, collect_homogeneous_results as transform_collect_homogeneous_results,
+    element_kinded as transform_element_kinded, project_indices as transform_project_indices,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Local helpers — value-search support (no shim usage; pure dispatch on
 // TypedArrayData variant + NativeKind cross-check)
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Recover an independent `Arc<TypedArrayData>` strong-count share from
+/// `args[0]`. Accepts both array carriers (heap-Arc + v2 raw-pointer)
+/// via the shared helper in `array_transform`.
+fn typed_array_arc(slot: &KindedSlot, op: &str) -> Result<Arc<TypedArrayData>, VMError> {
+    crate::executor::objects::array_transform::typed_array_arc_from_kinded(slot, op)
+}
 
 /// Borrow the `&TypedArrayData` referenced by a `Ptr(HeapKind::TypedArray)`-
 /// kinded receiver. Mirrors `array_basic::typed_array_ref`.
@@ -221,6 +234,7 @@ fn invoke_predicate(
     ctx: Option<&mut ExecutionContext>,
     op: &'static str,
 ) -> Result<bool, VMError> {
+    bump_closure_share(closure);
     let result = vm.call_value_immediate_nb(closure, std::slice::from_ref(&elem), ctx)?;
     // `elem` Drop runs at end of scope, releasing its share. `result`
     // owns one share for the predicate's return (Bool: no Arc share, but
@@ -249,65 +263,107 @@ fn invoke_predicate(
 //    `skipWhile`) — surface with explicit Phase-2c §2.7.4 reason; typed-
 //    array reconstruction is W9-array-transform's territory.
 
-const TYPED_ARRAY_BUILDER_SURFACE: &str =
-    "SURFACE per ADR-006 §2.7.4 (Phase-2c reentry): typed-Array result \
-     reconstruction requires the per-NativeKind result-builder matrix \
-     that lives alongside `array_transform::handle_filter_v2` / \
-     `handle_map_v2` in the sibling W9-array-transform sub-cluster. \
-     Implementing the closure-driven scan here without that builder \
-     would either re-create the per-variant accumulator pattern (cluster \
-     cascade) or silently widen to `TypedArrayData::HeapValue` (forbidden \
-     per CLAUDE.md \"No runtime coercion\" / \"Forbidden Patterns\"). \
-     Wired in W9-array-transform once the per-variant builder lands.";
+/// W17-array-closure-callback note: the prior `TYPED_ARRAY_BUILDER_SURFACE`
+/// rationale (per-NativeKind result-builder matrix as a separate sub-
+/// cluster) was resolved upstream: `array_transform::project_indices`
+/// (filter projection) and `array_transform::collect_homogeneous_results`
+/// (map result materialization) are the per-NativeKind builders. They
+/// were marked `fn` (file-private) in their original sub-cluster; this
+/// file's bodies promote them to `pub(super)` and reuse directly. The
+/// "cluster cascade" framing was over-stated — the helpers exist; only
+/// visibility needed flipping.
+///
+/// Heterogeneous-result handling (mixed-kind closure outputs) still
+/// surfaces via `collect_homogeneous_results`'s SURFACE arm, citing the
+/// `TypedArrayData::HeapValue` per-element kind metadata gap (ADR-006
+/// §2.7.4). That's a homogeneity contract on the closure return, not
+/// a missing builder.
 
 /// `arr.where(predicate)` — filter via closure callback.
 ///
-/// SURFACE — typed-Array result builder. See `TYPED_ARRAY_BUILDER_SURFACE`.
+/// W17-array-closure-callback: body filled now that `op_make_closure`
+/// (W17-make-closure close `aa47364`) and `call_value_immediate_nb`
+/// (W7 close `06cdfce`) are both live, and
+/// `array_transform::project_indices` is reachable as `pub(super)`.
+/// Identical shape to `handle_filter_v2` in `array_transform.rs` — the
+/// only difference is that "where" is the SQL-flavoured alias and
+/// dispatch routes through `array_query` per ARRAY_METHODS' query-DSL
+/// grouping. Predicate must return Bool; non-Bool surfaces per
+/// `invoke_predicate`.
 pub(crate) fn handle_where_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.where — {}",
-        TYPED_ARRAY_BUILDER_SURFACE
-    )))
+    let closure = closure_arg(args, "where")?;
+    let arr = typed_array_arc(&args[0], "where")?;
+    let len = typed_array_len(&arr);
+    let mut keep: Vec<usize> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = transform_element_kinded(&arr, i)?;
+        if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "where")? {
+            keep.push(i);
+        }
+    }
+    let out = transform_project_indices(&arr, &keep)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// `arr.select(projector)` — project via closure callback.
 ///
-/// SURFACE — typed-Array result builder. See `TYPED_ARRAY_BUILDER_SURFACE`.
+/// W17-array-closure-callback: body filled. SQL-flavoured alias for
+/// `map` (results dispatched through the query DSL group). Identical
+/// shape to `handle_map_v2` in `array_transform.rs`: invoke
+/// `projector(elem)` per element, collect the kinded results, then
+/// materialize a homogeneous typed array via
+/// `collect_homogeneous_results`. Heterogeneous-result kinds surface
+/// per the §2.7.4 per-element kind metadata gap (the documented
+/// homogeneity contract).
 pub(crate) fn handle_select_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.select — {}",
-        TYPED_ARRAY_BUILDER_SURFACE
-    )))
+    let closure = closure_arg(args, "select")?;
+    let arr = typed_array_arc(&args[0], "select")?;
+    let len = typed_array_len(&arr);
+    let mut results: Vec<KindedSlot> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = transform_element_kinded(&arr, i)?;
+        bump_closure_share(closure);
+        let result = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        results.push(result);
+    }
+    let out = transform_collect_homogeneous_results(results)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// `arr.find(predicate)` — first matching element via closure callback.
 /// Returns the matching element or `null` if no match.
+///
+/// W17-array-closure-callback: receiver carrier widened to accept
+/// both heap-Arc and v2 raw-pointer typed arrays via
+/// `typed_array_arc`. Element reads use the kind-aware
+/// `transform_element_kinded` so each predicate-call argument carries
+/// the correct `NativeKind`.
 pub(crate) fn handle_find_v2(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "find")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "find")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         // Read element a second time so we can return the matching one
         // without depending on whether `invoke_predicate` consumed `elem`.
         // (`elem`'s share is released by its Drop at end of the predicate
         // call; the receiver still owns the source share, so a fresh
-        // `read_element_at` is a clean independent share.)
+        // element read is a clean independent share.)
         let matched = invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "find")?;
         if matched {
-            return read_element_at(arr, i);
+            return transform_element_kinded(&arr, i);
         }
     }
     Ok(KindedSlot::none())
@@ -315,16 +371,18 @@ pub(crate) fn handle_find_v2(
 
 /// `arr.findIndex(predicate)` — index of first matching element via
 /// closure callback. Returns `-1` if no match.
+///
+/// W17-array-closure-callback: receiver carrier widened.
 pub(crate) fn handle_find_index_v2(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "findIndex")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "findIndex")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "findIndex")? {
             return Ok(KindedSlot::from_int(i as i64));
         }
@@ -370,10 +428,10 @@ pub(crate) fn handle_some_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "some")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "some")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "some")? {
             return Ok(KindedSlot::from_bool(true));
         }
@@ -389,10 +447,10 @@ pub(crate) fn handle_every_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "every")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "every")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "every")? {
             return Ok(KindedSlot::from_bool(false));
         }
@@ -407,10 +465,10 @@ pub(crate) fn handle_any_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "any")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "any")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "any")? {
             return Ok(KindedSlot::from_bool(true));
         }
@@ -425,10 +483,10 @@ pub(crate) fn handle_all_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "all")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "all")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "all")? {
             return Ok(KindedSlot::from_bool(false));
         }
@@ -444,11 +502,11 @@ pub(crate) fn handle_single_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "single")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "single")?;
+    let len = typed_array_len(&arr);
     let mut found_idx: Option<usize> = None;
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         if invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "single")? {
             if found_idx.is_some() {
                 return Err(VMError::RuntimeError(
@@ -459,7 +517,7 @@ pub(crate) fn handle_single_v2(
         }
     }
     match found_idx {
-        Some(i) => read_element_at(arr, i),
+        Some(i) => transform_element_kinded(&arr, i),
         None => Err(VMError::RuntimeError(
             "Array.single: no element matched the predicate".to_string(),
         )),
@@ -467,38 +525,59 @@ pub(crate) fn handle_single_v2(
 }
 
 /// `arr.takeWhile(predicate)` — prefix where the closure predicate
-/// holds.
+/// holds. Stops at the first index where the predicate returns false
+/// (no further closure calls are issued past the boundary).
 ///
-/// SURFACE — typed-Array result builder. The handler can scan the array
-/// to compute the boundary index `k` (first index where the predicate
-/// fails), but constructing the resulting `arr[0..k]` shares its
-/// per-NativeKind reconstruction surface with `where` / `select` /
-/// `slice`. See `TYPED_ARRAY_BUILDER_SURFACE`.
+/// W17-array-closure-callback: body filled. Scans for the boundary
+/// index `k`, then `transform_project_indices` materializes
+/// `arr[0..k]` in the receiver's `TypedArrayData` arm.
 pub(crate) fn handle_take_while_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.takeWhile — {}",
-        TYPED_ARRAY_BUILDER_SURFACE
-    )))
+    let closure = closure_arg(args, "takeWhile")?;
+    let arr = typed_array_arc(&args[0], "takeWhile")?;
+    let len = typed_array_len(&arr);
+    let mut boundary: usize = len;
+    for i in 0..len {
+        let elem = transform_element_kinded(&arr, i)?;
+        if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "takeWhile")? {
+            boundary = i;
+            break;
+        }
+    }
+    let keep: Vec<usize> = (0..boundary).collect();
+    let out = transform_project_indices(&arr, &keep)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// `arr.skipWhile(predicate)` — suffix from the first element where the
-/// closure predicate fails.
+/// closure predicate fails. Mirror of `takeWhile`: scans for the same
+/// boundary index `k` and projects `arr[k..]`.
 ///
-/// SURFACE — typed-Array result builder. Same dependency as `takeWhile`.
-/// See `TYPED_ARRAY_BUILDER_SURFACE`.
+/// W17-array-closure-callback: body filled. Once the boundary is
+/// reached, the remaining elements are taken verbatim — no further
+/// closure calls (matching JS / SQL `skipWhile` semantics).
 pub(crate) fn handle_skip_while_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(format!(
-        "Array.skipWhile — {}",
-        TYPED_ARRAY_BUILDER_SURFACE
-    )))
+    let closure = closure_arg(args, "skipWhile")?;
+    let arr = typed_array_arc(&args[0], "skipWhile")?;
+    let len = typed_array_len(&arr);
+    let mut boundary: usize = len;
+    for i in 0..len {
+        let elem = transform_element_kinded(&arr, i)?;
+        if !invoke_predicate(vm, closure, elem, ctx.as_deref_mut(), "skipWhile")? {
+            boundary = i;
+            break;
+        }
+    }
+    let keep: Vec<usize> = (boundary..len).collect();
+    let out = transform_project_indices(&arr, &keep)?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// `arr.forEach(action)` — invoke the closure on every element. The
@@ -511,12 +590,13 @@ pub(crate) fn handle_for_each_v2(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let closure = closure_arg(args, "forEach")?;
-    let arr = typed_array_ref(&args[0])?;
-    let len = typed_array_len(arr);
+    let arr = typed_array_arc(&args[0], "forEach")?;
+    let len = typed_array_len(&arr);
     for i in 0..len {
-        let elem = read_element_at(arr, i)?;
+        let elem = transform_element_kinded(&arr, i)?;
         // Result share is released by its `Drop` at end of scope; we
         // do not require any particular kind for forEach (action form).
+        bump_closure_share(closure);
         let _ =
             vm.call_value_immediate_nb(closure, std::slice::from_ref(&elem), ctx.as_deref_mut())?;
     }

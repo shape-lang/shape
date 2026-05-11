@@ -76,8 +76,192 @@ where
     }
 }
 
+/// Bump a closure carrier's strong-count share before passing it to
+/// `vm.call_value_immediate_nb`. The frame teardown via
+/// `op_return` releases the share carried in `CallFrame.closure_heap_bits`
+/// (one `Arc::decrement_strong_count<HeapValue>`), so a borrowed closure
+/// passed in a per-iteration loop would have its dispatch-shell-owned
+/// share consumed by the FIRST call, leaving the carrier dangling on
+/// subsequent iterations. This helper restores ownership symmetry:
+/// every iteration pays one increment, the frame's teardown pays one
+/// decrement, and the original dispatch-shell carrier's Drop pays the
+/// final decrement when my handler returns.
+///
+/// `Ptr(HeapKind::Closure)` carriers hold `Arc::into_raw(Arc<HeapValue>)`
+/// (W7 Round-2.5 slot-bits shape). `UInt64` callees are function-id
+/// integers — no refcount work needed. Other kinds aren't valid callees
+/// and surface earlier via the closure_arg classifier.
+///
+/// Documented as a W17-array-closure-callback caller-side compensation
+/// for the §2.7.11 / Q12 frame-teardown contract. A principled fix
+/// (move the share-bump into `call_value_immediate_nb` itself) is a
+/// follow-up — observing the existing call sites in
+/// `dispatch_call_value_immediate` shows the same shape, suggesting
+/// the upstream contract was authored assuming move-by-value of the
+/// callee carrier; the per-iteration loop form in array methods is
+/// the borrowed-by-reference case that needs the explicit bump.
+#[inline]
+pub(super) fn bump_closure_share(slot: &KindedSlot) {
+    use shape_value::heap_value::HeapKind;
+    use shape_value::HeapValue;
+    use shape_value::NativeKind;
+    if let NativeKind::Ptr(HeapKind::Closure) = slot.kind {
+        let bits = slot.slot.raw();
+        if bits != 0 {
+            // SAFETY: per the W7 closure-slot contract, bits =
+            // `Arc::into_raw(Arc<HeapValue>)`. Bumping the strong
+            // count is sound as long as the share originally owned by
+            // the carrier is still live — guaranteed because the
+            // carrier is borrowed for the entire scope of the
+            // calling handler.
+            unsafe {
+                std::sync::Arc::increment_strong_count(bits as *const HeapValue);
+            }
+        }
+    }
+}
+
+/// Receiver-carrier normalization (W17-array-closure-callback, 2026-05-11):
+/// the kinded MethodFnV2 ABI accepts both array carriers — the heap-Arc
+/// `Ptr(HeapKind::TypedArray)` shape and the v2 raw-pointer `UInt64`
+/// shape (with `HeapHeader.kind == HEAP_KIND_V2_TYPED_ARRAY` + stamped
+/// element-type byte). This helper materializes either into an
+/// `Arc<TypedArrayData>` so the per-arm element / projection helpers
+/// dispatch uniformly. Receivers of other kinds surface as a typed
+/// `RuntimeError`. No copy is taken for the heap-Arc path (refcount
+/// share is duplicated). For the v2 raw-pointer path we snapshot the
+/// element buffer into a fresh `Arc<TypedArrayData>` arm — the v2
+/// pointer is NOT refcounted, so a snapshot is the soundness-safe
+/// conversion. This is consistent with the W17-array-typed-receiver
+/// sibling sub-cluster's array_operations.rs reentry strategy (kind
+/// dispatch on the receiver carrier, no carrier-shape escape hatch).
+pub(super) fn typed_array_arc_from_kinded(
+    slot: &KindedSlot,
+    op: &str,
+) -> Result<std::sync::Arc<TypedArrayData>, VMError> {
+    use shape_value::heap_value::HeapKind;
+    use shape_value::NativeKind;
+    use std::sync::Arc;
+    match slot.kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(format!(
+                    "{}: null array receiver bits",
+                    op
+                )));
+            }
+            // SAFETY: per the kinded-ABI contract, `Ptr(HeapKind::TypedArray)`
+            // bits are `Arc::into_raw::<TypedArrayData>` and the dispatch
+            // shell owns one strong-count share for the call. Reconstruct,
+            // clone, restore (canonical `3ac2f11` 5-arm receiver-recovery).
+            let arc =
+                unsafe { Arc::<TypedArrayData>::from_raw(bits as *const TypedArrayData) };
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            Ok(cloned)
+        }
+        NativeKind::UInt64 => {
+            // v2 raw-pointer typed array (no refcount; the raw pointer
+            // is owned by the slot it was pushed into). Snapshot the
+            // element buffer into a fresh heap-Arc TypedArrayData arm
+            // so all per-arm helpers dispatch uniformly. The v2 pointer
+            // stays alive — the caller's `KindedSlot` still owns it; we
+            // only READ here, no mutation.
+            use crate::executor::v2_handlers::v2_array_detect::{
+                as_v2_typed_array, V2ElemType,
+            };
+            use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+            use shape_value::aligned_vec::AlignedVec;
+            use shape_value::v2::typed_array::TypedArray;
+            let bits = slot.slot.raw();
+            let view = match as_v2_typed_array(bits, NativeKind::UInt64) {
+                Some(v) => v,
+                None => {
+                    return Err(VMError::RuntimeError(format!(
+                        "{}: UInt64 receiver is not a v2 typed-array pointer",
+                        op
+                    )));
+                }
+            };
+            let len = view.len as usize;
+            let arc = match view.elem_type {
+                V2ElemType::I64 => {
+                    let arr_ptr = bits as usize as *const TypedArray<i64>;
+                    let mut data: Vec<i64> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        // SAFETY: `view.len` is the array's `len` field;
+                        // each index `i < len` is in bounds for `data`.
+                        let v = unsafe { TypedArray::<i64>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 I64 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::I32 => {
+                    let arr_ptr = bits as usize as *const TypedArray<i32>;
+                    let mut data: Vec<i32> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<i32>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 I32 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::I32(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::F64 => {
+                    let arr_ptr = bits as usize as *const TypedArray<f64>;
+                    let mut data = AlignedVec::<f64>::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<f64>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 F64 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::F64(Arc::new(
+                        AlignedTypedBuffer::from_aligned(data),
+                    )))
+                }
+                V2ElemType::Bool => {
+                    let arr_ptr = bits as usize as *const TypedArray<u8>;
+                    let mut data: Vec<u8> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<u8>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 Bool array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(data))))
+                }
+            };
+            Ok(arc)
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "{}: expected Array receiver, got kind {:?}",
+            op, other
+        ))),
+    }
+}
+
 /// Per-variant element count for `TypedArrayData`.
-fn typed_array_len(arr: &TypedArrayData) -> usize {
+pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
     match arr {
         TypedArrayData::I64(b) => b.data.len(),
         TypedArrayData::F64(b) => b.data.len(),
@@ -514,7 +698,7 @@ fn concat_typed_array(
 /// `kind` is dispatched per `HeapValue::kind()` — this is where the
 /// existing flatten/groupBy SURFACE notes flagged the per-element kind
 /// metadata gap.
-fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
+pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
     match arr {
         TypedArrayData::I64(buf) => Ok(KindedSlot::from_int(buf.data[idx])),
         TypedArrayData::F64(buf) => Ok(KindedSlot::from_number(buf.data.as_slice()[idx])),
@@ -599,7 +783,7 @@ fn kinded_to_bucket_key(slot: &KindedSlot) -> Result<String, VMError> {
 
 /// Build a fresh same-variant `Arc<TypedArrayData>` from indices `keep`
 /// of the receiver (filter projection).
-fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Arc<TypedArrayData>, VMError> {
+pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Arc<TypedArrayData>, VMError> {
     match arr {
         TypedArrayData::I64(buf) => {
             let v: Vec<i64> = keep.iter().map(|&i| buf.data[i]).collect();
@@ -706,7 +890,7 @@ fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Arc<TypedArra
 /// outputs into a single typed array. Cross-kind result vectors surface
 /// (no implicit promotion under strict typing — CLAUDE.md "No runtime
 /// coercion").
-fn collect_homogeneous_results(
+pub(super) fn collect_homogeneous_results(
     results: Vec<KindedSlot>,
 ) -> Result<Arc<TypedArrayData>, VMError> {
     if results.is_empty() {

@@ -15,13 +15,21 @@
 //! separator pulled from `args[1]: KindedSlot { kind: NativeKind::String }`.
 //! Body migrated.
 //!
-//! `orderBy` / `thenBy` take a comparator-closure that returns `int`
-//! (negative / zero / positive). The closure-callback path
-//! (`executor/call_convention.rs::call_value_immediate_*` and
-//! `executor/control_flow/mod.rs::op_call_value`) is itself
-//! `NotImplemented(SURFACE)` post-§2.7.10 (Phase-2c rebuild — kinded
-//! callee dispatch + `&[KindedSlot]` arg-slice on the runtime side).
-//! Surface per playbook §7.4 REVISED.
+//! ## W17-array-closure-callback (Phase 2d Wave 2, 2026-05-11)
+//!
+//! `orderBy` / `thenBy` bodies migrated off `NotImplemented(SURFACE)`
+//! now that the kinded value-call path (`call_value_immediate_nb` in
+//! `call_convention.rs:767`, ADR-006 §2.7.11 / Q12) and `op_make_closure`
+//! (`control_flow/mod.rs:447`, W17-make-closure close at `aa47364`) are
+//! both live. Both methods treat `args[1]` as a *key function* (not a
+//! comparator), invoking `keyFn(elem)` per element to produce sort keys
+//! that are then ordered via per-NativeKind comparison; canonical
+//! reference: `handle_sort_v2`'s closure-driven comparator path in
+//! `array_transform.rs` (the comparator-form sort is the existing
+//! template — the key-fn form here issues one closure call per element
+//! up-front, then sorts the index permutation by comparing the cached
+//! keys). The `direction` parameter (an optional `"asc"` / `"desc"`
+//! string) flips the comparator. `slice::sort_by` keys.
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
@@ -29,6 +37,12 @@ use shape_value::{
     HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, VMError,
 };
 use std::sync::Arc;
+
+use crate::executor::objects::array_transform::{
+    bump_closure_share, element_kinded as transform_element_kinded,
+    project_indices as transform_project_indices, typed_array_arc_from_kinded,
+    typed_array_len as transform_typed_array_len,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Local helpers
@@ -143,57 +157,213 @@ fn array_len(arr: &TypedArrayData) -> Result<usize, VMError> {
 // MethodFnV2 (native ABI) handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Recover the `Arc<TypedArrayData>` payload from `args[0]`. Accepts
+/// both array carriers (heap-Arc + v2 raw-pointer) via the shared
+/// `array_transform::typed_array_arc_from_kinded` helper.
+fn receiver_arc_clone(slot: &KindedSlot, op: &str) -> Result<Arc<TypedArrayData>, VMError> {
+    typed_array_arc_from_kinded(slot, op)
+}
+
+/// Parse the optional `direction` argument from `args[2..]`. Accepts
+/// the canonical `"asc"` / `"desc"` strings; missing argument defaults
+/// to ascending. Anything else is a `RuntimeError`.
+fn parse_direction(args: &[KindedSlot], op: &str) -> Result<SortDirection, VMError> {
+    if args.len() <= 2 {
+        return Ok(SortDirection::Ascending);
+    }
+    match args[2].kind {
+        NativeKind::String => match args[2].as_str() {
+            Some("asc") | Some("ascending") => Ok(SortDirection::Ascending),
+            Some("desc") | Some("descending") => Ok(SortDirection::Descending),
+            Some(other) => Err(VMError::RuntimeError(format!(
+                "{}: direction must be \"asc\" or \"desc\", got {:?}",
+                op, other
+            ))),
+            None => Err(VMError::RuntimeError(format!(
+                "{}: direction slot kind=String but bits empty",
+                op
+            ))),
+        },
+        other => Err(VMError::RuntimeError(format!(
+            "{}: direction must be a string (\"asc\" or \"desc\"), got kind {:?}",
+            op, other
+        ))),
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// Compare two `KindedSlot` keys produced by `keyFn(elem)`. Both keys
+/// must share the same `NativeKind`; mismatched kinds surface as a
+/// `RuntimeError` (no implicit coercion per CLAUDE.md "No runtime
+/// coercion"). Float comparison uses `total_cmp` for NaN-safety; Bool
+/// orders false-before-true; String orders lexically.
+fn cmp_key_kinded(a: &KindedSlot, b: &KindedSlot, op: &str) -> Result<std::cmp::Ordering, VMError> {
+    if a.kind != b.kind {
+        return Err(VMError::RuntimeError(format!(
+            "{}: key function produced heterogeneous result kinds {:?} vs {:?} \
+             (CLAUDE.md \"No runtime coercion\" — keys must be monomorphic)",
+            op, a.kind, b.kind
+        )));
+    }
+    Ok(match a.kind {
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize => (a.slot.raw() as i64).cmp(&(b.slot.raw() as i64)),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => a.slot.raw().cmp(&b.slot.raw()),
+        NativeKind::Float64 => a.slot.as_f64().total_cmp(&b.slot.as_f64()),
+        NativeKind::Bool => a.slot.as_bool().cmp(&b.slot.as_bool()),
+        NativeKind::String => {
+            let sa = a.as_str().unwrap_or("");
+            let sb = b.as_str().unwrap_or("");
+            sa.cmp(sb)
+        }
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "{}: comparison of key kind {:?} — SURFACE: only inline-scalar / \
+                 String key kinds dispatched in W17-array-closure-callback. \
+                 Heap-typed keys (Decimal, BigInt, ...) need an ADR-006 §2.7.6 / Q8 \
+                 per-kind comparator table; Phase-2c reentry.",
+                op, other
+            )));
+        }
+    })
+}
+
+/// Read closure callee at `args[1]` and validate it carries a closure
+/// kind. Returns the borrowed slot for the call site.
+fn closure_arg<'a>(args: &'a [KindedSlot], op: &'static str) -> Result<&'a KindedSlot, VMError> {
+    let Some(slot) = args.get(1) else {
+        return Err(VMError::RuntimeError(format!(
+            "{}: missing key function argument",
+            op
+        )));
+    };
+    match slot.kind {
+        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => Ok(slot),
+        other => Err(VMError::RuntimeError(format!(
+            "{}: key function must be a closure or function ref, got kind {:?}",
+            op, other
+        ))),
+    }
+}
+
+/// Sort `receiver_arc` by `keyFn(elem)` and return the sorted typed
+/// array. The shared body for both `orderBy` (primary sort) and
+/// `thenBy` (secondary sort — the input array is already partially
+/// ordered, and `slice::sort_by` is stable, so a single pass with the
+/// secondary key produces the lexicographic primary→secondary order).
+fn sort_by_key_fn(
+    vm: &mut VirtualMachine,
+    receiver_arc: &Arc<TypedArrayData>,
+    closure: &KindedSlot,
+    direction: SortDirection,
+    mut ctx: Option<&mut ExecutionContext>,
+    op: &'static str,
+) -> Result<Arc<TypedArrayData>, VMError> {
+    let len = transform_typed_array_len(receiver_arc);
+
+    // Compute keys up front — one closure call per element. This
+    // separates closure invocation (which requires `&mut vm`) from the
+    // sort comparator (which would otherwise need mutable VM access
+    // during `slice::sort_by` and complicate error propagation).
+    let mut keys: Vec<KindedSlot> = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = transform_element_kinded(receiver_arc, i)?;
+        bump_closure_share(closure);
+        let key = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
+        keys.push(key);
+    }
+
+    // Sort an index permutation by comparing cached keys. `sort_by`
+    // cannot return errors; capture the first comparison failure via a
+    // sticky shadow and short-circuit the rest by returning
+    // `Ordering::Equal` (matching `handle_sort_v2`'s precedent in
+    // `array_transform.rs`).
+    let mut idx: Vec<usize> = (0..len).collect();
+    let mut cmp_err: Option<VMError> = None;
+    idx.sort_by(|&a, &b| {
+        if cmp_err.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        let order = match cmp_key_kinded(&keys[a], &keys[b], op) {
+            Ok(o) => o,
+            Err(e) => {
+                cmp_err = Some(e);
+                return std::cmp::Ordering::Equal;
+            }
+        };
+        match direction {
+            SortDirection::Ascending => order,
+            SortDirection::Descending => order.reverse(),
+        }
+    });
+    if let Some(e) = cmp_err {
+        return Err(e);
+    }
+
+    transform_project_indices(receiver_arc, &idx)
+}
+
 /// v2 `orderBy` — sort an array by a key function (optionally with direction).
 ///
 /// args: [array, key_fn, direction?]
 ///
-/// **SURFACE — Wave-δ closure-callback dependency.** The kinded
-/// `MethodFnV2` ABI landed (Wave-γ G-method-fn-v2-abi); however the
-/// closure-callback path needed to invoke `key_fn(elem)` per element
-/// (`call_value_immediate_*` in `executor/call_convention.rs`,
-/// `op_call_value` in `executor/control_flow/mod.rs`) is itself
-/// `NotImplemented(SURFACE)` post-§2.7.10 pending the kinded callee
-/// dispatch + `&[KindedSlot]` arg-slice rebuild (ADR-006 §2.7.4 / §2.7.8
-/// Phase-2c). Without it the handler cannot invoke the user's comparator.
+/// W17-array-closure-callback: body filled now that `op_make_closure`
+/// (W17-make-closure close `aa47364`) and `call_value_immediate_nb` (W7
+/// close `06cdfce`, ADR-006 §2.7.11 / Q12) are both live. The key
+/// function is invoked once per element to produce a sort key; the
+/// resulting permutation is materialized via
+/// `array_transform::project_indices`. Direction defaults to ascending.
 pub(crate) fn handle_order_by_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "orderBy — SURFACE: closure-callback path unmigrated. \
-         The kinded MethodFnV2 ABI landed (ADR-006 §2.7.10 / Q11), but \
-         `call_value_immediate_*` / `op_call_value` (executor/call_convention.rs, \
-         executor/control_flow/mod.rs) still return NotImplemented(SURFACE) \
-         pending the kinded callee dispatch + `&[KindedSlot]` arg-slice rebuild \
-         per ADR-006 §2.7.4 / §2.7.8. Body shape: `args[0]` = receiver \
-         (Ptr(HeapKind::TypedArray)), `args[1]` = comparator closure \
-         (Ptr(HeapKind::Closure)), `args[2]?` = direction; iterate elements as \
-         indexed pairs and stably sort via `slice::sort_by` driving the closure \
-         callback (signum of the int return)."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(type_error(
+            "orderBy: expected (array, key_fn, direction?)",
+        ));
+    }
+    let receiver_arc = receiver_arc_clone(&args[0], "orderBy")?;
+    let closure = closure_arg(args, "orderBy")?;
+    let direction = parse_direction(args, "orderBy")?;
+    let out = sort_by_key_fn(vm, &receiver_arc, closure, direction, ctx, "orderBy")?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// v2 `thenBy` — sort an already-ordered array by a secondary key.
 ///
 /// args: [array, key_fn, direction?]
 ///
-/// **SURFACE — Wave-δ closure-callback dependency.** Same blocker as
-/// `orderBy`; bodies share the comparator-closure callback shape.
+/// Shares the body shape with `orderBy`: `slice::sort_by` is stable, so
+/// re-sorting the (assumed-already-primary-sorted) input by the
+/// secondary key produces the lexicographic primary→secondary order.
+/// Callers chaining `orderBy(...).thenBy(...)` get the expected
+/// multi-key sort semantics.
 pub(crate) fn handle_then_by_v2(
-    _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(VMError::NotImplemented(
-        "thenBy — SURFACE: closure-callback path unmigrated. \
-         Same blocker as orderBy: kinded `call_value_immediate_*` / \
-         `op_call_value` dispatch is Phase-2c rebuild territory (ADR-006 \
-         §2.7.4 / §2.7.8). Body shape mirrors orderBy with the receiver \
-         already partially-ordered (the secondary-key sort is stable)."
-            .to_string(),
-    ))
+    if args.len() < 2 {
+        return Err(type_error("thenBy: expected (array, key_fn, direction?)"));
+    }
+    let receiver_arc = receiver_arc_clone(&args[0], "thenBy")?;
+    let closure = closure_arg(args, "thenBy")?;
+    let direction = parse_direction(args, "thenBy")?;
+    let out = sort_by_key_fn(vm, &receiver_arc, closure, direction, ctx, "thenBy")?;
+    Ok(KindedSlot::from_typed_array(out))
 }
 
 /// v2 `joinStr` — join array elements into a single string with a separator.

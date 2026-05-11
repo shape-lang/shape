@@ -501,7 +501,9 @@ impl Drop for SharedCell {
                     }
                     // Char: inline-scalar payload (codepoint bits, not an
                     // `Arc<T>`). Drop is a no-op; non-zero bits are valid.
-                    HeapKind::Char => {}
+                    HeapKind::Char => {
+                        // no refcount work — inline scalar
+                    }
                     // Round 2.5b W7-closure-retain-parallel (ADR-006
                     // §2.7.11 / Q12, 2026-05-09 — lockstep with vm-tier
                     // Round 2.5 close `5fa4b19`): a `SharedCell` whose
@@ -525,7 +527,9 @@ impl Drop for SharedCell {
                     // payload). See `async_ops/mod.rs` §"Wave 6.5 /
                     // E-async migration" docstring. Same shape as
                     // `HeapKind::Char`.
-                    HeapKind::Future => {}
+                    HeapKind::Future => {
+                        // no refcount work — inline scalar
+                    }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): a `SharedCell` whose `kind` companion
                     // is `NativeKind::Ptr(HeapKind::SharedCell)` carries
