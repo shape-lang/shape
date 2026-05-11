@@ -283,12 +283,23 @@ impl<'a> ValueFormatter<'a> {
                 )
             }
             HeapKind::Temporal => {
-                todo!(
-                    "phase-2c — see ADR-006 §2.7.4: Temporal formatting \
-                     (DateTime / Duration / TimeSpan / Timeframe) needs \
-                     the kinded constructor surface from Wave 5e DateTime \
-                     ctor body migration"
-                );
+                // C1-temporal-lowering (Phase 2d Wave 2): Temporal carrier
+                // dispatch per ADR-006 §2.7.4. Slot bits are
+                // `Arc::into_raw::<TemporalData>` (set by
+                // `compiler/expressions/temporal.rs::compile_expr_duration`
+                // + `op_push_const`'s Duration arm in `stack_ops/mod.rs`
+                // and by the `TIMESPAN_METHODS` / `DATETIME_METHODS`
+                // PHF result construction in
+                // `objects/datetime_methods.rs::temporal_result`).
+                // `TemporalData`'s own `Display` impl already handles
+                // every arm (DateTime / Duration / TimeSpan / Timeframe /
+                // TimeReference / DateTimeExpr / DataDateTimeRef); we
+                // dispatch through it preserving ADR-005 §1's
+                // single-discriminator discipline (no per-arm peek at
+                // the `TemporalData` payload here).
+                let td: &shape_value::heap_value::TemporalData =
+                    unsafe { &*(bits as *const shape_value::heap_value::TemporalData) };
+                format!("{}", td)
             }
             HeapKind::TableView => {
                 let tv: &shape_value::heap_value::TableViewData =

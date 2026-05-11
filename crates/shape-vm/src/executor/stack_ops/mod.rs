@@ -15,7 +15,7 @@ use crate::{
     executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
     executor::VirtualMachine,
 };
-use shape_value::{NativeKind, VMError, heap_value::HeapKind};
+use shape_value::{NativeKind, VMError, heap_value::{HeapKind, TemporalData}};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -133,16 +133,55 @@ impl VirtualMachine {
                     return self
                         .push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal));
                 }
+                // C1-temporal-lowering (Phase 2d Wave 2): Duration literals
+                // (e.g. `3d`, `10s`) lower to `TemporalData::TimeSpan` via
+                // the existing `ast_duration_to_chrono` helper. The slot's
+                // bits are `Arc::into_raw::<TemporalData>` and the kind is
+                // `NativeKind::Ptr(HeapKind::Temporal)` per ADR-006 §2.7.4
+                // (Temporal carrier dispatch). The TIMESPAN_METHODS PHF in
+                // `objects/datetime_methods.rs` already recovers
+                // `&TemporalData` via `recv_temporal` (§2.7.6/Q8 heap-value
+                // match), so addition / subtraction / printing flow through
+                // the existing dispatch surface.
+                crate::bytecode::Constant::Duration(d) => {
+                    let chrono_dur =
+                        crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(d);
+                    let arc: Arc<TemporalData> =
+                        Arc::new(TemporalData::TimeSpan(chrono_dur));
+                    let bits = Arc::into_raw(arc) as u64;
+                    return self
+                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
+                }
+                // C1-temporal-lowering: DateTimeExpr literals (e.g.
+                // `@"2026-01-01"`, `@now`, `@today`) evaluate to
+                // `TemporalData::DateTime` at execution time via the
+                // pure-AST `eval_datetime_expr_recursive` helper in
+                // `executor/window_join.rs:401` (no VM state consumed; uses
+                // wall-clock-time when the AST asks for `@now`/`@today`).
+                // The companion `BuiltinCall(EvalDateTimeExpr)` emitted by
+                // `compiler/expressions/temporal.rs:42` becomes an identity
+                // passthrough — the value is already produced here.
+                // ADR-006 §2.7.4 (Temporal carrier dispatch).
+                crate::bytecode::Constant::DateTimeExpr(expr) => {
+                    let expr_clone = expr.clone();
+                    let dt = self.eval_datetime_expr_recursive(&expr_clone)?;
+                    let arc: Arc<TemporalData> =
+                        Arc::new(TemporalData::DateTime(dt));
+                    let bits = Arc::into_raw(arc) as u64;
+                    return self
+                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
+                }
                 _ => {}
             }
 
-            // Remaining complex constants (Timeframe, Duration, TimeReference,
-            // DateTimeExpr, DataDateTimeRef, TypeAnnotation, Value): these
-            // are deferred to a follow-up wave that aligns the constant
-            // table with the kinded heap encoding. For now they are
-            // unreachable in normal compilation paths — the constant
-            // emitter doesn't produce them outside of legacy code paths
-            // already broken by the ValueWord deletion.
+            // Remaining complex constants (Timeframe, TimeReference,
+            // DataDateTimeRef, TypeAnnotation, Value): these are deferred
+            // to a follow-up wave that aligns the constant table with the
+            // kinded heap encoding. The temporal-carrier arms (Duration /
+            // DateTimeExpr) are handled above; pure data-reference flavours
+            // belong to the data-reference / pipeline subsystems whose
+            // runtime entry points are themselves SURFACE per their own
+            // sub-clusters (W8-WJ for window_join, D-data-refs cascade).
             return Err(VMError::RuntimeError(format!(
                 "unsupported constant variant in PushConst (Wave 6 follow-up): {:?}",
                 std::mem::discriminant(constant)
