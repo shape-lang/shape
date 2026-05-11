@@ -146,6 +146,16 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
             // constructor where possible. For most arms this is a clone.
             heap_value_to_slot(hv_arc)
         }),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => None,
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => None,
     }
 }
@@ -329,6 +339,16 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
         TypedArrayData::HeapValue(b) => b.len(),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
+        TypedArrayData::Decimal(b) => b.len(),
+        TypedArrayData::BigInt(b) => b.len(),
+        TypedArrayData::DateTime(b) => b.len(),
+        TypedArrayData::Timespan(b) => b.len(),
+        TypedArrayData::Duration(b) => b.len(),
+        TypedArrayData::Instant(b) => b.len(),
+        TypedArrayData::Char(b) => b.len(),
+        TypedArrayData::TypedObject(b) => b.len(),
+        TypedArrayData::TraitObject(b) => b.len(),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
     };
     if len == 0 {
@@ -546,6 +566,16 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         TypedArrayData::U32(x) => x.len(),
         TypedArrayData::U64(x) => x.len(),
         TypedArrayData::F32(x) => x.len(),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
+        TypedArrayData::Decimal(x) => x.len(),
+        TypedArrayData::BigInt(x) => x.len(),
+        TypedArrayData::DateTime(x) => x.len(),
+        TypedArrayData::Timespan(x) => x.len(),
+        TypedArrayData::Duration(x) => x.len(),
+        TypedArrayData::Instant(x) => x.len(),
+        TypedArrayData::Char(x) => x.len(),
+        TypedArrayData::TypedObject(x) => x.len(),
+        TypedArrayData::TraitObject(x) => x.len(),
         TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
     } as isize;
 

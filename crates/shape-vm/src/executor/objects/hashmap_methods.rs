@@ -176,7 +176,11 @@ pub fn v2_get(
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
     match map.get(key) {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        // W17-typed-carrier-bundle-A: HashMapData::get now returns
+        // Option<Arc<HeapValue>> (owned) per Q25.B specialized arms, since
+        // the value buffer may be a per-variant typed buffer with no
+        // underlying `&Arc<HeapValue>` to borrow.
+        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
         None => Ok(KindedSlot::none()),
     }
 }
@@ -230,7 +234,22 @@ pub fn v2_values(
         return Err(type_error("HashMap.values() takes no arguments"));
     }
     let map = as_hashmap(&args[0])?;
-    let arr = TypedArrayData::HeapValue(Arc::clone(&map.values));
+    // W17-typed-carrier-bundle-A commit 1/4: HashMapValueBuf is now an
+    // enum per Q25.B; project to TypedArrayData per inner arm. The
+    // HeapValue arm reuses its inner buffer (single Arc bump); typed
+    // arms materialize via per-arm clone (commit 3 wiring; today only
+    // the HeapValue arm has construction sites).
+    let arr = match &map.values {
+        shape_value::heap_value::HashMapValueBuf::HeapValue(b) => {
+            TypedArrayData::HeapValue(Arc::clone(b))
+        }
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "HashMap.values(): typed HashMapValueBuf arm {:?} — wiring lands in commit 3 of W17-typed-carrier-bundle-A (ADR-006 §2.7.24 Q25.B)",
+                std::mem::discriminant(other)
+            )));
+        }
+    };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
 
@@ -294,7 +313,7 @@ pub fn v2_get_or_default(
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
     match map.get(key) {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(value_arc)),
+        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
         None => Ok(args[2].clone()),
     }
 }
@@ -321,7 +340,7 @@ fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
     let mut pairs: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
     for i in 0..n {
         let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
-        let value_arc: Arc<HeapValue> = Arc::clone(&map.values.data[i]);
+        let value_arc: Arc<HeapValue> = map.values.value_at(i);
         let inner = TypedArrayData::HeapValue(Arc::new(TypedBuffer::from_vec(vec![
             Arc::new(HeapValue::String(key_arc)),
             value_arc,
@@ -461,7 +480,7 @@ pub fn v2_for_each(
     let n = map.len();
     for i in 0..n {
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         // Result share released via `KindedSlot::drop` at end of scope.
         let _ = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
     }
@@ -490,7 +509,7 @@ pub fn v2_filter(
     let mut out_values: Vec<Arc<HeapValue>> = Vec::new();
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = Arc::clone(&map.values.data[i]);
+        let value_arc = map.values.value_at(i);
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let value_slot = heap_value_arc_to_slot(&value_arc);
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
@@ -531,7 +550,7 @@ pub fn v2_map(
     let mut out_values: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
         let new_value = result_slot_to_heap_value_arc(&result)?;
@@ -562,7 +581,7 @@ pub fn v2_reduce(
     let n = map.len();
     for i in 0..n {
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.data[i]);
+        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
         acc = vm.call_value_immediate_nb(
             closure,
             &[acc, key_slot, value_slot],
@@ -601,7 +620,7 @@ pub fn v2_group_by(
 
     for i in 0..n {
         let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = Arc::clone(&map.values.data[i]);
+        let value_arc = map.values.value_at(i);
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let value_slot = heap_value_arc_to_slot(&value_arc);
         let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;

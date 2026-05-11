@@ -85,16 +85,16 @@ fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, St
     for (k, v) in options.iter() {
         if k.as_str() == "headers" {
             if let HeapValue::HashMap(d) = &**v {
-                return d
-                    .keys
-                    .data
-                    .iter()
-                    .zip(d.values.data.iter())
-                    .filter_map(|(hk, hv)| match &**hv {
-                        HeapValue::String(s) => Some(((**hk).clone(), (**s).clone())),
-                        _ => None,
-                    })
-                    .collect();
+                let n = d.keys.data.len();
+                let mut out: Vec<(String, String)> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let hk = &d.keys.data[i];
+                    let hv = d.values.value_at(i);
+                    if let HeapValue::String(s) = &*hv {
+                        out.push(((**hk).clone(), (**s).clone()));
+                    }
+                }
+                return out;
             }
         }
     }

@@ -278,8 +278,11 @@ fn write_node_pairs(
     let mut elem = BytesStart::new(name.to_string());
 
     if let Some(attrs) = attrs {
-        for (ak, av) in attrs.keys.data.iter().zip(attrs.values.data.iter()) {
-            if let HeapValue::String(av_s) = &**av {
+        let n = attrs.keys.data.len();
+        for i in 0..n {
+            let ak = &attrs.keys.data[i];
+            let av = attrs.values.value_at(i);
+            if let HeapValue::String(av_s) = &*av {
                 elem.push_attribute((ak.as_str(), av_s.as_str()));
             }
         }
@@ -325,13 +328,12 @@ fn write_node_heap(
     node: &Arc<HeapValue>,
 ) -> Result<(), String> {
     if let HeapValue::HashMap(d) = &**node {
-        let pairs: Vec<(Arc<String>, Arc<HeapValue>)> = d
-            .keys
-            .data
-            .iter()
-            .zip(d.values.data.iter())
-            .map(|(k, v)| (Arc::clone(k), Arc::clone(v)))
-            .collect();
+        let n = d.keys.data.len();
+        let mut pairs: Vec<(Arc<String>, Arc<HeapValue>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let k = &d.keys.data[i];
+            pairs.push((Arc::clone(k), d.values.value_at(i)));
+        }
         write_node_pairs(writer, &pairs)
     } else {
         Err(format!(

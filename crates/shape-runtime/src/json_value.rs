@@ -96,9 +96,12 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
         HeapValue::TypedArray(ta) => typed_array_to_json_value(&**ta),
         HeapValue::HashMap(d) => {
-            let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(d.keys.data.len());
-            for (k, v) in d.keys.data.iter().zip(d.values.data.iter()) {
-                pairs.push(((**k).clone(), heap_to_json_value(v)?));
+            let n = d.keys.data.len();
+            let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(n);
+            for i in 0..n {
+                let k = &d.keys.data[i];
+                let v = d.values.value_at(i);
+                pairs.push(((**k).clone(), heap_to_json_value(&v)?));
             }
             Ok(JsonValue::Object(pairs))
         }
@@ -310,6 +313,41 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
         ),
         TypedArrayData::FloatSlice { .. } => Err(
             "FloatSlice serialization policy not yet decided (N7 architectural-choice deferral; structurally inherits Matrix's encoding question)"
+                .into(),
+        ),
+        // ── W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms ───
+        // Per-arm JSON serialisation lands in commit 3 (mechanical-yes for
+        // Decimal/BigInt/Char/TypedObject; deferred-Err for the
+        // Temporal/Instant/TraitObject arms whose JSON encoding policy
+        // needs a separate ruling). No construction sites on this branch
+        // yet — these arms are unreachable in current callers.
+        TypedArrayData::Decimal(buf) => Ok(JsonValue::Array(
+            buf.data
+                .iter()
+                .map(|d| JsonValue::String(d.to_string()))
+                .collect(),
+        )),
+        TypedArrayData::BigInt(buf) => Ok(JsonValue::Array(
+            buf.data.iter().map(|n| JsonValue::Int(**n)).collect(),
+        )),
+        TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_) => Err(
+            "Temporal-array JSON serialization policy not yet decided (W17-typed-carrier-bundle-A commit 3 follow-up; ADR-006 §2.7.24 Q25.A)"
+                .into(),
+        ),
+        TypedArrayData::Instant(_) => Err(
+            "Instant-array JSON serialization unsupported (Instant is a monotonic clock reading, not a wall-clock value; W17-typed-carrier-bundle-A commit 3)"
+                .into(),
+        ),
+        TypedArrayData::Char(buf) => Ok(JsonValue::Array(
+            buf.data
+                .iter()
+                .map(|c| JsonValue::String(c.to_string()))
+                .collect(),
+        )),
+        TypedArrayData::TypedObject(_) | TypedArrayData::TraitObject(_) => Err(
+            "TypedObject/TraitObject array JSON serialization deferred to commit 3 (ADR-006 §2.7.24 Q25.A; needs per-element schema/vtable dispatch)"
                 .into(),
         ),
     }

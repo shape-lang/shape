@@ -583,12 +583,15 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
                 shape_value::HeapValue::HashMap(d) => {
-                    d.keys
-                        .data
-                        .iter()
-                        .zip(d.values.data.iter())
-                        .map(|(k, v)| match &**v {
-                            shape_value::HeapValue::String(s) => (Arc::clone(k), Arc::clone(s)),
+                    let n = d.keys.data.len();
+                    let mut out: Vec<(Arc<String>, Arc<String>)> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let k = &d.keys.data[i];
+                        let v = d.values.value_at(i);
+                        match &*v {
+                            shape_value::HeapValue::String(s) => {
+                                out.push((Arc::clone(k), Arc::clone(s)));
+                            }
                             other => panic!(
                                 "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap value at \
                                  key '{}' is HeapValue::{:?}, not String. Body's parameter \
@@ -597,8 +600,9 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
                                 k,
                                 other.kind()
                             ),
-                        })
-                        .collect()
+                        }
+                    }
+                    out
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
@@ -630,13 +634,16 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(d) => d
-                    .keys
-                    .data
-                    .iter()
-                    .zip(d.values.data.iter())
-                    .map(|(k, v)| (Arc::clone(k), Arc::clone(v)))
-                    .collect(),
+                shape_value::HeapValue::HashMap(d) => {
+                    let n = d.keys.data.len();
+                    let mut out: Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> =
+                        Vec::with_capacity(n);
+                    for i in 0..n {
+                        let k = &d.keys.data[i];
+                        out.push((Arc::clone(k), d.values.value_at(i)));
+                    }
+                    out
+                }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \
                      HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",

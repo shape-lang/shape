@@ -278,6 +278,19 @@ pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::HeapValue(b) => b.data.len(),
         TypedArrayData::Matrix(m) => m.data.len(),
         TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     }
 }
 
@@ -479,6 +492,19 @@ fn slice_typed_array(
              yet specified."
                 .to_string(),
         )),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     }
 }
 
@@ -738,6 +764,19 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
              metadata. Wave-10 / Phase-2c reentry."
                 .to_string(),
         )),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     }
 }
 
@@ -882,6 +921,19 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
                 arr.type_name()
             )))
         }
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     }
 }
 
@@ -1329,6 +1381,19 @@ fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
                 arr.type_name()
             )))
         }
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     }
 }
 
@@ -1498,6 +1563,19 @@ pub(crate) fn handle_flatten_v2(
              scalar-or-nested-array shape. Wave-10 / Phase-2c reentry."
                 .to_string(),
         )),
+        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+        // No construction sites on this branch — surface-and-stop until commit 3.
+        TypedArrayData::Decimal(_)
+        | TypedArrayData::BigInt(_)
+        | TypedArrayData::DateTime(_)
+        | TypedArrayData::Timespan(_)
+        | TypedArrayData::Duration(_)
+        | TypedArrayData::Instant(_)
+        | TypedArrayData::Char(_)
+        | TypedArrayData::TypedObject(_)
+        | TypedArrayData::TraitObject(_) => unreachable!(
+            "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+        ),
     })
 }
 

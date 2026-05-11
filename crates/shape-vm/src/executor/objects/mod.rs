@@ -535,6 +535,19 @@ impl VirtualMachine {
                                 method_registry::MATRIX_METHODS.get(method_name).copied()
                             }
                             TypedArrayData::String(_) | TypedArrayData::HeapValue(_) => None,
+                            // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
+                            // No construction sites on this branch — surface-and-stop until commit 3.
+                            TypedArrayData::Decimal(_)
+                            | TypedArrayData::BigInt(_)
+                            | TypedArrayData::DateTime(_)
+                            | TypedArrayData::Timespan(_)
+                            | TypedArrayData::Duration(_)
+                            | TypedArrayData::Instant(_)
+                            | TypedArrayData::Char(_)
+                            | TypedArrayData::TypedObject(_)
+                            | TypedArrayData::TraitObject(_) => unreachable!(
+                                "TypedArrayData specialized variant reached in W17-typed-carrier-bundle-A commit 1/4: no construction sites yet (ADR-006 §2.7.24 Q25.A)"
+                            ),
                         },
                         _ => None,
                     };
