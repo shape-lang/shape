@@ -43,7 +43,8 @@
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MutexData, NativeViewData, OptionData, PriorityQueueData, RangeData,
-    ResultData, TableViewData, TaskGroupData, TemporalData, TypedArrayData, TypedObjectStorage,
+    ResultData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
+    TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -159,6 +160,21 @@ impl KindedSlot {
         Self::new(
             ValueSlot::from_channel(c),
             NativeKind::Ptr(HeapKind::Channel),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::TraitObject)`-kind slot. Mirror
+    /// of `from_typed_object` per ADR-006 §2.7.24 / Q25.C amendment
+    /// (Wave 17 W17-trait-object-storage, 2026-05-11). Full
+    /// `HeapValue::TraitObject(Arc<TraitObjectStorage>)` arm —
+    /// `TraitObjectStorage` is the typed-Arc replacement for the
+    /// bulldozer-deleted `HeapValue::TraitObject { value: Box<u64>,
+    /// vtable: Arc<VTable> }` shape.
+    #[inline]
+    pub fn from_trait_object(t: Arc<TraitObjectStorage>) -> Self {
+        Self::new(
+            ValueSlot::from_trait_object(t),
+            NativeKind::Ptr(HeapKind::TraitObject),
         )
     }
 
@@ -459,6 +475,18 @@ impl Drop for KindedSlot {
                     HeapKind::Channel => {
                         Arc::decrement_strong_count(bits as *const ChannelData);
                     }
+                    // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                    // 2026-05-11): TraitObject mirrors the typed-Arc
+                    // dispatch shape. Slot bits are
+                    // `Arc::into_raw(Arc<TraitObjectStorage>) as u64`.
+                    // Retires one strong-count share — at refcount=0
+                    // the inner `TraitObjectStorage::Drop` runs,
+                    // releasing its inner `Arc<TypedObjectStorage>`
+                    // value half + `Arc<VTable>` vtable half via
+                    // auto-derived `Drop`.
+                    HeapKind::TraitObject => {
+                        Arc::decrement_strong_count(bits as *const TraitObjectStorage);
+                    }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.
                     // Slot bits are `Arc::into_raw(Arc<MutexData>) /
@@ -728,6 +756,18 @@ impl Clone for KindedSlot {
                     // shared, NOT cloned).
                     HeapKind::Channel => {
                         Arc::increment_strong_count(bits as *const ChannelData);
+                    }
+                    // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                    // 2026-05-11): TraitObject mirrors the typed-Arc
+                    // dispatch shape. Bumps one strong-count share on
+                    // the outer `Arc<TraitObjectStorage>` — inner
+                    // `Arc<TypedObjectStorage>` value half and
+                    // `Arc<VTable>` vtable half stay shared with the
+                    // source carrier. `Arc::ptr_eq` on the vtable
+                    // preserves the §Q25.C.2 `Self`-arg identity
+                    // contract across the clone.
+                    HeapKind::TraitObject => {
+                        Arc::increment_strong_count(bits as *const TraitObjectStorage);
                     }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.

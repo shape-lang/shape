@@ -4798,6 +4798,96 @@ Following ADR-005's convention:
 - defections.md gets an append-only entry at Phase 1.A start naming
   the supersession of ADR-005 §3 by this ADR.
 
+#### 2.7.5.1.A `SerializableVMValue` wire-format extension (Phase 2d Wave 2.6 W17-snapshot-roundtrip, 2026-05-11)
+
+**Question:** the §2.7.5.1 rule pins `FrameDescriptor` as the canonical post-proof wire-format struct and forbids `Option<NativeKind>` wrap / `Unspecialized` placeholders in any `#[derive(Serialize, Deserialize)]` shape that reaches the `FunctionBlob` content hash. W17-snapshot-surfaces (Wave 2.5 close `0db5920`) identified a separate gap: `SerializableVMValue` (`shape-runtime/src/snapshot.rs:296`) — the snapshot wire-format enum — has arms for the pre-bulldozer carriers (`Int`, `Number`, `String`, `Bool`, `Decimal`, `Array`, `TypedObject`, `Range`, `Ok`, `Err`, `Future`, `DataTable`, `HashMap`, `TypedArray`, ...) but no arms for the post-W14/W15/W16/Wave-2.5 HeapKinds added since: `HashSet`, `Iterator`, `Result` (as typed-Arc carrier — `Ok`/`Err` are pre-bulldozer scalar form), `Option` (as typed-Arc carrier — `Some`/`None` are pre-bulldozer scalar form), `Deque`, `Channel`, `PriorityQueue`, `Reference`, `FilterExpr`, `SharedCell`, `Mutex`, `Atomic`, `Lazy`. The §2.7.5.1 forbidden-pattern policy (no Option wrap, no Unspecialized placeholder, no generic Arc<HeapValue> serializer) extends to `SerializableVMValue` — adding the 14 missing arms must follow the same shape as §2.7.5.1 governs for `FrameDescriptor`.
+
+**Decision (Wave 2.6 W17-snapshot-roundtrip):** extend `SerializableVMValue` with 14 new arms — one per missing `HeapKind` — and land the kind-threaded `slot_to_serializable(bits, kind, store)` / `serializable_to_slot(sv, expected_kind, store)` API pair. Each new arm is **post-proof**: the discriminator (variant tag) authoritatively carries the kind, the payload carries per-kind serialized data.
+
+**Arm-by-arm coverage:**
+
+| HeapKind | Wire arm | Coverage shape |
+|---|---|---|
+| `HashSet` | `HashSet { keys: Vec<String> }` | full payload — string-keyspace storage round-trips verbatim |
+| `Iterator` | `IteratorOpaque` | discriminator-only — carries closure-self share + source-buffer refs (§2.7.16 graph) |
+| `Result` (typed-Arc) | `ResultData { is_ok, payload: Box<SerializableVMValue> }` | discriminator + inner scalar payload (Int/String/Bool/Number/Unit); deep inner kinds follow-up |
+| `Option` (typed-Arc) | `OptionData { is_some, payload: Option<Box<...>> }` | mirror of ResultData |
+| `Deque` | `DequeOpaque { len }` | length only — heterogeneous-element `Arc<HeapValue>` payload re-introduces the generic-serializer shape (§2.7.5.1 forbidden) |
+| `Channel` | `ChannelOpaque { closed, len }` | closed-flag + length — queue contents follow-up |
+| `PriorityQueue` | `PriorityQueueHeap { heap: Vec<i64> }` | full payload — i64-priority-only landing |
+| `Reference` | `ReferenceOpaque` | discriminator-only — target identity across snapshot boundaries unspecified at landing |
+| `FilterExpr` | `FilterExprOpaque` | discriminator-only — AST tree serializer follow-up |
+| `SharedCell` | `SharedCellOpaque` | discriminator-only — binding-identity + per-kind cell payload follow-up |
+| `Mutex` | `MutexOpaque { has_value }` | discriminator + has-value flag — inner `Option<KindedSlot>` payload follow-up |
+| `Atomic` | `AtomicI64 { value }` | full payload — i64-only landing |
+| `Lazy` | `LazyOpaque { is_initialized }` | discriminator + init-flag — inner closure + cached payload follow-up |
+| `Char` | `Char(char)` | full payload — `char` serializes via serde |
+| `BigInt` | `BigInt(i64)` | full payload — current `Arc<i64>` representation; future typed-payload BigInt updates the wire format |
+
+**Wire-format policy (mirror of §2.7.5.1 for FrameDescriptor):**
+
+- Discriminator is post-proof: every `SerializableVMValue` produced by `slot_to_serializable` carries a definite arm name; no `Option<SerializableVMValue>` wrap (an unknown-kind slot is a `slot_to_serializable` error, not a wrapped-Option success — same shape as §2.7.5.1's `FrameDescriptor.slots` policy).
+- No `SerializableVMValue::Unknown` / `Unspecialized` variant — same defection-attractor as `NativeKind::Unknown` (§2.7.5.1 explicit) and `SlotKind::Dynamic` (CLAUDE.md "Forbidden code"). The wire format is bounded by `NativeKind` × `HeapKind` cardinality.
+- No `Arc<HeapValue>` generic serializer — heap arms recover the typed `Arc<T>` via the canonical 5-arm receiver-recovery pattern (CLAUDE.md "The 5-arm receiver-recovery soundness rule") and project per-arm. Casting bits to `*const HeapValue` is wrong-type recovery (the bits are `Arc::into_raw(Arc<XData>)`, not `*const HeapValue`).
+- No Bool-default fallback at the kind-discriminator-mismatch path. `serializable_to_slot` surfaces a structured error when the discriminator doesn't pair with the expected kind — same rule as §2.7.7 #9 stack-track Bool-default forbid.
+- Opaque-stub arms are surface-and-stop on restore. The `XOpaque` arms (Iterator/Deque/Channel/Reference/FilterExpr/SharedCell/Mutex/Lazy) round-trip the discriminator but a `serializable_to_slot` call against them returns a structured `Err(...)` per §2.7.5.1 — not a placeholder slot, not a fabricated Bool-zero. The §2.7.4 invariant — "snapshot reconstruction must not silently corrupt persisted state" — extends to here.
+
+**Kind-threaded API:**
+
+```rust
+// shape-runtime/src/snapshot.rs
+pub fn slot_to_serializable(
+    bits: u64,
+    kind: NativeKind,
+    store: &SnapshotStore,
+) -> Result<SerializableVMValue, String>;
+
+pub fn serializable_to_slot(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+) -> Result<(u64, NativeKind), String>;
+```
+
+Both functions take/return raw `(u64, NativeKind)` — the §2.7.5 cross-crate ABI policy boundary. The `expected_kind` parameter on `serializable_to_slot` is the post-proof kind the caller has already committed to (from `FrameDescriptor.slots[i]` or the parallel stack-kind track); a discriminator-vs-expected mismatch surfaces a structured error.
+
+**Mechanical effect:** at maximum, `SerializableVMValue` carries one arm per `NativeKind::Ptr(HeapKind::*)` plus one per scalar `NativeKind` family. Total wire-format surface is bounded by HeapKind cardinality (33 ords at HEAD `235256e`), not by user demand. Adding a new HeapKind variant requires extending `SerializableVMValue` in lockstep (the same 4-table lockstep rule §2.7 governs for `HeapKind` extends to the wire-format extension).
+
+**Forbidden shapes this rules out:**
+
+- `SerializableVMValue::HeapValue(Arc<HeapValue>)` — generic carrier that decodes per-arm at runtime. Same defection-attractor as the §2.7.6 / Q8 `from_heap_arc(Arc<HeapValue>)` carrier-API-bound violation; reject on sight.
+- `SerializableVMValue::Unknown { kind_tag: u32, bits: u64 }` — Unknown-kind escape hatch. Same defection-attractor as the deleted `SlotKind::Dynamic` / `NativeKind::Unknown`; reject.
+- `SerializableVMValue::OpaqueKind { kind: NativeKind, raw_payload: Vec<u8> }` — "we'll deserialize on resume" pattern. Same defection-attractor as the §2.7.5.1 `Option<NativeKind>` wrap forbid; reject.
+- `SerializableVMValue::Discriminator(u8)` — bare-tag carrier with no payload at all. The wire format is post-proof; if a payload is missing, the arm shouldn't have been written.
+- Bool-default fallback in `serializable_to_slot` when the discriminator doesn't match `expected_kind`. The §2.7.7 #9 stack-track Bool-default forbid extends to here.
+
+**Cross-cluster coordination.** Per-arm coverage expansion lands in follow-up sub-clusters as each `XOpaque` arm's deep payload semantics are nailed down:
+
+- **W17-snapshot-iterator** — Iterator graph walker that traces transform-closure captures and source-buffer refs.
+- **W17-snapshot-channel-queue** — Channel queue contents (per-element kinded projection).
+- **W17-snapshot-deque** — Deque element-payload kinded projection.
+- **W17-snapshot-references** — Reference target identity across snapshot boundaries (entity-id stable handle table).
+- **W17-snapshot-filter-expr** — FilterExpr AST tree serializer (mirror of pest's serde-aware AST landing).
+- **W17-snapshot-sharedcell** — SharedCell per-kind cell payload + binding-identity table.
+- **W17-snapshot-mutex-payload** — Mutex inner KindedSlot deep projection.
+- **W17-snapshot-lazy-closure** — Lazy initializer closure + cached value (shares the W17-snapshot-closure follow-up's ClosureLayout reconstruction).
+- **W17-snapshot-callstack-upvalues** — non-empty call-stack frames (deep upvalue restoration).
+- **W17-snapshot-nullable** — nullable-scalar kind wire-format with explicit sentinel-rule amendment.
+- **W17-snapshot-callback-invoker** — `ModuleContext.invoke_callable` / `raw_invoker` hooks for `@ai`-annotation callbacks back into the VM during module-fn dispatch.
+
+Each follow-up extends `SerializableVMValue` in lockstep with its target arm, lands the per-kind serializer / deserializer body, and updates this table.
+
+**Smoke targets at landing (six unit tests in `executor/snapshot.rs::tests`):**
+
+1. `test_w17_vm_snapshot_empty_ok` — empty VM snapshots cleanly.
+2. `test_w17_snapshot_roundtrip_scalar_state` — Int / Float / Bool scalar stack round-trip end-to-end.
+3. `test_w17_snapshot_result_option_roundtrip` — `Ok(42)`, `Some("hello")`, `None` round-trip end-to-end.
+4. `test_w17_snapshot_hashset_roundtrip` — HashSet with string keys round-trips end-to-end.
+5. `test_w17_snapshot_resume_incompatible_surfaces_error` — corrupted snapshot (IteratorOpaque on resume) surfaces structured error, not panic.
+6. `test_w17_state_bodies_return_structured_errors` — `state.*` bodies still surface as Err per W17-snapshot-surfaces close (pre-Wave-2.6 invariant preserved).
+
+Binding for Phase 2d onward.
+
 ## 16. References
 
 ### Research base

@@ -63,7 +63,10 @@ pub use shape_graph_current::{
 };
 pub use slot::ValueSlot;
 pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-pub use value::{FilterLiteral, FilterNode, FilterOp, VTable, VTableEntry};
+pub use value::{
+    ErasureError, ErasureType, FilterLiteral, FilterNode, FilterOp, RewriteResult, ThunkSignature,
+    TypeInfo, VTable, VTableEntry, VTableEntryFlags, WrapTarget,
+};
 pub use vm_closure_handle::VmClosureHandle;
 
 // v2 runtime re-exports

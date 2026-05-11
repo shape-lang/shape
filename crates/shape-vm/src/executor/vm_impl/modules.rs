@@ -4,6 +4,78 @@ use super::super::*;
 // `invoke_module_fn_id_stub` surface.
 use shape_value::VMError;
 
+/// Project a `TypedReturn` value into a `KindedSlot` ready for stack
+/// placement.
+///
+/// **W17-snapshot-roundtrip (Phase 2d Wave 2.6, 2026-05-11).** Implements
+/// the scalar/leaf return arms (`Concrete::*`) verbatim per ADR-006
+/// §2.7.4 — each arm picks its target `NativeKind` from the
+/// `ConcreteReturn` discriminator without intermediate value synthesis.
+/// Container / wrapper arms (`Ok`/`Err`/`Some`/`None`/typed objects)
+/// surface clean per §2.7.4 — building the typed-Arc `ResultData` /
+/// `OptionData` / `TypedObjectStorage` requires the per-arm KindedSlot
+/// projection path that lands in follow-up.
+fn project_typed_return(
+    tr: shape_runtime::typed_module_exports::TypedReturn,
+) -> Result<shape_value::KindedSlot, VMError> {
+    use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
+    use shape_value::{KindedSlot, NativeKind, ValueSlot};
+    use std::sync::Arc;
+    match tr {
+        TypedReturn::Concrete(c) => match c {
+            ConcreteReturn::I64(i) => Ok(KindedSlot::new(
+                ValueSlot::from_raw(i as u64),
+                NativeKind::Int64,
+            )),
+            ConcreteReturn::F64(f) => Ok(KindedSlot::new(
+                ValueSlot::from_raw(f.to_bits()),
+                NativeKind::Float64,
+            )),
+            ConcreteReturn::Bool(b) => Ok(KindedSlot::new(
+                ValueSlot::from_raw(if b { 1 } else { 0 }),
+                NativeKind::Bool,
+            )),
+            ConcreteReturn::Unit => Ok(KindedSlot::new(
+                ValueSlot::from_raw(0),
+                NativeKind::Bool,
+            )),
+            ConcreteReturn::String(s) => {
+                Ok(KindedSlot::from_string_arc(Arc::new(s)))
+            }
+            ConcreteReturn::OpaqueTypedObject(hv) => {
+                // hv is `Arc<HeapValue::TypedObject(Arc<TypedObjectStorage>)>`.
+                // Extract the inner Arc<TypedObjectStorage> and rewrap as a
+                // typed slot via `KindedSlot::from_typed_object`.
+                match &*hv {
+                    shape_value::heap_value::HeapValue::TypedObject(s) => Ok(
+                        KindedSlot::from_typed_object(Arc::clone(s)),
+                    ),
+                    other => Err(VMError::RuntimeError(format!(
+                        "project_typed_return: OpaqueTypedObject expected \
+                         HeapValue::TypedObject payload, got {:?}",
+                        other.kind()
+                    ))),
+                }
+            }
+            other => Err(VMError::NotImplemented(format!(
+                "project_typed_return: W17-snapshot-roundtrip surface — \
+                 ConcreteReturn::{:?} arm has no in-session KindedSlot \
+                 projection. Tracked as W17-marshal-return-arms follow-up. \
+                 ADR-006 §2.7.4.",
+                std::mem::discriminant(&other)
+            ))),
+        },
+        other_tr => Err(VMError::NotImplemented(format!(
+            "project_typed_return: W17-snapshot-roundtrip surface — \
+             TypedReturn::{:?} container arm needs the per-arm KindedSlot \
+             projection path (typed-Arc ResultData/OptionData/\
+             TypedObjectStorage builders). Tracked as W17-marshal-return-arms \
+             follow-up. ADR-006 §2.7.4.",
+            std::mem::discriminant(&other_tr)
+        ))),
+    }
+}
+
 impl VirtualMachine {
     /// Register a built-in stdlib module into the VM's module registry.
     /// Delegates to `register_extension` — this is a semantic alias to
@@ -64,21 +136,107 @@ impl VirtualMachine {
         id
     }
 
-    /// Invoke a module-function entry by ID — Phase-2c stub.
+    /// Invoke a module-function entry by ID.
     ///
-    /// The legacy signature took `args: &[ValueWord]` and returned
-    /// `Result<ValueWord, VMError>`. `ValueWord` was deleted; the kinded
-    /// rebuild (ADR-006 §2.7.4 / §2.7.5) takes `&[KindedSlot]` and
-    /// returns `Result<KindedSlot, VMError>`. Migration of every caller
-    /// (`call_convention.rs`, `control_flow/mod.rs`, …) is out of this
-    /// cluster's territory.
-    pub(crate) fn invoke_module_fn_id_stub(&mut self, _fn_id: usize) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "invoke_module_fn_id: ValueWord-shaped args/result carrier deleted; \
-             kinded `&[KindedSlot] -> Result<KindedSlot, _>` host-API revival is \
-             Phase-2c — see ADR-006 §2.7.4 and the §2.7.5 cross-crate ABI policy."
-                .to_string(),
-        ))
+    /// **W17-snapshot-roundtrip close (Phase 2d Wave 2.6, 2026-05-11).**
+    /// Lands the kinded shape per ADR-006 §2.7.4 / §2.7.5: takes
+    /// `&[KindedSlot]` and returns `Result<KindedSlot, VMError>`,
+    /// dispatching through the existing [`module_fn_table`] entry
+    /// (sum-typed `Typed` / `TypedAsync` per Phase 4c.3). The async
+    /// arm runs the future to completion on the ambient tokio
+    /// runtime; the sync arm calls the body directly with the slice's
+    /// raw `u64` bits and the registered `arg_kinds` table on the
+    /// receiver (the body is contract-bound to interpret each slot
+    /// per its `arg_kinds[i]`).
+    ///
+    /// Per `module_exports::ModuleContext`, the body receives a borrow
+    /// of the VM's type schema registry plus the optional invoker
+    /// hooks needed for callbacks back into the VM. The body is
+    /// `Send + Sync` so it can be invoked from worker tasks.
+    ///
+    /// Returns:
+    /// - `Ok(KindedSlot)` — successful invocation; the slot carries
+    ///   the projected `TypedReturn` value with the registered return
+    ///   type's `NativeKind`.
+    /// - `Err(VMError::InvalidCall)` — `fn_id` out of range for the
+    ///   current `module_fn_table`.
+    /// - `Err(VMError::RuntimeError(msg))` — body returned an error
+    ///   string; the message propagates verbatim.
+    /// - `Err(VMError::NotImplemented(msg))` — async body called with
+    ///   no ambient tokio runtime, or `TypedReturn::*` arm that needs
+    ///   the kind-threaded slot projection follow-up. Surface-and-stop
+    ///   per ADR-006 §2.7.4 — no Bool-default fallback.
+    pub(crate) fn invoke_module_fn_id_stub(
+        &mut self,
+        fn_id: usize,
+        args: &[shape_value::KindedSlot],
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        let entry = self
+            .module_fn_table
+            .get(fn_id)
+            .ok_or(VMError::InvalidCall)?
+            .clone();
+
+        // Build a `ModuleContext` borrow against the live schema
+        // registry. The optional invoker hooks (`invoke_callable`,
+        // `raw_invoker`, `function_hashes`, `vm_state`, …) are None
+        // at the synchronous entry path; bodies that need re-entry
+        // back into the VM (`@ai` annotations calling `state.*`)
+        // surface clean per the W17-snapshot-callback-invoker
+        // follow-up.
+        let schema_registry: &shape_runtime::type_schema::TypeSchemaRegistry =
+            &self.program.type_schema_registry;
+        // SAFETY: extend the borrow lifetime to 'ctx via transmute is
+        // not needed here because `ModuleContext` is invariant on its
+        // lifetime parameter and the body call below holds the borrow
+        // for the duration of the dispatch.
+        let ctx = shape_runtime::module_exports::ModuleContext {
+            schemas: schema_registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+        };
+
+        match entry {
+            shape_runtime::module_exports::ModuleFnEntry::Typed(typed) => {
+                // The body takes `&[u64]` slot bits (per its kind table)
+                // and returns `Result<TypedReturn, String>`. Translate
+                // `&[KindedSlot]` to `Vec<u64>` at the boundary.
+                let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
+                let typed_return = (typed.invoke)(&raw_bits, &ctx)
+                    .map_err(VMError::RuntimeError)?;
+                project_typed_return(typed_return)
+            }
+            shape_runtime::module_exports::ModuleFnEntry::TypedAsync(async_entry) => {
+                let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
+                let fut = (async_entry.invoke)(raw_bits);
+                // Drive the future on the ambient tokio runtime. If no
+                // runtime is available we surface — async dispatch
+                // requires an explicit host runtime per the §2.7.4 task-
+                // scheduler boundary.
+                let typed_return = match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => tokio::task::block_in_place(|| {
+                        handle.block_on(fut).map_err(VMError::RuntimeError)
+                    })?,
+                    Err(_) => {
+                        return Err(VMError::NotImplemented(
+                            "invoke_module_fn_id: async dispatch requires an \
+                             ambient tokio runtime — wrap the call in \
+                             tokio::runtime::Builder::new_current_thread().build() \
+                             or use a worker thread. ADR-006 §2.7.4 \
+                             task-scheduler boundary."
+                                .to_string(),
+                        ));
+                    }
+                };
+                project_typed_return(typed_return)
+            }
+        }
     }
 
     /// Populate extension module objects as module_bindings — Phase-2c stub.

@@ -500,6 +500,28 @@ impl<'a> ValueFormatter<'a> {
                     "<lazy:pending>".to_string()
                 }
             }
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): a `dyn Trait` carrier renders as
+            // `<dyn TraitName #schema>` for diagnostics. Pretty-print
+            // via the boxed receiver's user-defined `Display`-style
+            // method is the compiler-emission tier's concern (call
+            // the trait's display method through the vtable); the
+            // storage-tier formatter is diagnostic-only. SAFETY:
+            // construction-side contract on
+            // `KindedSlot::from_trait_object` — TraitObject-kind
+            // bits are `Arc::into_raw(Arc<TraitObjectStorage>)`.
+            HeapKind::TraitObject => {
+                let t: &shape_value::heap_value::TraitObjectStorage = unsafe {
+                    &*(bits as *const shape_value::heap_value::TraitObjectStorage)
+                };
+                let trait_name = t
+                    .vtable
+                    .trait_names
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                format!("<dyn {} #{}>", trait_name, t.value.schema_id)
+            }
         }
     }
 
@@ -885,6 +907,20 @@ impl<'a> ValueFormatter<'a> {
                 } else {
                     "<lazy:pending>".to_string()
                 }
+            }
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): `dyn Trait` carrier — render as
+            // `<dyn TraitName #schema>` for diagnostics. Pretty-print
+            // via the boxed receiver's user-defined `Display`-style
+            // method is the compiler-emission tier's concern.
+            HeapValue::TraitObject(t) => {
+                let trait_name = t
+                    .vtable
+                    .trait_names
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                format!("<dyn {} #{}>", trait_name, t.value.schema_id)
             }
         }
     }

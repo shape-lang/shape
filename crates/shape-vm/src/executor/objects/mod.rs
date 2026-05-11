@@ -640,12 +640,18 @@ impl VirtualMachine {
                 // future / reference / shared-cell / filter-expr
                 // discriminators from method-call dispatch — these are
                 // not user-callable receivers. Trait-object method
-                // calls go through `op_dyn_method_call`, not here.
+                // calls go through `op_dyn_method_call`, not here —
+                // the compiler-emission tier (W17-trait-object-emission)
+                // emits `DynMethodCall` opcodes that walk the receiver's
+                // `Arc<TraitObjectStorage>::vtable` directly per
+                // ADR-006 §2.7.24 / Q25.C.5 `VTableEntry` shape, NOT
+                // through this generic method PHF.
                 HeapKind::Closure
                 | HeapKind::Future
                 | HeapKind::Reference
                 | HeapKind::SharedCell
                 | HeapKind::FilterExpr
+                | HeapKind::TraitObject
                 | HeapKind::IoHandle
                 | HeapKind::TaskGroup
                 | HeapKind::NativeView

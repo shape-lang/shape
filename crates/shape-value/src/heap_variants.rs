@@ -237,6 +237,35 @@ macro_rules! define_heap_types {
             // from None under null-coding. Slot bits are
             // `Arc::into_raw(Arc<OptionData>)`; full HeapValue arm.
             Option,        // 28  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 24 at merge — Channel already took 24)
+            // ADR-006 §2.7.24 / Q25.C amendment (Wave 17
+            // W17-trait-object-storage, 2026-05-11): re-introduces the
+            // strict-typing-bulldozer-deleted `HeapKind::TraitObject` /
+            // `HeapValue::TraitObject` carrier as a typed-Arc pair
+            // (`Arc<TraitObjectStorage>`) replacing the legacy
+            // `HeapValue::TraitObject { value: Box<u64>, vtable: Arc<VTable> }`
+            // shape. The new carrier is a fat-pointer over an
+            // `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
+            // vtable half — universal-dyn auto-boxing (§Q25.C.1) makes
+            // the boxed value always a TypedObject, so the `Box<u64>`
+            // kind-blind raw-bits shape is refused under §Q25.E #3.
+            //
+            // Full HeapValue arm (NOT pure-discriminator like
+            // FilterExpr / SharedCell / Reference): TraitObject values
+            // flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`a.name()` /
+            // `a.clone_me()` etc. — the universe of `dyn T` method
+            // calls). Same dispatch shape as the §2.7.20 Channel
+            // precedent for refcount discipline; `clone_with_kind` /
+            // `drop_with_kind` retain/release
+            // `Arc<TraitObjectStorage>` directly via the kind label,
+            // NOT through `HeapValue`.
+            //
+            // Pre-assigned ordinal 29 per the wave-2.5 W17-trait-object
+            // dispatch contract (the original W17-typed-carrier-mono
+            // playbook reserved 29 for TraitObject; rescope kept that
+            // assignment). Ordinal 29 was free between Option=28 and
+            // the W17-concurrency block Mutex=30 / Atomic=31 / Lazy=32.
+            TraitObject,   // 29  (Wave 17 W17-trait-object-storage, 2026-05-11)
             // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
             // 2026-05-11): Mutex<T> concurrency primitive — a single
             // typed payload protected by a `Mutex<MutexInner>` for
@@ -528,6 +557,26 @@ macro_rules! define_heap_types {
             /// `OptionData::none()` at compiler emission sites). Same
             /// kinded-payload discipline as `Result` per §2.7.17.
             Option(std::sync::Arc<$crate::heap_value::OptionData>),
+            // ===== W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11) =====
+            /// `dyn Trait` carrier (`Arc<TraitObjectStorage>`).
+            /// Re-introduces the bulldozer-deleted `HeapValue::TraitObject`
+            /// arm as a typed-Arc pair — `TraitObjectStorage` holds an
+            /// `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
+            /// vtable half. Slot bits are
+            /// `Arc::into_raw(Arc<TraitObjectStorage>) as u64`;
+            /// recovery goes through `slot.as_heap_value()` →
+            /// `HeapValue::TraitObject(arc)` per ADR-005 §1
+            /// single-discriminator. The compiler-emission tier
+            /// (W17-trait-object-emission round) populates the slot
+            /// via `OpCode::BoxTraitObject` and dispatches method
+            /// calls via `OpCode::DynMethodCall` against the recovered
+            /// `Arc<TraitObjectStorage>`. See ADR-006 §2.7.24 Q25.C.1
+            /// (universal-dyn auto-boxing), Q25.C.2 (Self-arg runtime
+            /// vtable-identity check), Q25.C.3 (generic-method
+            /// TypeInfo dispatch), Q25.C.5 (`VTableEntry` 6-variant
+            /// shape).
+            TraitObject(std::sync::Arc<$crate::heap_value::TraitObjectStorage>),
             // ===== W17-concurrency (ADR-006 §2.7.25, 2026-05-11) =====
             /// `Mutex<T>` concurrency-primitive carrier
             /// (`Arc<MutexData>`). The inner `MutexData` wraps a
@@ -585,6 +634,7 @@ macro_rules! define_heap_types {
                     HeapValue::Range(..) => HeapKind::Range,
                     HeapValue::Result(..) => HeapKind::Result,
                     HeapValue::Option(..) => HeapKind::Option,
+                    HeapValue::TraitObject(..) => HeapKind::TraitObject,
                     HeapValue::Mutex(..) => HeapKind::Mutex,
                     HeapValue::Atomic(..) => HeapKind::Atomic,
                     HeapValue::Lazy(..) => HeapKind::Lazy,
@@ -647,6 +697,12 @@ macro_rules! define_heap_types {
                     // tests go through `op_is_ok` / `op_is_err`.
                     HeapValue::Result(_) => true,
                     HeapValue::Option(_) => true,
+                    // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                    // 2026-05-11): a `dyn Trait` carrier is always
+                    // truthy when present — a boxed trait object is a
+                    // live receiver regardless of its inner value.
+                    // Same shape as Reference / Iterator / Channel.
+                    HeapValue::TraitObject(_) => true,
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // concurrency primitives are always truthy when
                     // present — a live mutex/atomic/lazy is a usable
@@ -696,6 +752,7 @@ macro_rules! define_heap_types {
                     HeapValue::Range(_) => "range",
                     HeapValue::Result(_) => "result",
                     HeapValue::Option(_) => "option",
+                    HeapValue::TraitObject(_) => "trait_object",
                     HeapValue::Mutex(_) => "mutex",
                     HeapValue::Atomic(_) => "atomic",
                     HeapValue::Lazy(_) => "lazy",
