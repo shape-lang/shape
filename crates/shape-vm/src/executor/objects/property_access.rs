@@ -370,10 +370,22 @@ impl VirtualMachine {
         storage: &shape_value::heap_value::TypedObjectStorage,
         key: &str,
     ) -> Result<(), VMError> {
+        // W17-typed-carrier-bundle-A checkpoint 4/4: fall back to the
+        // ambient runtime registry's predeclared-schemas lookup for
+        // schemas auto-registered by `typed_object_from_pairs` (Entry /
+        // Pair / annotation metadata). The program's per-bytecode
+        // registry covers user-defined types; predeclared schemas live
+        // in `shape_runtime::type_schema::lookup_schema_by_id_public`.
         let schema = self
             .program
             .type_schema_registry
             .get_by_id(storage.schema_id as u32)
+            .cloned()
+            .or_else(|| {
+                shape_runtime::type_schema::lookup_schema_by_id_public(
+                    storage.schema_id as u32,
+                )
+            })
             .ok_or_else(|| {
                 VMError::RuntimeError(format!(
                     "Schema {} not found in registry",
@@ -558,10 +570,19 @@ impl VirtualMachine {
         // Pre-resolve schema + field; on lookup failure drop the value
         // share and propagate. Avoid `ok_or_else` closures here so the
         // `drop_with_kind` side-effect order is explicit.
-        let Some(schema) = self
+        // W17-typed-carrier-bundle-A checkpoint 4/4: fall back to the
+        // ambient runtime registry's predeclared schemas (see read path).
+        let schema_owned = self
             .program
             .type_schema_registry
             .get_by_id(storage.schema_id as u32)
+            .cloned()
+            .or_else(|| {
+                shape_runtime::type_schema::lookup_schema_by_id_public(
+                    storage.schema_id as u32,
+                )
+            });
+        let Some(schema) = schema_owned.as_ref()
         else {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(

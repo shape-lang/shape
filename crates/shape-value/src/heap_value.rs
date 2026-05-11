@@ -929,8 +929,11 @@ impl HashMapData {
     /// the first push selects the arm; subsequent pushes require the
     /// same HeapValue kind.
     fn push_heap_value(&mut self, value: Arc<HeapValue>) {
-        // Empty-map first-push: re-target the arm to match `value`'s kind.
-        if self.keys.data.is_empty() && matches!(&self.values, HashMapValueBuf::TypedObject(b) if b.data.is_empty()) {
+        // Empty-values first-push: re-target the arm to match `value`'s
+        // kind. `keys` may already have the new key pushed by `insert`
+        // (the caller `insert` pushes key first, then this); the values
+        // arm-selection key is the buffer's own emptiness.
+        if matches!(&self.values, HashMapValueBuf::TypedObject(b) if b.data.is_empty()) {
             self.values = match value.as_ref() {
                 HeapValue::String(_) => HashMapValueBuf::String(Arc::new(
                     crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),

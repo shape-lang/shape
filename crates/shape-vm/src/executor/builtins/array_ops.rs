@@ -392,15 +392,21 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
             ("first", xa),
             ("second", xb),
         ]);
-        match pair_slot.slot.as_heap_value() {
-            HeapValue::TypedObject(s) => pair_storages.push(Arc::clone(s)),
-            other => {
-                return Err(type_error(format!(
-                    "zip: typed_object_from_pairs returned non-TypedObject: {:?}",
-                    other.kind()
-                )))
-            }
-        }
+        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
+        // bits are `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT
+        // `*const HeapValue`) — `as_heap_value()` is wrong-type recovery.
+        // Recover the typed Arc directly per the 5-arm soundness rule;
+        // see `hashmap_methods.rs::build_entries_array` for the canonical form.
+        let bits = pair_slot.slot.raw();
+        let storage = unsafe {
+            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
+                bits as *const shape_value::heap_value::TypedObjectStorage,
+            );
+            let cloned = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            cloned
+        };
+        pair_storages.push(storage);
         drop(pair_slot);
     }
     Ok(KindedSlot::from_typed_array(Arc::new(

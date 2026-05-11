@@ -239,6 +239,7 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
     // Build slots — `NativeKind` selects the per-FieldType constructor.
     // Heap arms set the heap_mask bit; inline-scalar arms do not.
     let mut slots = Vec::with_capacity(schema.fields.len());
+    let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(schema.fields.len());
     let mut heap_mask: u64 = 0;
     for (i, field_def) in schema.fields.iter().enumerate() {
         let value = value_by_name
@@ -255,7 +256,8 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         // u64; the explicit `clone()` does the per-kind retain.
         let cloned = (*value).clone();
         let bits = cloned.slot().raw();
-        let is_heap = match cloned.kind() {
+        let kind = cloned.kind();
+        let is_heap = match kind {
             NativeKind::String | NativeKind::Ptr(_) => true,
             _ => false,
         };
@@ -264,6 +266,7 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         std::mem::forget(cloned);
         let slot = ValueSlot::from_raw(bits);
         slots.push(slot);
+        field_kinds.push(kind);
         if is_heap {
             heap_mask |= 1u64 << i;
         }
@@ -273,9 +276,11 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         schema.id as u64,
         slots.into_boxed_slice(),
         heap_mask,
-        // No per-slot kind table is recorded on this fast path — the
-        // schema's `FieldType`s are the source of truth at read time.
-        Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
+        // W17-typed-carrier-bundle-A checkpoint 4/4: pass the per-slot
+        // kind table so `TypedObjectStorage::new`'s slot/field_kinds
+        // length-match debug_assert holds. Required for the
+        // Entry/Pair construction path lit up by C+ resolution.
+        Arc::from(field_kinds.into_boxed_slice()),
     ));
     let _: &HeapValue = &HeapValue::TypedObject(storage.clone());
     KindedSlot::new(

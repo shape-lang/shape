@@ -362,16 +362,27 @@ fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
             ("key", key_slot),
             ("value", value_slot),
         ]);
-        match entry_slot.slot.as_heap_value() {
-            HeapValue::TypedObject(storage) => entry_storages.push(Arc::clone(storage)),
-            other => {
-                return Err(type_error(format!(
-                    "HashMap.entries: typed_object_from_pairs returned non-TypedObject: {:?}",
-                    other.kind()
-                )))
-            }
-        }
-        drop(entry_slot);
+        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
+        // kind is `Ptr(HeapKind::TypedObject)` and whose bits are
+        // `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT `*const HeapValue`
+        // — using `as_heap_value()` here is wrong-type recovery per the
+        // 5-arm receiver-recovery soundness rule). Recover the typed Arc
+        // directly, clone the inner share into the buffer, and consume
+        // the original via `Arc::from_raw` to release entry_slot's share
+        // without dropping the KindedSlot (which would also decrement).
+        let bits = entry_slot.slot.raw();
+        let storage = unsafe {
+            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
+                bits as *const shape_value::heap_value::TypedObjectStorage,
+            );
+            let cloned = Arc::clone(&arc);
+            // Re-raw the original so entry_slot's Drop's decrement runs
+            // cleanly on the still-owned share.
+            let _ = Arc::into_raw(arc);
+            cloned
+        };
+        entry_storages.push(storage);
+        drop(entry_slot); // releases the original share via Drop's kind-aware path
     }
     let buf = TypedBuffer::from_vec(entry_storages);
     Ok(KindedSlot::from_typed_array(Arc::new(
