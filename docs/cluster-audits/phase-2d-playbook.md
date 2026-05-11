@@ -561,6 +561,21 @@ resume(s)
 > - **W17-trait-object-emission** (NEW — missed by original P3 framing): compiler-side dyn-coerce grammar (verify or extend), type inference for dyn coercion, bytecode emit for `OpCode::BoxTraitObject` + `DynMethodCall`, compiler-side vtable lookup at coerce-to-dyn time. **BLOCKED BY** `W17-trait-object-storage` (needs the carrier + vtable shapes to exist). Smoke: end-to-end §2.7.24 Q25.C example (`let a: dyn Animal = box(Dog{...}); print(a.name())`). Effort: ~10-14h.
 >
 > ADR-006 §2.7.24 stays unchanged; only this playbook's scope framing was off. The original `W17-typed-carrier-monomorphization` row in `AGENTS.md` is marked "rescoped"; see the three new rows. The rest of this entry preserved verbatim as historical context.
+>
+> **Bundle-A checkpoint-2 amendment (2026-05-11, binding precedent for the heterogeneous-pair gap):** Bundle-A's first execution surfaced after checkpoint 1 because 5 `TypedArrayData::HeapValue(...)` construction sites genuinely produce heterogeneous pair/tuple arrays with no monomorphic target arm in Q25.A. Resolution **C+** (per supervisor ruling): change what `entries()` / `zip()` / `hashmap_elem_at` *construct*, rather than amending Q25.A:
+>
+> - **3 true-2-tuple sites** rewire to construct `Array<Entry<K,V>>` / `Array<Pair<A,B>>` where `Entry`/`Pair` are TypedObject (or Shape's tuple representation if distinct from TypedObject at runtime). Sites: `iterator_methods.rs:280-287` `hashmap_elem_at`, `hashmap_methods.rs:344, 350` `build_entries_array`, `builtins/array_ops.rs:396, 402` `builtin_zip`. **User-visible API change**: `entry[0]` / `entry[1]` becomes `entry.key` / `entry.value` (or `entry.0` / `entry.1` if tuple). Mechanical migration; stdlib + tests updated in checkpoints 2-3. Document the breaking change in bundle-A's close commit.
+> - **2 cross-kind-array sites** become structurally unreachable post-Q25.A deletion: `array_transform.rs:467, 620` cross-element-kind flatten, `concat.rs:253` cross-variant concat. After `TypedArrayData::HeapValue` is gone, the type system cannot admit `Array<Array<HeapValue>>` or cross-kind concat inputs at all. Migrate to `unreachable!("post-§2.7.24 Q25.A: cross-kind arrays unrepresentable")` with the structural-unreachability cite.
+>
+> Rationale for C+ over alternatives:
+> - **Not D (named exception)**: ADR-005 §2's String exception is *performance-justified by measurement*, not a structural escape hatch for polymorphism. Freezing 5 sites at `TypedArrayData::HeapValue` is the "keep ValueWord for just one edge case" rationalization from CLAUDE.md "Forbidden rationalizations" and falls under the new `(catchall|polymorphic.fallback|any.element)` defection-attractor family.
+> - **Not A (`Pair2(Arc<TypedBuffer<(KindedSlot, KindedSlot)>>)`)**: a 2-element rename of the deleted `HeapValue` arm.
+> - **Not B (global pair-literal lowering to TypedObject)**: changes language semantics for every site that uses array literals as ad-hoc tuples.
+> - **Not E (split into separate sub-cluster)**: `_ => Err(NotImplemented(SURFACE))` placeholder set in checkpoint 4 fails the "zero `TypedArrayData::HeapValue` hits" gate. Defers the decision rather than making it.
+>
+> C+ resolves the gap structurally: ADR-006 §2.7.24 spec is correct; the user-visible API of pair-as-array is replaced by record-or-tuple access, which is the right shape for typed records anyway. The "zero hits" gate at checkpoint 4 becomes genuinely zero — no exception set.
+>
+> **Surface-if-refuted**: if the bundle-A agent's audit finds Shape lacks a usable record/tuple carrier suitable for `entries()` / `zip()` return values (TypedObject with positional-field schemas not constructible at runtime for this case), surface — that would require its own sub-cluster (probably `W17-tuple-carrier`).
 
 **Slug:** `w17-typed-carrier-monomorphization` · **Effort:** 24-32h · **Risk:** high · **Consumes ADR-006 §2.7.24.**
 
