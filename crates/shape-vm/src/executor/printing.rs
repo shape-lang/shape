@@ -474,6 +474,32 @@ impl<'a> ValueFormatter<'a> {
                     "None".to_string()
                 }
             }
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+            // concurrency primitives have no user-facing literal —
+            // render as opaque tags annotated with diagnostic state.
+            // Mirror of Channel's `<channel:state:len>` shape.
+            // SAFETY: construction-side contract on
+            // `KindedSlot::from_mutex / from_atomic / from_lazy` —
+            // bits are `Arc::into_raw(Arc<MutexData / AtomicData /
+            // LazyData>)`.
+            HeapKind::Mutex => {
+                let _ = bits;
+                "<mutex>".to_string()
+            }
+            HeapKind::Atomic => {
+                let a: &shape_value::heap_value::AtomicData =
+                    unsafe { &*(bits as *const shape_value::heap_value::AtomicData) };
+                format!("<atomic:{}>", a.load())
+            }
+            HeapKind::Lazy => {
+                let l: &shape_value::heap_value::LazyData =
+                    unsafe { &*(bits as *const shape_value::heap_value::LazyData) };
+                if l.is_initialized() {
+                    "<lazy:initialized>".to_string()
+                } else {
+                    "<lazy:pending>".to_string()
+                }
+            }
         }
     }
 
@@ -830,6 +856,17 @@ impl<'a> ValueFormatter<'a> {
                     "Some(<...>)".to_string()
                 } else {
                     "None".to_string()
+                }
+            }
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+            // concurrency-primitive carriers — render as opaque tags.
+            HeapValue::Mutex(_) => "<mutex>".to_string(),
+            HeapValue::Atomic(a) => format!("<atomic:{}>", a.load()),
+            HeapValue::Lazy(l) => {
+                if l.is_initialized() {
+                    "<lazy:initialized>".to_string()
+                } else {
+                    "<lazy:pending>".to_string()
                 }
             }
         }

@@ -4655,6 +4655,91 @@ The W17-typed-carrier sub-cluster's gates include:
 
 Binding for Phase 2d onward.
 
+#### 2.7.25 Mutex / Atomic / Lazy HeapKinds — concurrency-primitive rebuild trio (Phase 2d Wave 2.5 W17-concurrency, 2026-05-11)
+
+**Question:** the §2.7.20 Channel amendment landed the first concurrency primitive kinded. The W13-out-of-scope list identified three more: `Mutex<T>` (shared-cell-with-exclusion), `Atomic<T>` (atomic load/store/CAS), `Lazy<T>` (initialize-once). All three lost their carriers in the strict-typing Phase-2 deletion of `HeapValue::Concurrency(ConcurrencyData::*)` because every `ConcurrencyData` variant carried `ValueWord`-shaped payload fields. What is the correct typed-Arc shape for each, and what are the runtime semantics at the single-threaded VM landing?
+
+**Decision:** introduce three new `HeapKind` ordinals + their matching `HeapValue` arms in a single coordinated amendment (mirror of the §2.7.20 Channel rebuild structure):
+
+- `HeapKind::Mutex = 30` + `HeapValue::Mutex(Arc<MutexData>)`
+- `HeapKind::Atomic = 31` + `HeapValue::Atomic(Arc<AtomicData>)`
+- `HeapKind::Lazy = 32` + `HeapValue::Lazy(Arc<LazyData>)`
+
+All three are **full `HeapValue` arms** (NOT pure-discriminator like FilterExpr / SharedCell) — receiver classification at method dispatch flows through `slot.as_heap_value()` per ADR-005 §1 single-discriminator. Same retain/release dispatch shape as the §2.7.20 Channel precedent.
+
+**Storage shape — Mutex.** Like Channel, Mutex needs **interior mutability** so two `Arc<MutexData>` shares of the same mutex observe each other's `set` mutations. The inner state therefore lives behind a `Mutex<MutexInner>`; the outer `Arc` is purely a refcount carrier. At the single-threaded VM landing, `lock()` / `try_lock()` are no-op markers that preserve the user-visible contract ("the inner value is mutated under exclusion") without serializing real concurrency.
+
+```rust
+pub struct MutexData {
+    inner: std::sync::Mutex<MutexInner>,
+}
+struct MutexInner {
+    value: Option<KindedSlot>,  // wrapped value
+}
+```
+
+**Storage shape — Atomic.** Wraps `std::sync::atomic::AtomicI64` for the atomic load / store / fetch_add / fetch_sub / compare_exchange operations. **i64-only at landing** per the typed-payload deferral precedent (W15-priority-queue i64-priority-only, W13-hashset string-only). Memory ordering is `SeqCst` throughout — the simplest semantically-correct ordering. A typed-payload `Atomic<T>` and relaxed-ordering optimizations are future Phase-2c amendments with measurement.
+
+```rust
+pub struct AtomicData {
+    value: std::sync::atomic::AtomicI64,
+}
+```
+
+**Storage shape — Lazy.** Wraps an initializer closure (`KindedSlot` of kind `Ptr(HeapKind::Closure)`) and a cached value slot. The closure-call path is unlocked by **W17-make-closure** (the Phase 2d Wave 2 partial-gate, merged at `aa47364`); without that closure-call re-entry shape, `Lazy.get()` could not invoke the initializer from a method handler. `LazyData` uses a `Mutex<LazyInner>` for interior mutability so the OnceCell-style "init only happens once" guarantee is preserved when the runtime grows real concurrency. At single-threaded landing the mutex is uncontended.
+
+```rust
+pub struct LazyData {
+    inner: std::sync::Mutex<LazyInner>,
+}
+struct LazyInner {
+    initializer: Option<KindedSlot>,  // closure; dropped after first get()
+    value:       Option<KindedSlot>,  // cached value; populated by first get()
+}
+```
+
+**Method surface (~11 sites):**
+
+- **Mutex:** `lock()`, `try_lock()`, `set(value)`, `get()` — `get` is the read-accessor for the wrapped value. The playbook smoke target uses `print(m.value)` (property-access form); since GetProp dispatch for `HeapKind::Mutex` is out of scope for W17-concurrency, the `get()` method is the equivalent accessor user code calls.
+- **Atomic:** `load()`, `store(v)`, `fetch_add(d)`, `fetch_sub(d)`, `compare_exchange(expected, new)`. Each `fetch_*` returns the prior value; `compare_exchange` returns the prior value regardless of success (callers infer success by comparing to `expected`).
+- **Lazy:** `get()` (runs initializer once, caches; closure-call via `vm.call_value_immediate_nb`), `is_initialized()` (bool).
+
+**Construction shape.** Each ctor takes one argument:
+
+- `Mutex(initial_value)` — accepts any `KindedSlot` (the inner value can be any kind; the share moves into the cell).
+- `Atomic(initial_int)` — int-only at landing per the i64-only storage shape; non-int args error.
+- `Lazy(|| initializer)` — closure-only; kind-validated as `Ptr(HeapKind::Closure)` at the ctor.
+
+**Dispatch tables (mirror of §2.7.20 Channel, lockstep updates for all three new ordinals):**
+
+1. `clone_with_kind` / `drop_with_kind` (`vm_impl/stack.rs`) dispatch the `Mutex` / `Atomic` / `Lazy` arms to `Arc::increment/decrement_strong_count::<MutexData/AtomicData/LazyData>`.
+2. `KindedSlot::Drop` / `KindedSlot::Clone` (`shape-value/src/kinded_slot.rs`) mirror the same arms; new `KindedSlot::from_mutex` / `from_atomic` / `from_lazy` constructors.
+3. `SharedCell::drop` (`shape-value/src/v2/closure_layout.rs`) mirrors the same arms.
+4. `TypedObjectStorage::drop` (`shape-value/src/heap_value.rs`) mirrors the same arms — a TypedObject field of kind `Ptr(HeapKind::Mutex/Atomic/Lazy)` retires one strong-count share.
+
+**Knock-on `kind_type_name` updates** in `arithmetic/mod.rs`, `comparison/mod.rs`, `typed_access.rs`, `printing.rs` — Mutex/Atomic/Lazy display as "mutex"/"atomic"/"lazy" (formatter renders `<mutex>`, `<atomic:N>`, `<lazy:initialized>` / `<lazy:pending>`). PHF classifier in `objects/mod.rs` routes Mutex receivers to `MUTEX_METHODS`, Atomic to `ATOMIC_METHODS`, Lazy to `LAZY_METHODS`.
+
+**Wire / JSON.** Concurrency primitives carry runtime-mutable interior state (Mutex inner value, atomic counter, lazy initializer) and don't have a stable serialized form. `wire_conversion.rs` surfaces as opaque tags (`<mutex:phase-2c>` etc.); `json_value.rs` rejects with "cannot serialize: Mutex/Atomic/Lazy". Same deferral shape as Channel / HashMap / HashSet.
+
+**Refcount discipline.** Storage-tier unit tests (`crates/shape-value/src/heap_value.rs#concurrency_storage`, 18 tests) pin the API contracts and refcount-on-drop invariant:
+
+- `mutex_set_with_heap_payload_retires_shares` — `Mutex.set` drops the prior payload's heap share.
+- `mutex_shared_arc_observes_set_mutations` — two `Arc<MutexData>` shares observe each other's mutations.
+- `atomic_shared_arc_observes_other_share` — same for Atomic load/store/fetch.
+- `lazy_dropping_lazy_with_heap_payload_retires_shares` — dropping the LazyData retires the cached slot's heap share.
+
+**Forbidden alternatives this rules out:**
+
+- **"Re-introduce `ConcurrencyData::{Mutex, Atomic, Lazy}` in the deleted `ValueWord`-encoded shape under a less-suspicious name."** This is the W-series defection-attractor (CLAUDE.md "Renames to refuse on sight"); the kind dispatch must go through the `HeapKind::Mutex` / `Atomic` / `Lazy` arms and the payloads must be typed `Arc<T>`, never `Box<HeapValue>` wrappers or tag-bit-decoded carriers.
+- **"Build a generic 'concurrency primitive' wrapper (`HeapValue::Concurrency(ConcurrencyData)`) and dispatch all three primitives through it."** Wrong shape — each primitive has different storage semantics (Mutex carries a `KindedSlot` payload; Atomic carries an atomic-typed scalar; Lazy carries a closure + cached value), and a parent enum would re-introduce the dispatch-on-inner-discriminator pattern §2.3 explicitly forbids.
+- **"Inline-scalar Mutex / Atomic carriers."** Wrong shape — the semantic identity of Mutex/Atomic is "this is a shared cell with mutation observable by all holders". Inline scalars cannot share state across `KindedSlot` copies; the typed-Arc shape is structurally required.
+- **"Re-use `HeapKind::SharedCell` for Mutex."** Wrong fit — `SharedCell` is the binding-storage interior-mutability carrier for `var` binding-form values (§2.7.12 / Q13), with a pure-discriminator dispatch and no method surface. `MutexData` is a runtime synchronization primitive user code asks for explicitly, with its own method surface and its own refcount discipline.
+- **"Skip the inner `Mutex<>` and use `Arc::make_mut` clone-on-write like HashMap / HashSet."** Wrong semantics — the shared-cell contract requires that all `Arc<MutexData>` / `Arc<LazyData>` shares observe each other's mutations. `Arc::make_mut` clones the inner state on the first mutation past refcount=1, breaking the shared-cell contract. Same justification as the §2.7.20 Channel rebuild.
+
+**Out-of-scope this amendment:** typed-payload `Atomic<T>` for non-i64 element kinds (the Phase-2c follow-up with measurement); relaxed memory-ordering variants on Atomic operations (SeqCst-only at landing); GetProp dispatch for `Mutex.value` property-access form (the playbook smoke target's `print(m.value)` shape — currently expressed via the `get()` method); typed sender/receiver / producer-only / consumer-only specializations for Mutex (the way Channel had pre-bulldozer); cross-task await-style `lazy.get()` for async initializers (the §2.7.4 task-scheduler boundary, same as Channel.recv blocking). All five are phase-2c follow-ups tracked separately.
+
+**Status.** Binding for Phase 2d onward.
+
 ## 13. Forbidden patterns (extends ADR-005 §Forbidden)
 
 - **No `from_heap_arc(Arc<HeapValue>)` catch-all slot constructor.** Per-

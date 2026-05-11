@@ -17,8 +17,9 @@
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
 use crate::heap_value::{
-    ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData, NativeViewData,
-    PriorityQueueData, RangeData, TypedArrayData, TypedObjectStorage,
+    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData,
+    LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData, TypedArrayData,
+    TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -173,6 +174,30 @@ impl ValueSlot {
     /// same channel observe each other's `send` / `recv`.
     pub fn from_channel(c: Arc<ChannelData>) -> Self {
         Self(Arc::into_raw(c) as u64)
+    }
+
+    /// Store an `Arc<MutexData>` directly. Mirrors
+    /// `HeapValue::Mutex(Arc<MutexData>)`. ADR-006 §2.7.25 amendment
+    /// (Wave 17 W17-concurrency, 2026-05-11). Same typed-Arc shape as
+    /// Channel; `MutexData` carries `Mutex<MutexInner>` for
+    /// interior-mutability sharing.
+    pub fn from_mutex(m: Arc<MutexData>) -> Self {
+        Self(Arc::into_raw(m) as u64)
+    }
+
+    /// Store an `Arc<AtomicData>` directly. Mirrors
+    /// `HeapValue::Atomic(Arc<AtomicData>)`. ADR-006 §2.7.25 amendment
+    /// (Wave 17 W17-concurrency, 2026-05-11). i64-only at landing.
+    pub fn from_atomic(a: Arc<AtomicData>) -> Self {
+        Self(Arc::into_raw(a) as u64)
+    }
+
+    /// Store an `Arc<LazyData>` directly. Mirrors
+    /// `HeapValue::Lazy(Arc<LazyData>)`. ADR-006 §2.7.25 amendment
+    /// (Wave 17 W17-concurrency, 2026-05-11). Closure-call path
+    /// unlocked by W17-make-closure (`aa47364`).
+    pub fn from_lazy(l: Arc<LazyData>) -> Self {
+        Self(Arc::into_raw(l) as u64)
     }
 
     /// Store an `Arc<PriorityQueueData>` directly. Mirrors

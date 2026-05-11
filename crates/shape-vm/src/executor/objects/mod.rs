@@ -606,6 +606,14 @@ impl VirtualMachine {
                 HeapKind::PriorityQueue => method_registry::PRIORITY_QUEUE_METHODS
                     .get(method_name)
                     .copied(),
+                // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): the
+                // new HeapKind ordinals 30/31/32 with their
+                // MUTEX_METHODS / ATOMIC_METHODS / LAZY_METHODS
+                // registries. Method-receiver classification routes
+                // `m.lock()` / `a.fetch_add(...)` / `l.get()` here.
+                HeapKind::Mutex => method_registry::MUTEX_METHODS.get(method_name).copied(),
+                HeapKind::Atomic => method_registry::ATOMIC_METHODS.get(method_name).copied(),
+                HeapKind::Lazy => method_registry::LAZY_METHODS.get(method_name).copied(),
                 // W15-range close (ADR-006 §2.7.23/Q24): Range receivers
                 // route to the RANGE_METHODS PHF.
                 HeapKind::Range => method_registry::RANGE_METHODS.get(method_name).copied(),
