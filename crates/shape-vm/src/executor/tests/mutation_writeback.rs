@@ -359,6 +359,78 @@ fn atomic_store_on_let_immutable_binding_works() {
     assert_eq!(result.as_i64(), Some(7));
 }
 
+// ─── Numeric widening lattice (ADR-006 §2.7.27 / Commit 2) ────────────────
+//
+// The lossless lattice covers integer-width widening:
+//   i8 → i16 → i32 → i64
+//   u8 → u16 → u32 → u64
+//
+// `int ↔ number` widening is governed by existing arithmetic-result
+// inference (`5 * 2.0 → number`) and is NOT part of the lattice this
+// ruling adds; the ruling reaffirms that narrow integers widen to wider
+// integers, not across the int/number boundary.
+//
+// Narrowing requires explicit `as T`. Widening is compile-time only —
+// NO runtime coercion opcodes (CLAUDE.md "Forbidden Patterns" #5).
+
+#[test]
+fn widening_i8_to_i32_via_compound_assign() {
+    // The dispatch text's canonical smoke target:
+    //   let mut n: i32 = 0
+    //   let x: i8 = 5
+    //   n += x      // widens x to i32, AddI32 + writeback to n's slot
+    //   print(n)   // 5
+    let result = eval_with_kind(
+        r#"
+        let mut n: i32 = 0
+        let x: i8 = 5
+        n += x
+        n
+        "#,
+        NativeKind::Int32,
+    );
+    // i32 result bits decode as the low 32 bits of the u64 slot.
+    let bits = result.raw();
+    let val = (bits & 0xFFFF_FFFF) as i32;
+    assert_eq!(val, 5);
+}
+
+#[test]
+fn widening_i16_to_i64_in_binding() {
+    let result = eval(
+        r#"
+        let x: i16 = 1234
+        let n: i64 = x
+        n
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(1234));
+}
+
+#[test]
+fn widening_u8_to_u16_in_binding() {
+    let result = eval(
+        r#"
+        let x: u8 = 200
+        let n: u16 = x
+        n
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(200));
+}
+
+#[test]
+fn widening_u8_to_u32_in_binding() {
+    let result = eval(
+        r#"
+        let x: u8 = 255
+        let n: u32 = x
+        n
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(255));
+}
+
 // ─── Compile-trace check: writeback opcodes emitted on mutating call ─────
 
 #[test]

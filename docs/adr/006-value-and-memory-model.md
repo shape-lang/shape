@@ -5133,6 +5133,105 @@ forbidden lists, applied to method mutation semantics):**
   lossless-widening lattice covers the opposite direction and rejects
   narrowing).
 
+**Widening lattice (W17-mutation-writeback Commit 2 deliverable):**
+
+The Item 4 ruling also specifies a **lossless numeric widening lattice**
+for narrow integers, hardening what `unify_annotations` /
+`can_numeric_widen` already partially implement. The lattice:
+
+- `i8 → i16 → i32 → i64` (signed sign-extension).
+- `u8 → u16 → u32 → u64` (unsigned zero-extension).
+- Safe signed↔unsigned crossings only when the source range is fully
+  representable in the target. `u8 → i16` is safe (0..255 ⊂ -32768..32767);
+  `i8 → u16` is unsafe (negative i8 ≠ representable u16); `u32 → i64`
+  is safe (0..2^32-1 ⊂ -2^63..2^63-1).
+- **No widening across the int/number boundary.** `int → number` is
+  lossy beyond 2^53 (f64 mantissa); `number → int` is always lossy
+  (rounding). Existing arithmetic-result inference (`5 * 2.0 → number`)
+  is a separate inference, not part of this lattice — the lattice
+  governs *assignment-side widening*, not arithmetic-result type
+  promotion.
+- **Narrowing requires explicit `as T`.** `let n: i8 =
+  some_i32_value` without `as i8` is a compile error. The typer's
+  existing unify pass plus the widening lattice cover this.
+- **Compile-time only.** Widening produces no runtime opcode; the
+  narrower type's bits are reinterpreted into the wider slot at
+  compile-time-resolved binding / call sites. Typed slots already
+  carry `NativeKind` in the §2.7.7 parallel-kind track, so the
+  compiler emits the target slot directly (no `IntToNumber` /
+  `NumberToInt` coercion opcodes — CLAUDE.md "Forbidden Patterns" #5
+  stands verbatim).
+
+Concretely, the existing `can_numeric_widen` in
+`crates/shape-runtime/src/type_system/constraints.rs:298` covers the
+integer-family ↔ integer-family lattice (any integer name to any
+wider integer name); the typed-opcode lowering in
+`crates/shape-vm/src/compiler/expressions/binary_ops.rs` already emits
+the target-typed opcode (`AddI32` / `AddI64` / etc.) when the
+producing context proves a widening source. The Commit-2 deliverable
+is the **verification scope**: the smoke target
+`let mut n: i32 = 0; let x: i8 = 5; n += x` lowers to `LoadLocal n;
+LoadLocal x; AddI32; StoreLocal n` (i8 → i32 widening, typed AddI32
+opcode, write-back to n's i32 slot) and prints `5`. Tests in
+`mutation_writeback.rs::widening_*` pin the lattice across (i8→i32 via
+compound assign), (i16→i64 in binding), (u8→u16 in binding), and
+(u8→u32 in binding).
+
+**Per-method-handler sweep (W17-mutation-writeback Commit 2 deliverable):**
+
+Audit confirmed (`grep Arc::make_mut crates/shape-vm/src/executor/objects/`):
+
+- **HashSet** (`set_methods.rs`): `v2_add` (line 235), `v2_delete`
+  (line 263). Both return `KindedSlot::from_hashset(hs)` after
+  `Arc::make_mut(&mut hs).{insert,remove}`. **Registered** in
+  `MUT_SELF_HASHSET_METHODS`.
+- **HashMap** (`hashmap_methods.rs`): `v2_set` (line 411), `v2_delete`
+  (line 445), `v2_merge` (line 467). All return
+  `KindedSlot::from_hashmap(hm)` after `Arc::make_mut`. **Registered**
+  in `MUT_SELF_HASHMAP_METHODS`.
+- **Deque** (`deque_methods.rs`): `v2_push_back` (line 281),
+  `v2_push_front` (line 300) return
+  `KindedSlot::from_deque(dq)` — **registered** in
+  `MUT_SELF_DEQUE_METHODS`. `v2_pop_back` (line 321), `v2_pop_front`
+  (line 340) return the popped element via `heap_value_arc_to_slot` —
+  **NOT registered** (pop-shape deferral).
+- **PriorityQueue** (`priority_queue_methods.rs`): `v2_push` (line
+  208) returns `KindedSlot::from_priority_queue(owned)` —
+  **registered** in `MUT_SELF_PRIORITY_QUEUE_METHODS`. `v2_pop` (line
+  227) returns the popped i64 — **NOT registered** (pop-shape
+  deferral).
+- **Array** (`array_basic.rs`): `handle_push_v2` (line 288) returns
+  `KindedSlot::from_typed_array(arc)` — **registered** in
+  `MUT_SELF_ARRAY_METHODS`. `handle_pop_v2` (line 378) returns the
+  popped element — **NOT registered**. `handle_reverse_v2` (line
+  239) returns a **fresh** Arc per the documented pre-Wave-6.5
+  "produces a fresh array" contract — **NOT registered** (functional
+  semantics preserved, matches `arr.sort()`).
+- **Mutex / Atomic / Lazy / Channel** (`concurrency_methods.rs` /
+  `channel_methods.rs`): all use interior mutability (`Cell` /
+  `AtomicI64` / `OnceCell` / channel-buffer); the receiver Arc's
+  identity is preserved. **NOT registered** — `let m = Mutex(0);
+  m.set(5)` stays valid on `let` (immutable) bindings.
+- **TypedArray<i64> / TypedArray<f64>** (`typed_int_array_methods.rs`
+  / `typed_number_array_methods.rs`): `push`, `set` mutate the
+  underlying TypedBuffer via Arc::make_mut and return the (mutated)
+  array — **registered** in `MUT_SELF_TYPED_ARRAY_METHODS`. `pop`
+  returns the popped element — **NOT registered**. (Note: these go
+  through the existing `ArrayPushLocal` / `TypedArrayPush*` fast
+  paths for identifier receivers, which have their own
+  compile-time write-back via the operand-encoded local-slot index;
+  the `MUT_SELF_TYPED_ARRAY_METHODS` set covers the generic-dispatch
+  fallback when the bespoke path isn't taken.)
+- **DataTable** (`datatable_methods/*`): `groupBy`, `aggregate`,
+  `filter`, `orderBy`, etc. all return new DataTables (builder
+  pattern). **NOT registered** — functional semantics, no write-back
+  needed.
+
+The sweep confirms `MUT_SELF_*` sets are correct and complete for the
+methods that return the mutated receiver. Pop-shape methods are the
+only mutating methods left out; a future tuple-return ABI amendment
+(out of scope this ruling) will pick them up.
+
 **Migration scope (W17-mutation-writeback Commit 1 deliverable):**
 
 1. `crates/shape-vm/src/executor/objects/method_registry.rs` — per-
