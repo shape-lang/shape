@@ -5652,6 +5652,7 @@ dependencies = [
  "arrow-ord",
  "arrow-schema",
  "arrow-select",
+ "bincode",
  "chrono",
  "chrono-tz",
  "clap",

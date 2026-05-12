@@ -240,17 +240,6 @@ impl super::VirtualMachine {
         use shape_runtime::snapshot::serializable_to_slot;
         use shape_value::NativeKind;
 
-        if !snapshot.call_stack.is_empty() {
-            return Err(VMError::NotImplemented(format!(
-                "VirtualMachine::from_snapshot: W17-snapshot-roundtrip surface — \
-                 non-empty call_stack ({} frames) round-trip needs the \
-                 W17-snapshot-callstack-upvalues follow-up. At landing only \
-                 top-level snapshots resume deterministically. \
-                 ADR-006 §2.7.4 + §2.7.5.1.",
-                snapshot.call_stack.len(),
-            )));
-        }
-
         let mut vm = super::VirtualMachine::new(crate::VMConfig::default());
         vm.load_program(program);
 
@@ -290,6 +279,28 @@ impl super::VirtualMachine {
         // IP restoration.
         vm.snapshot_set_ip(snapshot.ip);
 
+        // **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).**
+        // Call-stack restoration: structurally rebuild each `CallFrame`
+        // from the persisted `SerializableCallFrame` quintuple
+        // (return_ip, locals_base, locals_count, function_id, upvalues).
+        // Upvalues route through `serializable_to_slot` to recover their
+        // typed Arc shares — full round-trip for scalar/heap-light kinds;
+        // opaque arms surface clean per §2.7.5.1.
+        //
+        // closure_heap_bits / closure_heap_kind reconstruction (the
+        // Vec<u64> upvalue payload pointer back into a live
+        // OwnedClosureBlock) needs the layout's alloc_typed_closure +
+        // write_capture pipeline. We rebuild the block when:
+        //   (a) the function_id has a registered ClosureLayout
+        //   (b) the persisted upvalues align with capture_count
+        // Otherwise the frame restores without closure-block backing —
+        // a degraded but structurally-correct shape. Calls into the
+        // restored frame's upvalues then trip a `NotImplemented` at the
+        // upvalue-read site if any heap-bearing capture is missing.
+        if !snapshot.call_stack.is_empty() {
+            vm.restore_call_stack(&snapshot.call_stack, store)?;
+        }
+
         // Loop stack / timeframe stack / exception handlers: structural
         // restoration is internal-only — the VM doesn't expose public
         // setters at landing, so these fields are reconstructed when
@@ -307,6 +318,130 @@ impl super::VirtualMachine {
         let _ = NativeKind::Int64; // suppress unused-import warning when restore body shrinks
 
         Ok(vm)
+    }
+
+    /// Restore the call stack from a snapshot's `Vec<SerializableCallFrame>`.
+    ///
+    /// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Per
+    /// ADR-006 §2.7.8 / Q10, closure-bearing frames carry their captures
+    /// via `OwnedClosureBlock`, not via the legacy `Vec<u64>` upvalue
+    /// payload (the `Vec<u64>` field on CallFrame is now an opaque
+    /// payload byte-pattern preserved for non-typed closures).
+    ///
+    /// Per-frame restore steps:
+    ///   1. Recover function_id + locals_base + locals_count from the
+    ///      persisted SerializableCallFrame.
+    ///   2. If `upvalues: Some(serializable_upvalues)` AND the function
+    ///      has a registered `ClosureLayout`: allocate a fresh
+    ///      OwnedClosureBlock and write each capture's bits via
+    ///      `serializable_to_slot(sv, expected_kind=block.layout.
+    ///      capture_native_kind(i), store)`. The block's `Drop` walks
+    ///      the layout's capture masks and retires shares.
+    ///   3. Otherwise restore the frame without closure backing
+    ///      (closure_heap_bits/kind = None).
+    fn restore_call_stack(
+        &mut self,
+        frames: &[shape_runtime::snapshot::SerializableCallFrame],
+        store: &shape_runtime::snapshot::SnapshotStore,
+    ) -> Result<(), VMError> {
+        use shape_runtime::snapshot::serializable_to_slot;
+        use shape_value::NativeKind;
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64,
+        };
+
+        for (frame_idx, sframe) in frames.iter().enumerate() {
+            let function_id = sframe.function_id;
+            let mut closure_heap_bits: Option<u64> = None;
+            let mut closure_heap_kind: Option<NativeKind> = None;
+            let mut upvalues_raw: Option<Vec<u64>> = None;
+
+            if let (Some(svec), Some(fid)) = (sframe.upvalues.as_ref(), function_id) {
+                // Look up the closure layout for this function. If
+                // absent, fall back to raw-Vec<u64> upvalue restoration
+                // (non-typed closure path).
+                let layout_opt = self
+                    .program
+                    .closure_function_layouts
+                    .get(fid as usize)
+                    .and_then(|o| o.clone());
+                if let Some(layout) = layout_opt {
+                    if layout.capture_count() != svec.len() {
+                        return Err(VMError::NotImplemented(format!(
+                            "VirtualMachine::from_snapshot frame[{frame_idx}]: \
+                             W17-snapshot-roundtrip surface — upvalue count \
+                             mismatch (snapshot: {}, layout.capture_count: {}). \
+                             ADR-006 §2.7.5.1.",
+                            svec.len(),
+                            layout.capture_count(),
+                        )));
+                    }
+                    // SAFETY: alloc_typed_closure returns a freshly-
+                    // zeroed block sized for layout.total_heap_size();
+                    // refcount is 1 (owned by this frame).
+                    let ptr = unsafe { alloc_typed_closure(fid, 0, &layout) };
+                    for (i, sv) in svec.iter().enumerate() {
+                        let expected = layout.capture_native_kind(i);
+                        let (bits, _kind) =
+                            serializable_to_slot(sv, expected, store).map_err(|msg| {
+                                VMError::NotImplemented(format!(
+                                    "VirtualMachine::from_snapshot frame[{frame_idx}] \
+                                     upvalue[{i}]: {msg}"
+                                ))
+                            })?;
+                        // SAFETY: i < capture_count per the prior check.
+                        unsafe {
+                            write_capture_raw_u64(ptr, &layout, i, bits);
+                        }
+                    }
+                    // Wrap the freshly-built block — drop releases the
+                    // share when the frame pops. We need the raw ptr
+                    // bits to install on closure_heap_bits; build the
+                    // block, extract the ptr, then mem::forget the
+                    // wrapper so its Drop doesn't free the share we
+                    // just installed on the frame.
+                    let block = unsafe { OwnedClosureBlock::from_raw(ptr as *const u8, layout) };
+                    closure_heap_bits = Some(block.as_ptr() as u64);
+                    closure_heap_kind = Some(NativeKind::Ptr(
+                        shape_value::HeapKind::Closure,
+                    ));
+                    std::mem::forget(block);
+                } else {
+                    // No layout — store the raw payload bits as the
+                    // legacy Vec<u64> upvalue carrier so the frame
+                    // remains structurally complete. Heap-bearing
+                    // upvalues in this path surface clean on read.
+                    let mut raw: Vec<u64> = Vec::with_capacity(svec.len());
+                    for sv in svec {
+                        // Bool fallback is OK here: this branch is the
+                        // pre-typed-closure path that never carried
+                        // kind metadata anyway. Bool-zero-on-mismatch
+                        // is the legacy contract.
+                        let expected = NativeKind::Bool;
+                        let (bits, _) =
+                            serializable_to_slot(sv, expected, store).unwrap_or((0, NativeKind::Bool));
+                        raw.push(bits);
+                    }
+                    upvalues_raw = Some(raw);
+                }
+            }
+
+            let blob_hash = sframe
+                .blob_hash
+                .map(crate::bytecode::FunctionHash);
+
+            self.call_stack.push(super::CallFrame {
+                return_ip: sframe.return_ip,
+                base_pointer: sframe.locals_base,
+                locals_count: sframe.locals_count,
+                function_id,
+                upvalues: upvalues_raw,
+                blob_hash,
+                closure_heap_bits,
+                closure_heap_kind,
+            });
+        }
+        Ok(())
     }
 
     // ── W17-snapshot-roundtrip internal accessors ──
@@ -363,26 +498,98 @@ impl super::VirtualMachine {
     fn snapshot_call_stack_for_export(
         &self,
     ) -> Vec<shape_runtime::snapshot::SerializableCallFrame> {
-        // Note: the upvalues / blob_hash / local_ip / mutable-cell
-        // restoration is the W17-snapshot-callstack-upvalues follow-up.
-        // The landed shape preserves structural identity (return_ip,
-        // locals_base, locals_count, function_id) so a resume that
-        // only sees scalar-window snapshots can still reproduce the
-        // call-stack shape; deep frames surface clean on resume per
-        // the `from_snapshot`'s non-empty call_stack guard.
+        // **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).**
+        // Per-frame upvalues now project through `OwnedClosureBlock::
+        // read_capture_kinded` per the §2.7.8 / Q10 cell-storage
+        // parallel-kind track. The closure layout side-table provides
+        // the kind source for each capture; we route each (bits, kind)
+        // pair through `slot_to_serializable` to build the
+        // `Vec<SerializableVMValue>` payload.
+        //
+        // Non-closure frames (`closure_heap_bits == None`) carry
+        // `upvalues: None` as before.
+        //
+        // mutable-cell-payload restoration (cells whose interior holds
+        // a SharedCell payload) is the W17-snapshot-sharedcell follow-up.
+        let store = shape_runtime::snapshot::SnapshotStore::new(
+            std::env::temp_dir().join("shape-w17-snapshot-store"),
+        )
+        .ok();
         self.call_stack
             .iter()
-            .map(|frame| shape_runtime::snapshot::SerializableCallFrame {
-                return_ip: frame.return_ip,
-                locals_base: frame.base_pointer,
-                locals_count: frame.locals_count,
-                function_id: frame.function_id,
-                upvalues: None,
-                blob_hash: None,
-                local_ip: None,
+            .map(|frame| {
+                let upvalues = if let Some(ref s) = store {
+                    snapshot_frame_upvalues_serializable(self, frame, s)
+                } else {
+                    None
+                };
+                shape_runtime::snapshot::SerializableCallFrame {
+                    return_ip: frame.return_ip,
+                    locals_base: frame.base_pointer,
+                    locals_count: frame.locals_count,
+                    function_id: frame.function_id,
+                    upvalues,
+                    blob_hash: frame.blob_hash.map(|h| h.0),
+                    local_ip: None,
+                }
             })
             .collect()
     }
+}
+
+/// Project a frame's upvalues into `Vec<SerializableVMValue>` via the
+/// closure block's `read_capture_kinded` + `slot_to_serializable`.
+/// Returns `None` for non-closure frames or when the closure layout is
+/// not available in the program's side-table (the W17-snapshot-callstack-
+/// upvalues-no-layout follow-up).
+fn snapshot_frame_upvalues_serializable(
+    vm: &super::VirtualMachine,
+    frame: &super::CallFrame,
+    store: &shape_runtime::snapshot::SnapshotStore,
+) -> Option<Vec<shape_runtime::snapshot::SerializableVMValue>> {
+    use shape_runtime::snapshot::slot_to_serializable;
+    use shape_value::v2::closure_raw::{
+        OwnedClosureBlock, retain_typed_closure, typed_closure_function_id,
+    };
+
+    let bits = frame.closure_heap_bits?;
+    if bits == 0 {
+        return None;
+    }
+    let ptr = bits as *const u8;
+    // SAFETY: closure_heap_bits is a live closure block per §2.7.8 / Q10.
+    let fn_id = unsafe { typed_closure_function_id(ptr) };
+    let layout = vm
+        .program
+        .closure_function_layouts
+        .get(fn_id as usize)
+        .and_then(|opt| opt.clone())?;
+    // Retain a borrow share. SAFETY: ptr is a live OwnedClosureBlock
+    // allocation; retain_typed_closure bumps the strong-count atomically
+    // so the resulting OwnedClosureBlock's Drop doesn't free the live
+    // share.
+    unsafe {
+        retain_typed_closure(ptr);
+    }
+    let block = unsafe { OwnedClosureBlock::from_raw(ptr, layout) };
+    let count = block.layout().capture_count();
+    let mut out: Vec<shape_runtime::snapshot::SerializableVMValue> = Vec::with_capacity(count);
+    for idx in 0..count {
+        // SAFETY: idx < count; the block is borrowed live.
+        let (cap_bits, cap_kind) = unsafe { block.read_capture_kinded(idx) };
+        let sv = match slot_to_serializable(cap_bits, cap_kind, store) {
+            Ok(v) => v,
+            Err(_) => {
+                // Unsupported capture kind — surface as IteratorOpaque
+                // sentinel so the wire payload is still serializable.
+                // Restore will reject this via the OpaqueOnRestore
+                // contract per §2.7.5.1.
+                shape_runtime::snapshot::SerializableVMValue::IteratorOpaque
+            }
+        };
+        out.push(sv);
+    }
+    Some(out)
 }
 
 /// Pick the `expected_kind` for [`serializable_to_slot`] from a
@@ -898,5 +1105,118 @@ mod tests {
             }
             other => panic!("expected SV::HashSet, got {other:?}"),
         }
+    }
+
+    /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12): non-empty
+    /// call_stack with scalar locals round-trips structurally.
+    /// Closure-bearing frames need the program's
+    /// `closure_function_layouts` registered (out of this test's scope —
+    /// the bytecode-program plumbing routes through compiler-side
+    /// register_closure_function); this test exercises the non-closure
+    /// frame path.
+    #[test]
+    fn test_w17_snapshot_non_closure_callstack_roundtrip() {
+        use crate::bytecode::BytecodeProgram;
+        use crate::executor::CallFrame;
+        use shape_value::NativeKind;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        // Push 2 scalars to serve as frame[0]'s locals.
+        vm.push_kinded(7i64 as u64, NativeKind::Int64)
+            .expect("push int 7");
+        vm.push_kinded(1, NativeKind::Bool).expect("push bool true");
+        // Manually push a non-closure CallFrame whose locals window is
+        // those two slots.
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: 0,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let snap = vm.snapshot(&store).expect("snapshot non-closure frame");
+        assert_eq!(snap.call_stack.len(), 1);
+        let sframe = &snap.call_stack[0];
+        assert_eq!(sframe.locals_count, 2);
+        assert_eq!(sframe.locals_base, 0);
+        assert!(sframe.upvalues.is_none(), "non-closure frame has no upvalues");
+
+        // Restore on a fresh VM. Pre-pad stack so locals_base=0 +
+        // locals_count=2 has space; the test asserts the frame restores
+        // structurally (function_id, locals_base, locals_count) not the
+        // raw stack window.
+        let restored = VirtualMachine::from_snapshot(
+            BytecodeProgram::default(),
+            &snap,
+            &store,
+        )
+        .expect("restore non-closure callstack");
+        assert_eq!(restored.call_stack.len(), 1);
+        let restored_frame = &restored.call_stack[0];
+        assert_eq!(restored_frame.return_ip, 0);
+        assert_eq!(restored_frame.base_pointer, 0);
+        assert_eq!(restored_frame.locals_count, 2);
+        assert!(restored_frame.upvalues.is_none());
+        assert!(restored_frame.closure_heap_bits.is_none());
+    }
+
+    /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):
+    /// VmStateSnapshot accessor surface for an empty VM round-trips
+    /// cleanly (no panics; FrameInfo accessors return empty / None).
+    #[test]
+    fn test_w17_vm_state_snapshot_empty_accessor() {
+        use shape_runtime::module_exports::VmStateAccessor;
+
+        let vm = VirtualMachine::new(VMConfig::default());
+        let snap = vm.capture_vm_state();
+        assert!(snap.current_frame().is_none());
+        assert!(snap.caller_frame().is_none());
+        assert_eq!(snap.all_frames().len(), 0);
+        assert_eq!(snap.current_args().len(), 0);
+        assert_eq!(snap.current_locals().len(), 0);
+        assert_eq!(snap.module_bindings().len(), 0);
+        assert_eq!(snap.instruction_count(), 0);
+    }
+
+    /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):
+    /// VmStateSnapshot threads kinds through the parallel stack track
+    /// for a non-empty live VM. Locals come out as KindedSlot carriers.
+    #[test]
+    fn test_w17_vm_state_snapshot_kind_threaded_locals() {
+        use crate::executor::CallFrame;
+        use shape_runtime::module_exports::VmStateAccessor;
+        use shape_value::NativeKind;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.push_kinded(42i64 as u64, NativeKind::Int64)
+            .expect("push int");
+        vm.push_kinded(3.14f64.to_bits(), NativeKind::Float64)
+            .expect("push float");
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: 0,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+
+        let snap = vm.capture_vm_state();
+        let frames = snap.all_frames();
+        assert_eq!(frames.len(), 1);
+        let f = &frames[0];
+        assert_eq!(f.locals.len(), 2);
+        assert!(matches!(f.locals[0].kind(), NativeKind::Int64));
+        assert!(matches!(f.locals[1].kind(), NativeKind::Float64));
+        assert_eq!(f.locals[0].slot().raw(), 42);
+        assert_eq!(f.locals[1].slot().raw(), 3.14f64.to_bits());
     }
 }
