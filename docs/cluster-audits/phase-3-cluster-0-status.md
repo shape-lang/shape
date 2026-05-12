@@ -3,7 +3,7 @@
 **Started:** 2026-05-12 (this session)
 **Parent:** `phase-2d-close` `e22bffd2`
 **Branch:** `bulldozer-strictly-typed`
-**Current HEAD:** `a57e164f` (Round-1 fully merged)
+**Current HEAD:** `ff1ad3e6` (Round-2 W11-jit-carrier-conversion merged); Round-3 dispatched 2026-05-12
 
 Mirrors the Phase 2d Wave 1 status pattern. Next session reads this file first.
 
@@ -104,6 +104,63 @@ Three sub-clusters dispatched in parallel, all closed and merged into
   round-1 close's "9 individual tests #[ignore]'d that assert the
   deleted ValueWord-shape API"). Those tests need rewrites against
   the new strict-typed API, NOT carrier conversion work.
+
+## Cluster-0 rescope (supervisor ruling, 2026-05-12)
+
+The kickoff's "4 sub-clusters" scope was an architect planning miss.
+The 4 named sub-clusters (jit-test-runner, W17-jit-legacy-ord,
+W11-jit-new-array, W11-jit-carrier-conversion) closed honestly but do
+not satisfy the close criterion ("`--mode jit` works end-to-end for
+the standard program surface"). Three additional architectural gaps
+were surfaced during Round 2: closure-callee kind-flow through
+`jit_call_value` (item #6), top-level `concrete_types` conduit (item
+#1), JIT linker symbol resolution (Smoke 2 finding). Plus a parallel
+test-cleanup workstream for the 17 pre-existing tests asserting
+deleted ValueWord-shape API.
+
+**Cluster-0 rescopes from 4 sub-clusters to 7-8.** The close criterion
+stays unchanged (end-to-end JIT smoke matrix matches VM). Tagging
+`phase-3-cluster-0-close` at the Round-2 milestone with smokes 1.5,
+2, 3 still failing would be the W-series declare-victory pattern at
+the artifact-tagging layer — refused on sight, same discipline as
+phase-2d-close only marking VM-strict-typing complete (because that
+was honestly delivered).
+
+Precedent: Phase 2d W17-typed-carrier-monomorphization rescope
+(bundle-A + trait-object-storage + trait-object-emission, Wave 2.5)
+when the original scope mismatched the work needed.
+
+## Round 3 — dispatching
+
+Four sub-clusters dispatched in parallel 2026-05-12:
+
+| Sub-cluster | Branch | Smoke unblocked | Est |
+|---|---|---|---|
+| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session |
+| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | ~1 session |
+| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) |
+| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) |
+
+**Deferred to future cluster (NOT cluster-0):**
+
+- **W12-jit-typed-map-ffi** (`jit_v2_map_*` typed-HashMap FFI rebuild) —
+  no smoke in the cluster-0 matrix uses HashMap; not a close blocker.
+  Cluster-2 or later territory.
+
+**Cluster-0 close criterion (unchanged):** the smoke matrix passes
+end-to-end identical to `--mode vm`:
+
+- Smoke 1 (scalar loop): currently passes
+- Smoke 1.5 (Result/match with closures): Round 3 stack-kind-track unblocks
+- Smoke 2 (Option + Array): Round 3 linker-resolution unblocks
+- Smoke 3 (TypedObject field): Round 3 concrete-types-conduit unblocks
+- Smoke 4 (HashSet via `&mut self`): expected to pass post-Phase-2d-mutation;
+  confirm during smoke matrix re-run after Round 3
+
+If matrix passes end-to-end after Round 3 closes: standard cluster-0
+close report shape; supervisor authorizes `phase-3-cluster-0-close`
+tag. If any smoke still diverges between VM and JIT: surface-and-stop
+with the specific divergence, do not declare close.
 
 ## Surfaced items (cite-tracked, NOT silently fallback'd)
 
