@@ -134,12 +134,63 @@ when the original scope mismatched the work needed.
 
 Four sub-clusters dispatched in parallel 2026-05-12:
 
-| Sub-cluster | Branch | Smoke unblocked | Est |
-|---|---|---|---|
-| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session |
-| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | ~1 session |
-| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) |
-| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) |
+| Sub-cluster | Branch | Smoke unblocked | Est | Status |
+|---|---|---|---|---|
+| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session | **closed** (case 3 closed; Smoke 1.5 root cause was misdiagnosed — enum-constructor lowering, not closure dispatch) |
+| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | ~1 session | dispatching |
+| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) | auditing |
+| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) | dispatching |
+
+### W12-jit-stack-parallel-kind-track close notes (2026-05-12)
+
+**Close commit:** `<TBD — pending commit>`
+
+**Deliverable:** `JITContext.stack_kinds: [u8; 512]` parallel-track companion
+to `JITContext.stack: [u64; 512]`, mirroring ADR-006 §2.7.7 / Q9 stack
+parallel-kind invariant from the VM side. Every push site in
+`mir_compiler/{terminators,statements}.rs` writes the producing-site
+`NativeKind` in lockstep with the data via new
+`MirToIR::emit_kind_track_write`. `jit_call_value` reads the parallel
+track and dispatches on `callee_kind` (§2.7.11/Q12): `Ptr(HeapKind::
+Closure)` → real raw-Arc closure recovery (case 3 closed); UInt64-family
+→ preserved legacy bit-shape dispatch (cases 1+2). New
+`crates/shape-jit/src/ffi/stack_kind_code.rs` defines the 1-byte encoding
+(scalar codes 0..=23, Ptr arms 128..=156, SENTINEL = 255).
+
+**Kind sourcing:** `infer_slot_kinds` extended with `ClosureCapture` arm
++ `concrete_types`-projection-via-`native_kind_from_concrete_type` seed.
+`operand_slot_kind_or_carrier` falls back to the documented §2.7.5
+carrier kind `NativeKind::UInt64` (NOT Bool-default — `UInt64` is the
+existing JIT-FFI "I64-wide raw bits without further classification"
+carrier per `dispatch_call_via_trampoline_vm` already-existing
+convention) when MIR inference is opaque. Precise kinds (closure slots
+from ClosureCapture, typed slots from `concrete_types`) take precedence.
+
+**Smoke 1.5 outcome:** still segfaults under `--mode jit` — but the root
+cause was misdiagnosed in the Round-3 kickoff prompt. Case 3 (raw-Arc
+closure callee in `jit_call_value`) is now closed; the actual smoke
+failure surfaces earlier: `MirConstant::Function("Ok")` (or similar
+enum-variant constructor name) not in `function_indices` →
+`compile_constant` returns `iconst(I64, 0)` → indirect call with
+`callee_bits = 0` → my UInt64-arm classifier surfaces TAG_NULL (bits=0
+not inline function, not HK_CLOSURE) → downstream code dereferences the
+null result and segfaults. The W11-round-2 baseline crashed at the same
+location with the same exit code (139); my parallel-kind track changed
+the surface message (now kind-named) but not the segfault location.
+
+**Surface to triage:** (i) **Enum-constructor function-id lookup gap**
+— enum-variant constructor names should not lower to function-call
+indirect dispatch; bytecode compiler should emit `EnumStore` or a
+dedicated MIR shape. Likely overlap with item #4 (`op_new_array`
+heterogeneous-element surface) or a new enum-constructor-lowering
+follow-up. Surface-and-stop with §2.7.5 producing-site classification
+gap cite.
+
+**Verification (devenv exit-code):** `cargo check --workspace --lib
+--tests` EXIT=0; `cargo test -p shape-jit --lib` EXIT=0 (319 passed, 0
+failed, 38 ignored — +3 new tests in `stack_kind_code::tests` for
+scalar/Ptr roundtrip + SENTINEL); `verify-merge.sh` EXIT=0 (Passed: 12 /
+Failed: 0); `check-no-dynamic.sh` EXIT=0.
 
 **Deferred to future cluster (NOT cluster-0):**
 

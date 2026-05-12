@@ -179,23 +179,89 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     // ── Operand kind helpers ───────────────────────────────────────
 
+    /// Get the NativeKind of an operand's source, falling back to the
+    /// documented §2.7.5 stable-FFI carrier kind `NativeKind::UInt64` when
+    /// the producing-site inference left the slot kind undetermined.
+    ///
+    /// ADR-006 §2.7.5 designates `UInt64` as the "I64-wide raw bits without
+    /// further classification" carrier kind — the same kind
+    /// `dispatch_call_via_trampoline_vm` stamps for function-id-class
+    /// callees and for I64-widened args at the JIT-FFI boundary. It is
+    /// NOT a Bool-default rationalization (§2.7.7 #9 / CLAUDE.md
+    /// "Forbidden rationalizations"); `UInt64` is the documented carrier
+    /// kind for the bit-pattern the JIT actually pushes onto the stack
+    /// (every operand widens to I64 before the push per terminators.rs
+    /// R4.2E inline-widening discipline).
+    ///
+    /// Precise kinds — `Ptr(HeapKind::Closure)` for closure slots seeded by
+    /// `infer_slot_kinds::ClosureCapture`, `Float64` / `Bool` / etc. for
+    /// inferred scalar slots — flow through unchanged. The fallback only
+    /// applies to slots whose producing-site is opaque to MIR inference
+    /// (field reads through heap projections, opaque-source calls, etc.)
+    /// — in those cases the value IS I64-wide raw bits by construction,
+    /// and `UInt64` is the structurally-correct §2.7.5 carrier kind.
+    ///
+    /// For the load-bearing closure-callee classification at
+    /// `jit_call_value`'s indirect-call entry, the §2.7.11/Q12 dispatch
+    /// requires precise `Ptr(HeapKind::Closure)` kinds — seeded via
+    /// `infer_slot_kinds`'s ClosureCapture arm. The `UInt64` fallback at
+    /// other push sites preserves the existing JIT-internal NaN-box
+    /// bit-shape dispatch path inside `jit_call_value` (cases 1 / 2 —
+    /// inline `TAG_FUNCTION` function refs and legacy `HK_CLOSURE`
+    /// unified-heap callees).
+    #[allow(dead_code)]
+    pub(crate) fn operand_slot_kind_or_carrier(
+        &self,
+        operand: &Operand,
+    ) -> shape_value::NativeKind {
+        self.operand_slot_kind(operand)
+            .unwrap_or(shape_value::NativeKind::UInt64)
+    }
+
     /// Get the NativeKind of an operand's source (before compilation).
+    ///
+    /// ADR-006 §2.7.5 / §2.7.11: the producing site classifies the operand
+    /// kind at JIT-compile time. Function refs widen to the documented
+    /// `NativeKind::UInt64` carrier kind (the §2.7.11/Q12 function-id-class
+    /// callee-classification kind, also used as the "I64-wide raw bits
+    /// carrier" sentinel at the §2.7.5 stable-FFI boundary). Method-name
+    /// constants are heap String pointers (kind = `NativeKind::String`).
+    /// String and StringId constants are likewise heap String pointers.
     pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::NativeKind> {
+        use shape_vm::type_tracking::NativeKind;
         match operand {
-            Operand::Constant(MirConstant::Int(_)) => {
-                Some(shape_vm::type_tracking::NativeKind::Int64)
-            }
-            Operand::Constant(MirConstant::Float(_)) => {
-                Some(shape_vm::type_tracking::NativeKind::Float64)
-            }
-            Operand::Constant(MirConstant::Bool(_)) => {
-                Some(shape_vm::type_tracking::NativeKind::Bool)
-            }
+            Operand::Constant(MirConstant::Int(_)) => Some(NativeKind::Int64),
+            Operand::Constant(MirConstant::Float(_)) => Some(NativeKind::Float64),
+            Operand::Constant(MirConstant::Bool(_)) => Some(NativeKind::Bool),
+            // ADR-006 §2.7.11/Q12 function-id-class callee-classification
+            // kind: a `MirConstant::Function(name)` lowers to the JIT-
+            // internal `box_function(fn_id)` shape (TAG_FUNCTION NaN-box),
+            // whose carrier kind across the §2.7.5 stable-FFI boundary is
+            // `NativeKind::UInt64`. The trampoline VM consumer
+            // (`dispatch_call_via_trampoline_vm`) classifies this same
+            // kind as the function-id callee per `call_convention.rs`
+            // UInt64 arm.
+            Operand::Constant(MirConstant::Function(_)) => Some(NativeKind::UInt64),
+            // Method-name string constant. The JIT emits a heap String
+            // pointer via `box_string`; carrier kind is `String` (the
+            // §2.7.5 String arm — `Arc<String>` raw pointer carrier).
+            Operand::Constant(MirConstant::Method(_)) => Some(NativeKind::String),
+            // String constants and string-id constants both materialize
+            // as heap `Arc<String>` raw pointers; carrier kind is String.
+            Operand::Constant(MirConstant::Str(_)) => Some(NativeKind::String),
+            Operand::Constant(MirConstant::StringId(_)) => Some(NativeKind::String),
+            // ClosurePlaceholder is the producing-site forward-reference
+            // for closures whose function_id is patched later. The slot
+            // it lowers to carries `Arc<HeapValue::ClosureRaw>` bits per
+            // §2.7.11/Q12.
+            Operand::Constant(MirConstant::ClosurePlaceholder) => Some(NativeKind::Ptr(
+                shape_value::heap_value::HeapKind::Closure,
+            )),
+            Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                 let slot = p.root_local();
                 super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
             }
-            _ => None,
         }
     }
 

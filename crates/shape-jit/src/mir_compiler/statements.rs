@@ -322,7 +322,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // once the compile-time registration is universal and the
                 // `MakeClosure` opcode is merged into `MakeClosureHeap`.
 
-                // Push each capture operand to ctx.stack[stack_ptr + i]
+                // Push each capture operand to ctx.stack[stack_ptr + i].
+                // ADR-006 §2.7.7 / Q9: lockstep parallel-kind write at every
+                // push site. `jit_make_closure` (the legacy FFI consuming
+                // these slots) doesn't currently read the kinds — but the
+                // invariant requires the writes so future FFI consumers can
+                // route through `stack_kind_code::decode` rather than
+                // synthesizing kinds at the read site.
                 let stack_base = crate::context::STACK_OFFSET as i32;
                 let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
                 let old_sp = self.builder.ins().load(
@@ -337,6 +343,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // types inline (sextend / uextend / bitcast) — no NaN-box
                 // tagging.
                 for (i, op) in operands.iter().enumerate() {
+                    // Source the capture kind from the producing site,
+                    // falling back to the §2.7.5 carrier kind (`UInt64`)
+                    // for opaque-source operands — NOT a Bool-default
+                    // fallback.
+                    let _ = i;
+                    let op_kind = self.operand_slot_kind_or_carrier(op);
+
                     let raw = self.compile_operand(op)?;
                     let raw_ty = self.builder.func.dfg.value_type(raw);
                     let val = if raw_ty == cranelift::prelude::types::I64 {
@@ -359,6 +372,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base as i64);
                     let addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
                     self.builder.ins().store(MemFlags::new(), val, addr, 0);
+                    // §2.7.7 / Q9 lockstep parallel-kind write.
+                    self.emit_kind_track_write(slot_idx, op_kind);
                 }
 
                 // Update ctx.stack_ptr += captures_count

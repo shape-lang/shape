@@ -528,7 +528,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Until the two tables share a slot-numbering convention, drop
         // the bytecode seed and rely on MIR-level inference only.
         let _ = slot_kinds;
-        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &[]);
+        // ADR-006 §2.7.7 / §2.7.11 kind-source seed: when the bytecode
+        // compiler has populated `concrete_types[slot]` with a precise
+        // `ConcreteType`, project it to `NativeKind` for the parallel-kind
+        // track. This is the load-bearing kind source for closure-bearing
+        // slots returned from function calls (e.g. `let add3 =
+        // make_adder(3)` where `make_adder` returns
+        // `Function<(int), int>` / `ConcreteType::Closure`), which
+        // `infer_slot_kinds` alone cannot derive from MIR-observable
+        // statements.
+        let concrete_seed: Vec<Option<NativeKind>> = concrete_types
+            .iter()
+            .map(|ct| types::native_kind_from_concrete_type(ct))
+            .collect();
+        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &concrete_seed);
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy

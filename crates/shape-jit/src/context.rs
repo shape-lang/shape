@@ -25,10 +25,20 @@ pub const CURRENT_ROW_OFFSET: i32 = 56;
 // Locals and stack offsets
 pub const LOCALS_OFFSET: i32 = 64;
 pub const STACK_OFFSET: i32 = 2112; // 64 + (256 * 8)
-pub const STACK_PTR_OFFSET: i32 = 6208; // 2112 + (512 * 8)
+// Parallel `NativeKind` byte track on `JITContext.stack` per ADR-006 §2.7.7 /
+// Q9 (JIT-side analog of the VM `Vec<u64> + Vec<NativeKind>` lockstep
+// invariant). Every push into `stack[i]` writes the slot's kind code into
+// `stack_kinds[i]` in lockstep; every pop reads both. The kind sources from
+// the producing call signature at JIT-compile time (no tag-bit decode,
+// no `is_heap()` probe) per the §2.7.5 stamp-at-compile-time discipline.
+// 8-byte raw payload per stack slot is preserved; the kind track is a
+// parallel 1-byte-per-slot side array — same shape as the VM
+// `crates/shape-vm/src/executor/vm_impl/stack.rs::VmStack` design.
+pub const STACK_KINDS_OFFSET: i32 = 6208; // 2112 + (512 * 8)
+pub const STACK_PTR_OFFSET: i32 = 6720; // 6208 + 512
 
 // GC safepoint flag pointer offset (for inline safepoint check)
-pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6328;
+pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6840;
 
 // ============================================================================
 // Return Type Tags for stack[0]
@@ -89,6 +99,11 @@ const _: () = {
     assert!(
         std::mem::offset_of!(JITContext, stack) == STACK_OFFSET as usize,
         "STACK_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, stack_kinds) == STACK_KINDS_OFFSET as usize,
+        "STACK_KINDS_OFFSET does not match JITContext layout (ADR-006 §2.7.7 \
+         parallel-kind track must follow `stack` in lockstep)"
     );
     assert!(
         std::mem::offset_of!(JITContext, stack_ptr) == STACK_PTR_OFFSET as usize,
@@ -489,6 +504,15 @@ pub struct JITContext {
 
     // NaN-boxed stack for JIT execution
     pub stack: [u64; 512],
+    // Parallel `NativeKind` byte track per ADR-006 §2.7.7 / Q9 — the JIT-side
+    // analog of the VM `Vec<u64> + Vec<NativeKind>` lockstep invariant.
+    // `stack_kinds[i]` carries the §2.7.5 stamp-at-compile-time kind code
+    // for the slot at `stack[i]`, written by the MIR emitter at every push
+    // site in lockstep with the data write and read at every pop site (no
+    // tag-bit decode, no `is_heap()` probe). See
+    // `crates/shape-jit/src/ffi/stack_kind_code.rs` for the encoding and
+    // `crates/shape-vm/src/executor/vm_impl/stack.rs` for the VM mirror.
+    pub stack_kinds: [u8; 512],
     pub stack_ptr: usize,
 
     // Heap object storage (owned by VM, JIT just holds pointers)
@@ -572,6 +596,13 @@ impl Default for JITContext {
             // Local variables and stack
             locals: [TAG_NULL; 256],
             stack: [TAG_NULL; 512],
+            // ADR-006 §2.7.7: parallel-kind track initialized to the
+            // SENTINEL kind code (`stack_kind_code::SENTINEL`). Live slots
+            // overwrite this with the producing-site kind in lockstep with
+            // the data write; the sentinel surfaces a kind-source gap if a
+            // pop reads an unwritten slot (forbidden #9 / W-series Bool-
+            // default rationalization).
+            stack_kinds: [crate::ffi::stack_kind_code::SENTINEL; 512],
             stack_ptr: 0,
             heap_ptr: std::ptr::null_mut(),
             function_table: std::ptr::null(),

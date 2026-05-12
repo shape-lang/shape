@@ -188,4 +188,38 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             _ => widened,
         }
     }
+
+    /// Emit the lockstep kind-byte write into `JITContext.stack_kinds[slot_idx]`
+    /// for the §2.7.7 / Q9 JIT-side parallel-kind track. Mirrors the data-side
+    /// `store(stack[slot_idx], bits)` that every push site already emits.
+    ///
+    /// `slot_idx` is a Cranelift I64 slot index (the same value used to compute
+    /// the data slot's byte offset). `kind` is the stamped `NativeKind` from
+    /// the producing call signature (`operand_slot_kind` / a documented
+    /// callee-classification kind for FFI sentinels). The byte is encoded via
+    /// `stack_kind_code::encode` — codes 0..=23 are scalar arms, 128..=156
+    /// are `Ptr(HeapKind)` arms (see
+    /// `crates/shape-jit/src/ffi/stack_kind_code.rs`).
+    ///
+    /// **Forbidden alternatives** (refuse on sight):
+    /// - Bool-default fallback for unknown kind (§2.7.7 #9) — callers must
+    ///   surface-and-stop when the kind isn't known at the push site.
+    /// - Skipping the kind write because "it's the same as the previous
+    ///   slot" — the lockstep invariant requires a write at every push.
+    /// - Decoding the kind from the data slot's bit pattern (§2.7.7 #4 / #7)
+    ///   — kind comes from the call signature, not the bits.
+    pub(crate) fn emit_kind_track_write(
+        &mut self,
+        slot_idx: Value,
+        kind: shape_value::NativeKind,
+    ) {
+        let kinds_base = crate::context::STACK_KINDS_OFFSET as i64;
+        // `stack_kinds: [u8; 512]` — slot index doubles as byte offset
+        // within the kind track (no `<< 3` shift like the data side).
+        let abs_off = self.builder.ins().iadd_imm(slot_idx, kinds_base);
+        let addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+        let code = crate::ffi::stack_kind_code::encode(kind) as i64;
+        let code_val = self.builder.ins().iconst(types::I8, code);
+        self.builder.ins().store(MemFlags::new(), code_val, addr, 0);
+    }
 }
