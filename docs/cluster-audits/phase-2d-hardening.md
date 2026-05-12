@@ -9,7 +9,7 @@ Format: `(<letter>) <one-line title>` — body explains finding + recommended re
 
 ## (a) `verify-merge.sh` CHECK 8 — `HeapKind::X => {}` shorthand style rule
 
-**Status (post-Wave 2.5):** RESOLVED at the call-site level; reframed.
+**Status (Phase 2d close 2026-05-12 `e22bffd2`):** RESOLVED. The call-site refactor landed at Wave 2 close `6eee767`; the going-forward style rule (multi-line empty arms only) is binding for all future agents. CHECK 8 stays in the merge gate as the enforcement hook.
 
 **The finding (reframed 2026-05-11):** CHECK 8 is NOT a flake or false positive. It correctly catches the `HeapKind::X => {}` inline-empty-arm shorthand inside dispatch tables — that shorthand makes the awk state machine's `}`-closing detector unable to pair arms correctly when an exhaustive-match comment-and-arm-on-same-line pattern shows up later. The original framing as a "false positive" was a misread by early Wave 1 / Wave 2 agents (and reinforced by a supervisor pipe-tail measurement bug; see CHECK-COMMS-1).
 
@@ -70,7 +70,7 @@ The function bodies use raw-pointer arithmetic + dereferences. In Rust 2024 edit
 
 ## (e) `SerializableVMValue` wire-format gap
 
-**Status:** owned by W17-snapshot-roundtrip (Wave 2.6+).
+**Status (Phase 2d close 2026-05-12 `e22bffd2`):** RESOLVED. Landed via W17-snapshot-roundtrip (Wave 2.6 close `fbfbfb62`, merged into bundle-A and bulldozer); ADR-006 §2.7.5.1.A amendment formalizes the 15-arm wire-format extension for HashSet / Iterator / Result / Option / Deque / Channel / PriorityQueue / Reference / FilterExpr / SharedCell / Mutex / Atomic / Lazy plus the canonical `slot_to_serializable` / `serializable_to_slot` API. W17-state-tier-roundtrip (Wave 3) consumes this API end-to-end.
 
 **The finding:** W17-snapshot-surfaces (Wave 2.5 close `0db5920`) identified that `SerializableVMValue` in `shape-runtime/src/snapshot.rs` has wire-format arms for pre-bulldozer carriers but no arms for the post-W14/W15/W16 HeapKinds: `HashSet`, `Iterator`, `Result`, `Option`, `Deque`, `Channel`, `PriorityQueue`, `Reference`, `FilterExpr`, `SharedCell`. The W17-concurrency close (Wave 2.5 `6ba7e59`) adds another 3 needing arms: `Mutex`, `Atomic`, `Lazy`.
 
@@ -100,7 +100,7 @@ The function bodies use raw-pointer arithmetic + dereferences. In Rust 2024 edit
 
 ## (h) `let-in-fn` triggers `DropCall` SURFACE — D-trait-obj territory
 
-**Status:** owned by future D-trait-obj sub-cluster.
+**Status (Phase 2d close 2026-05-12 `e22bffd2`):** RESOLVED-PARTIAL. Types that have a `Drop` impl now dispatch correctly through W17-trait-object-emission's Erase_T + DynMethodCall lowering (Wave 2.6 close, merged into bulldozer). The remaining gap is general drop-trait dispatch for types without explicit `Drop` impls, which is §Q25.C.5 closure-impl emission territory and stays open as a Wave-3 / Phase-3 follow-up cluster.
 
 **The finding:** C1-temporal-lowering (Wave 2 close `1d751e6`) discovered that any `let x = expr` inside a function body hits `DropCall` dispatch at function scope exit, which surfaces a `NotImplemented` at `trait_object_ops.rs:123`. The `Drop` trait dispatch for locals going out of scope is owned by D-trait-obj (a future sub-cluster aliased to W17-trait-object-emission per the Wave 2.5 rescope). Multiple Wave 2 / Wave 2.5 agents (C1, C2, others) re-shaped their smokes from `let x = …` in fn-body to `return …` to avoid this.
 
@@ -136,7 +136,7 @@ This isn't a code follow-up — it's a process / supervisor-discipline note. Rec
 
 ## (i) JIT FFI `HK_*` legacy-ordinal collisions with current HeapKind
 
-**Status:** latent; not currently reachable due to upstream JIT-execute SURFACE.
+**Status (Phase 2d close 2026-05-12 `e22bffd2`):** OPEN — now Phase 3 cluster-0 territory (`W17-jit-legacy-ordinal-disambiguation`, dispatchable in parallel with `W11-jit-new-array`). Latent at Phase 2d close because the upstream JIT-execute SURFACE (`jit_new_array` stub) prevents the collision from being reachable; once `W11-jit-new-array` lands the kinded `Arc<TypedArrayData>` FFI surface, this becomes immediately load-bearing. See `docs/cluster-audits/phase-3-kickoff-prompt.md` for the cluster-0 dispatch contract.
 
 **The finding:** Phase 2d Item 3 JIT verification (Wave-4, 2026-05-12) audited
 the `HK_*` u16-prefix table in `crates/shape-jit/src/ffi/value_ffi.rs:153-201`

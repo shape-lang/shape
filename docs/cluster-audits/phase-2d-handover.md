@@ -430,3 +430,7 @@ Worktrees from W14/W15/W16 (`shape-w15-*`, `shape-w16-*`, `shape-w14-*`) can be 
 ---
 
 *End of handover. Read §0 again before starting any sub-cluster.*
+
+## Close
+
+Phase 2d closed on 2026-05-12 at commit `e22bffd2`, tagged `phase-2d-close`. The VM-path strict-typing migration is complete; the JIT path remains pre-existing structurally broken (phase-2c W10 §2.7.14 SURFACE — `jit_new_array` stub at `crates/shape-jit/src/ffi_symbols/array_symbols.rs:30` aborts every JIT compilation; independently confirmed by Item 3 verification on programs that don't touch arrays). JIT rebuild is Phase 3 cluster-0 territory. See `docs/cluster-audits/phase-2d-close-summary.md` for the full close artifact (delivery summary, ADR amendments, HeapKind ordinal table, hardening backlog status, open Wave-3 surfaces, worktree cleanup authorization) and `docs/cluster-audits/phase-3-kickoff-prompt.md` for the Phase 3 cluster-0 supervisor contract.
