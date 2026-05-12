@@ -614,7 +614,7 @@ runtime carriers). The trinity co-design itself may or may not need an
 amendment — that's the co-design sub-cluster's call.
 
 Branch: `bulldozer-strictly-typed-w12-jit-match-enum-inline`
-Audit commit: pending (this commit)
+Audit commit: `36a35f34`
 Close: audit-only — code deferred to trinity co-design
 
 ## Cluster-0 close gate
