@@ -130,16 +130,82 @@ Precedent: Phase 2d W17-typed-carrier-monomorphization rescope
 (bundle-A + trait-object-storage + trait-object-emission, Wave 2.5)
 when the original scope mismatched the work needed.
 
-## Round 3 — dispatching
+## Round 3 — partial close
 
 Four sub-clusters dispatched in parallel 2026-05-12:
 
-| Sub-cluster | Branch | Smoke unblocked | Est |
+| Sub-cluster | Branch | Smoke unblocked | Status |
 |---|---|---|---|
-| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session |
-| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | ~1 session |
-| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) |
-| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) |
+| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | dispatching |
+| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | dispatching |
+| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | **closed** (2026-05-12) |
+| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | dispatching |
+
+### W12-jit-linker-symbol-resolution close (2026-05-12)
+
+Audit-first sub-cluster. Root cause: NOT a naming convention
+mismatch, NOT a missing FFI registration, NOT an ABI gap. The
+`can't resolve symbol main_f{idx}_{name}` panic is a second-order
+failure of the failed-compile stub fallback in
+`crates/shape-jit/src/compiler/program.rs:702-725`:
+
+When `compile_function_with_user_funcs` returns `Err` (e.g. on a
+`Route A` `Rvalue::Aggregate` surface), the stub fallback installs a
+body returning `signal = -1` via `iconst.i32 -1`. Cranelift's
+`iconst` immediate-bounds rule
+(`cranelift-codegen/src/verifier/mod.rs:1644-1665`) requires the I32
+immediate to be the unsigned bit-pattern — `-1i64 as u64 =
+0xFFFFFFFFFFFFFFFF` exceeds `u32::MAX = 0xFFFFFFFF`, so the
+verifier rejects the stub. The `define_function` error was
+silently swallowed via `let _ = ...`, leaving the declared FuncId
+with no body. Then `finalize_definitions()` panicked in
+`cranelift-jit-0.110.3/src/backend.rs:345` on the undefined
+symbol.
+
+Fix has two parts:
+1. Pass the unsigned bit-pattern `(-1i32 as u32) as i64` matching
+   the Cranelift convention used by every other I32 negative-value
+   site in the codebase.
+2. Convert the silent `let _ = define_function(...)` into a
+   structured `Err` return so failed stub recovery surfaces as a
+   typed JIT compilation error (`SHAPE_JIT_DEBUG=1` adds a
+   diagnostic eprintln).
+
+Smoke 2 (`fn main()`-wrap repro): JIT no longer panics — returns
+deopt signal -1 from the stub, which is the intended behavior for
+a function that failed Phase-4 compile. Smoke 2 plain form
+(`print(first_positive([-1, -2, 3, -4]))`) still hits an upstream
+surface — the top-level `Rvalue::Aggregate` for the Array literal
+(W12-top-level-concrete-types-conduit territory, item 1 in the
+surfaced-items table). The linker resolution is now CORRECT;
+Smoke 2 full success depends on the concrete-types conduit
+sub-cluster also closing.
+
+Branch: `bulldozer-strictly-typed-w12-jit-linker-resolve`
+Audit commit: `f30644cb`
+Fix commit: (pending — appended below at merge)
+
+Close gates (devenv exit-code-verified):
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` EXIT=0 (316 / 0 / 38 — same as baseline)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+Sites surfaced (NOT silently skipped):
+- (a) Smoke 2 plain form depends on W12-top-level-concrete-types-conduit
+  (cross-cluster). The linker fix unblocks the stub path for ANY
+  user function failing Phase-4; the plain-form Smoke 2 still
+  fails at the top-level surface before reaching the stub.
+- (b) ~30+ stdlib user functions (`Into::*::*::into`,
+  `TryInto::*::*::tryInto`, `Json.*` accessors,
+  `std::core::math::spread`/`zscore`) currently fail Phase-4
+  compile with `Rvalue::Aggregate` and route through the stub.
+  Each is a W11-jit-new-array follow-up, NOT a linker bug.
+- (c) The audit's deeper observation: `let _ = ...` on a
+  load-bearing error is itself a forbidden pattern when the
+  swallowed error masks a subsequent panic. Fixed at the W12-jit-
+  linker site; future agents touching stub-recovery code should
+  follow the same surface-and-stop discipline.
 
 **Deferred to future cluster (NOT cluster-0):**
 

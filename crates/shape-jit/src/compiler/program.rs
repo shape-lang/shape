@@ -699,6 +699,23 @@ impl JITCompiler {
                 }
                 // Define a stub body so Cranelift doesn't panic on undefined symbol.
                 // The stub returns signal -1 (error), causing the caller to deopt.
+                //
+                // W12-jit-linker-resolve (`docs/cluster-audits/w12-jit-linker-audit.md`):
+                // Cranelift's `iconst` immediate-bounds rule requires the I32
+                // immediate to be the unsigned bit-pattern, not the signed
+                // value. `iconst.i32 -1` is rejected by the verifier because
+                // `-1i64 as u64 = 0xFFFFFFFFFFFFFFFF` exceeds the I32 mask
+                // `u32::MAX = 0xFFFFFFFF`. Pass the two's-complement unsigned
+                // bit pattern instead — see `cranelift-codegen/src/verifier/
+                // mod.rs:1644-1665` for the documented invariant.
+                //
+                // Also: previously the stub `define_function` failure was
+                // silently swallowed via `let _ = ...`, which left the
+                // declared FuncId with no body and caused `finalize_definitions`
+                // to panic with `can't resolve symbol main_f{idx}_{name}` —
+                // the very surface this audit traced. Surface the stub
+                // failure under `SHAPE_JIT_DEBUG=1` so future regressions
+                // don't hide beneath the linker panic.
                 if let Some(&fid) = user_func_ids.get(&(idx as u16)) {
                     let mut stub_sig = self.module.make_signature();
                     stub_sig.params.push(AbiParam::new(types::I64));
@@ -716,11 +733,36 @@ impl JITCompiler {
                         b.append_block_params_for_function_params(block);
                         b.switch_to_block(block);
                         b.seal_block(block);
-                        let neg = b.ins().iconst(types::I32, -1);
+                        // Cranelift I32 iconst convention: pass the unsigned
+                        // bit-pattern, not the signed value. `-1i32` is
+                        // `0xFFFFFFFF` as a `u32`.
+                        let neg = b.ins().iconst(types::I32, (-1i32 as u32) as i64);
                         b.ins().return_(&[neg]);
                         b.finalize();
                     }
-                    let _ = self.module.define_function(fid, &mut stub_ctx);
+                    if let Err(stub_err) = self.module.define_function(fid, &mut stub_ctx) {
+                        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                            eprintln!(
+                                "[jit-mir] stub define_function failed for '{}' (idx={}, fid={:?}): {:?}",
+                                func.name, idx, fid, stub_err
+                            );
+                        }
+                        // Surface-and-stop: a failed stub leaves the declared
+                        // FuncId with no body, which propagates to
+                        // `finalize_definitions` as a `can't resolve symbol`
+                        // panic. Convert to a structured error here so the
+                        // caller sees a typed JIT-compilation failure, not a
+                        // panic through `catch_unwind`. The stub itself was
+                        // supposed to be a recovery path; if recovery fails,
+                        // the whole JIT compilation is unsound.
+                        return Err(format!(
+                            "JIT stub fallback failed for function '{}' (idx={}): {:?}. \
+                             The Cranelift module is in an inconsistent state — \
+                             this is a JIT-compiler bug, not a user-code error. \
+                             See docs/cluster-audits/w12-jit-linker-audit.md.",
+                            func.name, idx, stub_err
+                        ));
+                    }
                     self.module.clear_context(&mut stub_ctx);
                 }
                 jit_compatible[idx] = false;
