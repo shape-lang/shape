@@ -453,7 +453,7 @@ the call signature, not decoded from bits" applied to one specific
 FFI body family.
 
 Branch: `bulldozer-strictly-typed-w12-jit-binop-heap-read`
-Close commit: pending (appended at commit)
+Close commit: `414d0a0a`
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
