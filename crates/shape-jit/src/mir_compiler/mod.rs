@@ -541,7 +541,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .iter()
             .map(|ct| types::native_kind_from_concrete_type(ct))
             .collect();
-        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &concrete_seed);
+        // ADR-006 §2.7.5 element-kind projection: pass the per-slot
+        // `ConcreteType` map into the inference so `Place::Index` reads
+        // off typed-array slots stamp the destination kind from the
+        // element kind, not the array's pointer kind. Without this seed
+        // a `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
+        // print decoder.
+        let slot_kinds = types::infer_slot_kinds_with_concrete(
+            &mir_data.mir,
+            &concrete_seed,
+            &concrete_types,
+        );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy

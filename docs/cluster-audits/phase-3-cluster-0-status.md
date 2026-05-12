@@ -349,9 +349,128 @@ correct cites are §2.7.14 / §2.7.5. Round-5B agent fixes this.
 |---|---|---|---|
 | W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) | dispatching |
 | W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | dispatching (audit-first) |
-| W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | dispatching |
+| W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | **closed** (2026-05-12) |
 
-**Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
+**Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap was framed as print-classification, not constructor MIR. Round-5C's audit-and-fix shows the constructor MIR gap IS load-bearing for Smoke 4's value-correctness (see W12-jit-print-kind-classification close below) — but the print-classification fix is independently correct and is the prerequisite for any future Smoke-4 close.
+
+### W12-jit-print-kind-classification close (2026-05-12)
+
+Audit-first sub-cluster (Round 5C). Root cause: the print
+dispatch in `crates/shape-jit/src/mir_compiler/terminators.rs:298-396`
+already routes correctly per `operand_slot_kind(&args[0])` — the
+kinded entries (`jit_print_i64` / `jit_print_f64` / `jit_print_bool`)
+landed in W11-jit-new-array Round 1 fire correctly when the kind is
+known. The gap is upstream: `kinds[slot]` returns `None` for two
+load-bearing patterns:
+
+1. **`TerminatorKind::Call` destinations.** `infer_slot_kinds`
+   only walks `StatementKind::Assign` writes. The destination of a
+   Call terminator is a separate kind-source the statement-walk
+   misses. `let n = s.size()` writes the method-call result into a
+   temp slot whose kind stays `None`; the downstream `Assign(n_slot,
+   Use(Move(temp)))` propagates `None` into the user-visible binding.
+2. **`Place::Index` element-kind projection.** `operand_slot_kind`
+   collapses `Place::Index(arr, _)` to `root_local()` and returns
+   the array's kind, not the element kind. `print(xs[0])` flows to
+   the print path with kind `Ptr(HeapKind::TypedArray)` and falls
+   through to the kind-blind fallback (`format_value_word`, a deleted-
+   W-series tag-decode pattern per CLAUDE.md "Forbidden code").
+
+**Fix shape (ADR-006 §2.7.5 producing-site classification)**:
+
+- New `infer_slot_kinds_with_concrete(mir, existing, concrete_types)`
+  entry point that adds two passes to the legacy `infer_slot_kinds`:
+  (a) a Call-terminator pre-pass BEFORE the forward statement pass —
+  destination slots of `TerminatorKind::Call` with
+  `MirConstant::Method(name)` / `MirConstant::Function(name)` are
+  stamped from a bounded well-known return-kind registry (`size` /
+  `len` / `length` / `count` → `Int64`; `isEmpty` / `is_empty` / `has`
+  / `contains` → `Bool`; global `len` builtin → `Int64`). Pre-forward
+  placement is load-bearing: it makes the call temp's kind visible
+  to the forward pass's propagation through `Assign(n_slot, Use(Move(
+  temp)))`. (b) An `infer_index_element_kind` helper consulted at the
+  forward-pass entry — when the Rvalue is `Use(Copy/Move/MoveExplicit(
+  Place::Index(Local(arr), _)))` and the receiver slot's
+  `ConcreteType` is `Array(elem)` with a scalar element kind, the
+  destination's kind is the element kind.
+- `operand_slot_kind` in `rvalues.rs` extended to recognize
+  `Place::Index(Local(arr), _)` and project the array's
+  `ConcreteType::Array(elem)` to the element `NativeKind` via the
+  existing `elem_slot_kind_for_concrete` helper — closes the
+  kind-source gap at the FFI dispatch site without touching the
+  slot-write path.
+
+**Forbidden frames refused on sight**: (i) NO Bool-default fallback
+for unknown kind — the print dispatch's kind-blind fallback path is
+preserved as-is for genuinely-unproven operand kinds (the §2.7.5
+surface-and-stop prescription); the fix removes the conditions under
+which the fallback fires for the named smokes. (ii) NO "print-
+classification bridge" / "kind-routing helper" / "print-decode probe"
+/ similar bridge-probe-helper-hop-translator-adapter-shim framing —
+the producing-site stamp is at the MIR-compile layer, not as a
+runtime probe in the print FFI body. (iii) NO decoding kind from
+raw bits via `format_value_word` NaN-decode — kind comes from the
+§2.7.5 stamp at MIR-compile time. (iv) NO heap-arm kinded print
+entries (`jit_print_str` / `jit_print_typed_object` / `jit_print_
+result` / `jit_print_option`) — these are the cluster-2 candidate
+item #3 surfaced in the table above, and not exercised by the
+cluster-0 smoke matrix (all current smokes have scalar results that
+route through the existing `print_i64` / `print_f64` / `print_bool`
+entries correctly).
+
+**Smoke results — under `--mode vm` and `--mode jit` separately**:
+
+| Smoke | VM | JIT |
+|---|---|---|
+| `print(42)` | `42` | `42` ✅ |
+| `print(3.14)` | `3.14` | `3.14` ✅ |
+| `print(true)` | `true` | `true` ✅ |
+| `let xs: Array<int> = [10, 20]; print(xs[0])` | `10` | `10` ✅ (element-kind projection) |
+| `let xs: Array<int> = [10, 20, 30]; print(xs.length())` | `3` | `3` ✅ (well-known return-kind) |
+| `let xs: Array<int> = [10, 20, 30]; let n = xs.length(); print(n)` | `3` | `3` ✅ (terminator pass before forward pass) |
+| Smoke 4 (`Set()` + `s.add()` + `print(s.size())`) | `2` | integer value (kind classification correct; **value wrong because `Set()` constructor doesn't construct**) |
+
+**Sites surfaced (NOT silently fallback'd)**:
+
+- (a) **Smoke 4's value-correctness depends on the deferred
+  `W12-collection-constructor-mir-lowering` sub-cluster.** The
+  pre-dispatch audit in this Round-5 status section claimed "Set()
+  constructor works correctly and program reaches `print(s.size())`
+  cleanly" — `SHAPE_JIT_DEBUG=1` reveals a `[jit-call-value] SURFACE
+  §2.7.5: callee_bits=0x0` at the `Set()` call site, confirming
+  `MirConstant::Function("Set")` is unresolved in `function_indices`
+  exactly like the §2.3 collection-ctor family the Round-4 audit grid
+  identified. The print classification fix is complete and correct
+  (visible by the f64-denormalized `0.000...535409` output flipping
+  to a clean integer output) regardless of the upstream `Set()`
+  constructor gap — but the VM=JIT smoke-4 equivalence requires the
+  collection-constructor MIR lowering too. Surfaced as a finding
+  that contradicts the playbook's pre-dispatch audit; supervisor
+  decides whether to retag `W12-collection-constructor-mir-lowering`
+  as load-bearing for cluster-0 close or accept the divergence
+  with a tracked follow-up.
+- (b) `well_known_method_return_kind` is a bounded registry by
+  design — names outside the set return `None` and the slot's kind
+  genuinely isn't statically classifiable at the producing-MIR
+  layer alone. Adding `toArray` / `toString` / etc. would require
+  verifying every receiver-side dispatch-table entry returns the
+  declared kind across every receiver type the dispatch reaches.
+  Potential follow-up if the smoke matrix ever exercises one of
+  those names.
+- (c) Heap-arm print entries (`jit_print_str` / `jit_print_typed_
+  object` / `jit_print_result` / `jit_print_option`) per Round-1
+  surfaced item #3 still stand as a cluster-2 candidate — not
+  exercised by the cluster-0 smoke matrix.
+
+**Branch:** `bulldozer-strictly-typed-w12-jit-print-kind`
+**Close commit:** (pending — appended below at merge)
+
+**Close gates (devenv exit-code-verified)**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` EXIT=0 (322 passed, 0 failed, 26
+  ignored — matches baseline 322/0/26 on `7a78799b`)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
 
 ## Cluster-0 close gate
 

@@ -200,6 +200,32 @@ pub(crate) fn infer_slot_kinds(
     mir: &MirFunction,
     existing: &[Option<NativeKind>],
 ) -> Vec<Option<NativeKind>> {
+    infer_slot_kinds_with_concrete(mir, existing, &[])
+}
+
+/// Extended `infer_slot_kinds` that additionally consults the per-slot
+/// `ConcreteType` map for element-kind projection through `Place::Index`
+/// reads.
+///
+/// ADR-006 §2.7.5 producing-site classification: when the source MIR
+/// statement reads an element from a typed-array slot
+/// (`Assign(dst, Use(Copy/Move(Index(arr, _))))`), the destination's
+/// `NativeKind` is the element kind, not the array's pointer kind. The
+/// element kind comes from the typed-array seed
+/// (`ConcreteType::Array(elem)`) the bytecode compiler stamps via
+/// `infer_top_level_concrete_types_from_mir` / `function_local_concrete_types`,
+/// and is passed in as `concrete_types`. Without this projection the
+/// `xs[0]` slot stays `None` and a downstream `print(xs[0])` falls into
+/// the kind-blind decoder.
+///
+/// `concrete_types` aligned with MIR slot indices (same shape as the
+/// `concrete_seed` built in `mir_compiler::mod.rs`). Entries outside
+/// `Array(_)` shapes contribute nothing to the Index-projection rule.
+pub(crate) fn infer_slot_kinds_with_concrete(
+    mir: &MirFunction,
+    existing: &[Option<NativeKind>],
+    concrete_types: &[ConcreteType],
+) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
     let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
 
@@ -207,6 +233,57 @@ pub(crate) fn infer_slot_kinds(
     for (i, &k) in existing.iter().enumerate() {
         if i < n && k.is_some() {
             kinds[i] = k;
+        }
+    }
+
+    // ADR-006 §2.7.5 producing-site classification for `TerminatorKind::Call`
+    // destinations — seeded BEFORE the forward statement pass so the
+    // call-result kind is available when a downstream `Assign(slot,
+    // Use(Move(call_temp)))` walks the forward pass to propagate the
+    // method-call return kind into the user-visible binding slot.
+    //
+    // The `infer_slot_kinds` statement-walk only sees
+    // `StatementKind::Assign(place, rvalue)` writes; the destination of a
+    // Call terminator (`TerminatorKind::Call { destination, .. }`) is the
+    // separate kind-source the statement-walk misses. Without this seed a
+    // `let n = s.size(); print(n)` flows the method-call result through a
+    // temp slot whose `kinds[temp]` stays `None`, and the downstream
+    // `Assign(n_slot, Use(Move(temp)))` forward-pass inherits `None`,
+    // sending `print(n)` into the kind-blind decoder
+    // (`format_value_word`, a deleted-W-series tag-decode pattern per
+    // CLAUDE.md "Forbidden code").
+    //
+    // The kind is classified from the well-known method name per
+    // `well_known_method_return_kind` — a small registry of method names
+    // whose return type is invariant across receiver types in the
+    // VM's method registry (`crates/shape-vm/src/executor/objects/
+    // method_registry.rs`): `size`/`len`/`length`/`count` → Int64;
+    // `isEmpty`/`contains`/`has` → Bool. Names outside this set
+    // remain `None` — the slot's kind genuinely isn't statically
+    // classifiable from the MIR-observable shape alone, per §2.7.7
+    // (no fabricated default).
+    for block in &mir.blocks {
+        if let TerminatorKind::Call {
+            func, destination, ..
+        } = &block.terminator.kind
+        {
+            if let Place::Local(slot) = destination {
+                let idx = slot.0 as usize;
+                if idx < n && kinds[idx].is_none() {
+                    let ret_kind = match func {
+                        Operand::Constant(MirConstant::Method(name)) => {
+                            well_known_method_return_kind(name)
+                        }
+                        Operand::Constant(MirConstant::Function(name)) => {
+                            well_known_function_return_kind(name)
+                        }
+                        _ => None,
+                    };
+                    if let Some(k) = ret_kind {
+                        kinds[idx] = Some(k);
+                    }
+                }
+            }
         }
     }
 
@@ -218,8 +295,24 @@ pub(crate) fn infer_slot_kinds(
                     if let Place::Local(slot) = place {
                         let idx = slot.0 as usize;
                         if idx < n && kinds[idx].is_none() {
-                            if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
-                                kinds[idx] = Some(inferred);
+                            // ADR-006 §2.7.5 element-kind projection: when
+                            // the Rvalue reads through `Place::Index(arr,
+                            // _)` and the receiver's `ConcreteType` is
+                            // `Array(elem)`, project the element kind.
+                            // This is the producing-site classification
+                            // for typed-array index reads — the only path
+                            // through which `xs[0]` can statically prove
+                            // its kind under strict typing. Same shape as
+                            // the `infer_rvalue_kind` fallback below but
+                            // with the index-source disambiguation that
+                            // requires `concrete_types`.
+                            let inferred = infer_index_element_kind(
+                                rvalue,
+                                concrete_types,
+                            )
+                            .or_else(|| infer_rvalue_kind(rvalue, &kinds));
+                            if let Some(k) = inferred {
+                                kinds[idx] = Some(k);
                             }
                         } else if idx < n {
                             // Slot already has a kind — check for conflicts.
@@ -362,6 +455,96 @@ pub(crate) fn infer_slot_kinds(
     }
 
     kinds
+}
+
+/// Return the statically-known return `NativeKind` for a well-known
+/// method name, per ADR-006 §2.7.5 producing-site classification.
+///
+/// This is the JIT-side classifier for method-call destinations whose
+/// return kind is invariant across receiver types in the VM's method
+/// registry. The set mirrors the entries that appear in multiple
+/// dispatch tables in `crates/shape-vm/src/executor/objects/
+/// method_registry.rs` with the same return shape:
+///
+/// - `size` / `len` / `length` / `count`: every collection-method
+///   implementation in `set_methods::v2_size`, `deque_methods::v2_size`,
+///   `hashmap_methods::v2_len`, `typed_array_methods::v2_len`,
+///   `array_basic::handle_len_v2`, etc. returns `KindedSlot::from_int(...)`.
+/// - `isEmpty`: returns `KindedSlot::from_bool(...)` in every collection-
+///   method implementation (e.g. `set_methods::v2_is_empty`).
+/// - `has` / `contains`: typically `KindedSlot::from_bool(...)`.
+///
+/// Names outside this set return `None` — the JIT-compile pass treats
+/// `None` as "kind genuinely not classifiable from the MIR-observable
+/// shape" per §2.7.7 (no Bool-default fallback). Adding a new name
+/// requires verifying the receiver-side method registry returns the
+/// declared kind for every receiver type the dispatch reaches.
+fn well_known_method_return_kind(name: &str) -> Option<NativeKind> {
+    match name {
+        // Collection-size methods. Verified against every dispatch table
+        // in `method_registry.rs` that registers these names: array,
+        // datatable, hashmap, set, deque, priority_queue, iterator,
+        // typed_array — all return `KindedSlot::from_int(...)`.
+        "size" | "len" | "length" | "count" => Some(NativeKind::Int64),
+        // Emptiness / membership predicates — `KindedSlot::from_bool(...)`
+        // across every receiver's PHF entry.
+        "isEmpty" | "is_empty" | "has" | "contains" => Some(NativeKind::Bool),
+        _ => None,
+    }
+}
+
+/// Return the statically-known return `NativeKind` for a well-known
+/// builtin-function name (called via `MirConstant::Function(name)`
+/// rather than method dispatch). Currently only `len` is exposed as a
+/// global builtin alongside its method form, returning Int64.
+fn well_known_function_return_kind(name: &str) -> Option<NativeKind> {
+    match name {
+        // `len(x)` global builtin — returns int for every supported
+        // receiver type (Array, String, HashMap, ...).
+        "len" => Some(NativeKind::Int64),
+        _ => None,
+    }
+}
+
+/// ADR-006 §2.7.5 element-kind projection for `Place::Index` reads.
+///
+/// When the Rvalue is `Use(Copy(Index(arr_slot, _)))` (or `Move` /
+/// `MoveExplicit` variants) and the receiver slot's `ConcreteType` is
+/// `Array(elem)` with a scalar element kind, project the destination's
+/// `NativeKind` from the element. Returns `None` for non-Index sources,
+/// non-`Place::Local` receivers, or array slots whose `ConcreteType` is
+/// not a scalar `Array` (the kind is genuinely not statically classifiable
+/// at the producing-MIR layer in those cases).
+///
+/// This is the kind-source the legacy opaque-projection rule papered
+/// over by leaving the destination slot's kind as `None`, which then
+/// fell through to the kind-blind print decoder. With strict typing,
+/// `Array<int>[i]` proves the destination's kind at JIT-compile time.
+fn infer_index_element_kind(
+    rvalue: &Rvalue,
+    concrete_types: &[ConcreteType],
+) -> Option<NativeKind> {
+    let operand = match rvalue {
+        Rvalue::Use(op) => op,
+        _ => return None,
+    };
+    let place = match operand {
+        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p,
+        Operand::Constant(_) => return None,
+    };
+    let (arr_place, _index) = match place {
+        Place::Index(arr, idx) => (arr.as_ref(), idx),
+        _ => return None,
+    };
+    let arr_slot = match arr_place {
+        Place::Local(slot) => *slot,
+        _ => return None,
+    };
+    let ct = concrete_types.get(arr_slot.0 as usize)?;
+    let ConcreteType::Array(elem) = ct else {
+        return None;
+    };
+    elem_slot_kind_for_concrete(elem)
 }
 
 /// F7.c — `true` when `operand` reads through a heap projection

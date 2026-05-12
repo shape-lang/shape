@@ -259,6 +259,31 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             )),
             Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                // ADR-006 §2.7.5 element-kind projection: when the
+                // operand reads through `Place::Index(arr, _)`, the
+                // produced value IS the array element — not the array
+                // pointer. The kind classification at the receiving FFI
+                // site (e.g. `print` dispatch) must see the element
+                // kind, otherwise `Array<int>[i]` flows to the print
+                // path with kind `Ptr(HeapKind::TypedArray)` and falls
+                // into the kind-blind decoder. Project the element kind
+                // from the receiver slot's `ConcreteType::Array(elem)`.
+                if let shape_vm::mir::types::Place::Index(arr_place, _) = p {
+                    if let shape_vm::mir::types::Place::Local(arr_slot) =
+                        arr_place.as_ref()
+                    {
+                        let idx = arr_slot.0 as usize;
+                        if let Some(ct) = self.concrete_types.get(idx) {
+                            if let shape_value::v2::ConcreteType::Array(elem) = ct {
+                                if let Some(k) =
+                                    super::types::elem_slot_kind_for_concrete(elem)
+                                {
+                                    return Some(k);
+                                }
+                            }
+                        }
+                    }
+                }
                 let slot = p.root_local();
                 super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
             }
