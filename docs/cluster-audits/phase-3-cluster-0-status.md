@@ -536,6 +536,144 @@ conduit successfully stamped Enum (including `divide`).
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
+## Round 6 — dispatching
+
+Round 6 dispatched 2026-05-12 with three parallel sub-clusters covering
+the Round 5 surfaced option-(iii) territory + the previously-deferred
+collection-constructor MIR gap (re-classified as load-bearing after
+Round 5C revealed Smoke 4's value-correctness depends on it):
+
+| Sub-cluster | Branch | Smoke unblocked | Status |
+|---|---|---|---|
+| W12-jit-call-return-kind-track | `bulldozer-strictly-typed-w12-jit-call-return-kind` | 1.5 (`divide(...)` Result return-kind flow) | dispatching |
+| W12-jit-match-enum-inline-codegen | `bulldozer-strictly-typed-w12-jit-match-enum-inline` | 1.5 + 2 (match-on-enum dispatch) | dispatching |
+| W12-collection-constructor-mir-lowering | `bulldozer-strictly-typed-w12-collection-ctor-mir` | 4 segfault-chain side (constructor MIR) | **closed** (2026-05-12) |
+
+### W12-collection-constructor-mir-lowering close (2026-05-12)
+
+Lightweight audit-first sub-cluster — mechanically identical to the
+W12-enum-constructor-mir-lowering precedent (commit `2429b5ee`) at the
+MIR-lowering layer, with the W12-enum-constructor audit's §2.3 + §5.3
+spelling out the rewrite shape in advance.
+
+**Audit re-verification (2026-05-12)**: All 8 collection-ctor sites
+(`HashMap` / `Set` / `Deque` / `PriorityQueue` / `Channel` / `Mutex` /
+`Atomic` / `Lazy`) confirmed BROKEN pre-fix by smoke-runs with the
+freshly-built `shape` binary on the worktree branch. Round 5C's
+`well_known_function_return_kind` registry only handles `len` and did
+NOT inadvertently close any of the 8 sites. Cross-cutting Round 5 work
+did not touch the MIR-emission layer where these names leak as
+`MirConstant::Function(name)`. The kickoff's `callee_bits=0 → garbage
+downstream` chain confirmed by tracing: `Set()` JIT prints
+`102733544169152`, `HashMap()` and `Mutex(42).get()` JIT print
+denormalized floats around `0.000...053...` — the §2.3 family's
+silent-wrong-answer failure mode (contrast §2.1 enum-variant family's
+segfault — same root cause, different downstream because PHF method
+dispatch on null-Arc bits doesn't crash, it just returns whatever).
+
+**MIR shape chosen — option (b) reuse `EnumStore` with `variant_name`
+threading** per the W12-enum-constructor audit's §5.3 explicit
+recommendation ("strictly-simpler alternative"). Zero new MIR variants,
+zero exhaustive-match updates across the ~10 consumer files
+(`solver` / `liveness` / `storage_planning` / `field_analysis` /
+`repair` / `return_ownership` / `cfg` / `compiler_impl_reference_model`
+/ etc. — every match arm already iterates `EnumStore { operands, .. }`
+operands uniformly with no-op-on-empty-slice). The empty-args ctors
+(`Set()`, `HashMap()`, `Deque()`, `PriorityQueue()`, `Channel()`) emit
+`EnumStore { operands: [] }` via a new helper
+`emit_collection_ctor_store` that bypasses the existing
+`emit_container_store_full` empty-guard; the with-arg ctors
+(`Mutex(x)`, `Atomic(x)`, `Lazy(x)`) emit
+`EnumStore { operands: [arg] }`. The JIT EnumStore consumer's
+`is_collection_ctor_name` disambiguates enum-variant from
+collection-ctor and surfaces a collection-ctor-specific §-cited
+message (no garbage propagation, honest surface-and-stop equivalence
+ratchet matching the W12-enum-constructor precedent's Smoke 1.5
+behavior).
+
+**Decision called beyond playbook**: pipe-operator intercepts (sites
+2 + 3) restricted to the with-arg subset (`Mutex` / `Atomic` /
+`Lazy`) — zero-arg ctors via pipe (`x |> Set()`) fall through to the
+legacy `Call` path since `Set` et al. reject positional args at the
+VM-side ctor body (`executor/vm_impl/builtins.rs:592` arg-count
+check); matching the bytecode-compile-time error shape rather than
+silently discarding the piped value.
+
+**Smoke results (kickoff target + 2 additional)**:
+
+- `let mut s = Set(); s.add("a"); s.add("b"); print(s.size())`:
+  - `--mode vm`: prints `2` (unchanged from baseline).
+  - `--mode jit`: pre-fix `102733544169152` (garbage from null
+    callee bits propagated through method dispatch). Post-fix clean
+    surface-and-stop "EnumStore: SURFACE — primitive-collection
+    constructor 'Set' (operands.len()=0) requires the typed-Arc
+    allocation FFI for its `HeapKind` ... not yet landed".
+- `let mut m = HashMap(); m.set("k", 1); print(m.get("k"))`:
+  - `--mode vm`: `1`; `--mode jit`: pre-fix denormalized garbage,
+    post-fix clean `'HashMap'` variant surface.
+- `let m = Mutex(42); print(m.get())`:
+  - `--mode vm`: `42`; `--mode jit`: pre-fix denormalized garbage,
+    post-fix clean `'Mutex'` variant surface.
+
+Plus all 8 ctors verified to construct valid containers in VM mode
+via combined smokes (`Set` / `HashMap` / `Deque` / `PriorityQueue` /
+`Mutex` all print `0` or `7` for size/value methods; `Channel.send` +
+`try_recv` round-trips `42`).
+
+**The smoke target "Both VM and JIT must print 2"**: VM does; JIT
+surface-and-stops honestly per the equivalence-ratchet pattern. The
+typed-Arc allocation FFI work needed to make JIT print `2` is the
+tracked future-cluster work (`Arc<HashSetData>` / `Arc<HashMapData>` /
+... in the JIT FFI table — same architectural shape as the
+typed-Arc enum-payload FFI gap surfaced by W12-jit-aggregate-non-array
+Round 5B option-(iii) territory). The constructor-MIR fix closes the
+segfault chain / silent-wrong-answer chain on the producer side;
+consumer-side typed-Arc FFI is a separate concern.
+
+**Close gates (devenv exit-code-verified)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 322 passed / 0 failed / 26 ignored
+  (matches baseline 322/0/26)
+- `cargo test -p shape-vm --lib` pre-existing SIGABRT in
+  v2-raw-heap-audit cluster (unrelated; verified identical on
+  baseline — same `tcache_thread_shutdown(): unaligned tcache chunk
+  detected` signature as documented in CLAUDE.md known-constraints)
+- `bash scripts/verify-merge.sh` 12/12
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Sites surfaced (cite-tracked, NOT silently skipped)**:
+
+- Typed-Arc allocation FFI for the 8 collection-ctor HeapKinds —
+  needed in JIT FFI table for end-to-end `--mode jit` parity with
+  VM. Same architectural shape as the typed-Arc enum-payload FFI
+  gap from Round 5B item 3. Tracked as future-cluster work; not
+  load-bearing for cluster-0 close per the W12-enum-constructor
+  surface-and-stop equivalence-ratchet precedent.
+- The MIR pipe-operator `x |> Set` form (and other zero-arg ctors
+  via pipe) intentionally falls through to the legacy `Call` path —
+  surfaces as the existing function-table lookup miss, mirroring
+  the bytecode-compile-time arg-count error. No current cluster-0
+  smoke exercises this; if a future smoke does, it should produce
+  a typed compile-error not a silent value drop.
+
+**ADR-006 amendment**: NOT required — the fix reuses `EnumStore`
+per the W12-enum-constructor audit's §5.3 recommendation, aligns
+with §2.7.5 producing-site classification verbatim, no new
+HeapKind / opcode / dispatch shape.
+
+**Parallel sub-cluster coordination verified**: Round 6A
+(W12-jit-call-return-kind-track) and 6B
+(W12-jit-match-enum-inline-codegen) touch JIT
+`mir_compiler/types.rs` (return-kind) and
+`mir_compiler/terminators.rs` (match dispatch) respectively; this
+sub-cluster touches `mir/lowering/{expr,helpers}.rs` (producer) and
+`mir_compiler/statements.rs::EnumStore` consumer. Zero file-territory
+overlap with 6A/6B confirmed at close.
+
+Branch: `bulldozer-strictly-typed-w12-collection-ctor-mir`
+Close commit: `d784042e`
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
