@@ -288,6 +288,111 @@ pub(super) fn is_bare_enum_variant_ctor(name: &str) -> bool {
     matches!(name, "Ok" | "Err" | "Some")
 }
 
+/// W12-collection-constructor-mir-lowering (Phase 3 cluster-0 Round 6C):
+/// Identify a bare-form built-in primitive-collection constructor name.
+///
+/// The parser produces `Expr::FunctionCall { name: "Set" / "HashMap" /
+/// ..., ... }` for the bare surface forms `Set()` / `HashMap()` /
+/// `Deque()` / `PriorityQueue()` / `Channel()` / `Mutex(x)` /
+/// `Atomic(x)` / `Lazy(x)` — indistinguishable in AST shape from any
+/// other function call. These names are NOT registered in the runtime
+/// function table; the VM intercepts them at bytecode-compile time via
+/// `classify_builtin_function` (`crates/shape-vm/src/compiler/helpers.rs:3427-3440`)
+/// and dispatches them via `OpCode::BuiltinCall(HashMapCtor / SetCtor / ...)`
+/// to the executor's hand-written constructor bodies
+/// (`executor/vm_impl/builtins.rs:587-749`).
+///
+/// MIR emission must perform the equivalent producer-side classification
+/// at the MIR-lowering layer, otherwise it leaks
+/// `MirConstant::Function("Set")` operands into MIR — operands the JIT
+/// cannot resolve through its function index table, producing
+/// `iconst(I64, 0)` callee bits and downstream garbage values (the JIT-
+/// side reads the null bits as int/float and prints garbage; the segfault
+/// the §2.1 enum-variant family produced is replaced with a
+/// silent-wrong-answer here because `.add()` etc. on null bits dispatches
+/// to method handlers via PHF that interpret the null as a valid Arc).
+///
+/// The list here mirrors the collection-constructor subset of
+/// `classify_builtin_function`. The bare enum-variant subset
+/// (`Ok` / `Err` / `Some`) is handled separately by
+/// `is_bare_enum_variant_ctor` — same producer-side classification, same
+/// `EnumStore` MIR shape, different downstream JIT consumer surface
+/// message (enum vs collection ctor).
+///
+/// All eight names share the same MIR shape — `Assign(Aggregate(operands))`
+/// + `EnumStore { container_slot, operands, variant_name: Some(name) }` —
+/// per the W12-enum-constructor audit's §5.3 "reuse `EnumStore` with
+/// `kind`-on-the-slot threading" recommendation. The empty-args ctors
+/// (Set/HashMap/Deque/PriorityQueue/Channel) emit `operands: []`; the
+/// with-arg ctors (Mutex/Atomic/Lazy) emit `operands: [arg]`. The JIT
+/// EnumStore consumer disambiguates by `variant_name` to surface a
+/// collection-specific message (`docs/cluster-audits/w12-enum-
+/// constructor-audit.md` §5.3, ADR-006 §2.7.5 producing-site
+/// classification).
+pub(super) fn is_bare_collection_ctor(name: &str) -> bool {
+    matches!(
+        name,
+        "HashMap" | "Set" | "Deque" | "PriorityQueue" | "Channel" | "Mutex" | "Atomic" | "Lazy"
+    )
+}
+
+/// True iff `name` is a bare-form collection ctor that takes one
+/// argument (`Mutex(x)` / `Atomic(x)` / `Lazy(x)`). The remaining
+/// collection ctors (`Set` / `HashMap` / `Deque` / `PriorityQueue` /
+/// `Channel`) take zero arguments at landing; passing args produces a
+/// VM-side argument-count error from the executor's ctor body
+/// (`executor/vm_impl/builtins.rs:592` etc.), so the MIR rewrite must
+/// not silently accept `Set(extra_arg)` via the pipe-operator path.
+pub(super) fn is_bare_collection_ctor_with_arg(name: &str) -> bool {
+    matches!(name, "Mutex" | "Atomic" | "Lazy")
+}
+
+/// W12-collection-constructor-mir-lowering: lower a bare-form collection
+/// constructor to the `Aggregate` + `EnumStore` MIR shape per the
+/// W12-enum-constructor audit's §5.3 recommendation.
+///
+/// Unlike the `emit_container_store_full` helper (which guards
+/// `if operands.is_empty() { return; }` for the existing
+/// Array/Object/Enum/Closure-store callers), the empty-args collection
+/// ctors (`Set()` / `HashMap()` / `Deque()` / `PriorityQueue()` /
+/// `Channel()`) must still emit the `EnumStore` so the JIT consumer
+/// observes the collection-ctor surface (and bytecode-side borrow /
+/// storage planning has a kind-source statement for the container slot).
+/// The helper is bypassed here by emitting `StatementKind::EnumStore`
+/// directly with the variant_name.
+///
+/// The `Assign(Aggregate(...))` is unconditional: with `operands: []`
+/// it produces an empty aggregate that the JIT side recognizes as the
+/// container-init form. The MIR borrow solver / liveness / storage
+/// planner all treat empty-operands and non-empty-operands EnumStore
+/// statements uniformly (`crates/shape-vm/src/mir/{solver,liveness,
+/// storage_planning,field_analysis}.rs` — every match arm is on
+/// `EnumStore { operands, .. }` with operand iteration that no-ops on
+/// empty slices).
+pub(super) fn emit_collection_ctor_store(
+    builder: &mut MirBuilder,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    variant_name: String,
+    span: Span,
+) {
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(container_slot),
+            Rvalue::Aggregate(operands.clone()),
+        ),
+        span,
+    );
+    builder.push_stmt(
+        StatementKind::EnumStore {
+            container_slot,
+            operands,
+            variant_name: Some(variant_name),
+        },
+        span,
+    );
+}
+
 pub(super) fn lower_unary_op(op: ast::UnaryOp) -> Option<UnOp> {
     match op {
         ast::UnaryOp::Neg => Some(UnOp::Neg),

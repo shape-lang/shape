@@ -1577,6 +1577,55 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 return temp;
             }
 
+            // W12-collection-constructor-mir-lowering (Phase 3 cluster-0
+            // Round 6C, 2026-05-12): bare-form primitive-collection
+            // constructors (`Set()` / `HashMap()` / `Deque()` /
+            // `PriorityQueue()` / `Channel()` / `Mutex(x)` / `Atomic(x)`
+            // / `Lazy(x)`) parse as `Expr::FunctionCall { name: "Set",
+            // ... }` but are NOT function calls — the VM dispatches them
+            // via `OpCode::BuiltinCall(SetCtor / HashMapCtor / ...)`,
+            // not via the function table. Pre-fix MIR emitted
+            // `Call { func: Constant(Function("Set")), ... }`, the JIT's
+            // `compile_constant` could not resolve the name through
+            // `function_indices`, fell back to `iconst(I64, 0)`, and
+            // downstream code received `callee_bits = 0` → garbage
+            // values silently propagated through `.add()` / `.size()`
+            // method dispatch (the §2.1 enum-variant family produced a
+            // segfault chain at this point; here it's a silent-wrong-
+            // answer because the PHF method dispatch reads null bits as
+            // a valid Arc rather than crashing).
+            //
+            // Per ADR-006 §2.7.5 producing-site classification, the
+            // constructor's kind is known here at MIR-emit time. The
+            // rewrite reuses the same `Aggregate` + `EnumStore` MIR
+            // shape as the bare-form enum-variant family (the audit's
+            // §5.3 "simpler alternative — reuse `EnumStore` with
+            // `kind`-on-the-slot threading" recommendation), with the
+            // collection name threaded via `variant_name`. The JIT
+            // EnumStore consumer disambiguates enum-ctor from
+            // collection-ctor by name and surfaces a collection-ctor-
+            // specific §-cited message (no garbage propagation,
+            // honest surface-and-stop equivalence ratchet per the
+            // W12-enum-constructor close pattern).
+            //
+            // The intercept happens AFTER local-shadow resolution so
+            // user code that rebinds `let Set = ...; Set(5)` still
+            // calls the local. `named_args.is_empty()` preserves the
+            // legacy named-args error path.
+            //
+            // Site 1 of 3: `Expr::FunctionCall` direct call.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor(name)
+                && named_args.is_empty()
+            {
+                let operands: Vec<_> = args
+                    .iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg))
+                    .collect();
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return temp;
+            }
+
             let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
             arg_ops.extend(
                 args.iter()
@@ -1907,6 +1956,29 @@ fn lower_pipe_expr(
                 return;
             }
 
+            // W12-collection-constructor-mir-lowering: Site 2 of 3 —
+            // pipe-operator `FunctionCall` form (`x |> Mutex(...)`).
+            // Only meaningful for the with-arg subset
+            // (`Mutex`/`Atomic`/`Lazy`); zero-arg ctors via pipe
+            // (`x |> Set()`) fall through to the legacy `Call` path
+            // since `Set` rejects positional args at the VM-side
+            // ctor body — matching the bytecode-compile-time error
+            // shape rather than silently discarding the piped value.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor_with_arg(name)
+                && named_args.is_empty()
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let mut operands = Vec::with_capacity(1 + args.len());
+                operands.push(left_op);
+                operands.extend(
+                    args.iter()
+                        .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+                );
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return;
+            }
+
             let left_op = lower_expr_as_moved_operand(builder, left);
             let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
             arg_ops.push(left_op);
@@ -1933,6 +2005,25 @@ fn lower_pipe_expr(
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
         Expr::Identifier(name, _) => {
+            // W12-collection-constructor-mir-lowering: Site 3 of 3 —
+            // pipe-operator `Identifier` form (`x |> Mutex`). Only
+            // meaningful for the with-arg subset (Mutex/Atomic/Lazy);
+            // for zero-arg ctors (`x |> Set`) the piped value has
+            // nowhere to go — fall through to the legacy `Call` path,
+            // which surfaces the existing function-table lookup miss
+            // (the bare-Identifier-callee form is rare enough that
+            // CLAUDE.md doesn't track it as a load-bearing failure
+            // mode). Apply intercept BEFORE the enum-variant intercept
+            // since `Mutex`/`Atomic`/`Lazy` and `Ok`/`Err`/`Some` are
+            // disjoint sets.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor_with_arg(name)
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let operands = vec![left_op];
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return;
+            }
             // W12-enum-constructor-mir-lowering: `expr |> Ok` form —
             // pipe into a bare-form constructor ident. Same producer-
             // side classification.
