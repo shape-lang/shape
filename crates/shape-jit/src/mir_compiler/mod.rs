@@ -46,14 +46,16 @@ mod integration_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod v2_array_tests;
 
-// Gated behind `deep-tests` (W11-jit-new-array): post-phase-2d, the JIT-
-// side closure dispatch path goes through `jit_call_value`, whose body is
-// `todo!("phase-2c §2.7.10/Q11 + §2.7.11/Q12 ...")` pending the kinded
-// value-call ABI rebuild (control/mod.rs:171). extern "C" cannot unwind,
-// so the panic SIGABRTs the test process — `#[ignore]` on the individual
-// tests doesn't help because the cargo runner has already loaded their
-// symbols and the runner-side closure dispatch hits the same code path.
-// Re-ungate after §2.7.11/Q12 lands.
+// Re-gated post-W11 reopen verification: with principled arc_retain/
+// release (W11-jit-new-array), the SIGABRT source for these tests is
+// confirmed to be `ffi/control/mod.rs:171::jit_call_value` whose body
+// is `todo!("phase-2c §2.7.10/Q11 + §2.7.11/Q12: JIT-side kinded
+// value-call ABI rebuild")` — NOT a retain/release issue. The
+// closure-dispatch tests exercise the §2.7.11 / Q12 value-call ABI
+// (callee/args kind-stamping) which is W11-jit-carrier-conversion's
+// territory; the W11-jit-new-array charter is limited to the array
+// FFI surface + arc_retain/release. Re-enable when the kinded
+// value-call ABI lands at `ffi/control/mod.rs:171`.
 #[cfg(all(test, feature = "deep-tests"))]
 mod closure_dispatch_regression_tests;
 

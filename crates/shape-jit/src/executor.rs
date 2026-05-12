@@ -230,9 +230,35 @@ impl JITExecutor {
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
             eprintln!("[jit-debug] compilation OK, about to execute...");
         }
+        // W11-jit-new-array (supervisor reopen Step 4): snapshot arc
+        // retain/release counters before/after the JIT-emitted code runs
+        // so the supervisor can verify refcount balance — silent leaks
+        // here are the W-series defection-attractor shape we're refusing.
+        let retain_before =
+            crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let release_before =
+            crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let frees_before =
+            crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
+
+        if std::env::var_os("SHAPE_JIT_ARC_COUNTERS").is_some() {
+            let retain_after =
+                crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            let release_after =
+                crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            let frees_after =
+                crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "[shape-jit-arc] retain_calls={} release_calls={} release_frees={}",
+                retain_after - retain_before,
+                release_after - release_before,
+                frees_after - frees_before
+            );
+        }
 
         // Get result from JIT context stack via TypedScalar boundary
         let raw_result = if jit_ctx.stack_ptr > 0 {

@@ -73,14 +73,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             Rvalue::Clone(operand) => {
-                // Explicit clone: get the value and retain.
+                // Explicit clone: get the value and (if heap-kinded) retain.
                 //
-                // R4.2D: `jit_arc_retain` takes a plain `u64` bit-pattern
-                // (implicitly ValueWord-encoded), so no width-extension
-                // wrap is needed. Clones are only emitted for heap types,
-                // which already live in I64 slots at this site.
+                // W11-jit-new-array (ADR-006 §2.7.5 / §2.7.6 / Q8): the
+                // pre-W11 unconditional retain here was the symmetric
+                // version of the `compile_operand` Copy bug — fired on
+                // every Clone regardless of kind, which segfaulted on
+                // `NativeKind::Int64` slots whose bits are a raw int
+                // (the `MIR-emits-Clone-on-non-heap` case the W-series
+                // ABI tolerated via tag-bit decode). The principled
+                // response is to use the same kind-aware disposition
+                // path as Copy. When the operand has no `Place::Local`
+                // (e.g. `Operand::Constant`), there's no slot to
+                // discriminate by — and the bytecode compiler does not
+                // emit `Rvalue::Clone(Constant(...))` (Clone is by
+                // construction a place-rooted operation), so the
+                // fallback arm surface-and-stops with a clear marker.
                 let val = self.compile_operand_raw(operand)?;
-                self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                let place = match operand {
+                    shape_vm::mir::types::Operand::Copy(p)
+                    | shape_vm::mir::types::Operand::Move(p)
+                    | shape_vm::mir::types::Operand::MoveExplicit(p) => p,
+                    shape_vm::mir::types::Operand::Constant(_) => {
+                        return Err(
+                            "MirToIR: Rvalue::Clone(Constant) — Clone is \
+                             defined on place-rooted operands per ADR-006 \
+                             §2.7.5; emitter contract violated. SURFACE."
+                                .to_string(),
+                        );
+                    }
+                };
+                if self.refcount_disposition_for_place(place)? {
+                    self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                }
                 Ok(val)
             }
 

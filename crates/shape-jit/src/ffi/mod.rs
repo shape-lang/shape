@@ -5,6 +5,7 @@
 
 pub mod arc;
 pub mod array;
+pub mod jit_release;
 pub mod data;
 pub mod jit_kinds;
 pub mod object;
