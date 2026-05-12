@@ -1429,6 +1429,37 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-006 §2.7.5 conduit: stamp per-MIR-slot `ConcreteType` for
+        // top-level code by walking the cached top-level MIR. The JIT
+        // MirToIR reads this side-table (`BytecodeProgram.
+        // top_level_local_concrete_types`) to drive the v2 typed-array
+        // fast path (avoiding `Rvalue::Aggregate` surface-and-stop) and
+        // the TypedObject `ObjectStore` short-circuit.
+        //
+        // Why MIR-walk rather than bytecode-compiler slot mapping: top-
+        // level code allocates the user's bindings as module_bindings
+        // (NOT bytecode locals — `self.next_local` is 0 at top level),
+        // so the bytecode-compiler's per-local side-tables do not
+        // carry top-level `let p = Point{...}` slots. The cached top-
+        // level MIR already encodes the structural type information
+        // through `StatementKind::{ObjectStore, ArrayStore, EnumStore}`
+        // — the MIR-level kind-source statements emitted for
+        // struct/enum/array construction. The walk is purely from the
+        // proven MIR shape; no runtime decode, no Bool-default fallback.
+        //
+        // The result is indexed by MIR `SlotId` (matching MirToIR's
+        // `concrete_type_for_slot` / `is_v2_typed_array_slot` indexing
+        // exactly). `ConcreteType::Void` per slot means "no
+        // information inferred" — a real enum variant per §2.7.5.1, not
+        // a Bool-default fallback per forbidden #9.
+        if let Some(ref mir_data) = self.program.top_level_mir {
+            let concrete_types =
+                crate::compiler::helpers::infer_top_level_concrete_types_from_mir(
+                    &mir_data.mir,
+                );
+            self.program.top_level_local_concrete_types = concrete_types;
+        }
+
         // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
         // table for the JIT worker. `emit_heap_closure` consumes this to lay
         // out captures at their natural-width offsets without going through

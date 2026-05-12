@@ -480,6 +480,14 @@ impl BytecodeCompiler {
                 // forward it to `BytecodeProgram` and the VM host boundary
                 // synthesises a tagged ValueWord on `vm.execute()`.
                 top_level_frame: self.program.top_level_frame.clone(),
+                // ADR-006 §2.7.5 conduit: top-level concrete-types side-
+                // table propagated through the content-addressed path so
+                // the linker forwards it to `BytecodeProgram` for the JIT
+                // typed-array / TypedObject fast paths.
+                top_level_local_concrete_types: self
+                    .program
+                    .top_level_local_concrete_types
+                    .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.

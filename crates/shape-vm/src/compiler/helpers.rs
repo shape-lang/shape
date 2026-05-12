@@ -391,6 +391,238 @@ pub(crate) fn with_typed_string_coerce_concat_flag<R>(enabled: bool, f: impl FnO
     f()
 }
 
+// ── ADR-006 §2.7.5 conduit — top-level MIR-slot ConcreteType inference ───
+
+/// Walk a top-level MIR function and infer a per-MIR-slot `ConcreteType`
+/// vector for the JIT MirToIR conduit.
+///
+/// ADR-006 §2.7.5 conduit (W12-top-level-concrete-types-conduit close,
+/// 2026-05-12). The JIT's typed-array / TypedObject fast paths require
+/// the destination slot's `ConcreteType` to be proven at compile time;
+/// reaching the fast path with an unproven slot would surface-and-stop.
+///
+/// This walk is the conduit's producer side. Each kind-source statement
+/// in the MIR carries enough structural information to stamp the
+/// destination slot's `ConcreteType`:
+///
+/// - `StatementKind::ObjectStore { container_slot, field_names, .. }`
+///   stamps `Struct(StructLayoutId(0))` (the schema-id placeholder is
+///   irrelevant for the JIT short-circuit which only checks the variant
+///   tag). The MIR-level lowering pairs every struct/object construction
+///   `(StructLiteral / Object)` with `ContainerStoreKind::Object` —
+///   `lowering/expr.rs:1597..1716`.
+/// - `StatementKind::EnumStore { container_slot, .. }` stamps
+///   `Enum(EnumLayoutId(0))` — the JIT treats `Enum(_)` and `Struct(_)`
+///   identically at the Aggregate short-circuit per
+///   `is_typed_object_slot`.
+/// - `StatementKind::ArrayStore { container_slot, .. }` — array element
+///   type is not directly known from the ArrayStore alone. We do NOT
+///   stamp `Array(Void)` here (it would mask the genuine surface-and-stop
+///   case for unproven element kinds). Array literals with proven
+///   `Array<scalar>` element kind are typed-array-allocated by the
+///   bytecode compiler via `NewTypedArrayF64/I64/I32/Bool` opcodes
+///   (`compile_expr_array` in `expressions/collections.rs`) — that path
+///   doesn't go through `Rvalue::Aggregate` at all. The remaining
+///   generic-`Array` case must legitimately surface-and-stop in the JIT
+///   until a richer element-kind kind-source landing arrives.
+///
+/// `ConcreteType::Void` per slot is the explicit "no information
+/// inferred" sentinel per §2.7.5.1 — NOT a Bool-default fallback per
+/// forbidden #9. Downstream JIT consumers (`concrete_type_for_slot` in
+/// `v2_array.rs`) treat `Void` as "fall through to legacy path".
+pub(crate) fn infer_top_level_concrete_types_from_mir(
+    mir: &crate::mir::MirFunction,
+) -> Vec<shape_value::v2::ConcreteType> {
+    use crate::mir::types::{MirConstant, Operand, StatementKind};
+    let n = mir.num_locals as usize;
+    let mut concrete_types: Vec<shape_value::v2::ConcreteType> =
+        vec![shape_value::v2::ConcreteType::Void; n];
+
+    // Pre-pass: build a per-slot scalar `ConcreteType` map by inspecting
+    // `Assign(Place::Local(slot), Rvalue::Use(Constant(_)))` statements.
+    // The MIR lowering for array element operands runs each expression
+    // through `lower_expr_to_temp` / `lower_expr_as_moved_operand` —
+    // which for literal sub-expressions emits an `Assign(temp, Use(Const))`
+    // first, then the array's `ArrayStore` moves the temp. We probe the
+    // pre-assigned temps' constant kinds so the array-element inference
+    // can prove the typed-array kind from the indirect operand shape.
+    let mut slot_scalar_kind: Vec<Option<shape_value::v2::ConcreteType>> =
+        vec![None; n];
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            if let StatementKind::Assign(
+                crate::mir::types::Place::Local(dst),
+                crate::mir::types::Rvalue::Use(Operand::Constant(c)),
+            ) = &stmt.kind
+            {
+                let idx = dst.0 as usize;
+                if idx < n {
+                    slot_scalar_kind[idx] = match c {
+                        MirConstant::Int(_) => Some(shape_value::v2::ConcreteType::I64),
+                        MirConstant::Float(_) => Some(shape_value::v2::ConcreteType::F64),
+                        MirConstant::Bool(_) => Some(shape_value::v2::ConcreteType::Bool),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+
+    // First pass: stamp slots from container-store statements. These are
+    // the kind-source statements emitted by the MIR lowering for
+    // struct/enum/array literal construction.
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            match &stmt.kind {
+                StatementKind::ObjectStore { container_slot, .. } => {
+                    let idx = container_slot.0 as usize;
+                    if idx < n {
+                        concrete_types[idx] =
+                            shape_value::v2::ConcreteType::Struct(
+                                shape_value::v2::concrete_type::StructLayoutId(0),
+                            );
+                    }
+                }
+                StatementKind::EnumStore { container_slot, .. } => {
+                    let idx = container_slot.0 as usize;
+                    if idx < n {
+                        concrete_types[idx] =
+                            shape_value::v2::ConcreteType::Enum(
+                                shape_value::v2::concrete_type::EnumLayoutId(0),
+                            );
+                    }
+                }
+                StatementKind::ArrayStore {
+                    container_slot,
+                    operands,
+                } => {
+                    let idx = container_slot.0 as usize;
+                    if idx < n {
+                        // Infer scalar element type from operand kinds. The
+                        // MIR lowering's `lower_array_expr` runs each element
+                        // through `lower_expr_as_moved_operand`, which for
+                        // literal sub-expressions emits an `Assign(temp,
+                        // Use(Const))` followed by an ArrayStore that moves
+                        // the temp. We resolve through the per-slot scalar
+                        // map (`slot_scalar_kind`) built in the pre-pass to
+                        // recover the underlying kind across that temp hop.
+                        if let Some(elem) = infer_array_elem_from_operands(
+                            operands,
+                            &slot_scalar_kind,
+                        ) {
+                            concrete_types[idx] =
+                                shape_value::v2::ConcreteType::Array(Box::new(elem));
+                        }
+                        // Heterogeneous / non-literal operands → leave
+                        // `Void`, the JIT surfaces-and-stops honestly at
+                        // the Aggregate site rather than papering over.
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Second pass: propagate Struct/Enum/Array through simple slot moves.
+    // The MIR lowering for `let p = Point{...}` first builds the
+    // TypedObject in a scratch temp, then `Assign(p_slot, Use(Move temp))`
+    // moves it into the user-visible slot. Without this propagation the
+    // user slot's `ConcreteType` would remain `Void` and downstream JIT
+    // consumers (field access codegen, drop release) couldn't pick the
+    // right path.
+    //
+    // The propagation is structural: only `Rvalue::Use(Move|Copy local)`
+    // assignments propagate. Anything else (Aggregate, BinaryOp, Borrow,
+    // Clone) does not — those don't preserve the source slot's
+    // ConcreteType.
+    //
+    // Iterate to a fixed point — slot chains can be longer than 1.
+    use crate::mir::types::{Place, Rvalue};
+    let mut changed = true;
+    let mut iter_budget = n.max(1) * 4; // hard cap against pathological MIR
+    while changed && iter_budget > 0 {
+        changed = false;
+        iter_budget -= 1;
+        for block in mir.iter_blocks() {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(
+                    Place::Local(dst),
+                    Rvalue::Use(
+                        Operand::Move(Place::Local(src))
+                        | Operand::Copy(Place::Local(src))
+                        | Operand::MoveExplicit(Place::Local(src)),
+                    ),
+                ) = &stmt.kind
+                {
+                    let (di, si) = (dst.0 as usize, src.0 as usize);
+                    if di < n && si < n {
+                        let src_ct = concrete_types[si].clone();
+                        if !matches!(src_ct, shape_value::v2::ConcreteType::Void)
+                            && concrete_types[di] != src_ct
+                        {
+                            concrete_types[di] = src_ct;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    concrete_types
+}
+
+/// Infer a homogeneous element `ConcreteType` from a slice of MIR
+/// operands. Resolves `Move(Local(slot))` operands through
+/// `slot_scalar_kind`, the pre-pass map of `Assign(slot, Use(Const))`
+/// scalar kinds.
+///
+/// Returns `None` for empty / heterogeneous / unresolved operand vectors
+/// — the caller leaves the slot's `ConcreteType` as `Void` (the "no
+/// information" sentinel per §2.7.5.1, NOT a Bool-default fallback).
+fn infer_array_elem_from_operands(
+    operands: &[crate::mir::types::Operand],
+    slot_scalar_kind: &[Option<shape_value::v2::ConcreteType>],
+) -> Option<shape_value::v2::ConcreteType> {
+    use crate::mir::types::{MirConstant, Operand, Place};
+    if operands.is_empty() {
+        return None;
+    }
+    let mut elem: Option<shape_value::v2::ConcreteType> = None;
+    for op in operands {
+        let here = match op {
+            Operand::Constant(MirConstant::Int(_)) => {
+                Some(shape_value::v2::ConcreteType::I64)
+            }
+            Operand::Constant(MirConstant::Float(_)) => {
+                Some(shape_value::v2::ConcreteType::F64)
+            }
+            Operand::Constant(MirConstant::Bool(_)) => {
+                Some(shape_value::v2::ConcreteType::Bool)
+            }
+            // Move/Copy of a local slot — consult the pre-pass scalar
+            // map. If the source slot was filled by an `Assign(s,
+            // Use(Constant(k)))` then we can recover the kind across
+            // the temp hop. Non-scalar source slots return None.
+            Operand::Move(Place::Local(s))
+            | Operand::Copy(Place::Local(s))
+            | Operand::MoveExplicit(Place::Local(s)) => {
+                let idx = s.0 as usize;
+                slot_scalar_kind.get(idx).and_then(|k| k.clone())
+            }
+            // Other operand shapes (Constants we don't handle, projections,
+            // etc.) → surface-and-stop (no fast-path fabrication).
+            _ => return None,
+        };
+        match (&elem, here) {
+            (None, Some(k)) => elem = Some(k),
+            (Some(a), Some(ref b)) if a == b => {}
+            _ => return None, // heterogeneous → surface-and-stop
+        }
+    }
+    elem
+}
+
 // ── Phase V3.6: `emit_dynamic_*` helpers deleted ─────────────────────────
 //
 // V3.2-V3.5 migrated every arithmetic, comparison, and pattern-`Eq` emission
@@ -2647,6 +2879,7 @@ impl BytecodeCompiler {
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
+
 
         // Per ADR-006 §2.7.5.1, the wire-format
         // `module_binding_storage_hints: Vec<NativeKind>` requires every
