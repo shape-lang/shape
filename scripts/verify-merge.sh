@@ -336,6 +336,52 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 12 — JIT-private HK_* ordinal-collision guard
+# -----------------------------------------------------------------------------
+# Per phase-2d-hardening item (i) close (W17-jit-legacy-ordinal-disambiguation,
+# 2026-05-12): every JIT-private `HK_*` constant in
+# `crates/shape-jit/src/ffi/value_ffi.rs` must either alias `HeapKind::X as u16`
+# directly or sit at or above `JIT_LEGACY_HK_BASE` (currently 256). This guard
+# prevents the regression where a future agent re-introduces a literal small
+# u16 (e.g. `pub const HK_FOO: u16 = 12;`) that would collide with a runtime-
+# tier HeapKind ordinal.
+echo "=== CHECK 12: JIT-private HK_* ordinal-collision guard ==="
+hk_table="crates/shape-jit/src/ffi/value_ffi.rs"
+hk_violations=$(awk '
+  /^pub const HK_[A-Z0-9_]+: u16 =/ {
+    line = $0
+    # Match `pub const HK_FOO: u16 = <RHS>;` and extract RHS.
+    if (match(line, /^pub const (HK_[A-Z0-9_]+): u16 = ([^;]+);/, m)) {
+      name = m[1]
+      rhs = m[2]
+      gsub(/^[ \t]+|[ \t]+$/, "", rhs)
+      # Accept: HeapKind::<X> as u16 (canonical Tier 1 alias)
+      if (rhs ~ /^HeapKind::[A-Za-z0-9_]+ as u16$/) next
+      # Accept: JIT_LEGACY_HK_BASE [+ N] (Tier 2 JIT-private contiguous block)
+      if (rhs ~ /^JIT_LEGACY_HK_BASE([ \t]*\+[ \t]*[0-9]+)?$/) next
+      # Accept: numeric literal >= 256 (JIT-private private-range manually written)
+      if (rhs ~ /^[0-9]+$/) {
+        if (rhs + 0 >= 256) next
+      }
+      # Otherwise: violation
+      print FILENAME":"NR" — "name" = "rhs" (must alias HeapKind::X as u16 OR be JIT_LEGACY_HK_BASE [+ N] OR be >= 256)"
+      fail = 1
+    }
+  }
+  END { if (fail) exit 1 }
+' "$hk_table")
+
+if [[ -z "$hk_violations" ]]; then
+  record_pass "JIT-private HK_* ordinal guard"
+  echo "  -> clean (every HK_* is HeapKind-aliased or >= 256)"
+else
+  record_fail "JIT-private HK_* ordinal guard" "low-numbered JIT-private HK_*"
+  echo "  -> FAILED:"
+  echo "$hk_violations"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="
