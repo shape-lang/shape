@@ -33,6 +33,11 @@ mod matrix_ops;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
 mod mutation_writeback;
+// ADR-006 §2.7.27 amendment (W17-pop-mutation, 2026-05-12): source-level
+// smoke tests for the tuple-return `&mut self` ABI variant covering
+// pop-shaped methods (Array.pop / Deque.popBack / popFront /
+// PriorityQueue.pop / HashMap.remove).
+mod pop_mutation;
 mod priority_queue_ops;
 mod set_ops;
 mod soak_tests;

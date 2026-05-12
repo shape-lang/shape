@@ -157,6 +157,93 @@ pub fn is_mut_self_method_name(method: &str) -> bool {
         || MUT_SELF_TYPED_ARRAY_METHODS.contains(method)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Tuple-return `&mut self` opt-in registries (ADR-006 §2.7.27 amendment,
+// W17-pop-mutation, 2026-05-12)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pop-shaped methods extract an element from a collection AND mutate the
+// collection's structure. The conceptual dispatch signature is
+// `(&mut self) -> (Option<T>, Self)` — the user-facing return is the popped
+// element (`Option<T>`); the new container Arc is published as a side
+// effect on the VM stack and the compiler emits a post-CallMethod
+// `Swap; Store*(receiver)` to write it back to the binding slot (r-value
+// receivers get `Swap; Pop` for silent drop, mirroring §2.7.27's r-value
+// silent-drop rule for self-returning mutators).
+//
+// The runtime `MethodFnV2` ABI is unchanged — the handler still returns
+// `Result<KindedSlot, VMError>`. The convention is: a tuple-return handler
+// `vm.push_kinded(new_self_bits, new_self_kind)` before returning the
+// popped element. The dispatch shell pushes the returned popped element on
+// top, so the post-call stack is `[..., NewSelf, popped_element]`. The
+// compiler emits the post-CallMethod opcode pair that consumes `NewSelf`
+// per the receiver-rooting rule.
+//
+// Hard rule (binding, per W17-pop-mutation dispatch text §"Forbidden
+// patterns"): tuple-return is used ONLY for methods that satisfy BOTH
+// (a) canonical-extraction-from-collection AND (b) structural-mutation-
+// of-collection. Forbidden examples: `find` (no structural mutation),
+// `entry_or_default` (returns reference-into-collection — wrong shape),
+// `peek_first` (no mutation), `iter().next()` (iteration cursor mutation,
+// not container mutation).
+
+/// Array methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `pop` extracts the last element and mutates the array — the handler
+/// returns `Option<T>` (the popped element) and side-channel-publishes
+/// the new `Arc<TypedArrayData>` to the VM stack before returning. The
+/// compiler emits `Swap; Store*(receiver)` after `CallMethod` to write
+/// back; r-value receivers get `Swap; Pop` (silent drop, mirror of
+/// §2.7.27 self-return r-value rule).
+pub static MUT_SELF_TUPLE_RETURN_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "pop",
+};
+
+/// Deque methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `popBack` / `popFront` extract an end element and mutate the deque.
+/// Same shape as `MUT_SELF_TUPLE_RETURN_ARRAY_METHODS`.
+pub static MUT_SELF_TUPLE_RETURN_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "popBack",
+    "popFront",
+};
+
+/// PriorityQueue methods that opt into the tuple-return `&mut self` ABI
+/// variant.
+///
+/// `pop` extracts the minimum priority and mutates the heap. Same shape
+/// as `MUT_SELF_TUPLE_RETURN_ARRAY_METHODS`.
+pub static MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "pop",
+};
+
+/// HashMap methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `remove(k)` returns the popped value (`Option<V>`) and mutates the map.
+/// The pre-existing `delete(k)` method keeps the self-returning shape used
+/// by `stdlib-src/core/set.shape::remove` (which wraps `s.delete(item)`
+/// and returns the new set) — adding `remove` as a parallel method
+/// preserves the self-return contract while exposing the canonical
+/// pop-shape ABI for callers that want `Option<V>`.
+pub static MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
+    "remove",
+};
+
+/// Returns `true` if `method` is a name registered as tuple-return
+/// `&mut self` for ANY container/collection receiver class.
+///
+/// Mirror of `is_mut_self_method_name` for the tuple-return ABI variant.
+/// Used by `compile_expr_method_call`'s post-CallMethod writeback gate
+/// to choose between (a) self-return `Dup; Store*` shape (existing
+/// W17-mutation-writeback), (b) tuple-return `Swap; Store*` / `Swap; Pop`
+/// shape (this amendment).
+pub fn is_mut_self_tuple_return_method_name(method: &str) -> bool {
+    MUT_SELF_TUPLE_RETURN_ARRAY_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_DEQUE_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS.contains(method)
+}
+
 /// PHF registry for Array methods (47 methods total)
 ///
 /// **Categories:**
@@ -344,6 +431,10 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "set" => crate::executor::objects::hashmap_methods::v2_set,
     "has" => crate::executor::objects::hashmap_methods::v2_has,
     "delete" => crate::executor::objects::hashmap_methods::v2_delete,
+    // ADR-006 §2.7.27 amendment (W17-pop-mutation, 2026-05-12):
+    // `remove(k)` is the canonical pop-shape sibling of `delete(k)` —
+    // returns `Option<V>` (the removed value) instead of the (new) map.
+    "remove" => crate::executor::objects::hashmap_methods::v2_remove,
     "keys" => crate::executor::objects::hashmap_methods::v2_keys,
     "values" => crate::executor::objects::hashmap_methods::v2_values,
     "entries" => crate::executor::objects::hashmap_methods::v2_entries,

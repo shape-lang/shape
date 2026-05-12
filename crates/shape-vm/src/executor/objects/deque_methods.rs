@@ -310,16 +310,26 @@ pub fn v2_push_front(
     Ok(KindedSlot::from_deque(dq))
 }
 
-/// Deque.popBack() -> element | none
+/// Deque.popBack() -> Option<element>
 ///
-/// Removes and returns the back element. The receiver's deque is
-/// mutated via `Arc::make_mut`; on multi-share receivers the inner
-/// `DequeData` is cloned before mutation so other shares stay intact
-/// (clone-on-write per ADR-006 §2.7.4). The popped element is
-/// re-wrapped via `heap_value_arc_to_slot`. Empty deques return
-/// `KindedSlot::none()`.
+/// Tuple-return ABI variant (ADR-006 §2.7.27 amendment, W17-pop-mutation,
+/// 2026-05-12). Conceptual dispatch signature is
+/// `(&mut self) -> (Option<element>, Self)`. The handler:
+///
+/// 1. Mutates the receiver's deque via `Arc::make_mut` (clone-on-write
+///    per ADR-006 §2.7.4 — multi-share receivers get a clone before
+///    mutation so other shares stay intact).
+/// 2. Side-channel-publishes the new `Arc<DequeData>` to the VM stack via
+///    `vm.push_kinded(...)` — this becomes the receiver-binding write-back
+///    target consumed by the compiler-emitted `Swap; Store*` post-call
+///    sequence.
+/// 3. Returns the popped element as the user-facing call expression value.
+///    Empty deques return `KindedSlot::none()`.
+///
+/// The runtime `MethodFnV2` ABI is unchanged — only the convention that
+/// tuple-return handlers push the new container before returning.
 pub fn v2_pop_back(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -328,17 +338,22 @@ pub fn v2_pop_back(
     }
     let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     let popped = Arc::make_mut(&mut dq).pop_back();
+    // Side-channel-publish NewContainer for compiler write-back.
+    let new_self_slot = KindedSlot::from_deque(dq);
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
     match popped {
         Some(arc) => Ok(heap_value_arc_to_slot(&arc)),
         None => Ok(KindedSlot::none()),
     }
 }
 
-/// Deque.popFront() -> element | none
+/// Deque.popFront() -> Option<element>
 ///
-/// Mirror of `pop_back` at the front end.
+/// Mirror of `v2_pop_back` at the front end. Same tuple-return ABI
+/// (ADR-006 §2.7.27 amendment).
 pub fn v2_pop_front(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -347,6 +362,10 @@ pub fn v2_pop_front(
     }
     let mut dq: Arc<DequeData> = as_deque(&args[0])?;
     let popped = Arc::make_mut(&mut dq).pop_front();
+    // Side-channel-publish NewContainer for compiler write-back.
+    let new_self_slot = KindedSlot::from_deque(dq);
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
     match popped {
         Some(arc) => Ok(heap_value_arc_to_slot(&arc)),
         None => Ok(KindedSlot::none()),

@@ -372,16 +372,25 @@ pub(crate) fn handle_push_v2(
 
 /// `arr.pop()` — return the last element after popping it from the array.
 ///
-/// The pre-Wave-6.5 contract returns just the popped element (the array
-/// itself is consumed by the call). Empty array errors with
-/// `IndexOutOfBounds`.
+/// Tuple-return ABI variant (ADR-006 §2.7.27 amendment, W17-pop-mutation,
+/// 2026-05-12). Conceptual dispatch signature is
+/// `(&mut self) -> (Option<element>, Self)`; mutates the receiver's
+/// `Arc<TypedArrayData>` via `Arc::make_mut`, side-channel-publishes
+/// the new (possibly-cloned) Arc to the VM stack so the compiler-emitted
+/// `Swap; Store*(receiver)` post-call sequence writes it back, then
+/// returns the popped element.
+///
+/// Empty arrays error with `IndexOutOfBounds` to preserve the pre-tuple-
+/// return contract — the smoke targets that exercise the new ABI all use
+/// non-empty arrays; an `Option<T>` empty-case return is a downstream
+/// W14-variant-codegen-style refinement (out of scope for this amendment).
 pub(crate) fn handle_pop_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let mut arc = owned_typed_array_clone(&args[0])?;
-    match Arc::make_mut(&mut arc) {
+    let popped: Result<KindedSlot, VMError> = match Arc::make_mut(&mut arc) {
         TypedArrayData::I64(buf) => {
             let buf = Arc::make_mut(buf);
             buf.data
@@ -429,7 +438,15 @@ pub(crate) fn handle_pop_v2(
              float-slice view materialization.",
             other.type_name()
         ))),
-    }
+    };
+    let popped = popped?;
+    // Side-channel-publish NewContainer for compiler write-back. The
+    // post-CallMethod `Swap; Store*(receiver)` sequence consumes this
+    // and leaves `popped` on the stack as the call expression value.
+    let new_self_slot = KindedSlot::from_typed_array(arc);
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
+    Ok(popped)
 }
 
 /// `a.zip(b)` — return an array of pair-shaped elements drawn from `a` and

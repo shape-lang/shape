@@ -98,6 +98,44 @@ impl ContainerKind {
         }
     }
 
+    /// Returns the tuple-return method-name set that mutates this
+    /// container kind. ADR-006 §2.7.27 amendment (W17-pop-mutation,
+    /// 2026-05-12): pop-shaped methods extract an element AND mutate
+    /// the container; the dispatch signature is
+    /// `(&mut self) -> (Option<T>, Self)`. The handler returns the
+    /// popped element via the standard `MethodFnV2` ABI but
+    /// side-channels the new container Arc onto the VM stack before
+    /// returning; the compiler emits a `Swap; Store*(receiver)` after
+    /// `CallMethod` to write back the new container (or `Swap; Pop`
+    /// for r-value receivers — silent drop per §2.7.27 r-value rule).
+    ///
+    /// Bound: tuple-return is used ONLY for methods satisfying BOTH
+    /// (a) canonical-extraction-from-collection AND (b) structural-
+    /// mutation-of-collection. NOT a general-purpose tool — `find`,
+    /// `entry_or_default`, `peek_first`, `iter().next()` etc. are
+    /// explicitly forbidden per §2.7.27.
+    pub fn is_mut_self_tuple_return_method(self, method: &str) -> bool {
+        use crate::executor::objects::method_registry as mr;
+        match self {
+            ContainerKind::HashMap => {
+                mr::MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS.contains(method)
+            }
+            ContainerKind::Deque => {
+                mr::MUT_SELF_TUPLE_RETURN_DEQUE_METHODS.contains(method)
+            }
+            ContainerKind::PriorityQueue => {
+                mr::MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS.contains(method)
+            }
+            ContainerKind::Array => {
+                mr::MUT_SELF_TUPLE_RETURN_ARRAY_METHODS.contains(method)
+            }
+            // HashSet has no canonical pop-shape method in the current
+            // stdlib (no `take(x)` / `pop_first()`); see audit-and-include
+            // disposition in W17-pop-mutation close report.
+            ContainerKind::HashSet => false,
+        }
+    }
+
     /// Classifier for ctor names that produce a known container kind.
     /// Returns `Some(kind)` when the named builtin / type constructor
     /// produces a COW container the write-back layer covers.
@@ -149,6 +187,37 @@ pub enum WriteBackTarget {
 pub enum MutSelfWriteBackTarget {
     Local(u16),
     ModuleBinding(u16),
+}
+
+/// Write-back ABI mode resolved at the method-call site.
+///
+/// ADR-006 §2.7.27 base (W17-mutation-writeback): self-returning
+/// `&mut self` methods publish the new container Arc as the call's
+/// expression value; the compiler emits `Dup; Store*(receiver)` to
+/// write back, leaving the new Arc on the stack as the expression
+/// value too.
+///
+/// ADR-006 §2.7.27 amendment (W17-pop-mutation): pop-shaped tuple-
+/// return methods follow the conceptual signature
+/// `(&mut self) -> (Option<T>, Self)`. The handler returns `Option<T>`
+/// (the popped element) via the standard `MethodFnV2` ABI and
+/// side-channel-publishes the new container Arc to the VM stack
+/// before returning. Post-call stack:
+/// `[..., NewContainer, popped_element]`. The compiler emits
+/// `Swap; Store*(receiver)` (writes back NewContainer, leaves
+/// popped_element on the stack as the call's expression value) or
+/// `Swap; Pop` (silent drop for r-value receivers — mirror of the
+/// §2.7.27 self-returning r-value silent-drop rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutSelfWriteBackMode {
+    /// Self-returning `&mut self` (existing §2.7.27 base): handler
+    /// returns the (possibly-cloned) container Arc. Codegen emits
+    /// `Dup; Store*(target)`.
+    SelfReturn,
+    /// Tuple-return pop-shape (§2.7.27 amendment): handler returns
+    /// the popped element; new container is on the stack below it.
+    /// Codegen emits `Swap; Store*(target)`.
+    TupleReturn,
 }
 
 /// Reserved future surface — runtime helper for write-back through a

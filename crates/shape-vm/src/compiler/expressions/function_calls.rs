@@ -1422,6 +1422,66 @@ impl BytecodeCompiler {
         None
     }
 
+    /// Tuple-return resolver — ADR-006 §2.7.27 amendment (W17-pop-mutation).
+    ///
+    /// Returns `Some(target)` when:
+    /// - the binding's tracked container kind has `method` in its
+    ///   `MUT_SELF_TUPLE_RETURN_*` set;
+    /// - the receiver is an `Identifier` resolvable to a local-slot or
+    ///   module-binding index.
+    ///
+    /// Returns `None` for r-value receivers (the caller emits `Swap; Pop`
+    /// silent-drop in that case — mirror of the §2.7.27 self-returning
+    /// r-value silent-drop rule) and for non-pop method names.
+    ///
+    /// Separate from `resolve_mut_self_writeback_target` because the
+    /// post-CallMethod codegen differs (`Swap; Store*` vs `Dup; Store*`)
+    /// and the ABI categories are mutually exclusive at the registry
+    /// level — a method is either self-returning OR tuple-return, never
+    /// both. Both resolvers share the receiver-rooting machinery
+    /// (`mut_self_container_locals` / `mut_self_container_bindings`).
+    fn resolve_mut_self_tuple_return_target(
+        &self,
+        receiver: &Expr,
+        method: &str,
+    ) -> Option<crate::compiler::mutation_writeback::MutSelfWriteBackTarget> {
+        use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+        let Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
+                if kind.is_mut_self_tuple_return_method(method) {
+                    return Some(MutSelfWriteBackTarget::Local(local_idx));
+                }
+            }
+            return None;
+        }
+        let scoped = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
+                if kind.is_mut_self_tuple_return_method(method) {
+                    return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns `true` if `method` is registered for the tuple-return
+    /// ABI under SOME container kind (used to choose between `Swap; Pop`
+    /// silent-drop and the standard no-writeback path at r-value
+    /// receiver sites). The kind narrowing happens at
+    /// `resolve_mut_self_tuple_return_target`; this is just the
+    /// method-name lookup.
+    fn is_known_tuple_return_method(&self, method: &str) -> bool {
+        crate::executor::objects::method_registry::is_mut_self_tuple_return_method_name(
+            method,
+        )
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
@@ -1859,14 +1919,47 @@ impl BytecodeCompiler {
             crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
         > = self.resolve_mut_self_writeback_target(receiver, method);
 
-        if mut_self_writeback_target.is_some() {
+        // ADR-006 §2.7.27 amendment (W17-pop-mutation): tuple-return
+        // pop-shape detection. Mutually exclusive with the self-return
+        // case above (a method is registered in at most one set).
+        let mut_self_tuple_return_target: Option<
+            crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
+        > = if mut_self_writeback_target.is_some() {
+            // A method is never registered as both self-return and
+            // tuple-return — the registries are partitioned by ABI.
+            None
+        } else {
+            self.resolve_mut_self_tuple_return_target(receiver, method)
+        };
+
+        // R-value receivers calling a known tuple-return method need the
+        // dispatch shell's silent-drop emission (Swap; Pop) — the new
+        // container Arc is on the stack below the popped element with
+        // no owner, so we drop it to balance refcounts. Mirror of the
+        // §2.7.27 self-returning r-value silent-drop rule.
+        //
+        // `is_rvalue_tuple_return` triggers when (a) the method is in
+        // the tuple-return registry under SOME container kind, AND (b)
+        // the receiver is not identifier-rooted with a tracked
+        // container kind. This includes both genuine r-value receivers
+        // (e.g. `make_deque().popBack()`) and identifier receivers whose
+        // binding wasn't tracked as a container kind (e.g. a function
+        // parameter the compiler didn't see constructed) — in both
+        // cases the handler still side-channel-publishes NewSelf, so
+        // we must consume it.
+        let is_rvalue_tuple_return = mut_self_tuple_return_target.is_none()
+            && self.is_known_tuple_return_method(method);
+
+        if mut_self_writeback_target.is_some() || mut_self_tuple_return_target.is_some() {
             // Enforce the let-vs-let-mut immutability check at the
             // method-call site: a `&mut self` call on an immutable
             // binding is the cleanest place to surface "method `add`
             // mutates the receiver; bind `s` as `let mut s = ...`".
             // The diagnostic flows through the existing
             // `check_named_binding_write_allowed` which already handles
-            // both local-slot and module-binding cases.
+            // both local-slot and module-binding cases. Applies to both
+            // ABI variants — pop-shaped mutating methods on `let`
+            // bindings are the same footgun as self-returning ones.
             if let Expr::Identifier(name, span) = receiver {
                 let source_loc = self.span_to_source_location(*span);
                 self.check_named_binding_write_allowed(name, Some(source_loc))?;
@@ -2277,6 +2370,47 @@ impl BytecodeCompiler {
                     ));
                 }
             }
+        } else if let Some(target) = mut_self_tuple_return_target {
+            // ADR-006 §2.7.27 amendment (W17-pop-mutation): tuple-return
+            // post-call codegen. Stack at this point is
+            // `[..., NewContainer, popped_element]` — the handler
+            // side-channel-pushed NewContainer via `vm.push_kinded`
+            // before returning the popped element, and the dispatch
+            // shell then pushed the returned popped element on top.
+            //
+            // `Swap` flips the top two: `[..., popped_element, NewContainer]`.
+            // `Store*(target)` pops NewContainer and writes it to the
+            // receiver binding (existing `stack_write_kinded` releases
+            // the prior occupant's share via `drop_with_kind`); the
+            // popped_element remains on the stack as the call's
+            // expression value.
+            use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+            self.emit(Instruction::simple(OpCode::Swap));
+            match target {
+                MutSelfWriteBackTarget::Local(local_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                }
+                MutSelfWriteBackTarget::ModuleBinding(binding_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreModuleBinding,
+                        Some(Operand::ModuleBinding(binding_idx)),
+                    ));
+                }
+            }
+        } else if is_rvalue_tuple_return {
+            // ADR-006 §2.7.27 amendment (W17-pop-mutation): r-value
+            // receiver silent-drop. The handler side-channel-pushed
+            // NewContainer before returning the popped element, so the
+            // stack is `[..., NewContainer, popped_element]`. With no
+            // receiver binding to write back to, `Swap; Pop` flips and
+            // drops NewContainer (the `Pop` opcode's drop_with_kind
+            // discipline releases the heap share cleanly). Mirror of
+            // the §2.7.27 self-returning r-value silent-drop rule.
+            self.emit(Instruction::simple(OpCode::Swap));
+            self.emit(Instruction::simple(OpCode::Pop));
         }
 
         // Propagate known return type for standard method calls

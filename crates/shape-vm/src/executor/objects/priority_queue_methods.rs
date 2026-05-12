@@ -221,11 +221,18 @@ pub fn v2_push(
 /// PriorityQueue.pop() -> int  (returns 0 for empty queue at landing
 /// — Option-typed result is W14-variant-codegen territory).
 ///
-/// Returns the popped minimum priority. The receiver itself is mutated
-/// via `Arc::make_mut` clone-on-write; on an empty queue the call is a
-/// no-op and the result is `0`.
+/// Tuple-return ABI variant (ADR-006 §2.7.27 amendment, W17-pop-mutation,
+/// 2026-05-12). Conceptual dispatch signature is
+/// `(&mut self) -> (Option<int>, Self)`; the empty-queue case returns
+/// `0` rather than `None` at this landing — Option-typed result is
+/// W14-variant-codegen territory and landing it here is out of scope.
+///
+/// Mutates the receiver's queue via `Arc::make_mut` clone-on-write,
+/// side-channel-publishes the new `Arc<PriorityQueueData>` to the VM
+/// stack for compiler-emitted write-back, then returns the popped
+/// minimum priority.
 pub fn v2_pop(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -237,5 +244,9 @@ pub fn v2_pop(
     let pq = as_priority_queue(&args[0])?;
     let mut owned = pq;
     let min = Arc::make_mut(&mut owned).pop().unwrap_or(0);
+    // Side-channel-publish NewContainer for compiler write-back.
+    let new_self_slot = KindedSlot::from_priority_queue(owned);
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
     Ok(KindedSlot::from_int(min))
 }

@@ -458,6 +458,50 @@ pub fn v2_delete(
     Ok(KindedSlot::from_hashmap(hm))
 }
 
+/// HashMap.remove(key) -> Option<value>
+///
+/// Tuple-return ABI variant (ADR-006 §2.7.27 amendment, W17-pop-mutation,
+/// 2026-05-12). Conceptual dispatch signature is
+/// `(&mut self) -> (Option<value>, Self)`; reads the value-at-key
+/// (returning `Option<value>` for missing keys), mutates the map via
+/// `Arc::make_mut + remove`, side-channel-publishes the new
+/// `Arc<HashMapData>` to the VM stack for compiler-emitted write-back,
+/// then returns the popped value.
+///
+/// Distinct from the existing `delete(key)` self-returning method:
+/// `delete` returns the (new) map for chaining and is consumed by
+/// `stdlib-src/core/set.shape::remove` which wraps `s.delete(item)` to
+/// preserve set-style semantics. `remove` follows the canonical
+/// pop-shape ABI; both methods can coexist on HashMap with distinct
+/// return contracts (decision-call #3 per W17-pop-mutation dispatch).
+pub fn v2_remove(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(type_error(
+            "HashMap.remove() requires exactly 1 argument (key)",
+        ));
+    }
+    let key = as_string_key(&args[1])?;
+    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
+    // Snapshot the value-at-key BEFORE removal — Arc::make_mut may
+    // clone the underlying buffers, so post-removal `hm.get(key)` would
+    // return `None` and produce a wrong-typed Option result. Borrowing
+    // here is safe: `hm` still holds at least one share until we drop it.
+    let popped = hm.get(key);
+    Arc::make_mut(&mut hm).remove(key);
+    // Side-channel-publish NewContainer for compiler write-back.
+    let new_self_slot = KindedSlot::from_hashmap(hm);
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
+    match popped {
+        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
+        None => Ok(KindedSlot::none()),
+    }
+}
+
 /// HashMap.merge(other) -> HashMap
 ///
 /// W13-hashmap-mutation close: routes through `HashMapData::merge(&other)`.
