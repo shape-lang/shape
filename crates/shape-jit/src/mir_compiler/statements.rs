@@ -207,6 +207,65 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             } => {
                 // Enum variant construction.
                 //
+                // W12-collection-constructor-mir-lowering (Phase 3 cluster-
+                // 0 Round 6C, 2026-05-12): the `EnumStore` MIR shape is
+                // also used by the primitive-collection ctor family
+                // (`Set` / `HashMap` / `Deque` / `PriorityQueue` /
+                // `Channel` / `Mutex` / `Atomic` / `Lazy`) per the
+                // W12-enum-constructor audit's §5.3 "reuse `EnumStore`
+                // with `kind`-on-the-slot threading" recommendation. The
+                // `variant_name` disambiguates enum-variant from
+                // collection-ctor. Surface-and-stop with a collection-
+                // ctor-specific cite for those names — both empty-args
+                // (`Set()` etc., `operands.is_empty()`) and with-arg
+                // (`Mutex(x)`, operands.len()==1) forms hit this path,
+                // because the typed-Arc allocation FFI for these
+                // kinds (Arc<HashSetData>/Arc<HashMapData>/Arc<MutexData>/
+                // ...) is not yet plumbed into the JIT-side FFI table.
+                // The bytecode/VM path is unaffected — bytecode-compile
+                // intercepts these names at AST time via
+                // `classify_builtin_function` and emits
+                // `OpCode::BuiltinCall(SetCtor)` etc., never reaching
+                // MIR-driven JIT codegen.
+                //
+                // ADR-006 §2.7.5 producer-side classification holds: the
+                // ctor kind is known here at MIR-emission time, threaded
+                // through `variant_name`, and the JIT honestly surfaces
+                // (not Bool-default fallback) when its consumer-side
+                // FFI is incomplete. Cross-boundary Arc-payload FFI is a
+                // future cluster-0+ workstream (see
+                // `docs/cluster-audits/w12-enum-constructor-audit.md`
+                // §8 "Sites surfaced" for the cite-tracked follow-up).
+                let is_collection_ctor = variant_name
+                    .as_deref()
+                    .map(is_collection_ctor_name)
+                    .unwrap_or(false);
+                if is_collection_ctor {
+                    let variant_label = variant_name.as_deref().unwrap_or("<missing>");
+                    return Err(format!(
+                        "EnumStore: SURFACE — primitive-collection \
+                         constructor '{}' (operands.len()={}) requires the \
+                         typed-Arc allocation FFI for its `HeapKind` \
+                         (`Arc<HashSetData>` / `Arc<HashMapData>` / \
+                         `Arc<MutexData>` / etc., per \
+                         `executor/vm_impl/builtins.rs:587-749`) plumbed \
+                         into the JIT FFI table — not yet landed at \
+                         W12-collection-constructor-mir-lowering. The \
+                         bare-form name is intercepted at MIR-emission \
+                         (ADR-006 §2.7.5 producer-side classification) \
+                         to avoid the pre-fix garbage-bits propagation \
+                         from `MirConstant::Function('{}')` → \
+                         `iconst(I64, 0)` callee bits → null-Arc method \
+                         dispatch; this surface is the honest equivalence-\
+                         ratchet step (no false answer, no segfault). \
+                         Tracked as future-cluster FFI work — \
+                         `docs/cluster-audits/w12-enum-constructor-audit.md` \
+                         §8 + §5.3 / ADR-006 §2.7.5.",
+                        variant_label,
+                        operands.len(),
+                        variant_label,
+                    ));
+                }
                 // For unit variants (empty operands), the preceding
                 // `Assign(Aggregate)` short-circuit already left the slot
                 // initialized.
@@ -955,6 +1014,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Last-resort: already an I64 bit-pattern; pass through.
         val
     }
+}
+
+/// W12-collection-constructor-mir-lowering (Phase 3 cluster-0 Round 6C,
+/// 2026-05-12): identify a primitive-collection constructor name on the
+/// JIT consumer side. The MIR-lowering pass at
+/// `crates/shape-vm/src/mir/lowering/helpers.rs::is_bare_collection_ctor`
+/// is the authoritative producer-side classifier; this is its mirror
+/// for the `StatementKind::EnumStore` consumer.
+///
+/// Mirrors the bytecode compiler's `classify_builtin_function` collection-
+/// ctor subset (`crates/shape-vm/src/compiler/helpers.rs:3433-3440`). Any
+/// future addition to that list (e.g. a new HeapKind ctor) needs the
+/// same name added here, plus the corresponding lowering-side
+/// `is_bare_collection_ctor` arm. The CHECK-12-style merge gate doesn't
+/// cover this drift; add to the verify-merge script if it becomes
+/// load-bearing.
+fn is_collection_ctor_name(name: &str) -> bool {
+    matches!(
+        name,
+        "HashMap" | "Set" | "Deque" | "PriorityQueue" | "Channel" | "Mutex" | "Atomic" | "Lazy"
+    )
 }
 
 /// Closure-spec Phase H1: map a capture's `FieldKind` to the Cranelift
