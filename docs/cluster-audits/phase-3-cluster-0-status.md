@@ -3,7 +3,7 @@
 **Started:** 2026-05-12 (this session)
 **Parent:** `phase-2d-close` `e22bffd2`
 **Branch:** `bulldozer-strictly-typed`
-**Current HEAD:** `ff1ad3e6` (Round-2 W11-jit-carrier-conversion merged); Round-3 dispatched 2026-05-12
+**Current HEAD:** `67af0282` (Round 3+4 merged into bulldozer-strictly-typed); Round-5 dispatched 2026-05-12 with 3 sub-clusters (reframed from kickoff's original Round-5 plan to match actual SURFACE sites verified by the 5-smoke matrix run)
 
 Mirrors the Phase 2d Wave 1 status pattern. Next session reads this file first.
 
@@ -313,6 +313,45 @@ surface-and-stop. Triaged by cluster:
 Items 2 and 3 are the cluster-2 candidate flags the user asked for.
 Item 1 is cluster-1 territory (hardening). Items 4 and 5 are either
 already in scope (5) or out-of-cluster (4).
+
+## Round 5 — dispatching (post-merge smoke matrix verification + reframe)
+
+After Round 3+4 merged (HEAD `67af0282`), the full 5-smoke matrix
+was run end-to-end. Results:
+
+| Smoke | VM | JIT |
+|---|---|---|
+| 1 (scalar loop) | `4950` | `4950` ✅ |
+| 1.5 (`divide(10,2)` Result/match) | `5` | `JIT execution error (code: -1)` — stub fallback |
+| 2 (`first_positive` Option/Array) | `Some(3)` | `JIT execution error (code: -1)` — stub fallback |
+| 3 (`Point{}` + `p.x+p.y`) | `7` | `compile_binop_dynamic_arith` SURFACE |
+| 4 (`Set()` + `s.size()`) | `2` | denormalized garbage `0.000...535409...` |
+
+Tracing with `SHAPE_JIT_DEBUG=1` revealed Smokes 1.5 / 2 fail
+because the user functions (`divide`, `first_positive`) building
+`Ok(v)` / `Some(x)` hit `Rvalue::Aggregate reached the kind-blind
+fallback` — the destination's `ConcreteType` is `Enum(EnumLayoutId(0))`
+placeholder, not `Array<scalar>`, so the v2 fast path doesn't fire.
+30+ stdlib fns (`TryInto::*`, `Into::*`, `math::spread`, `math::zscore`)
+fail the same way. Smoke 4's garbage output is a `jit_print`
+kind-classification gap (`.size()` returns int, decoded as f64) —
+NOT the deferred collection-constructor MIR gap (Set() constructor
+works correctly).
+
+**Stray §-cite found:** `mir_compiler/statements.rs:236` and
+`docs/cluster-audits/w12-enum-constructor-audit.md:215` cite "§2.7.4"
+(task-scheduler boundary) for the EnumStore/Aggregate surface; the
+correct cites are §2.7.14 / §2.7.5. Round-5B agent fixes this.
+
+**Reframed Round-5 territory** (3 sub-clusters in parallel):
+
+| Sub-cluster | Branch | Smoke unblocked | Status |
+|---|---|---|---|
+| W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) | dispatching |
+| W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | dispatching (audit-first) |
+| W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | dispatching |
+
+**Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
 ## Cluster-0 close gate
 
