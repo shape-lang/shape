@@ -184,13 +184,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         sp_offset,
                     );
 
-                    // args[0] = receiver, args[1..] = actual method arguments
+                    // args[0] = receiver, args[1..] = actual method arguments.
+                    // ADR-006 §2.7.7 / Q9: every push into ctx.stack writes
+                    // the producing-site kind into `stack_kinds` in lockstep.
+                    // `jit_call_method` doesn't currently consume kinds (it
+                    // dispatches by method name + receiver type via the
+                    // §2.7.10/Q11 path), but the lockstep invariant
+                    // requires the writes; the kind track at these slots
+                    // surfaces a kind-source gap correctly if some future
+                    // FFI reads them.
+                    //
                     // R4.2E: VM-stack slots are 8-byte-wide I64 bit-patterns.
                     // Widen narrow Cranelift types inline (sextend/uextend/
                     // bitcast) so the method-dispatch trampoline reads a
                     // uniform u64 from ctx.stack[sp+i]. No NaN-boxing tagging
                     // is applied — raw bit-patterns only.
                     for (i, arg) in args.iter().enumerate() {
+                        // Source kind for the parallel-kind track,
+                        // falling back to the §2.7.5 carrier kind
+                        // (`UInt64`) for opaque-source operands —
+                        // NOT a Bool-default fallback.
+                        let _ = i;
+                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+
                         let val = self.compile_operand(arg)?;
                         let val_ty = self.builder.func.dfg.value_type(val);
                         let boxed = if val_ty == types::I64 {
@@ -211,6 +227,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
                         let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
                         self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                        // §2.7.7 / Q9 lockstep parallel-kind write.
+                        self.emit_kind_track_write(slot_idx, arg_kind);
                     }
 
                     // v2-boundary: method name pushed as NaN-boxed string to ctx.stack
@@ -221,6 +239,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let method_abs_off = self.builder.ins().iadd_imm(method_byte_off, stack_base_offset as i64);
                     let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
                     self.builder.ins().store(MemFlags::new(), method_val, method_addr, 0);
+                    // Method name is a heap String — kind = `NativeKind::String`.
+                    self.emit_kind_track_write(
+                        method_slot_idx,
+                        shape_value::NativeKind::String,
+                    );
 
                     // v2-boundary: arg_count pushed as raw i64 to ctx.stack.
                     // jit_call_method decodes this via direct `as usize` — no NaN-box.
@@ -232,6 +255,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
                     let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
                     self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+                    // arg_count sentinel slot — UInt64 carrier kind per §2.7.5.
+                    self.emit_kind_track_write(
+                        argc_slot_idx,
+                        shape_value::NativeKind::UInt64,
+                    );
 
                     // Update stack_ptr: receiver + args + method_name + arg_count
                     let total_items = args.len() + 2; // args (including receiver) + method_name + arg_count
@@ -611,6 +639,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     )
                 } else {
                     // ── INDIRECT CALL (closures/first-class functions) ────
+                    //
+                    // ADR-006 §2.7.7 / Q9 + §2.7.11 / Q12: every push into
+                    // `JITContext.stack` writes the producing-site kind into
+                    // the parallel `stack_kinds` track in lockstep. The
+                    // callee's kind classifies the dispatch shape inside
+                    // `jit_call_value` (Closure → raw-Arc closure path,
+                    // FunctionRef / UInt64 → function-id path); per-arg
+                    // kinds flow into the trampoline VM's frame setup as
+                    // §2.7.11/Q12 carriers.
                     let stack_base_offset = crate::context::STACK_OFFSET as i32;
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 
@@ -620,6 +657,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.ctx_ptr,
                         sp_offset,
                     );
+
+                    // Source the callee kind from the producing site.
+                    // Precise kinds — `Ptr(HeapKind::Closure)` for
+                    // closure-bearing slots seeded by `infer_slot_kinds::
+                    // ClosureCapture`, `UInt64` for `MirConstant::Function`
+                    // inline function refs — drive the §2.7.11/Q12 callee
+                    // classification at `jit_call_value` exactly. For
+                    // opaque-source slots whose inference left `None`,
+                    // the documented §2.7.5 carrier kind `UInt64` flows in
+                    // instead — `jit_call_value`'s UInt64 arm preserves
+                    // the existing JIT-internal NaN-box bit-shape dispatch
+                    // (cases 1 / 2 — inline function refs and legacy
+                    // HK_CLOSURE callees). NOT a Bool-default fallback
+                    // (§2.7.7 #9 forbidden); `UInt64` is the §2.7.5
+                    // carrier kind for I64-wide raw bits without further
+                    // classification.
+                    let callee_kind = self.operand_slot_kind_or_carrier(func);
 
                     // R4.2E: indirect-call callee pushed to ctx.stack as raw
                     // I64 bit-pattern. Widen narrow types inline — closures
@@ -645,10 +699,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let callee_abs_off = self.builder.ins().iadd_imm(callee_byte_off, stack_base_offset as i64);
                     let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
                     self.builder.ins().store(MemFlags::new(), callee_boxed, callee_addr, 0);
+                    // Lockstep parallel-kind track write (§2.7.7 / Q9).
+                    self.emit_kind_track_write(callee_slot_idx, callee_kind);
 
                     // R4.2E: indirect-call args pushed to ctx.stack as raw
                     // I64 bit-patterns. Widen narrow Cranelift types inline.
                     for (i, arg) in args.iter().enumerate() {
+                        // Source the arg kind from the producing site for the
+                        // parallel-kind track. Falls back to `UInt64`
+                        // (the §2.7.5 carrier kind for I64-wide raw bits)
+                        // when the producing-site inference is opaque —
+                        // not a Bool-default fallback.
+                        let _ = i;
+                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+
                         let val = self.compile_operand(arg)?;
                         let val_ty = self.builder.func.dfg.value_type(val);
                         let boxed = if val_ty == types::I64 {
@@ -669,10 +733,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
                         let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
                         self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                        // Lockstep parallel-kind track write (§2.7.7 / Q9).
+                        self.emit_kind_track_write(slot_idx, arg_kind);
                     }
 
                     // v2-boundary: arg_count stored as a raw i64 on ctx.stack.
                     // jit_call_value decodes this via direct `as usize` — no NaN-box.
+                    //
+                    // ADR-006 §2.7.11/Q12 + §2.7.5: the arg_count sentinel
+                    // slot's kind is `NativeKind::UInt64` — the documented
+                    // "I64-wide raw bits carrier kind" / function-id-class
+                    // kind already used for FFI-boundary scalar sentinels
+                    // (cf. `dispatch_call_via_trampoline_vm` callee/arg
+                    // kind companion). NOT a Bool-default fallback.
                     let total_items = 1 + args.len() + 1; // callee + args + arg_count
                     let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
@@ -681,12 +754,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let argc_val = self.builder.ins().iconst(types::I64,
                         args.len() as i64);
                     self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+                    // Lockstep parallel-kind track write (§2.7.7 / Q9).
+                    self.emit_kind_track_write(
+                        argc_slot_idx,
+                        shape_value::NativeKind::UInt64,
+                    );
 
                     // Update stack_ptr
                     let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
                     self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
                     // jit_call_value reads callee + args + arg_count from stack
+                    // AND the parallel-kind track for the §2.7.11/Q12
+                    // callee-classification dispatch.
                     let inst = self.builder.ins().call(
                         self.ffi.call_value,
                         &[self.ctx_ptr],

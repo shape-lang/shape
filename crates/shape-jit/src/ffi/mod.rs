@@ -8,6 +8,7 @@ pub mod array;
 pub mod jit_release;
 pub mod data;
 pub mod jit_kinds;
+pub mod stack_kind_code;
 pub mod object;
 // DELETED: Finance-specific indicator JIT module
 // pub mod indicator;

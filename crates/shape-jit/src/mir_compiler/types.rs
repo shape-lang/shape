@@ -5,6 +5,7 @@
 //! when the bytecode compiler doesn't provide them.
 
 use cranelift::prelude::types;
+use shape_value::heap_value::HeapKind;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
@@ -111,6 +112,68 @@ pub(crate) fn is_v2_typed_array_slot(
     }
 }
 
+/// Project a `ConcreteType` to its corresponding `NativeKind` for the
+/// §2.7.7 / Q9 parallel-kind track seed.
+///
+/// ADR-006 §2.7.11/Q12: closure-bearing slots (e.g. function return
+/// values that produce a closure value via `jit_finalize_heap_closure`)
+/// carry kind `Ptr(HeapKind::Closure)` per the slot-tier convention.
+/// `ConcreteType::Closure(_)` is the bytecode-compiler-supplied kind
+/// source for such slots; without this projection the closure-callee
+/// classification at the indirect-call entry can't be derived from
+/// MIR-observable statements alone (`infer_slot_kinds` sees only
+/// `Rvalue::Use(Copy(_))` chains, not the producing function-call's
+/// declared return type).
+///
+/// Returns `None` for `ConcreteType::Void` (the unit/no-value type)
+/// since there is no carrier-bits-shaped slot for void.
+pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<NativeKind> {
+    use shape_value::heap_value::HeapKind;
+    Some(match ct {
+        ConcreteType::F64 => NativeKind::Float64,
+        ConcreteType::I64 => NativeKind::Int64,
+        ConcreteType::I32 => NativeKind::Int32,
+        ConcreteType::I16 => NativeKind::Int16,
+        ConcreteType::I8 => NativeKind::Int8,
+        ConcreteType::U64 => NativeKind::UInt64,
+        ConcreteType::U32 => NativeKind::UInt32,
+        ConcreteType::U16 => NativeKind::UInt16,
+        ConcreteType::U8 => NativeKind::UInt8,
+        ConcreteType::Bool => NativeKind::Bool,
+        ConcreteType::String => NativeKind::String,
+        // Closure / Function carry `Arc<HeapValue::ClosureRaw>` per
+        // §2.7.11/Q12 — `Ptr(HeapKind::Closure)`.
+        ConcreteType::Closure(_) | ConcreteType::Function(_) => {
+            NativeKind::Ptr(HeapKind::Closure)
+        }
+        // Result/Option are typed-Arc heap values with their own
+        // HeapKind discriminator per §2.7.17.
+        ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::Result),
+        ConcreteType::Option(_) => NativeKind::Ptr(HeapKind::Option),
+        // Array<T> — `Arc<TypedArrayData>` per §2.7.6 / Route A.
+        ConcreteType::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        // HashMap — `Arc<HashMapData>` per Stage C P1(b).
+        ConcreteType::HashMap(_, _) => NativeKind::Ptr(HeapKind::HashMap),
+        // Struct → TypedObject per §2.7.6.
+        ConcreteType::Struct(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        // Enum payloads live in TypedObject too (the W14-variant-codegen
+        // single-storage-discriminator convention).
+        ConcreteType::Enum(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        // Decimal / BigInt / DateTime carry typed-Arc heap values.
+        ConcreteType::Decimal => NativeKind::Ptr(HeapKind::Decimal),
+        ConcreteType::BigInt => NativeKind::Ptr(HeapKind::BigInt),
+        ConcreteType::DateTime => NativeKind::Ptr(HeapKind::Temporal),
+        // Pointer is the FFI `*const T` raw pointer — UInt64 carrier.
+        ConcreteType::Pointer(_) => NativeKind::UInt64,
+        // Tuple slots carry typed-array-style storage per the W14
+        // tuple-codegen convention; treat as TypedObject for the
+        // kind track.
+        ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        // Void has no carrier slot.
+        ConcreteType::Void => return None,
+    })
+}
+
 // ── MIR-level type inference ────────────────────────────────────────────
 
 /// Infer SlotKinds from MIR constants and operations.
@@ -169,6 +232,24 @@ pub(crate) fn infer_slot_kinds(
                                 }
                             }
                         }
+                    }
+                }
+                // ADR-006 §2.7.7 / §2.7.11 / Q12 kind-source: a
+                // `ClosureCapture` lowers to either the §2.7.11 raw-Arc
+                // closure shape (`jit_finalize_heap_closure` → raw
+                // `Arc::into_raw(Arc<HeapValue::ClosureRaw>) as u64` slot
+                // bits) or the §2.7.11 stack-closure fast path. Either
+                // way the slot's `NativeKind` is
+                // `Ptr(HeapKind::Closure)` per the §2.7.11/Q12 callee-
+                // classification convention. Without this seed the slot
+                // would be `None` and the indirect-call dispatch's
+                // parallel-kind track would surface a kind-source gap at
+                // the load-bearing closure-callee push site for
+                // Smoke 1.5.
+                StatementKind::ClosureCapture { closure_slot, .. } => {
+                    let idx = closure_slot.0 as usize;
+                    if idx < n && kinds[idx].is_none() {
+                        kinds[idx] = Some(NativeKind::Ptr(HeapKind::Closure));
                     }
                 }
                 _ => {}
@@ -378,6 +459,16 @@ fn infer_operand_kind(operand: &Operand, kinds: &[Option<NativeKind>]) -> Option
 }
 
 /// Infer the NativeKind of a constant.
+///
+/// ADR-006 §2.7.5 / §2.7.11/Q12 producing-site classification:
+/// - `Function(_)`: the JIT-internal `box_function(fn_id)` shape — carrier
+///   kind `UInt64` (the function-id-class callee-classification kind also
+///   used at the §2.7.5 stable-FFI boundary).
+/// - `Method(_)`: heap String carrier (`Arc<String>` raw pointer).
+/// - `ClosurePlaceholder`: forward-reference for a closure slot —
+///   `Ptr(HeapKind::Closure)` per §2.7.11/Q12.
+/// - `None`: the unit/null value — kind genuinely unknown; callers
+///   surface-and-stop per §2.7.7 #9.
 fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
     match constant {
         MirConstant::Float(_) => Some(NativeKind::Float64),
@@ -385,9 +476,9 @@ fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
         MirConstant::Bool(_) => Some(NativeKind::Bool),
         MirConstant::None => None,
         MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
-        MirConstant::Function(_) | MirConstant::Method(_) | MirConstant::ClosurePlaceholder => {
-            None
-        }
+        MirConstant::Function(_) => Some(NativeKind::UInt64),
+        MirConstant::Method(_) => Some(NativeKind::String),
+        MirConstant::ClosurePlaceholder => Some(NativeKind::Ptr(HeapKind::Closure)),
     }
 }
 
