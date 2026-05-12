@@ -132,4 +132,67 @@ This isn't a code follow-up — it's a process / supervisor-discipline note. Rec
 
 ---
 
+---
+
+## (i) JIT FFI `HK_*` legacy-ordinal collisions with current HeapKind
+
+**Status:** latent; not currently reachable due to upstream JIT-execute SURFACE.
+
+**The finding:** Phase 2d Item 3 JIT verification (Wave-4, 2026-05-12) audited
+the `HK_*` u16-prefix table in `crates/shape-jit/src/ffi/value_ffi.rs:153-201`
+against the current `HeapKind` enum at `crates/shape-value/src/heap_variants.rs`.
+The table uses "legacy ordinals" for kinds that were renumbered between
+pre-strict-typing and current HEAD; per the file's own doc-comment those
+ordinals are deliberately frozen for "ABI stability of the JIT-emitted
+constants" because they tag `JitAlloc<T>` / `UnifiedValue<T>` prefixes, not
+runtime `HeapKind` discriminator labels. But several legacy ordinals now
+collide with newly-assigned `HeapKind` ordinals:
+
+| Legacy `HK_*` | Value | Current HeapKind at same ord | Notes |
+|---|---|---|---|
+| `HK_ARRAY` | 1 | TypedObject | JIT-internal "Array" allocations |
+| `HK_RANGE` | 12 | Instant | post-W15-range produces this via `jit_box(HK_RANGE, *range)` in `context.rs:427` |
+| `HK_SOME` | 14 | NativeScalar | post-W14 produces this via `box_some(inner_bits)` |
+| `HK_OK` | 15 | NativeView | post-W14 produces this via `box_ok(inner_bits)` |
+| `HK_ERR` | 16 | Char | post-W14 produces this via `box_err(inner_bits)` |
+| `HK_TRAIT_OBJECT` | 19 | Reference | reserved; no current JIT producer |
+| `HK_HOST_CLOSURE` | 6 | DataTable | legacy, no current producer |
+| `HK_TYPED_TABLE` | 8 | TypedArray | legacy |
+| `HK_ROW_VIEW` | 9 | Temporal | legacy |
+| `HK_COLUMN_REF` | 10 | TableView | post-strict-typing `box_column_ref` uses this |
+| `HK_INDEXED_TABLE` | 11 | Content | legacy |
+| `HK_ENUM` | 13 | IoHandle | legacy |
+| `HK_FUTURE_..` | 17,18 | HashMap,FilterExpr | legacy fanout |
+| `HK_EXPR_PROXY` | 20 | SharedCell | legacy |
+| `HK_TIME` | 22 | Iterator | post-strict-typing `unified_box(HK_TIME, ...)` |
+| `HK_DURATION` | 23 | Deque | post-strict-typing `jit_box(HK_DURATION, ...)` |
+
+The collisions don't currently cause bugs at HEAD because the runtime-tier
+`HeapKind` discriminator never crosses the JIT FFI boundary: the
+`jit_bits_to_nanboxed` / `nanboxed_to_jit_bits` carrier-conversion functions
+in `crates/shape-jit/src/ffi/object/conversion.rs:70,217` are themselves
+SURFACE (`todo!("phase-2c §2.7.5: ...")`). When the W10 jit-playbook §5
+carrier-conversion rebuild lands, any cross-boundary heap value carrying
+the runtime `HeapKind` label as a u16 prefix will collide with the legacy
+ordinal on the JIT side and dispatch to the wrong arm.
+
+**Resolution:** dedicated sub-cluster (suggested name `W11-jit-legacy-
+ordinal-disambiguation`). Either:
+
+1. Switch the JIT-side `HK_*` constants to use distinct values starting
+   at e.g. 256 (above the `HeapKind as u16` range) so they never collide
+   regardless of how `HeapKind` grows.
+2. Migrate JIT-internal allocations to use `HeapKind`-aligned ordinals
+   directly (drop the "legacy" label), and add the missing kinds
+   (`HK_RESULT = HeapKind::Result as u16` etc.) so producer + consumer
+   arms reference the canonical discriminator.
+
+Either is preferable to the current "the constants are legacy but the
+values look like HeapKind ordinals" arrangement. Tracked here because
+the JIT execute path itself is upstream-SURFACE; no fix lands until the
+carrier-conversion rebuild creates a callsite that would hit the
+collision.
+
+---
+
 *End of stack.* New items append at the bottom with the next available letter.
