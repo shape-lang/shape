@@ -675,6 +675,165 @@ Branch: `bulldozer-strictly-typed-w12-jit-call-return-kind`
 Audit commit: `f58abc8d`
 Fix commit: (pending — appended at merge)
 
+## Round 7 — dispatching (Result/Option + Collections trinity / typed-Arc FFI)
+
+Two sub-clusters dispatched in parallel 2026-05-12 from the Round 6 close
+HEAD `b77be454`:
+
+| Sub-cluster | Branch | Smoke unblocked | Status |
+|---|---|---|---|
+| W12-jit-result-option-trinity | `bulldozer-strictly-typed-w12-jit-result-option-trinity` | 1.5 / 2 (Result/Option match codegen + Arc-shape producers + EnumStore non-empty consumer — integrated trinity) | migrating |
+| W12-jit-collection-typed-arc-ffi | `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi` | 4 + 2 additional collection smokes (typed-Arc allocation FFI for 8 collection HeapKinds) | **closed (audit-only)** — option (iii) surfaced (2026-05-12) |
+
+### W12-jit-collection-typed-arc-ffi close (audit-only, 2026-05-12)
+
+AUDIT-FIRST sub-cluster. Audit doc:
+`docs/cluster-audits/w12-jit-collection-typed-arc-ffi-audit.md` (12 sections,
+covers per-HeapKind FFI shape table, carrier-shape clarification, and the
+option-(iii) surface analysis).
+
+**Audit reclassified the territory as option (iii), NOT the dispatch's
+default option-(i) framing.** The reframing:
+
+The **allocation FFI piece in isolation IS option (i)** territory — bounded
+mechanical work, ~250 LoC across 4 files, no ADR amendment. 8 ctor names
+verified, all 8 surface at JIT EnumStore consumer per Round 6C close, all
+8 have well-defined VM-side `KindedSlot::from_X(arc)` carriers to mirror.
+
+But **landing allocation FFI alone REGRESSES the equivalence-ratchet.**
+The smoke target `let s = Set(); s.add("a"); s.add("b"); print(s.size())`
+requires both allocation AND method-dispatch to work end-to-end. The
+method-dispatch piece is broken at `crates/shape-jit/src/ffi/call_method/
+mod.rs:201`: `jit_call_method` dispatches via `heap_kind(receiver_bits)`
+which decodes NaN-box tags. Typed-Arc bits (`Arc::into_raw(arc) as u64`)
+have no NaN-box tags; `heap_kind` returns None; dispatch falls through to
+`dispatch_method_via_trampoline` which is extern-C `todo!()` (line 179-199)
+— **aborts the process** at first method call.
+
+This is the **same** §2.7.10 / Q11 kinded MethodFnV2 ABI rebuild deferral
+W11-jit-carrier-conversion (Round 2) partially closed for `jit_call_value`
+but left out for `jit_call_method`. Same root cause as W12-jit-aggregate-
+non-array (Round 5B) Result/Option family — Round 7A explicitly absorbs
+that trinity, but the broader `jit_call_method` rebuild is its own scope.
+
+**Three options the audit considered before settling on option (iii)**:
+
+1. **Land allocation FFI alone (option-(i) partial)**: REGRESSES — clean
+   Round 6C compile-time surface becomes runtime extern-C `todo!()`
+   process abort. Refused per W11-round-1 walk-back precedent.
+2. **Land allocation FFI + add a SURFACE at first method call**: strictly
+   worse than current state — adds code + moves the surface from `let s =
+   Set()` site to `s.add(...)` site without progress on smoke equivalence.
+3. **Land allocation FFI + extend `jit_call_method` to read parallel-kind
+   track**: the principled co-design per §2.7.10 / Q11, but a multi-week
+   workstream beyond a single sub-cluster.
+
+**Carrier-shape discovery (audit §8)**: dispatch's literal prescription
+`Box::into_raw(Box::new(UnifiedValue<T>)) as u64` is the W11 TypedArray<T>
+shape (own HeapHeader refcount). Collections use `Arc::into_raw(Arc<XData>)
+as u64` (Arc's internal refcount). The two refcount mechanisms are NOT
+interchangeable — going through `UnifiedValue<HashSetData>` would
+segfault at every `jit_arc_release` reclaim. ADR-006 §2.7.6 / Q8
+single-source-of-truth via `KindedSlot::from_X` is the correct carrier
+shape. Worth a documentation-only ADR clarification clause if option-(i)
+work ever lands.
+
+**Audit grid for 8 HeapKinds — current state (all SURFACE) + proposed
+FFI shape**:
+
+| HeapKind | Ord | Operands | Current state | Proposed FFI |
+|---|---|---|---|---|
+| HashSet | 21 | 0 | SURFACE 'Set' | `jit_v2_make_hashset() -> u64` |
+| HashMap | 17 | 0 | SURFACE 'HashMap' | `jit_v2_make_hashmap() -> u64` |
+| Deque | 23 | 0 | SURFACE 'Deque' | `jit_v2_make_deque() -> u64` |
+| PriorityQueue | 25 | 0 | SURFACE 'PriorityQueue' | `jit_v2_make_priorityqueue() -> u64` |
+| Channel | 24 | 0 | SURFACE 'Channel' | `jit_v2_make_channel() -> u64` |
+| Mutex | 30 | 1 (any) | SURFACE 'Mutex' | `jit_v2_make_mutex(bits, kind) -> u64` (JitFfiCarrier form) |
+| Atomic | 31 | 1 (i64) | SURFACE 'Atomic' | `jit_v2_make_atomic(i: i64) -> u64` |
+| Lazy | 32 | 1 (Closure) | SURFACE 'Lazy' | `jit_v2_make_lazy(closure_bits: u64) -> u64` |
+
+5 zero-arg ctors map to single FFI entries. 3 with-arg ctors:
+- Atomic — compile-time i64-only validation; single i64-input entry.
+- Lazy — compile-time `Ptr(HeapKind::Closure)`-only validation; single
+  ptr-input entry.
+- Mutex — accepts any kind; (bits, kind) carrier-pair form per §2.7.5.
+
+**Coordination with Round 7A (parallel W12-jit-result-option-trinity)**:
+verified zero file-territory overlap. 7A handles `variant_name = "Ok" /
+"Err" / "Some" / "None"` path; 7B (this) handles `variant_name = "Set" /
+"HashMap" / "Deque" / "PriorityQueue" / "Channel" / "Mutex" / "Atomic" /
+"Lazy"` path. Round 6C's `is_collection_ctor_name` disambiguator
+(`mir_compiler/statements.rs:1037`) keeps the two paths separate. Both
+sub-clusters likely surface option (iii) for the method-dispatch gap
+— same root cause (§2.7.10 / Q11), applied to different HeapKind
+families.
+
+**Sites surfaced (cite-tracked, NOT silently skipped)**:
+
+1. **`jit_call_method` collection-kind dispatch** —
+   `crates/shape-jit/src/ffi/call_method/mod.rs:201-388`. Load-bearing
+   for smoke 4 + the 2 additional smokes. Requires §2.7.10 / Q11 kinded
+   MethodFnV2 ABI rebuild.
+
+2. **`dispatch_method_via_trampoline` extern-C `todo!()`** —
+   `crates/shape-jit/src/ffi/call_method/mod.rs:179-199`. extern-C
+   `todo!()` aborts the process (not a controlled surface). Even
+   pending the §2.7.10 rebuild, this should be a structured Err return.
+   Small principled improvement, orthogonal to the broader §2.7.10
+   work. Tracked as `W12-jit-method-dispatch-structured-error`
+   follow-up.
+
+3. **Carrier-shape ADR clarification** — the typed-Arc vs
+   `Box::new(UnifiedValue<T>)` distinction. Whichever path the supervisor
+   decides, §2.7.15 / §2.7.18 / §2.7.19 / §2.7.20 / §2.7.25 amendments
+   could add a "Carrier-shape note: typed-Arc per §2.7.6 / Q8, NOT
+   W11-style `Box<UnifiedValue<T>>`" clause. Documentation hygiene.
+
+4. **HashMap K/V kind threading** (per kickoff's hint) — NOT a gap
+   in allocation path (HashMap stores `Arc<HeapValue>` heterogeneously).
+   K/V kinds matter only for downstream `m.set(k, v)` / `m.get(k)`
+   method dispatch — already in §2.7.10 deferral. Not a sub-cluster
+   gap, not an ADR amendment requirement.
+
+**ADR-006 amendment**: NOT required for audit itself. Would be required
+for the deeper co-design work this audit surfaces (§2.7.10 / Q11
+closure-trigger extension; carrier-shape note across the five collection-
+family amendments). Neither lands in this audit-only commit.
+
+**Smoke matrix (Round 6C state preserved, audit-only doesn't change
+anything)**:
+
+- Smoke 4 (`Set()` + `s.size()`): VM `2` / JIT clean SURFACE.
+- HashMap smoke: VM `1` / JIT clean SURFACE.
+- Mutex smoke: VM `42` / JIT clean SURFACE.
+
+**Close gates (audit is doc-only; no regressions, no behavior change)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0 (no source changes
+  in audit-only commit)
+- `cargo test -p shape-jit --lib` 322/0/26 (matches Round 6C baseline)
+- `cargo test -p shape-vm --lib` pre-existing v2-raw-heap-audit
+  failures (unrelated, unchanged)
+- `bash scripts/verify-merge.sh` 12/12
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Forbidden frames explicitly refused (per CLAUDE.md "Renames to refuse
+on sight" + dispatch's forbidden list)**:
+
+- NOT "collection-FFI bridge" / "typed-Arc translator" /
+  "container-allocation helper" — broader-family defection-attractor regex.
+- NOT Bool-default fallback for inner-kind when statically underivable
+  — Mutex uses (bits, kind) carrier-pair per §2.7.5.
+- NOT resurrecting `unified_box(HK_HASHSET, ...)` shape — wrong-type
+  retain/release vs Arc, the carrier-shape mismatch from §8 of the
+  audit doc.
+- NOT silent walkback (W11-round-1 precedent).
+- NOT "blame pre-existing" — the broken `jit_call_method` shell is a
+  §2.7.10 / Q11 documented deferral.
+
+Branch: `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi`
+Audit commit: (pending — appended at close)
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
