@@ -5043,16 +5043,22 @@ opcode when the call site matches a `&mut self` opt-in pattern.
    `mut_self_container_locals`; their mutating method names
    (`set`, `store`, `send`, ...) are NOT in any `MUT_SELF_*` set.
 
-6. **`pop`-shaped methods — explicitly NOT in the write-back set.**
-   `Array.pop`, `Deque.popBack` / `popFront`, `PriorityQueue.pop`
-   return the popped *element*, not the (mutated) receiver Arc.
-   Generic write-back semantics would corrupt the binding slot by
-   writing the element bits where the container Arc should be. Until
-   a future tuple-return ABI lands for mutate-and-return-something-
-   else methods, the pre-ruling pop behaviour is preserved (mutation
-   visible only via `arr = arr.pop()` reassignment if the popped
-   element is discarded). Listed in the `MUT_SELF_*` doc-comments as
-   the next ABI milestone.
+6. **`pop`-shaped methods — tuple-return ABI variant.**
+   `Array.pop`, `Deque.popBack` / `popFront`, `PriorityQueue.pop`,
+   `HashMap.remove` extract an element AND mutate the container's
+   structure. They opt into the **tuple-return ABI variant**
+   (W17-pop-mutation amendment, 2026-05-12, below in this §2.7.27).
+   Conceptual dispatch signature `(&mut self) -> (Option<T>, Self)`:
+   the user-facing return is the popped element (`Option<T>`); the
+   new container Arc is published as a side effect on the VM stack
+   and the compiler emits a post-`CallMethod`
+   `Swap; Store*(receiver)` to write it back to the binding slot
+   (r-value receivers get `Swap; Pop` for silent drop, mirroring the
+   §2.7.27 r-value silent-drop rule). The runtime `MethodFnV2` ABI is
+   unchanged — the convention is that tuple-return handlers
+   `vm.push_kinded` the new container before returning the popped
+   element. See the tuple-return amendment below for the binding
+   spec.
 
 7. **Primitive operator sugar — `s += x` already covered by existing
    compound-assignment lowering.** The parser (`shape-ast/src/parser/expressions/binary_ops.rs::parse_assignment_impl`)
@@ -5268,6 +5274,207 @@ only mutating methods left out; a future tuple-return ABI amendment
    write-back, let-immutability compile errors, r-value receiver
    silent-drop, compound-assignment for primitives, and
    interior-mutability primitives staying on `let` bindings.
+
+**Tuple-return ABI variant (W17-pop-mutation amendment, 2026-05-12):**
+
+Pop-shaped methods extract an element from a collection AND mutate
+the collection's structure. The conceptual dispatch signature is
+`(&mut self) -> (Option<T>, Self)`: the user-facing call return is
+the popped element (`Option<T>`); the `Self` slot is invisible to
+user code and consumed by compile-time codegen to write the new
+container Arc back to the receiver binding. The runtime
+`MethodFnV2` ABI is unchanged — handlers still return a single
+`Result<KindedSlot, VMError>`. The convention is that tuple-return
+handlers `vm.push_kinded(new_container_bits, kind)` before
+returning the popped element; the dispatch shell pushes the
+returned popped element on top, so the post-call stack is
+`[..., NewContainer, popped_element]`. The compiler emits the
+post-`CallMethod` opcode pair that consumes `NewContainer` per the
+receiver-rooting rule.
+
+```rust
+// §2.7.27 amendment emit shape, post-CallMethod, for tuple-return
+// pop-shape methods on identifier receivers tracked as recognised
+// COW container kinds.
+self.emit(Instruction::new(OpCode::CallMethod, Some(operand)));
+if let Some(target) = mut_self_tuple_return_target {
+    self.emit(Instruction::simple(OpCode::Swap));
+    match target {
+        MutSelfWriteBackTarget::Local(idx) =>
+            self.emit(Instruction::new(OpCode::StoreLocal,
+                Some(Operand::Local(idx)))),
+        MutSelfWriteBackTarget::ModuleBinding(idx) =>
+            self.emit(Instruction::new(OpCode::StoreModuleBinding,
+                Some(Operand::ModuleBinding(idx)))),
+    }
+} else if is_rvalue_tuple_return {
+    self.emit(Instruction::simple(OpCode::Swap));
+    self.emit(Instruction::simple(OpCode::Pop));
+}
+```
+
+`Swap` flips the top two slots into
+`[..., popped_element, NewContainer]`. `Store*(target)` then pops
+`NewContainer` and writes it to the receiver binding (the existing
+`stack_write_kinded` invariant releases the prior occupant's share
+via `drop_with_kind`); `popped_element` remains as the call's
+expression value. The r-value variant `Swap; Pop` drops
+`NewContainer` cleanly (the `Pop` opcode's `drop_with_kind`
+discipline releases the heap share) and leaves `popped_element` on
+top — mirror of the §2.7.27 self-returning r-value silent-drop
+rule.
+
+**Canonical-shape rule — binding scope of the tuple-return ABI variant.**
+Tuple-return is used ONLY for methods that satisfy BOTH:
+
+- **(a) canonical-extraction-from-collection** — the call returns an
+  element drawn from the container's payload (a popped element, a
+  removed value-at-key, the minimum-priority entry from a heap, etc.);
+- **(b) structural-mutation-of-collection** — the call mutates the
+  container's spine (decrements the length, removes an entry, drains
+  a slot, etc.), and the post-mutation receiver is observably
+  different from the pre-mutation receiver in length / membership.
+
+Methods that satisfy only one half do NOT use the tuple-return ABI.
+Forbidden examples (refused on sight):
+
+- **`find` / `findIndex`** — extraction without structural mutation.
+  Use the self-return ABI variant (or stay as `&self` if non-mutating).
+- **`entry_or_default`** — returns a reference-into-collection. Wrong
+  shape for tuple-return; needs its own ABI (deferred to a future
+  amendment, not this one).
+- **`peek_first` / `peek_back` / `peekFront`** — extraction without
+  mutation. Stay `&self`.
+- **`iter().next()` and iteration cursor advancement** — mutates the
+  cursor state, not the container's spine. Out of scope; iterators
+  have their own §2.7.16 dispatch shape.
+- **`HashSet.remove(x) -> bool`** — returns "was present" rather than
+  the removed element. Self-return ABI (extraction half not
+  satisfied — the result isn't a payload element).
+- **`HashMap.delete(k) -> HashMap`** — returns the (new) map for
+  chaining; consumed by `stdlib-src/core/set.shape::remove` which
+  wraps it. Stays self-return; the canonical pop-shape sibling is
+  the new `HashMap.remove(k)` method (which returns `Option<V>`)
+  introduced in this amendment.
+
+**Composition with the existing self-returning `&mut self` pattern.**
+Self-return (§2.7.27 base) and tuple-return (this amendment) share
+the receiver-rooting machinery
+(`mut_self_container_locals` / `mut_self_container_bindings`,
+`resolve_mut_self_writeback_target` / `resolve_mut_self_tuple_return_target`)
+and the let-vs-let-mut immutability guard
+(`check_named_binding_write_allowed`). The difference is purely in
+the post-`CallMethod` emit shape: `Dup; Store*` (self-return) vs
+`Swap; Store*` / `Swap; Pop` (tuple-return). A method is registered
+in at most one ABI partition — the registries are mutually
+exclusive at the `method_registry` level.
+
+**Per-method-handler sweep (W17-pop-mutation amendment):**
+
+The pop-shape audit identifies the following five canonical methods.
+Each has its handler updated to side-channel-publish the new
+container Arc before returning the popped element, and is registered
+in the matching `MUT_SELF_TUPLE_RETURN_*` `phf::Set`:
+
+| Method | Receiver kind | Handler | Returns | Tuple-return set |
+|---|---|---|---|---|
+| `Array.pop` | `Ptr(TypedArray)` | `array_basic::handle_pop_v2` | `KindedSlot` (popped element) | `MUT_SELF_TUPLE_RETURN_ARRAY_METHODS` |
+| `Deque.popBack` | `Ptr(Deque)` | `deque_methods::v2_pop_back` | `KindedSlot` (popped element, or `KindedSlot::none()` if empty) | `MUT_SELF_TUPLE_RETURN_DEQUE_METHODS` |
+| `Deque.popFront` | `Ptr(Deque)` | `deque_methods::v2_pop_front` | `KindedSlot` (popped element, or `KindedSlot::none()` if empty) | `MUT_SELF_TUPLE_RETURN_DEQUE_METHODS` |
+| `PriorityQueue.pop` | `Ptr(PriorityQueue)` | `priority_queue_methods::v2_pop` | `KindedSlot::from_int(min)` (`0` if empty per landing) | `MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS` |
+| `HashMap.remove(k)` | `Ptr(HashMap)` | `hashmap_methods::v2_remove` (new) | `KindedSlot` (popped value, or `KindedSlot::none()` for missing key) | `MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS` |
+
+`TypedArray<i64>` / `TypedArray<f64>` v2 fast-path `pop`
+(`typed_int_array_methods::pop` / `typed_number_array_methods::pop`)
+stays in-place on the raw `*mut TypedArray<T>` pointer — there is
+no `Arc<T>` identity to write back, the underlying buffer mutation
+is visible through the binding's stable pointer. The tuple-return
+ABI does not apply to the v2 fast path.
+
+Audit-and-include disposition for the additional candidate list in
+the dispatch text (`Array.remove(i)` / `Array.swap_remove(i)` /
+`HashSet.take(x)` / `HashSet.pop_first` / `Channel.recv`): none of
+these exist in the current stdlib. Queued as natural follow-up
+sites for a future amendment if they're introduced; they all match
+the canonical-shape rule and would slot into the same ABI variant
+with no further machinery.
+
+**Forbidden shapes the tuple-return amendment rules out (in
+addition to the §2.7.27 base list):**
+
+- **Bool-default for the tuple-return ABI variant.** If a kind
+  source is genuinely missing, surface-and-stop with a §2.7.27
+  cite; never silently leak a `Ptr(Bool)` slot as the new container.
+- **Reintroducing the runtime dispatch-shell write-back path** that
+  W17-mutation-writeback specifically avoided. The tuple-return
+  amendment extends the compile-time codegen, not the runtime ABI.
+  The new `MUT_SELF_TUPLE_RETURN_*` flag is a compile-time marker
+  only; the runtime `MethodFnV2` ABI is unchanged.
+- **Tuple-return for non-canonical pop-shape methods.** A method
+  not satisfying BOTH (a) and (b) of the canonical-shape rule
+  belongs in the self-return ABI variant, in the iterator §2.7.16
+  shape, or in `&self`. Adding a tuple-return entry for `find` /
+  `entry_or_default` / `peek_first` / iteration cursors is a
+  §2.7.27-amendment defection.
+- **Silent fallback to peek-like behaviour** if the receiver root
+  can't be identified. R-value receivers DROP both slots
+  (`Swap; Pop`); the popped element stays as the expression value,
+  the new container is released cleanly via `drop_with_kind`. No
+  fabrication, no kind-blind probe on the receiver bits.
+- **Adding new HeapKind ordinals or runtime variants** to support
+  the tuple-return path. None are required; the amendment is pure
+  codegen + handler convention.
+- **Defection-attractor descriptors** for the tuple-return emission:
+  "MethodTuple bridge", "popback hop", "container-publish translator",
+  "tuple-result adapter". Per the 2026-05-09 user ruling broadening
+  the W-series rename family, any descriptor of the tuple-return
+  emission that uses bridge / probe / helper / hop / translator /
+  adapter framing belongs to the defection-attractor family
+  CLAUDE.md "Renames to refuse on sight" enumerates. Describe the
+  emission by name (the §2.7.27 amendment `Swap; Store*` /
+  `Swap; Pop` emission) or by mechanism (compile-time write-back
+  of the side-channel-published new container), never by hypothetical
+  role.
+
+**Migration scope (W17-pop-mutation amendment deliverables):**
+
+1. `crates/shape-vm/src/executor/objects/method_registry.rs` —
+   per-receiver-kind `MUT_SELF_TUPLE_RETURN_*` `phf::Set` constants
+   (`MUT_SELF_TUPLE_RETURN_ARRAY_METHODS` /
+   `MUT_SELF_TUPLE_RETURN_DEQUE_METHODS` /
+   `MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS` /
+   `MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS`) +
+   `is_mut_self_tuple_return_method_name` predicate. New `remove`
+   entry in `HASHMAP_METHODS` pointing at the new `v2_remove`
+   handler.
+2. `crates/shape-vm/src/compiler/mutation_writeback.rs` —
+   `ContainerKind::is_mut_self_tuple_return_method` classifier +
+   `MutSelfWriteBackMode` enum (`SelfReturn` vs `TupleReturn`) as
+   documentation of the two ABI partitions.
+3. `crates/shape-vm/src/compiler/expressions/function_calls.rs` —
+   `resolve_mut_self_tuple_return_target` resolver +
+   `is_known_tuple_return_method` predicate + the post-`CallMethod`
+   `Swap; Store{Local,ModuleBinding}` / `Swap; Pop` emit gate +
+   integration with the let-immutability guard.
+4. Pop-shape handler updates:
+   - `executor/objects/array_basic.rs::handle_pop_v2` — pushes the
+     new `Arc<TypedArrayData>` via `vm.push_kinded` before returning
+     the popped element.
+   - `executor/objects/deque_methods.rs::{v2_pop_back, v2_pop_front}` —
+     pushes the new `Arc<DequeData>`.
+   - `executor/objects/priority_queue_methods.rs::v2_pop` — pushes
+     the new `Arc<PriorityQueueData>`.
+   - `executor/objects/hashmap_methods.rs::v2_remove` (new) —
+     extracts the value-at-key BEFORE mutation (so post-mutation
+     buffer cloning doesn't strand the value), then pushes the new
+     `Arc<HashMapData>` and returns the popped value.
+5. Smoke tests in `crates/shape-vm/src/executor/tests/pop_mutation.rs`
+   — 17 tests covering Deque popBack/popFront, PriorityQueue pop,
+   HashMap remove, let-immutability compile errors, r-value receiver
+   silent-drop, regression guard that `HashMap.delete` stays
+   self-returning for the stdlib `set.shape::remove` wrapper, and
+   bytecode-level checks that the `Swap; Store*` / `Swap; Pop`
+   sequence emits correctly.
 
 Binding for Phase 2d onward.
 
