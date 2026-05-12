@@ -349,7 +349,7 @@ correct cites are §2.7.14 / §2.7.5. Round-5B agent fixes this.
 |---|---|---|---|
 | W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) + array-scalar (`xs[0] + xs[1]`) | **closed** (2026-05-12) |
 | W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | dispatching (audit-first) |
-| W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | dispatching |
+| W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | **closed** (2026-05-12) |
 
 ### W12-jit-binop-after-heap-read-kind-tracker close (2026-05-12)
 

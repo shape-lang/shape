@@ -565,18 +565,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .iter()
             .map(|ct| types::native_kind_from_concrete_type(ct))
             .collect();
-        // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
-        // pass `concrete_types` through so `infer_slot_kinds` can project
-        // `Place::Index` through the `Array<scalar>` shape — same kind
-        // source the JIT codegen-side `place_native_kind` /
-        // `v2_typed_array_elem_kind` projection uses. Without this the
-        // destination slot of `Assign(slot, Use(Copy(Index(xs, _))))`
-        // inherits `xs`'s `Ptr(HeapKind::TypedArray)` kind, then the
-        // print dispatcher in `terminators.rs::Call` falls through to
-        // the kind-blind `jit_print` fallback that decodes the raw int
-        // as f64 (denormalized-garbage output).
-        let slot_kinds =
-            types::infer_slot_kinds_with_concrete(&mir_data.mir, &concrete_seed, &concrete_types);
+        // ADR-006 §2.7.5 producing-site classification: pass the per-
+        // slot `ConcreteType` map into the inference so two projections
+        // both work end-to-end —
+        //
+        // (1) W12-jit-binop-after-heap-read-kind-tracker (Round 5A):
+        // `Place::Field` reads stamp the destination kind from the
+        // FIELD's kind, not the base struct's heap kind (drives the
+        // Smoke 3 `p.x + p.y` int-add).
+        //
+        // (2) W12-jit-print-kind (Round 5C): `Place::Index` reads off
+        // typed-array slots stamp the destination kind from the
+        // element kind, not the array's pointer kind — same source the
+        // JIT codegen-side `place_native_kind` /
+        // `v2_typed_array_elem_kind` projection uses. Without this seed
+        // `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
+        // print decoder.
+        let slot_kinds = types::infer_slot_kinds_with_concrete(
+            &mir_data.mir,
+            &concrete_seed,
+            &concrete_types,
+        );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy

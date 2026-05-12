@@ -259,6 +259,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             )),
             Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                // Centralized projection: `place_native_kind` handles
+                // both Round 5A's Field projection (via
+                // `field_native_kinds`) AND Round 5C's Index projection
+                // (via `v2_typed_array_elem_kind` → `concrete_types`'s
+                // `Array<scalar>` shape) in a single helper that
+                // `ownership::refcount_disposition` also shares.
                 self.place_native_kind(p)
             }
         }
@@ -282,7 +288,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   conduit close), project to the element's `NativeKind` via
     ///   `v2_typed_array_elem_kind`. This is the same kind the v2
     ///   `read_place` fast path uses to load the element at its native
-    ///   width.
+    ///   width. Same projection the W12-jit-print-kind (Round 5C) sub-
+    ///   cluster needs at the `print(xs[0])` dispatch site.
     /// - `Place::Deref(_)`: not stamped — references are heap-tier
     ///   indirection and the type-of-pointed-to-value is not threaded
     ///   into the JIT-side projection map yet. Returns `None` so the
