@@ -30,6 +30,9 @@ mod deque_ops;
 mod io_integration;
 mod jit_abi_tests;
 mod matrix_ops;
+// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
+// source-level smoke tests for `&mut self` method writeback semantics.
+mod mutation_writeback;
 mod priority_queue_ops;
 mod set_ops;
 mod soak_tests;

@@ -886,6 +886,37 @@ pub struct BytecodeCompiler {
     pub(crate) v2_typed_map_module_bindings:
         HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
 
+    /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
+    /// per-local-slot record of locals known to hold a Copy-on-Write
+    /// collection (HashSet / HashMap / Deque / PriorityQueue / Array of
+    /// generic carrier). Populated at let-binding time when the initializer
+    /// is one of `Set()` / `HashMap()` / `Deque()` / `PriorityQueue()` /
+    /// `[…]`, or when the binding has an explicit type annotation that
+    /// names the container kind.
+    ///
+    /// Consumed by `compile_expr_method_call`'s `&mut self` writeback
+    /// emission gate: for an identifier-receiver method call where
+    /// `(container_kind, method_name)` matches a `MUT_SELF_*` entry, the
+    /// compiler emits `Dup; StoreLocal recv` after `CallMethod` so the
+    /// new (possibly Arc-cloned) receiver Arc updates the binding slot.
+    pub(crate) mut_self_container_locals:
+        HashMap<u16, crate::compiler::mutation_writeback::ContainerKind>,
+
+    /// ADR-006 §2.7.27 / Item 4 ruling: per-module-binding record of
+    /// mutating-container module bindings. Mirrors
+    /// [`mut_self_container_locals`] for top-level bindings.
+    pub(crate) mut_self_container_bindings:
+        HashMap<u16, crate::compiler::mutation_writeback::ContainerKind>,
+
+    /// ADR-006 §2.7.27 / Item 4 ruling: signal raised by container-ctor
+    /// builtin call emitters (`SetCtor`, `DequeCtor`,
+    /// `PriorityQueueCtor`, `HashMapCtor`) so the surrounding statement-
+    /// binding code path can transfer the kind onto the target local
+    /// / module binding. Mirrors the existing
+    /// [`pending_variable_typed_array_kind`] convention.
+    pub(crate) pending_variable_container_kind:
+        Option<crate::compiler::mutation_writeback::ContainerKind>,
+
     /// v2 Phase 3.2: per-AST-node side table mapping a HashMap-shaped
     /// expression to its key/value `ConcreteType` pair. Populated by the
     /// `let m: HashMap<K, V> = ...` annotation path AND by inference helpers
@@ -1304,3 +1335,9 @@ pub(crate) mod v2_array_emission;
 pub(crate) mod v2_map_emission;
 pub(crate) mod v2_typed_emission;
 pub(crate) mod v2_typed_map_emission;
+
+// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
+// compile-time write-back emission for `&mut self` opt-in methods on
+// COW container receivers (HashSet / HashMap / Array / Deque /
+// PriorityQueue / TypedArray).
+pub(crate) mod mutation_writeback;

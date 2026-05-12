@@ -93,6 +93,11 @@ impl BytecodeCompiler {
             pending_variable_typed_map_kind: None,
             v2_typed_map_locals: HashMap::new(),
             v2_typed_map_module_bindings: HashMap::new(),
+            // ADR-006 §2.7.27 / Item 4 ruling: container-kind tracking for
+            // `&mut self` write-back emission.
+            mut_self_container_locals: HashMap::new(),
+            mut_self_container_bindings: HashMap::new(),
+            pending_variable_container_kind: None,
             map_key_value_types: HashMap::new(),
             local_map_key_value_types: HashMap::new(),
             module_binding_map_key_value_types: HashMap::new(),

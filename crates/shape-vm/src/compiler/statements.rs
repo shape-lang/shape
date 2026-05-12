@@ -4408,6 +4408,12 @@ impl BytecodeCompiler {
                         if let Some(kind) = captured_typed_map_kind {
                             self.v2_typed_map_module_bindings.insert(binding_idx, kind);
                         }
+                        // ADR-006 §2.7.27 / Item 4 ruling: transfer the
+                        // pending container-kind signal to the module
+                        // binding for write-back-aware method dispatch.
+                        if let Some(ckind) = self.pending_variable_container_kind.take() {
+                            self.mut_self_container_bindings.insert(binding_idx, ckind);
+                        }
                         // ADR-006 §2.7.24 Q25.C: record dyn-typed module
                         // binding so subsequent `a.method()` calls emit
                         // `OpCode::DynMethodCall` instead of the standard
@@ -4682,6 +4688,23 @@ impl BytecodeCompiler {
                         if let Some(name) = var_decl.pattern.as_identifier() {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 self.v2_typed_array_locals.insert(local_idx, kind);
+                            }
+                        }
+                    }
+
+                    // ADR-006 §2.7.27 / Item 4 ruling: transfer the
+                    // pending container-kind signal from the
+                    // initializer ctor (`Set()` / `HashMap()` /
+                    // `Deque()` / `PriorityQueue()`) onto the target
+                    // local-slot so method-call dispatch can decide
+                    // whether to emit `Dup; StoreLocal` write-back. The
+                    // signal is consumed (taken) here so a later
+                    // statement doesn't accidentally inherit it.
+                    let captured_container_kind = self.pending_variable_container_kind.take();
+                    if let Some(kind) = captured_container_kind {
+                        if let Some(name) = var_decl.pattern.as_identifier() {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                self.mut_self_container_locals.insert(local_idx, kind);
                             }
                         }
                     }
@@ -4971,6 +4994,16 @@ impl BytecodeCompiler {
             Statement::Expression(expr, _) => {
                 // Fast path: arr.push(val) as standalone statement → in-place mutation
                 // (avoids the LoadLocal+Pop overhead from the expression-level optimization)
+                //
+                // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback):
+                // gate the fast path so it does NOT fire when the receiver
+                // is a non-Array container (Deque / PriorityQueue / HashMap
+                // / HashSet). Those containers have their own `push`
+                // handlers in `method_registry`; `ArrayPushLocal` would
+                // error on a non-Array slot kind. Falls through to the
+                // generic compile_expr path, which dispatches via
+                // `CallMethod` and emits the writeback per
+                // `resolve_mut_self_writeback_target`.
                 if let Expr::MethodCall {
                     receiver,
                     method,
@@ -4978,7 +5011,39 @@ impl BytecodeCompiler {
                     ..
                 } = expr
                 {
-                    if method == "push" && args.len() == 1 {
+                    let bespoke_push_blocked = if method == "push"
+                        && args.len() == 1
+                        && let Expr::Identifier(recv_name, _) = receiver.as_ref()
+                    {
+                        let local_kind = self
+                            .resolve_local(recv_name)
+                            .and_then(|idx| self.mut_self_container_locals.get(&idx).copied());
+                        let module_kind = if local_kind.is_none() {
+                            let scoped = self
+                                .resolve_scoped_module_binding_name(recv_name)
+                                .unwrap_or_else(|| recv_name.to_string());
+                            self.module_bindings
+                                .get(&scoped)
+                                .copied()
+                                .and_then(|idx| {
+                                    self.mut_self_container_bindings.get(&idx).copied()
+                                })
+                        } else {
+                            None
+                        };
+                        local_kind
+                            .or(module_kind)
+                            .map(|kind| {
+                                !matches!(
+                                    kind,
+                                    crate::compiler::mutation_writeback::ContainerKind::Array
+                                )
+                            })
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if method == "push" && args.len() == 1 && !bespoke_push_blocked {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             let source_loc = self.span_to_source_location(receiver.as_ref().span());
                             if let Some(local_idx) = self.resolve_local(recv_name) {
