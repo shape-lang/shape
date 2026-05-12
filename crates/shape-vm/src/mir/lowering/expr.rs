@@ -1515,6 +1515,61 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             named_args,
             ..
         } => {
+            // W12-enum-constructor-mir-lowering (Phase 3 cluster-0 Round 4,
+            // 2026-05-12 audit `588fba2c`): bare-form enum-variant
+            // constructors (`Ok(x)` / `Err(x)` / `Some(x)`) parse as
+            // `Expr::FunctionCall { name: "Ok", ... }` but are NOT
+            // function calls — the VM dispatches them via
+            // `OpCode::BuiltinCall(OkCtor)` etc., not via the function
+            // table. The pre-fix MIR shape emitted
+            // `Call { func: Constant(Function("Ok")), ... }`, which the
+            // JIT's `compile_constant` could not resolve (no entry in
+            // `function_indices`); it fell back to `iconst(I64, 0)`,
+            // the indirect-call dispatched with `callee_bits=0`, and
+            // downstream code segfaulted on TAG_NULL.
+            //
+            // Per ADR-006 §2.7.5 producing-site classification, the
+            // constructor's kind is known here at MIR-emit time: the
+            // name resolves through the same classifier the bytecode
+            // compiler uses (`classify_builtin_function` at
+            // `compiler/helpers.rs:3194-3209`). The rewrite lowers
+            // the bare form to the same `Aggregate` + `EnumStore` MIR
+            // shape the qualified `Result::Ok(x)` path already uses
+            // (see `Expr::EnumConstructor` arm below) — preserving
+            // ADR-006 §2.7.27 mutation-writeback's container-kind
+            // classification at the producing site, and matching the
+            // VM-side bytecode compiler's interception of these names
+            // at `compile_expr_function_call`
+            // (`compiler/expressions/function_calls.rs:870-971`).
+            //
+            // The intercept happens AFTER local-shadow resolution
+            // (`builder.lookup_local(name)`) so user code that
+            // rebinds `let Ok = ...; Ok(5)` still calls the local.
+            if builder.lookup_local(name).is_none()
+                && is_bare_enum_variant_ctor(name)
+                && named_args.is_empty()
+            {
+                let operands: Vec<_> = args
+                    .iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg))
+                    .collect();
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                emit_container_store_if_needed(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    span,
+                );
+                return temp;
+            }
+
             let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
             arg_ops.extend(
                 args.iter()
@@ -1805,6 +1860,37 @@ fn lower_pipe_expr(
             named_args,
             ..
         } => {
+            // W12-enum-constructor-mir-lowering: same producer-side
+            // classification as the non-piped path above. `expr |> Ok`
+            // is a constructor expression, not a function call.
+            if builder.lookup_local(name).is_none()
+                && is_bare_enum_variant_ctor(name)
+                && named_args.is_empty()
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let mut operands = Vec::with_capacity(1 + args.len());
+                operands.push(left_op);
+                operands.extend(
+                    args.iter()
+                        .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+                );
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                emit_container_store_if_needed(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    span,
+                );
+                return;
+            }
+
             let left_op = lower_expr_as_moved_operand(builder, left);
             let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
             arg_ops.push(left_op);
@@ -1831,6 +1917,28 @@ fn lower_pipe_expr(
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
         Expr::Identifier(name, _) => {
+            // W12-enum-constructor-mir-lowering: `expr |> Ok` form —
+            // pipe into a bare-form constructor ident. Same producer-
+            // side classification.
+            if builder.lookup_local(name).is_none() && is_bare_enum_variant_ctor(name) {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let operands = vec![left_op];
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                emit_container_store_if_needed(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    span,
+                );
+                return;
+            }
             let left_op = lower_expr_as_moved_operand(builder, left);
             let func_op = Operand::Constant(MirConstant::Function(name.clone()));
             builder.emit_call(func_op, vec![left_op], Place::Local(temp), span);
