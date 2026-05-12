@@ -2782,6 +2782,20 @@ impl Drop for TypedObjectStorage {
                         HeapKind::Future => {
                             // No-op: future-id inline scalar.
                         }
+                        // W17-comptime-vm-dispatch (ADR-006 §2.7.26,
+                        // 2026-05-12): `Ptr(HeapKind::ModuleFn)` carries
+                        // the module-fn-id u64 directly in `bits`
+                        // (inline scalar — no `Arc<T>` payload). Used
+                        // by `populate_module_objects` for typed-
+                        // object module-binding field slots. Same
+                        // dispatch shape as `HeapKind::Future` —
+                        // no refcount work, but the kind label is
+                        // `Ptr(HeapKind::ModuleFn)` so the dispatch
+                        // shell can route the slot's bits to
+                        // `invoke_module_fn_id_stub` at CallValue time.
+                        HeapKind::ModuleFn => {
+                            // No-op: module-fn-id inline scalar.
+                        }
                         // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                         // 2026-05-10): when a TypedObject field of kind
                         // `NativeKind::Ptr(HeapKind::SharedCell)` is dropped
@@ -3715,6 +3729,9 @@ impl Clone for HeapValue {
             HeapValue::Mutex(v) => HeapValue::Mutex(Arc::clone(v)),
             HeapValue::Atomic(v) => HeapValue::Atomic(Arc::clone(v)),
             HeapValue::Lazy(v) => HeapValue::Lazy(Arc::clone(v)),
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // ModuleFn is an inline-scalar payload (no Arc).
+            HeapValue::ModuleFn(v) => HeapValue::ModuleFn(*v),
         }
     }
 }
@@ -4007,6 +4024,9 @@ impl fmt::Display for HeapValue {
                     write!(f, "<lazy:pending>")
                 }
             }
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // ModuleFn references render as `<module_fn:id>`.
+            HeapValue::ModuleFn(id) => write!(f, "<module_fn:{}>", id),
         }
     }
 }

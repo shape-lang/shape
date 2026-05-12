@@ -248,6 +248,12 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // tier may later add a `Serializable` trait whose impls
         // self-serialize through the vtable — that's a follow-up.
         HeapValue::TraitObject(_) => Err("cannot serialize: TraitObject".into()),
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+        // ModuleFn references are VM-internal callable handles with
+        // no stable serialised form — they index `module_fn_table`
+        // which is rebuilt per-VM-instance, not part of the
+        // serialisable program state.
+        HeapValue::ModuleFn(_) => Err("cannot serialize: ModuleFn".into()),
     }
 }
 

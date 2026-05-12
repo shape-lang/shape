@@ -342,6 +342,25 @@ impl KindedSlot {
         Self::new(ValueSlot::from_char(c), NativeKind::Ptr(HeapKind::Char))
     }
 
+    /// Convenience: a `Ptr(HeapKind::ModuleFn)`-kind slot. Stores the
+    /// `module_fn_id` as raw `u64` slot bits directly (inline-scalar
+    /// payload — no `Arc<T>`, no heap state). Same shape as
+    /// `from_char` / `from_future` per ADR-006 §2.7.26
+    /// (W17-comptime-vm-dispatch).
+    ///
+    /// Construction-side contract: `id` must index a registered entry
+    /// in `VirtualMachine.module_fn_table`. The dispatch shell at
+    /// `executor/call_convention.rs::call_value_immediate_nb` consumes
+    /// the kind label to route the slot's bits to
+    /// `invoke_module_fn_id_stub` at `CallValue` time.
+    #[inline]
+    pub fn from_module_fn_id(id: u64) -> Self {
+        Self::new(
+            ValueSlot::from_raw(id),
+            NativeKind::Ptr(HeapKind::ModuleFn),
+        )
+    }
+
     /// Convenience: a `String`-kind slot from a `&str`. Allocates a fresh
     /// `Arc<String>`. Use `from_string_arc` when you already have the
     /// `Arc<String>` in hand and want to avoid a clone.
@@ -683,6 +702,14 @@ impl Drop for KindedSlot {
                     HeapKind::Future => {
                         // No-op: future-id inline scalar.
                     }
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                    // `Ptr(HeapKind::ModuleFn)` carries the module-fn-id
+                    // u64 directly in `bits` (inline scalar — no heap
+                    // state, no `Arc<T>` payload). Same shape as
+                    // `HeapKind::Future` / `HeapKind::Char`.
+                    HeapKind::ModuleFn => {
+                        // No-op: module-fn-id inline scalar.
+                    }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): `SharedCell`-kinded `KindedSlot`s
                     // own one `Arc::into_raw(Arc<SharedCell>)` strong-
@@ -937,6 +964,13 @@ impl Clone for KindedSlot {
                     // below; no refcount work. Mirror of the Drop arm.
                     HeapKind::Future => {
                         // No-op: future-id inline scalar.
+                    }
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                    // mirror of the Drop arm — module-fn-id is an
+                    // inline scalar payload; Rust copies the slot bits
+                    // below; no refcount work.
+                    HeapKind::ModuleFn => {
+                        // No-op: module-fn-id inline scalar.
                     }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): mirror of the Drop arm above. Bumps

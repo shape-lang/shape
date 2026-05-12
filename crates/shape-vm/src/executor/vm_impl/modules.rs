@@ -240,23 +240,208 @@ impl VirtualMachine {
         }
     }
 
-    /// Populate extension module objects as module_bindings — Phase-2c stub.
+    /// Populate extension module objects as module_bindings — W17-comptime-vm-dispatch rebuild.
     ///
-    /// The legacy body assembled a `TypedObject` module binding by
-    /// inserting `ValueWord::from_module_function` / `ValueWord::from_function`
-    /// into a `HashMap<String, ValueWord>` and writing it through the
-    /// deleted module-binding raw-write shim. Both halves depend on the
-    /// deleted `ValueWord` runtime representation. The kinded equivalent
-    /// (Arc<TypedObjectStorage> + parallel-kind track + the §2.7.8 / Q10
-    /// module-binding cell-storage rebuild) lands with the Phase-2c
-    /// host-API revival per ADR-006 §2.7.4.
+    /// **W17-comptime-vm-dispatch (Phase 2d Wave 3, 2026-05-12).**
+    /// Per ADR-006 §2.7.26 amendment. Builds a kinded `TypedObject`
+    /// per registered extension module, with field slots that store
+    /// **module-function-id field references** as `Ptr(HeapKind::ModuleFn)`
+    /// inline-scalar payloads. The dispatch chain
+    /// `LoadModuleBinding(idx) + GetFieldTyped(...) + CallValue` routes
+    /// through:
+    ///
+    /// 1. `LoadModuleBinding(idx)` reads the kinded module-binding
+    ///    slot (TypedObject + `Ptr(HeapKind::TypedObject)` kind) and
+    ///    pushes it via `clone_with_kind` retain-on-read (§2.7.7).
+    /// 2. `GetFieldTyped { type_id, field_idx, field_type_tag }` pops
+    ///    the receiver, recovers the `Arc<TypedObjectStorage>` per
+    ///    ADR-005 §1, and reads the field. The compiler emits
+    ///    `field_type_tag = FIELD_TAG_ANY` for schema fields of
+    ///    `FieldType::Any` (the comptime predeclared schema shape).
+    ///    The `op_get_field_typed` body falls through to
+    ///    `push_field_value_with_kind`, which sources the kind from
+    ///    `storage.field_kinds[field_idx]` (the §2.7.7 parallel-kind
+    ///    track) — resolving hardening item (f) — and pushes the
+    ///    `module_fn_id as u64` bits with kind
+    ///    `Ptr(HeapKind::ModuleFn)`.
+    /// 3. `CallValue` pops args + callee, dispatches via
+    ///    `call_value_immediate_nb` whose `Ptr(HeapKind::ModuleFn)`
+    ///    arm routes to `invoke_module_fn_id_stub(bits as usize, args)` —
+    ///    the same path used by `W17-snapshot-roundtrip` for direct
+    ///    module-fn invocation.
+    ///
+    /// Per-module construction:
+    ///
+    /// - Look up the predeclared `__mod_<name>` schema (registered by
+    ///   `compiler/comptime.rs::ensure_module_object_schema` before
+    ///   bytecode compilation). The schema field names define the
+    ///   storage's field order; missing schemas are skipped (the
+    ///   module's exports remain unreachable through this binding).
+    /// - For each typed export (sync and async), register a
+    ///   `ModuleFnEntry::Typed` / `TypedAsync` into `module_fn_table`
+    ///   to obtain a `module_fn_id`.
+    /// - For each schema field, look up the matching `module_fn_id`,
+    ///   write a `ValueSlot::from_raw(module_fn_id as u64)` with
+    ///   `field_kinds[i] = Ptr(HeapKind::ModuleFn)` and `heap_mask`
+    ///   bit set. Unmatched fields (a schema field with no
+    ///   corresponding export) get the `(0u64, NativeKind::Bool)`
+    ///   sentinel pair — same shape as the
+    ///   `module_binding_pad_to_kinded` uninitialised-slot convention.
+    /// - Construct `Arc<TypedObjectStorage>` via the typed constructor
+    ///   per ADR-006 §2.4 and write the `Ptr(HeapKind::TypedObject)`
+    ///   slot to the module-binding via
+    ///   `module_binding_write_kinded` (§2.7.8 / Q10 lockstep).
+    ///
+    /// Resolves the upstream `populate_module_objects` no-op blocker
+    /// flagged by `W17-snapshot-roundtrip` (commit `fbfbfb6`). The
+    /// 4 comptime introspection forms wired by C2-comptime-rebuild
+    /// (`a5df165`) — `build_config` / `implements` / `warning` /
+    /// `error` — now dispatch end-to-end via VM mode.
     pub fn populate_module_objects(&mut self) {
-        // No-op: module-binding object population is deferred to the
-        // Phase-2c rebuild. Tests / callers that depend on the populated
-        // object hit the surface inside their downstream call sites,
-        // not here, so the VM init path stays compile-clean. Surfacing
-        // at the call-site rather than here also keeps the read-side
-        // legacy ValueWord reach contained.
-        let _ = &self.module_registry;
+        use shape_runtime::module_exports::ModuleFnEntry;
+        use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::{HeapKind, NativeKind, ValueSlot};
+        use std::sync::Arc;
+
+        // Phase 1 — collect: gather per-module data without taking a
+        // mutable borrow on `self` while iterating the registry. The
+        // `register_module_fn_entry` call mutates `self.module_fn_table`,
+        // which conflicts with an active borrow on `self.module_registry`.
+        let module_names: Vec<String> = self
+            .module_registry
+            .module_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for module_name in module_names {
+            // Resolve the module's typed exports. The `module_registry.get`
+            // borrow is local to this iteration and dropped before we
+            // mutate `module_fn_table` below.
+            let typed_entries: Vec<(String, ModuleFnEntry)> = {
+                let module = match self.module_registry.get(&module_name) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let typed = module.typed_exports();
+                let mut entries: Vec<(String, ModuleFnEntry)> =
+                    Vec::with_capacity(typed.functions.len() + typed.async_functions.len());
+                for (export_name, typed_fn) in &typed.functions {
+                    entries.push((
+                        export_name.clone(),
+                        ModuleFnEntry::Typed(typed_fn.clone()),
+                    ));
+                }
+                for (export_name, typed_async) in &typed.async_functions {
+                    entries.push((
+                        export_name.clone(),
+                        ModuleFnEntry::TypedAsync(typed_async.clone()),
+                    ));
+                }
+                entries
+            };
+
+            // Locate the binding index for this module — prefer the
+            // hidden native binding (`__imported_module__::<name>`,
+            // injected by the compiler's
+            // `ensure_hidden_native_module_binding`), fall back to the
+            // plain binding name. The hidden form is used when a Shape
+            // artifact module with the same name would otherwise
+            // shadow the native object.
+            let hidden_name = format!("__imported_module__::{}", module_name);
+            let binding_idx = self
+                .program
+                .module_binding_names
+                .iter()
+                .position(|n| n == &hidden_name)
+                .or_else(|| {
+                    self.program
+                        .module_binding_names
+                        .iter()
+                        .position(|n| n == &module_name)
+                });
+            let binding_idx = match binding_idx {
+                Some(i) => i,
+                None => continue, // No binding name — nothing to populate.
+            };
+
+            // Resolve the predeclared module-object schema. The schema
+            // is registered before compilation by
+            // `compiler/comptime.rs::ensure_module_object_schema`
+            // (under canonical name `__mod_<module_name>`).
+            // Without it we can't define a stable field order for
+            // the typed-object layout, so skip — the binding stays at
+            // the no-op-on-drop sentinel and any reference to a field
+            // through this binding will surface clean at GetFieldTyped.
+            let schema_name = format!("__mod_{}", module_name);
+            let schema = match self.lookup_schema_by_name(&schema_name) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+
+            // Register each typed entry into `module_fn_table` and
+            // build a name → module_fn_id lookup.
+            let mut fn_id_by_name: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::with_capacity(typed_entries.len());
+            for (export_name, entry) in typed_entries {
+                let fn_id = self.register_module_fn_entry(entry);
+                fn_id_by_name.insert(export_name, fn_id as u64);
+            }
+
+            // Build the typed-object slot list in schema field order.
+            // Each field maps to either:
+            //   - a known module-fn-id → ValueSlot(fn_id) with kind
+            //     Ptr(HeapKind::ModuleFn) and heap_mask bit set, or
+            //   - no matching export → (0, NativeKind::Bool) sentinel
+            //     (same shape as the module-binding-pad uninitialised
+            //     slot convention — no Bool-default fallback for a
+            //     known-callable-but-missing field; the compiler
+            //     should have surfaced 'module has no export' earlier).
+            let field_count = schema.fields.len();
+            let mut slots: Vec<ValueSlot> = Vec::with_capacity(field_count);
+            let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(field_count);
+            let mut heap_mask: u64 = 0;
+            for (i, field) in schema.fields.iter().enumerate() {
+                match fn_id_by_name.get(&field.name) {
+                    Some(&fn_id) => {
+                        // ModuleFn inline-scalar slot: bits = fn_id,
+                        // kind = Ptr(HeapKind::ModuleFn). Mark the
+                        // heap_mask bit so the read path sees the slot
+                        // as "kind-bearing" and dispatches through the
+                        // FIELD_TAG_ANY / field_kinds resolver in
+                        // op_get_field_typed.
+                        slots.push(ValueSlot::from_raw(fn_id));
+                        field_kinds.push(NativeKind::Ptr(HeapKind::ModuleFn));
+                        heap_mask |= 1u64 << i;
+                    }
+                    None => {
+                        // Schema field present but no typed export:
+                        // sentinel slot. `clone_with_kind` /
+                        // `drop_with_kind` are no-op on (0, Bool).
+                        slots.push(ValueSlot::from_raw(0));
+                        field_kinds.push(NativeKind::Bool);
+                    }
+                }
+            }
+
+            let storage = Arc::new(TypedObjectStorage::new(
+                schema.id as u64,
+                slots.into_boxed_slice(),
+                heap_mask,
+                Arc::from(field_kinds.into_boxed_slice()),
+            ));
+
+            // Hand off one share to the binding slot. `Arc::into_raw`
+            // converts the Arc<TypedObjectStorage> to its raw pointer
+            // bits; `module_binding_write_kinded` retires the prior
+            // occupant (sentinel pair → no-op) and transfers our
+            // share into the binding.
+            let bits = Arc::into_raw(storage) as u64;
+            self.module_binding_write_kinded(
+                binding_idx,
+                bits,
+                NativeKind::Ptr(HeapKind::TypedObject),
+            );
+        }
     }
 }

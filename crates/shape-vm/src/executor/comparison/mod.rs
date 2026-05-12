@@ -483,6 +483,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // values surface the carrier's display name; user-level
         // equality goes through trait-method dispatch (Eq trait).
         NativeKind::Ptr(HeapKind::TraitObject) => "trait_object",
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+        // ModuleFn references — inline-scalar module-fn-id label.
+        NativeKind::Ptr(HeapKind::ModuleFn) => "module_fn",
     }
 }
 

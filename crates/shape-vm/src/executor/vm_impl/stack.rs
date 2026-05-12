@@ -126,6 +126,14 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::Lazy => {
                     Arc::increment_strong_count(bits as *const LazyData);
                 }
+                // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                // ModuleFn references are inline-scalar payloads
+                // (module_fn_id cast to u64 — no heap state, no
+                // Arc<T> share). Same dispatch shape as
+                // HeapKind::Future / HeapKind::Char — no-op on retain.
+                HeapKind::ModuleFn => {
+                    // No-op: module-fn-id inline scalar (no Arc payload).
+                }
                 // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
                 // 2026-05-11): TraitObject mirrors the typed-Arc
                 // dispatch shape. Slot bits are
@@ -407,6 +415,13 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 }
                 HeapKind::Lazy => {
                     Arc::decrement_strong_count(bits as *const LazyData);
+                }
+                // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                // ModuleFn references are inline-scalar payloads —
+                // no-op on drop (mirror of HeapKind::Future /
+                // HeapKind::Char).
+                HeapKind::ModuleFn => {
+                    // No-op: module-fn-id inline scalar (no Arc payload).
                 }
                 // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
                 // 2026-05-11): TraitObject mirrors the typed-Arc

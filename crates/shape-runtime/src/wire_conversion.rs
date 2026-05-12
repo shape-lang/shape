@@ -304,6 +304,10 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // trait could route through the vtable, but that's emission-tier
         // work outside this sub-cluster.
         HeapValue::TraitObject(_) => WireValue::String("<trait_object:phase-2c>".to_string()),
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+        // ModuleFn references are VM-internal callable handles
+        // — same opaque-tag shape as the concurrency primitives.
+        HeapValue::ModuleFn(id) => WireValue::String(format!("<module_fn:{}>", id)),
     }
 }
 

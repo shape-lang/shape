@@ -693,7 +693,14 @@ impl VirtualMachine {
                 | HeapKind::IoHandle
                 | HeapKind::TaskGroup
                 | HeapKind::NativeView
-                | HeapKind::NativeScalar => None,
+                | HeapKind::NativeScalar
+                // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                // ModuleFn references are not user-callable receivers
+                // via method-call dispatch — they route through
+                // op_call_value's `Ptr(HeapKind::ModuleFn)` arm directly
+                // (`invoke_module_fn_id_stub`), not through this generic
+                // PHF lookup.
+                | HeapKind::ModuleFn => None,
             };
             if let Some(h) = heap_handler {
                 return Ok(h);
