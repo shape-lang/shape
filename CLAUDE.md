@@ -53,7 +53,7 @@ The repo is a monorepo with several top-level projects:
 ```bash
 cargo build                    # Debug build
 cargo build --release          # Release build
-cargo check --workspace        # Check compilation without building
+just check-clean               # Canonical workspace-clean gate (exit 0 = green)
 cargo fmt                      # Format code
 cargo clippy                   # Lint
 
@@ -62,6 +62,21 @@ cargo run --bin shape -- repl                # Start REPL
 cargo run --bin shape -- wire-serve          # Start wire protocol server
 cargo run --bin shape -- ext install <name>  # Install extension from source
 ```
+
+**Canonical build gate.** `just check-clean` runs `cargo check --workspace
+--lib --bins --tests --examples` — `--all-targets` minus `--benches`. Every
+workspace member (`shape-macros`, `shape-ast`, `shape-value`, `shape-wire`,
+`shape-runtime`, `shape-vm`, `shape-jit`, `shape-diagnostics`, the two
+`shape-viz` crates, `shape-cli`, `shape-lsp`, `shape-test`, `xtask`,
+`shape-abi-v1`, `shape-gc`, `shape-ext-python`, `shape-ext-typescript`) is
+covered. `shape-app` and `shape-server` are NOT workspace members (they live
+in a separate workspace at `../shape-app/`); they are not covered by this
+gate. `--benches` is excluded because `crates/shape-vm/benches/vm_benchmarks.rs`
+and `crates/shape-vm/benches/typed_access_bench.rs` reference deleted
+post-strict-typing shapes (`OpCode::Lt`, `ValueWord`, `ValueWordExt`,
+`Constant::Value`) — bench-rebuild is Item 5's territory. Both
+`scripts/verify-merge.sh` CHECK 2 and `just test-check` anchor on this
+command's coverage.
 
 ### Test Tiers (use `just`)
 

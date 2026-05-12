@@ -76,20 +76,23 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
-# CHECK 2 — `cargo check --workspace --lib --tests` exits 0
+# CHECK 2 — canonical clean-check gate exits 0
 # -----------------------------------------------------------------------------
+# Same target set as `just check-clean`: `--lib --bins --tests --examples`
+# (`--all-targets` minus `--benches`; the two `shape-vm/benches/*.rs` files
+# reference deleted post-strict-typing shapes and are Item 5's territory).
 if [[ "$fast_mode" -eq 0 ]]; then
-  echo "=== CHECK 2: cargo check --workspace --lib --tests ==="
-  if cargo check --workspace --lib --tests 2>&1 | tail -5; then
-    record_pass "cargo check --workspace --lib --tests"
+  echo "=== CHECK 2: cargo check --workspace --lib --bins --tests --examples ==="
+  if cargo check --workspace --lib --bins --tests --examples 2>&1 | tail -5; then
+    record_pass "cargo check --workspace --lib --bins --tests --examples"
     echo "  -> CLEAN"
   else
-    record_fail "cargo check --workspace --lib --tests" "exit non-zero"
+    record_fail "cargo check --workspace --lib --bins --tests --examples" "exit non-zero"
     echo "  -> FAILED (exit non-zero from cargo)"
   fi
   echo
 else
-  echo "=== CHECK 2: cargo check --tests (SKIPPED in --fast mode) ==="
+  echo "=== CHECK 2: cargo check (canonical gate) (SKIPPED in --fast mode) ==="
   echo
 fi
 
