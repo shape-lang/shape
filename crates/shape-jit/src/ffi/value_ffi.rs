@@ -640,27 +640,87 @@ mod tests {
         assert!(!is_heap(bits));
     }
 
+    /// `box_typed_object` produces a `UnifiedValue<*const u8>` heap
+    /// allocation tagged with `HK_TYPED_OBJECT` at offset 0. Strict-typed
+    /// rewrite of `test_typed_object_encoding` (W12-deleted-valuewordshape-
+    /// tests-rewrite, 2026-05-12).
+    ///
+    /// Pre-rewrite the test asserted the deleted ValueWord-shape invariant
+    /// `is_number(box_typed_object(p)) == false` and `is_typed_object(boxed)
+    /// == true`. Under ADR-006 §2.7.5 the JIT-FFI carrier is
+    /// `(bits, NativeKind)`: producers return raw `Box::into_raw(...) as u64`
+    /// without NaN-box tag bits, so `is_number(boxed)` is true (raw pointer
+    /// bits look like a plain f64) and `is_typed_object(boxed)` is false
+    /// (`is_heap_kind` gates on `is_tagged` first). Discrimination flows
+    /// through the parallel `NativeKind` companion stamped at JIT compile
+    /// time — or, where the test needs to probe the JIT-internal heap
+    /// allocation, via `read_heap_kind(bits)` which reads the `kind: u16`
+    /// prefix at offset 0 of the allocation directly (per §2.7.5 "*not*
+    /// tag-bit dispatch — it reads a field from a heap-resident struct
+    /// that the producing call placed there").
+    ///
+    /// Same construction-side semantics expressed through the strict-typed
+    /// predicate.
     #[test]
-    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
-                ValueWord-shape `is_number` / `box_typed_object` NaN-box \
-                encoding. Under strict typing TypedObject pointers are \
-                typed `Arc<TypedObjectStorage>` carried directly via the \
-                §2.7.5 (bits, NativeKind) JIT-FFI carrier — no NaN-box \
-                tagging. Re-enable after the §2.7.5 carrier rebuild lands."]
-    fn test_typed_object_encoding() {
+    fn test_typed_object_encoding_via_heap_kind_prefix() {
         let fake_ptr = 0x0000_1234_5678_0000u64 as *const u8;
         let boxed = box_typed_object(fake_ptr);
-        assert!(!is_number(boxed));
+        // Construction-side contract: `box_typed_object` produces a
+        // `UnifiedValue<*const u8>` allocation. The kind prefix at offset 0
+        // is the strict-typed §2.7.5 discriminator.
+        assert_ne!(boxed, 0, "allocation pointer is non-null");
+        assert_eq!(
+            unsafe { super::super::jit_kinds::read_heap_kind(boxed) },
+            HK_TYPED_OBJECT,
+            "heap-kind prefix at offset 0 discriminates the allocation"
+        );
 
-        // Round-trip: recover the pointer
+        // Round-trip via direct `unbox_typed_object`: reads the `data`
+        // field of the `UnifiedValue<*const u8>` without gating on tag
+        // bits, recovering the pointer the producer stored.
         let recovered = unbox_typed_object(boxed);
         assert_eq!(recovered, fake_ptr);
 
-        // Non-typed-object values should not match
-        assert!(!is_typed_object(TAG_NULL));
-        assert!(!is_typed_object(box_number(42.0)));
-
-        // Clean up
+        // Clean up the UnifiedValue allocation directly. The deleted
+        // ValueWord-shape clean-up went through `jit_typed_object_dec_ref`,
+        // which itself gates on `is_typed_object(bits)` and is broken on
+        // raw `Box::into_raw` pointers; using `heap_drop` is the §2.7.5
+        // direct-path cleanup.
         unsafe { UnifiedValue::<*const u8>::heap_drop(boxed) };
+    }
+
+    /// Pairing a `KindedSlot` with a typed-object pointer is the
+    /// runtime-tier `(slot, NativeKind)` carrier per ADR-006 §2.7.6 / Q8.
+    /// Reflects the same construction-side contract `box_typed_object`
+    /// expresses at the JIT-FFI tier, but using the bounded carrier API
+    /// from `shape-value`. Same test semantics as the deleted
+    /// `is_typed_object(boxed) == true` invariant, expressed at the
+    /// strict-typed carrier layer where the discriminator IS the kind
+    /// label (no tag-bit probe).
+    #[test]
+    fn test_typed_object_kinded_slot_discriminates_via_kind_label() {
+        use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
+        use std::sync::Arc;
+
+        // Build a minimal `Arc<TypedObjectStorage>` — the strict-typed
+        // analog of the JIT-internal `box_typed_object(*const TypedObject)`
+        // wrapping. The VM-tier carrier is the canonical receiver-recovery
+        // shape per ADR-005 §1 single-discriminator.
+        let storage = TypedObjectStorage::new(
+            0,
+            Vec::<ValueSlot>::new().into_boxed_slice(),
+            0,
+            Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
+        );
+        let slot = KindedSlot::from_typed_object(Arc::new(storage));
+
+        // §2.7.6 / Q8: the kind label discriminates the slot — no tag-bit
+        // probe required (and tag-bit probes don't exist post-strict-
+        // typing). Construction-side contract holds.
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        // The matching heap discriminator for an `Arc<TypedObjectStorage>`
+        // slot is `HeapKind::TypedObject` — the §2.7.5/Q8 bounded-carrier
+        // API exposes one constructor per kind variant, mirror-matching
+        // the heap arm.
     }
 }

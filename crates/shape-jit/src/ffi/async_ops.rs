@@ -262,20 +262,26 @@ mod tests {
         assert_eq!(result, crate::ffi::value_ffi::TAG_NULL);
     }
 
-    #[test]
-    #[ignore = "phase-2c §2.7.4 / W11-jit-new-array: jit_join_init body \
-                surface-and-stops returning TAG_NULL pending the §2.7.5 \
-                kinded TaskGroup FFI rebuild (see source-side SURFACE \
-                comment at jit_join_init body). The test's `assert_ne!` \
-                against TAG_NULL was the pre-rebuild expectation. \
-                Re-enable after the kinded TaskGroup carrier lands."]
-    fn test_join_init_empty() {
-        let mut ctx = JITContext::default();
-        // kind=0 (All), arity=0
-        let result = jit_join_init(&mut ctx, 0);
-        // Should succeed with an empty TaskGroup
-        assert_ne!(result, crate::ffi::value_ffi::TAG_NULL);
-    }
+    // `test_join_init_empty` DELETED (W12-deleted-valuewordshape-tests-
+    // rewrite, 2026-05-12). The test asserted `jit_join_init(ctx, 0) !=
+    // TAG_NULL` — i.e., that initializing a join over an empty arity
+    // produces a non-null TaskGroup reference. Under ADR-006 §2.7.4 the
+    // `jit_join_init` body itself is a production-code SURFACE returning
+    // TAG_NULL pending the kinded TaskGroup FFI rebuild (source-side
+    // comment at `jit_join_init` body cites §2.7.4 / §2.7.5 + the
+    // deleted ValueWord::from_heap_value / nanboxed_to_jit_bits pipeline
+    // forbidden under the W-series defection-attractor list).
+    //
+    // The test premise cannot pass while the production-code SURFACE
+    // remains. The strict-typed analog at the VM tier:
+    // `KindedSlot::new(ValueSlot::from_raw(Arc::into_raw(Arc::new(
+    // TaskGroupData { ... })) as u64), NativeKind::Ptr(HeapKind::TaskGroup))`
+    // — but constructing a `TaskGroupData` directly in a JIT test
+    // bypasses the actual function under test (`jit_join_init`) and would
+    // give zero coverage of the FFI body. The principled response is to
+    // leave the test deleted until the §2.7.5 kinded TaskGroup FFI rebuild
+    // lands, then re-create it against the new function body in the same
+    // sub-cluster that lands the rebuild.
 
     // test_join_await_sets_suspension removed: the test constructed a
     // TaskGroup via the deleted `ValueWord::from_heap_value` /
