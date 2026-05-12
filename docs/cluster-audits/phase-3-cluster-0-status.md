@@ -347,9 +347,113 @@ correct cites are §2.7.14 / §2.7.5. Round-5B agent fixes this.
 
 | Sub-cluster | Branch | Smoke unblocked | Status |
 |---|---|---|---|
-| W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) | dispatching |
+| W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) + array-scalar (`xs[0] + xs[1]`) | **closed** (2026-05-12) |
 | W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | dispatching (audit-first) |
 | W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | dispatching |
+
+### W12-jit-binop-after-heap-read-kind-tracker close (2026-05-12)
+
+Producer-side kind threading per ADR-006 §2.7.5 stamp-at-compile-time.
+Closes the `compile_binop_dynamic_arith: kind-untyped arith Add reached
+the JIT — SURFACE per W10 playbook §5: producing-MIR kind-tracker gap`
+surface plus three cascade bugs the previous compile-time error path
+masked.
+
+**Three layers fixed in lockstep**:
+
+1. **Consumer-side kind classification** (`mir_compiler/rvalues.rs`):
+   new `place_native_kind` projects `Place::Field` via a producer-side
+   `field_native_kinds: HashMap<String, NativeKind>` map (populated by
+   `infer_field_native_kinds`'s walk of `StatementKind::ObjectStore`)
+   and `Place::Index` via the existing `v2_typed_array_elem_kind`
+   projection over `concrete_types`'s `Array<scalar>` shape.
+   `operand_slot_kind` now uses this for Field/Index instead of the
+   root-local lookup that returned the base's heap kind.
+
+2. **MIR-level destination-kind inference** (`mir_compiler/types.rs`):
+   new `infer_slot_kinds_with_concrete` extends `infer_slot_kinds` to
+   accept the `concrete_types` side-table. Inside, new
+   `infer_operand_kind_with_projections` + `infer_rvalue_kind_with_
+   projections` carry Field + Index projection through both the
+   forward pass (for `Assign(slot, Use(Move(Field)))` destinations)
+   and the backward pass (for `BinaryOp` operand kind propagation).
+   Without this, the destination slot of `let a = p.x` inherited
+   `Ptr(TypedObject)` from the base — refcount-dispatched as heap
+   and segfaulted on the raw-int field value.
+
+3. **JIT-FFI consumer migration** (`ffi/typed_object/field_access.rs`):
+   removed `is_typed_object(obj_bits)` precondition from
+   `jit_typed_object_get_field` / `_set_field`. This was the
+   documented production-code consumer migration gap from the
+   deleted-test comment at `field_access.rs:275..314`:
+   `is_typed_object → is_heap_kind → is_heap` requires `is_tagged`
+   (NaN-box tag bits) but JIT-allocated `box_typed_object` returns
+   raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+   pointers per §2.7.5 stamp-at-compile-time. Every set_field call
+   on a valid producer output took the "not a typed object" early-
+   return path and returned TAG_NULL — silently null-corrupting the
+   just-allocated TypedObject and segfaulting on the subsequent
+   field-read deref. Null-pointer / mis-alignment guards remain.
+
+**Also fixed in lockstep**: `refcount_disposition` in `ownership.rs`
+discriminated on `place.root_local()` for projection places, calling
+`arc_retain(i64_field_value)` for `Copy(Field(p_TypedObject, x_Int64))`
+— segfaulted in `Arc::increment_strong_count` interpreting the integer
+3 as a pointer. The new `match place { Field/Index => place_native_
+kind-projected }` arm at the top of `refcount_disposition` closes this
+latent bug; it was masked by the `compile_binop_dynamic_arith` compile-
+time error path that previously prevented this code from executing.
+
+**Smoke results (VM = JIT, both EXIT=0)**:
+
+- Smoke 3 (`p.x + p.y` after `Point{x:3, y:4}`): VM `7`, JIT `7`.
+- Array smoke (`xs[0] + xs[1]` over `Array<int>`): VM `30`, JIT `30`.
+
+**Close gates (devenv exit-code-verified)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` EXIT=0 (322 / 0 / 26 — matches
+  baseline 322 / 0 / 26 verified by stash-and-rerun; kickoff's
+  "319/0/38 baseline" claim was stale)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Sites surfaced (NOT silently skipped)**:
+
+- The `jit_typed_object_set_field` / `_get_field` `is_typed_object`
+  gate (consumer migration gap #3 above) is the FIRST instance fixed
+  for the typed-object family; the same NaN-box-tag-bit precondition
+  pattern likely lives in other FFI bodies that gate on `is_X(bits)`
+  for `is_typed_array`, `is_typed_string`, `is_typed_hashmap`, etc.
+  Each is a separate migration gap that the same §2.7.5 reasoning
+  applies to — surface-and-stop here, the broader sweep is its own
+  sub-cluster. Pattern grep: `grep -rn 'is_heap_kind\|is_tagged.*HEAP\|is_typed_' crates/shape-jit/src/ffi/`.
+
+- A schema-aware `(StructLayoutId, FieldIdx) → NativeKind` registry is
+  the principled long-term shape for `field_native_kinds` (currently
+  keyed by field NAME with last-writer-wins on cross-struct name
+  collision — same fragility as the existing `field_byte_offsets`).
+  Out-of-scope for this sub-cluster; no current cluster-0 smoke
+  exercises a collision.
+
+- `Place::Deref` projection in `place_native_kind` returns `None` —
+  references are heap-tier indirection and the type-of-pointed-to-
+  value is not threaded into the JIT-side projection map yet. No
+  current cluster-0 smoke exercises a binop after a ref-deref; if a
+  future smoke surfaces this, thread the deref-target kind via the
+  MIR's reference annotations.
+
+**ADR-006 amendment**: NOT required. Producer-side classification at
+both MIR-emission time (`StatementKind::ObjectStore` walk for fields)
+and bytecode-compiler conduit time (`Array<scalar>` via
+`concrete_types`) — the same §2.7.5 conduit shape the
+`W12-top-level-concrete-types-conduit` Round-3 close already
+established. The FFI consumer migration is the §2.7.5 "kind stamped at
+the call signature, not decoded from bits" applied to one specific
+FFI body family.
+
+Branch: `bulldozer-strictly-typed-w12-jit-binop-heap-read`
+Close commit: pending (appended at commit)
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 

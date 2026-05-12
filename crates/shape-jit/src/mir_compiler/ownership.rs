@@ -100,6 +100,46 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return Ok(RefcountDisposition::Skip_TypedCellCarrier);
         }
 
+        // W12-jit-binop-after-heap-read-kind-tracker: for projection
+        // places (`Place::Field` / `Place::Index`), the value being
+        // copied is the field's / element's value, NOT the base struct/
+        // array's heap handle. Refcount disposition must follow the
+        // PROJECTED kind. `place_native_kind` does the project lookup
+        // through the producer-side `field_native_kinds` map (§2.7.5
+        // producer classification) for fields and through
+        // `concrete_types`'s `Array<scalar>` shape for indexes — the
+        // same kind sources the BinaryOp lowering picker uses.
+        //
+        // Without this projection, `Copy(Field(p_TypedObject, x_Int64))`
+        // routed `refcount_disposition` to the base's `Ptr(TypedObject)`
+        // kind (refcounted), then `compile_operand`'s Copy arm called
+        // `arc_retain(i64_3_field_value)` — segfaulting in
+        // `Arc::increment_strong_count` interpreting the integer 3 as
+        // a pointer.
+        match place {
+            Place::Field(_, _) | Place::Index(_, _) => {
+                match self.place_native_kind(place) {
+                    Some(k) if k.is_refcounted() => {
+                        return Ok(RefcountDisposition::Refcounted);
+                    }
+                    Some(_) => return Ok(RefcountDisposition::Skip),
+                    None => {
+                        // Projection kind genuinely unproven at this
+                        // consumer site (e.g. the field name isn't in
+                        // `field_native_kinds` because the producer-side
+                        // walk didn't see the ObjectStore that stamps
+                        // it, or the array's `ConcreteType` isn't
+                        // `Array<scalar>`). Fall through to the
+                        // root-local-kind dispatch below — that arm
+                        // already has the surface-and-stop discipline
+                        // for genuinely-unproven kinds via the
+                        // `LocalTypeInfo` arms.
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // Authoritative kind source: the slot's proven `NativeKind` from
         // bytecode-compiler seed + MIR-level inference. Under §2.7.5
         // stamp-at-compile-time this is the canonical refcount

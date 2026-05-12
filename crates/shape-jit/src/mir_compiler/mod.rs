@@ -158,6 +158,30 @@ pub struct MirToIR<'a, 'b> {
     /// Mapping from field name to byte offset within a TypedObject.
     pub(crate) field_byte_offsets: HashMap<String, u16>,
 
+    /// W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5
+    /// stamp-at-compile-time): field-name → `NativeKind` map populated
+    /// by the producer-side MIR walk (`infer_field_native_kinds` in
+    /// `types.rs`). Every `StatementKind::ObjectStore { operands,
+    /// field_names, .. }` stamps each named operand's MIR-inferred kind
+    /// here, threading the producer's kind classification across the
+    /// `Place::Field` projection at consumer sites — specifically the
+    /// `Rvalue::BinaryOp` lowering in `rvalues.rs`, which needs proven
+    /// operand kinds at compile time per CLAUDE.md "Forbidden code"
+    /// (runtime tag_bits dispatch deleted with the W-series IC).
+    ///
+    /// Keying by field name (not `FieldIdx` or `StructLayoutId`) mirrors
+    /// the existing `field_byte_offsets` discipline; both maps have the
+    /// same structural caveat ("last-writer-wins on name collision
+    /// across distinct struct types") but cover every load-bearing
+    /// cluster-0 smoke. A schema-aware `(StructLayoutId, FieldIdx) →
+    /// NativeKind` registry is the principled long-term shape — out of
+    /// scope for this sub-cluster.
+    ///
+    /// Populated once at `MirToIR::new_with_closure_layouts` time so
+    /// the kind is available for cross-block field reads, mirroring how
+    /// `slot_kinds` is computed pre-codegen via `infer_slot_kinds`.
+    pub(crate) field_native_kinds: HashMap<String, NativeKind>,
+
     // ── Closure Spec Phase E: stack-allocated closures ──────────────
     /// Slots that hold a non-escaping closure value, per the MIR
     /// storage plan's `non_escaping_closure_slots`. When a
@@ -541,7 +565,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .iter()
             .map(|ct| types::native_kind_from_concrete_type(ct))
             .collect();
-        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &concrete_seed);
+        // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
+        // pass `concrete_types` through so `infer_slot_kinds` can project
+        // `Place::Index` through the `Array<scalar>` shape — same kind
+        // source the JIT codegen-side `place_native_kind` /
+        // `v2_typed_array_elem_kind` projection uses. Without this the
+        // destination slot of `Assign(slot, Use(Copy(Index(xs, _))))`
+        // inherits `xs`'s `Ptr(HeapKind::TypedArray)` kind, then the
+        // print dispatcher in `terminators.rs::Call` falls through to
+        // the kind-blind `jit_print` fallback that decodes the raw int
+        // as f64 (denormalized-garbage output).
+        let slot_kinds =
+            types::infer_slot_kinds_with_concrete(&mir_data.mir, &concrete_seed, &concrete_types);
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
@@ -687,6 +722,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let closure_placeholder_fids =
             scan_closure_placeholder_fids(&mir_data.mir, function_indices);
 
+        // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
+        // pre-pass the MIR for every `StatementKind::ObjectStore` and
+        // record each named operand's inferred kind. This makes
+        // `Place::Field(_, field_idx)` reads available with a proven
+        // kind at JIT compile time, so the downstream `Rvalue::BinaryOp`
+        // lowering picks the typed inline arithmetic path instead of
+        // surfacing `compile_binop_dynamic_arith`. Pre-pass placement
+        // (rather than during `compile_statement`) makes the kind
+        // available for cross-block field reads, mirroring how
+        // `infer_slot_kinds` and the §2.7.5 conduit's
+        // `infer_top_level_concrete_types_from_mir` already work.
+        let field_native_kinds =
+            types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
+
         Self {
             builder,
             ctx_ptr,
@@ -706,6 +755,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_arities,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
+            field_native_kinds,
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
             stack_closure_call_info: HashMap::new(),
