@@ -455,10 +455,14 @@ mod tests {
     // companion explicitly.
 
     #[test]
-    #[should_panic(expected = "phase-2c")]
+    #[ignore = "SURFACE: jit_call_foreign_native_0 is extern \"C\" todo!() pending kinded foreign-call ABI rebuild (ADR-006 §2.7.10/Q11, docs/cluster-audits/wave-10-jit-playbook.md §5); extern C can't unwind, so #[should_panic] aborts the test process. Re-enable via `cargo test -- --ignored` once the underlying SURFACE closes."]
     fn native_fixed_arity_helpers_surface_pending_kinded_abi() {
         // SURFACE: jit_call_foreign_native_args_fixed routes to todo!()
         // pending the kinded foreign-call ABI rebuild (§2.7.10/Q11).
+        // Can't use #[should_panic] on extern "C" functions: Rust 1.93+
+        // aborts the process (SIGABRT) on a non-unwinding panic instead of
+        // reporting a clean test failure. Same constraint as
+        // ffi/v2/mod.rs:1060 `test_array_get_oob_returns_none_via_typed_array`.
         let _ = jit_call_foreign_native_0(std::ptr::null_mut(), 0);
     }
 
