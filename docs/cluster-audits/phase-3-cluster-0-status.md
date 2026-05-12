@@ -536,6 +536,87 @@ conduit successfully stamped Enum (including `divide`).
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
+## Round 6 — dispatching (post-Round-5B option-iii surface)
+
+Three sub-clusters dispatched 2026-05-12 from Round 5B's surfaced
+trinity (`docs/cluster-audits/w12-jit-aggregate-non-array-audit.md` §4.4):
+
+| Sub-cluster | Branch | Smoke unblocked | Status |
+|---|---|---|---|
+| W12-jit-call-return-kind-track | `bulldozer-strictly-typed-w12-jit-call-return-kind` | 1.5 + 2 (slot kind after Call terminator) | dispatching |
+| W12-jit-match-enum-inline | `bulldozer-strictly-typed-w12-jit-match-enum-inline` | 1.5 + 2 (Ok/Err/Some/None match dispatch) | **audit-only close** (2026-05-12) — surfaced trinity-dependency |
+| W12-collection-constructor-mir-lowering | `bulldozer-strictly-typed-w12-collection-ctors` | 4 (HashMap/Set/Deque/...) | dispatching |
+
+### W12-jit-match-enum-inline audit close (2026-05-12)
+
+Audit-first sub-cluster. Audit doc:
+`docs/cluster-audits/w12-jit-match-enum-inline-audit.md`.
+
+**Audit finding**: the JIT match-on-enum codegen for `Ok(v)`/`Err(e)`/
+`Some(x)`/`None` is one of three architectural items the W12-jit-aggregate-
+non-array §4.4 audit identified as a trinity. The three (Call-return kind
+track, match codegen, NaN-box↔Arc round-trip ABI) must land together to
+make Smoke 1.5 / Smoke 2 pass JIT end-to-end — landing only one in
+isolation forces forbidden bridge / translator shapes (CLAUDE.md
+"Renames to refuse on sight" broader-family rule extends to the
+NaN-box↔Arc boundary).
+
+The audit lands the MIR-shape blueprint:
+
+- New `Rvalue::EnumTest { operand, variant: VariantTag }` for producer-
+  side variant testing (replaces the kind-blind `SwitchBool { operand:
+  Copy(scrutinee) }` shape that current `lower_match_pattern_condition_operand`
+  emits).
+- New `Rvalue::EnumPayload { operand, variant: VariantTag }` for
+  producer-side payload extraction (replaces the meaningless
+  `Place::Index(scrutinee, 0)` projection that current
+  `lower_constructor_bindings_from_place_opt` emits).
+- New FFI helpers `jit_arc_result_is_ok` / `is_err` / `payload`,
+  `jit_arc_option_is_some` / `is_none` / `payload` operating on
+  `Arc<ResultData>` / `Arc<OptionData>` directly (NOT NaN-box tag bits —
+  the deleted W-series predicate family).
+- ~10 exhaustive-match site updates across `mir/{solver,liveness,
+  field_analysis,return_ownership}.rs` + `mir_compiler/rvalues.rs`.
+
+**Why audit-only:** match codegen depends on the EnumStore producer
+emitting `Arc::into_raw(Arc<ResultData>) as u64` bits — but the current
+`jit_make_ok` / `_err` / `_some` FFI returns NaN-boxed
+`unified_box(HK_OK, ...)` bits. The two shapes are not interconvertible
+without a "translator / decoder bridge" (CLAUDE.md broader-family forbidden
+framing). Wiring my match codegen against either shape in isolation
+either (a) segfaults at the VM↔JIT boundary (Arc against NaN-box producer)
+or (b) re-introduces deleted tag-bit dispatch (NaN-box against Arc
+producer). Per CLAUDE.md surface-and-stop discipline, the audit surfaces
+the dependency and lands the structural blueprint as the spec for a
+co-design dispatch.
+
+**Cross-cluster dependencies surfaced**:
+
+- 6A (`W12-jit-call-return-kind-track`) — load-bearing for the top-level
+  `let r = divide(...)` slot kind classification.
+- New item: `jit_v2_make_result_*` / `jit_v2_make_option_*` producers
+  returning Arc shape (NaN-box↔Arc ABI co-design from §4.4 item 3) —
+  load-bearing for my match codegen's consumer side.
+- 6B (this audit) — blueprint landed, code deferred until trinity items
+  are co-designed.
+
+**Close gates** (audit-only delivery — no code change beyond audit doc + status):
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 322/0/26 (baseline unchanged)
+- `bash scripts/verify-merge.sh` 12/12
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+- Smoke 1.5 / Smoke 2 under `--mode jit`: unchanged (still `JIT execution
+  error (code: -1)`); under `--mode vm`: unchanged (`5` / `Some(3)`).
+
+**ADR amendment**: NOT required. Audit's blueprint reuses existing concepts
+(§2.7.5 producer-site classification, §2.7.17 Arc<ResultData> / Arc<OptionData>
+runtime carriers). The trinity co-design itself may or may not need an
+amendment — that's the co-design sub-cluster's call.
+
+Branch: `bulldozer-strictly-typed-w12-jit-match-enum-inline`
+Audit commit: pending (this commit)
+Close: audit-only — code deferred to trinity co-design
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
