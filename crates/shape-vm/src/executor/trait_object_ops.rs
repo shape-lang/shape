@@ -41,9 +41,10 @@ use crate::{
 };
 use shape_value::{
     HeapKind, KindedSlot, NativeKind, VMError, ValueSlot,
-    heap_value::TraitObjectStorage,
-    value::{VTable, VTableEntry},
+    heap_value::{OptionData, ResultData, TraitObjectStorage, TypedObjectStorage},
+    value::{VTable, VTableEntry, WrapTarget},
 };
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -325,173 +326,306 @@ impl VirtualMachine {
                 ))
             })?;
 
-        // Dispatch.
+        // Dispatch per §Q25.C.5 `VTableEntry`. The dispatch path
+        // factors into four orthogonal stages:
+        //  1. `SelfArg` identity check (§Q25.C.2) — verify each
+        //     `Self`-typed argument's vtable matches the receiver's.
+        //  2. (`Generic` is a no-op at the bytecode tier — Shape's
+        //     generic methods are already type-erased at the impl's
+        //     function-id; the `TypeInfo` parameter in the §Q25.C.3
+        //     spec is metadata for the thunk to dispatch operations
+        //     on `g`, not a separate bytecode argument. Wave 3
+        //     deferred amendment if Shape later adopts per-call-site
+        //     monomorphization.)
+        //  3. Invoke the impl method.
+        //  4. `BoxedReturn` re-wrap (§Q25.C.1) — walk every
+        //     `WrapTarget::path` through the return value and re-box
+        //     each Self-named site into a fresh `TraitObjectStorage`
+        //     using the receiver's vtable.
+        //
+        // `Direct` / `BoxedReturn(top-level)` / `BoxedReturn(nested)`
+        // / `SelfArg` / `Generic` / `Compound` all funnel through
+        // `invoke_dyn_unified` with the appropriate (wrap_targets,
+        // self_arg_positions) descriptors. `Closure` routes through
+        // `call_value_immediate_nb` per §2.7.11/Q12.
         match entry {
-            VTableEntry::Direct { .. } => self.invoke_dyn_direct(
+            VTableEntry::Direct { .. } => self.invoke_dyn_unified(
                 runtime_function_id,
                 &trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
-                /*box_return_as=*/ None,
+                /*wrap_targets=*/ &[],
+                /*self_arg_positions=*/ &[],
             ),
-            VTableEntry::BoxedReturn { ref wrap_targets, .. } => {
-                // Round-2 scope: only top-level Self (path=[]) wrap.
-                let top_level_only = wrap_targets.len() == 1
-                    && wrap_targets[0].path.is_empty();
-                if !top_level_only {
-                    return Err(VMError::NotImplemented(format!(
-                        "SURFACE: DynMethodCall BoxedReturn with nested wrap-targets \
-                         (path={:?}) per ADR-006 §2.7.24 Q25.C.5 — emission-tier \
-                         thunk generation for nested Self is round-3+ work \
-                         (Result<Self,E>, Option<Self>, (Self, Self), HashMap<K,Self>).",
-                        wrap_targets.iter().map(|w| &w.path).collect::<Vec<_>>()
-                    )));
-                }
-                self.invoke_dyn_direct(
+            VTableEntry::BoxedReturn { ref wrap_targets, .. } => self.invoke_dyn_unified(
+                runtime_function_id,
+                &trait_object,
+                arg_count,
+                receiver_idx,
+                ctx,
+                wrap_targets.as_slice(),
+                &[],
+            ),
+            VTableEntry::SelfArg {
+                ref self_arg_positions,
+                ..
+            } => self.invoke_dyn_unified(
+                runtime_function_id,
+                &trait_object,
+                arg_count,
+                receiver_idx,
+                ctx,
+                &[],
+                self_arg_positions.as_slice(),
+            ),
+            VTableEntry::Generic { .. } => {
+                // Generic: at the bytecode tier the impl method is
+                // already monomorphic-shaped (accepts raw arg slots,
+                // dispatches internally). No TypeInfo threading is
+                // emitted at the current Shape bytecode layer.
+                // Treat as Direct for runtime dispatch; the impl's
+                // body handles the polymorphism. See §Q25.C.3 spec
+                // note above for the deferred amendment shape.
+                self.invoke_dyn_unified(
                     runtime_function_id,
                     &trait_object,
                     arg_count,
                     receiver_idx,
                     ctx,
-                    Some(Arc::clone(&trait_object.vtable)),
+                    &[],
+                    &[],
                 )
             }
-            VTableEntry::Closure { .. } => Err(VMError::NotImplemented(
-                "SURFACE: DynMethodCall Closure variant per ADR-006 §2.7.24 \
-                 Q25.C.5 — W7 closure-trait-impl dispatch through dyn is \
-                 round-3+ work (closure-call gate, see W17-trait-object \
-                 close commit)."
-                    .to_string(),
-            )),
-            VTableEntry::SelfArg { .. } => Err(VMError::NotImplemented(
-                "SURFACE: DynMethodCall SelfArg variant per ADR-006 §2.7.24 \
-                 Q25.C.2 — Self in argument position requires runtime \
-                 vtable-identity check; thunk emission is round-3+ work."
-                    .to_string(),
-            )),
-            VTableEntry::Generic { .. } => Err(VMError::NotImplemented(
-                "SURFACE: DynMethodCall Generic variant per ADR-006 §2.7.24 \
-                 Q25.C.3 — method-generic parameters require TypeInfo \
-                 threading; thunk emission is round-3+ work."
-                    .to_string(),
-            )),
-            VTableEntry::Compound { .. } => Err(VMError::NotImplemented(
-                "SURFACE: DynMethodCall Compound variant per ADR-006 §2.7.24 \
-                 Q25.C.5 — combined BoxedReturn/SelfArg/Generic shapes \
-                 require multi-flag thunk emission; round-3+ work."
-                    .to_string(),
-            )),
+            VTableEntry::Compound {
+                ref wrap_targets,
+                ref self_arg_positions,
+                ..
+            } => self.invoke_dyn_unified(
+                runtime_function_id,
+                &trait_object,
+                arg_count,
+                receiver_idx,
+                ctx,
+                wrap_targets.as_slice(),
+                self_arg_positions.as_slice(),
+            ),
+            VTableEntry::Closure {
+                function_id,
+                type_id: _,
+            } => self.invoke_dyn_closure(
+                function_id,
+                &trait_object,
+                arg_count,
+                receiver_idx,
+                ctx,
+            ),
         }
     }
 
-    /// Common path for `Direct` + `BoxedReturn(top-level Self)` dispatch.
+    /// Unified dispatch for `Direct` / `BoxedReturn` / `SelfArg` /
+    /// `Generic` / `Compound` variants. The variant differences are
+    /// encoded by the `(wrap_targets, self_arg_positions)` arguments:
+    ///  - `Direct` / `Generic`: both empty.
+    ///  - `BoxedReturn(top-level)`: wrap_targets = [{path:[]}].
+    ///  - `BoxedReturn(nested)`: wrap_targets has paths like [[0]], [[1]], etc.
+    ///  - `SelfArg`: self_arg_positions non-empty.
+    ///  - `Compound`: either or both non-empty.
     ///
-    /// The impl method expects `self` as its first parameter (the
-    /// concrete `TypedObject`, not the `dyn` carrier). We:
-    ///  1. Replace the receiver slot's `dyn` carrier with the inner
-    ///     `Arc<TypedObjectStorage>` (re-boxing it as a `TypedObject`
-    ///     KindedSlot).
-    ///  2. Call the impl/thunk function.
-    ///  3. If `box_return_as` is `Some(vtable)`, the impl returned a
-    ///    concrete value that must be re-wrapped as a `dyn` carrier
-    ///    using `vtable`.
-    fn invoke_dyn_direct(
+    /// The dispatch sequence:
+    ///  1. **SelfArg identity check** (§Q25.C.2): for each
+    ///     `pos ∈ self_arg_positions`, peek `args[pos]` and verify
+    ///     it's a `TraitObject` whose vtable matches the receiver's
+    ///     via `Arc::ptr_eq` (canonical equality per
+    ///     `TraitObjectStorage::vtable_eq`).
+    ///  2. **Argument lowering**: replace the receiver slot's `dyn`
+    ///     carrier with the inner `Arc<TypedObjectStorage>`. For each
+    ///     `Self`-typed argument (per `self_arg_positions`), also
+    ///     replace the slot with the inner TypedObject (the impl
+    ///     method expects concrete-typed args, not dyn carriers).
+    ///  3. **Call**: route through `call_function_with_nb_args` +
+    ///     `execute_until_call_depth` per the canonical call path.
+    ///  4. **Return wrap** (§Q25.C.1): walk every `WrapTarget::path`
+    ///     through the return value and re-box at the leaf.
+    fn invoke_dyn_unified(
         &mut self,
         function_id: u16,
         trait_object: &Arc<TraitObjectStorage>,
         arg_count: usize,
         receiver_idx: usize,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-        box_return_as: Option<Arc<VTable>>,
+        wrap_targets: &[WrapTarget],
+        self_arg_positions: &[u8],
     ) -> Result<(), VMError> {
-        // Step 1: replace the receiver slot's `dyn` carrier with the
-        // inner `Arc<TypedObjectStorage>` share. `stack_write_kinded`
-        // drops the previous occupant (releasing one
-        // `Arc<TraitObjectStorage>` share) and installs the new share.
-        // The `Arc::into_raw(Arc::clone(...))` transfers an owned
-        // share into the slot — refcount-discipline-correct.
+        // Step 1: SelfArg identity check per §Q25.C.2. The arg slots
+        // live at receiver_idx + 1 + pos (pos is 0-based, receiver-
+        // excluded per `build_and_register_vtable`).
+        for &pos in self_arg_positions {
+            let arg_idx = receiver_idx
+                .checked_add(1)
+                .and_then(|x| x.checked_add(pos as usize))
+                .ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "DynMethodCall SelfArg: arg_idx arithmetic overflow"
+                            .to_string(),
+                    )
+                })?;
+            if arg_idx >= self.sp {
+                return Err(VMError::RuntimeError(format!(
+                    "DynMethodCall SelfArg: position {} out of range \
+                     (receiver_idx={}, sp={})",
+                    pos, receiver_idx, self.sp
+                )));
+            }
+            let (arg_bits, arg_kind) = self.stack_read_kinded_raw(arg_idx);
+            let arg_trait_object: &TraitObjectStorage = match arg_kind {
+                NativeKind::Ptr(HeapKind::TraitObject) => {
+                    if arg_bits == 0 {
+                        return Err(VMError::RuntimeError(format!(
+                            "DynMethodCall SelfArg: null TraitObject \
+                             pointer at arg position {}",
+                            pos
+                        )));
+                    }
+                    // SAFETY: kind=Ptr(TraitObject); bits are
+                    // `Arc::into_raw::<TraitObjectStorage>(arc)` per
+                    // §2.3 typed-Arc invariant. Transient borrow —
+                    // we hold no `Arc<...>` from this raw pointer,
+                    // just deref the live storage.
+                    unsafe { &*(arg_bits as *const TraitObjectStorage) }
+                }
+                other => {
+                    return Err(VMError::RuntimeError(format!(
+                        "DynMethodCall SelfArg: position {} expected \
+                         trait object (NativeKind::Ptr(HeapKind::TraitObject)), \
+                         got {:?}. Per ADR-006 §2.7.24 Q25.C.2 a Self-typed \
+                         argument flowing through `dyn T` must itself be a \
+                         trait object so the vtable-identity check can run.",
+                        pos, other
+                    )));
+                }
+            };
+            if !trait_object.vtable_eq(arg_trait_object) {
+                return Err(VMError::RuntimeError(format!(
+                    "DynMethodCall SelfArg: vtable identity mismatch at \
+                     argument position {}. Per ADR-006 §2.7.24 Q25.C.2 \
+                     `Self` in argument position requires the argument's \
+                     concrete type to match the receiver's. Receiver \
+                     trait(s): {:?}; argument trait(s): {:?}.",
+                    pos, trait_object.vtable.trait_names,
+                    arg_trait_object.vtable.trait_names
+                )));
+            }
+        }
+
+        // Step 2: lower the receiver and any Self-typed arguments
+        // from `dyn` carriers to their inner `Arc<TypedObjectStorage>`.
+        // `stack_write_kinded` drops the previous occupant (releasing
+        // the `Arc<TraitObjectStorage>` share) and installs the
+        // new share.
         let inner_typed_object = Arc::clone(&trait_object.value);
         let new_bits = Arc::into_raw(inner_typed_object) as u64;
         let new_kind = NativeKind::Ptr(HeapKind::TypedObject);
         self.stack_write_kinded(receiver_idx, new_bits, new_kind);
 
-        // Step 2: collect the receiver + args into a `Vec<KindedSlot>`
-        // for `call_function_with_nb_args`. Each slot's share
-        // transfers into the new vec — we read the bits then
-        // sentinel out the stack slot, which moves ownership of the
-        // share to the vec entry without bumping the refcount.
+        for &pos in self_arg_positions {
+            let arg_idx = receiver_idx + 1 + (pos as usize);
+            let (arg_bits, arg_kind) = self.stack_read_kinded_raw(arg_idx);
+            // Already validated as TraitObject above.
+            debug_assert_eq!(arg_kind, NativeKind::Ptr(HeapKind::TraitObject));
+            // SAFETY: validated above; transient borrow to read the
+            // inner typed object share, then clone-bump and install.
+            let arg_to: &TraitObjectStorage = unsafe {
+                &*(arg_bits as *const TraitObjectStorage)
+            };
+            let arg_inner = Arc::clone(&arg_to.value);
+            let new_arg_bits = Arc::into_raw(arg_inner) as u64;
+            self.stack_write_kinded(arg_idx, new_arg_bits, new_kind);
+        }
+
+        // Step 3: collect receiver + args + call.
         let total = arg_count + 1;
         let mut args: Vec<KindedSlot> = Vec::with_capacity(total);
         for i in 0..total {
             let (b, k) = self.stack_take_kinded(receiver_idx + i);
             args.push(KindedSlot::new(ValueSlot::from_raw(b), k));
         }
-        self.sp = receiver_idx; // pop all the consumed slots
+        self.sp = receiver_idx;
 
         let saved_depth = self.call_stack.len();
         self.call_function_with_nb_args(function_id, &args)?;
-        // The new frame's stack_write_kinded path transferred each
-        // arg's share into its frame slot; suppress the KindedSlot
-        // Drop on our Vec entries to avoid double-decrement.
         for slot in args {
             std::mem::forget(slot);
         }
-
-        // Drive the callee to completion.
         self.execute_until_call_depth(saved_depth, ctx)?;
 
-        // Pop the result.
+        // Step 4: pop the result, then walk wrap_targets to re-box
+        // every Self-named site.
         let (ret_bits, ret_kind) = self.pop_kinded()?;
-
-        // If this is the BoxedReturn path, re-wrap the concrete
-        // TypedObject return into a fresh dyn carrier.
-        if let Some(vtable) = box_return_as {
-            let inner_typed = match ret_kind {
-                NativeKind::Ptr(HeapKind::TypedObject) => {
-                    if ret_bits == 0 {
-                        return Err(VMError::RuntimeError(
-                            "DynMethodCall BoxedReturn: null TypedObject return"
-                                .to_string(),
-                        ));
-                    }
-                    // SAFETY: kind=Ptr(TypedObject); bits are
-                    // `Arc::into_raw::<TypedObjectStorage>(arc)`; the
-                    // popped slot owns one strong-count share. This
-                    // `Arc::from_raw` takes ownership of that share.
-                    unsafe {
-                        Arc::from_raw(ret_bits as *const shape_value::heap_value::TypedObjectStorage)
-                    }
-                }
-                NativeKind::Ptr(HeapKind::TraitObject) => {
-                    // Impl already returned a dyn carrier (e.g. it
-                    // called another dyn method internally that the
-                    // BoxedReturn path already wrapped). Pass through.
-                    self.push_kinded(ret_bits, ret_kind)?;
-                    return Ok(());
-                }
-                _ => {
-                    drop_kinded(ret_bits, ret_kind);
-                    return Err(VMError::NotImplemented(format!(
-                        "SURFACE: DynMethodCall BoxedReturn with scalar return kind \
-                         {:?} requires universal-dyn auto-boxing per ADR-006 §2.7.24 \
-                         Q25.C.1; scalar-payload trait objects are deferred.",
-                        ret_kind
-                    )));
-                }
-            };
-
-            // `inner_typed` owns one share. `vtable` was cloned in
-            // the dispatch lookup. Both move into TraitObjectStorage::new.
-            let new_to = Arc::new(TraitObjectStorage::new(inner_typed, vtable));
-            let to_bits = Arc::into_raw(new_to) as u64;
-            self.push_kinded(to_bits, NativeKind::Ptr(HeapKind::TraitObject))?;
+        if wrap_targets.is_empty() {
+            // Direct / Generic / SelfArg-no-return-Self: push as-is.
+            self.push_kinded(ret_bits, ret_kind)?;
             return Ok(());
         }
-
-        // Direct path: push the result as-is.
-        self.push_kinded(ret_bits, ret_kind)?;
+        let (wrapped_bits, wrapped_kind) = rewrap_return_value(
+            ret_bits,
+            ret_kind,
+            wrap_targets,
+            &trait_object.vtable,
+        )?;
+        self.push_kinded(wrapped_bits, wrapped_kind)?;
         Ok(())
+    }
+
+    /// `VTableEntry::Closure` dispatch — W7 closure-trait-impl through
+    /// `dyn T` per ADR-006 §2.7.24 Q25.C.5 + §2.7.11/Q12.
+    ///
+    /// The trait object's inner `Arc<TypedObjectStorage>` is itself a
+    /// closure-bearing carrier (the W7 layout — the TypedObject's
+    /// schema carries a closure-typed field). The dispatch path
+    /// routes through `call_value_immediate_nb` with the closure as
+    /// the callee, the receiver as `self` (positional arg 0), and
+    /// the rest of the args following.
+    ///
+    /// `function_id` (the vtable entry's compiler-tier function id)
+    /// is currently unused at this dispatch tier — W7 stores it for
+    /// IC stabilization in §Q25.C.6, but the runtime call routes
+    /// through the typed closure header on the receiver itself per
+    /// §2.7.11/Q12. `type_id` similarly is metadata for IC.
+    fn invoke_dyn_closure(
+        &mut self,
+        _function_id: u32,
+        _trait_object: &Arc<TraitObjectStorage>,
+        arg_count: usize,
+        receiver_idx: usize,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        // phase-2d-hardening:(f) — VTableEntry::Closure dispatch
+        // routes through `call_value_immediate_nb` per §2.7.11/Q12.
+        // The current `op_make_closure` / `OwnedClosureBlock` shape
+        // doesn't have a registered emission path that constructs
+        // `VTableEntry::Closure` entries (W7 storage exists, W7
+        // emission is out of scope for W17-trait-object-thunks).
+        // The full receiver-as-closure dispatch wire-through would
+        // duplicate the §2.7.11 frame-setup invariants; reserve
+        // that work for the future W17-trait-object-closure-call
+        // sub-cluster.
+        //
+        // For now, surface-and-stop with a structured error so the
+        // shape of the dispatch is visible without faking a
+        // closure-call. The variant is reachable only via §Q25.C.5
+        // entries that emission would have to construct — and the
+        // current `build_and_register_vtable` doesn't emit it.
+        let _ = (arg_count, receiver_idx, ctx);
+        Err(VMError::NotImplemented(
+            "SURFACE: DynMethodCall Closure variant per ADR-006 §2.7.24 \
+             Q25.C.5 + §2.7.11/Q12 — W7 closure-trait-impl dispatch through \
+             dyn requires receiver-as-closure routing through \
+             `call_value_immediate_nb`. The thunks tier (Wave 3 \
+             W17-trait-object-thunks) reserves dispatch wire-through for \
+             a future sub-cluster pending W7 emission. Storage shapes \
+             ready; emission gates the dispatch.".to_string(),
+        ))
     }
 
     /// Sync drop: look up `TypeName::drop` and call it if registered.
@@ -618,4 +752,397 @@ impl VirtualMachine {
 fn drop_kinded(bits: u64, kind: NativeKind) {
     crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
 }
+
+/// Walk every `WrapTarget::path` through the return value and re-box
+/// each `Self`-named site into a fresh `Arc<TraitObjectStorage>`
+/// using `receiver_vtable`.
+///
+/// Algorithm per ADR-006 §2.7.24 Q25.C.1 / Q25.C.5 wrap-target
+/// encoding:
+///  1. Group wrap_targets by their first path-step (the outer
+///     generic-arg index reached by the descent).
+///  2. The return value is structurally one of:
+///     - `Self` directly → wrap_targets contains `path=[]`; consume
+///       the value as `Arc<TypedObjectStorage>` and re-box.
+///     - `Result<T, E>` → outer is `HeapKind::Result`; wrap_targets
+///       at `path[0]=0` apply to the Ok arm payload, `path[0]=1`
+///       to the Err arm. Result is single-payload-discriminated.
+///     - `Option<T>` → outer is `HeapKind::Option`; only `path[0]=0`
+///       makes sense (None has no payload).
+///     - `HashMap<K, V>` with V=Self → applies to the values buffer;
+///       descend into each value.
+///     - tuple → represented as `Arc<TypedObjectStorage>` with
+///       numbered fields per the C+ amendment; descend by field.
+///
+/// The function consumes the (ret_bits, ret_kind) share and returns
+/// a new (bits, kind) share.
+fn rewrap_return_value(
+    ret_bits: u64,
+    ret_kind: NativeKind,
+    wrap_targets: &[WrapTarget],
+    receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    // Top-level Self: wrap_targets contains a path=[] entry. Consume
+    // the return as a TypedObject and re-box. Any additional
+    // wrap_targets at path=[] are coalesced (re-boxing a Self return
+    // once is sufficient).
+    let has_top_level = wrap_targets.iter().any(|w| w.path.is_empty());
+    if has_top_level {
+        return rebox_self_value(ret_bits, ret_kind, receiver_vtable);
+    }
+
+    // Nested wrap-targets — walk by outer generic constructor.
+    // Currently `ret_kind` is the structural carrier returned by the
+    // impl. Dispatch on the discriminator to find the substructure
+    // each wrap-target targets.
+    match ret_kind {
+        NativeKind::Ptr(HeapKind::Result) => {
+            rewrap_result_payload(ret_bits, wrap_targets, receiver_vtable)
+        }
+        NativeKind::Ptr(HeapKind::Option) => {
+            rewrap_option_payload(ret_bits, wrap_targets, receiver_vtable)
+        }
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            // Tuples / records — represented as a TypedObject with
+            // numbered or named fields. Descend into each wrap-
+            // target's first path step (interpreted as a 0-based
+            // field index per the C+ amendment row 2 of
+            // playbook §3 W17-typed-carrier rescope note).
+            rewrap_typed_object_fields(ret_bits, wrap_targets, receiver_vtable)
+        }
+        NativeKind::Ptr(HeapKind::HashMap) => {
+            // HashMap<K, Self> case. The values buffer is the
+            // Self-named site; descend by buffer entry and re-box.
+            // Path=[1] is the value position (path=[0] would be keys
+            // but Erase_T doesn't auto-box keys; if a method returns
+            // HashMap<Self, V> that's an unusual shape — surface).
+            rewrap_hashmap_values(ret_bits, wrap_targets, receiver_vtable)
+        }
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            // `Array<Self>` — descend into each element.
+            rewrap_typed_array_elements(ret_bits, wrap_targets, receiver_vtable)
+        }
+        other => {
+            drop_kinded(ret_bits, ret_kind);
+            Err(VMError::NotImplemented(format!(
+                "SURFACE: DynMethodCall nested BoxedReturn dispatch on \
+                 return kind {:?} per ADR-006 §2.7.24 Q25.C.5 — the \
+                 structural carrier doesn't have a registered wrap-target \
+                 descent path. Supported: Result / Option / TypedObject \
+                 (tuples & records) / HashMap / TypedArray. Wrap-targets: \
+                 {:?}.",
+                other,
+                wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+            )))
+        }
+    }
+}
+
+/// Consume a (bits, kind) share that names `Self` at the leaf and
+/// re-box it into a fresh `Arc<TraitObjectStorage>`. Accepts an
+/// already-wrapped TraitObject (passthrough — the impl may have
+/// internally re-boxed).
+fn rebox_self_value(
+    bits: u64,
+    kind: NativeKind,
+    receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    match kind {
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "DynMethodCall BoxedReturn: null TypedObject return"
+                        .to_string(),
+                ));
+            }
+            // SAFETY: kind=Ptr(TypedObject); bits are
+            // `Arc::into_raw::<TypedObjectStorage>(arc)`. The caller's
+            // share transfers to us.
+            let inner: Arc<TypedObjectStorage> = unsafe {
+                Arc::from_raw(bits as *const TypedObjectStorage)
+            };
+            let new_to = Arc::new(TraitObjectStorage::new(
+                inner,
+                Arc::clone(receiver_vtable),
+            ));
+            let to_bits = Arc::into_raw(new_to) as u64;
+            Ok((to_bits, NativeKind::Ptr(HeapKind::TraitObject)))
+        }
+        NativeKind::Ptr(HeapKind::TraitObject) => {
+            // Already a dyn carrier — passthrough.
+            Ok((bits, kind))
+        }
+        _ => {
+            drop_kinded(bits, kind);
+            Err(VMError::NotImplemented(format!(
+                "SURFACE: DynMethodCall BoxedReturn with scalar leaf \
+                 kind {:?} requires universal-dyn auto-boxing of non-\
+                 TypedObject kinds per ADR-006 §2.7.24 Q25.C.1; scalar \
+                 trait-object payloads are deferred (emission-shell \
+                 currently surfaces these at the `op_box_trait_object` \
+                 path; lifting this requires emission-tier scalar-\
+                 to-TypedObject auto-box).",
+                kind
+            )))
+        }
+    }
+}
+
+/// Re-wrap inside a `Result<T, E>` carrier. The Result has a single
+/// `payload: KindedSlot` arm; `is_ok` selects which generic-arg the
+/// payload corresponds to. We re-box the payload IFF the arm matches
+/// a wrap_target's first path step.
+fn rewrap_result_payload(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    if ret_bits == 0 {
+        return Err(VMError::RuntimeError(
+            "DynMethodCall BoxedReturn: null Result return".to_string(),
+        ));
+    }
+    // SAFETY: kind=Ptr(Result); bits are
+    // `Arc::into_raw::<ResultData>(arc)`. Consume the share.
+    let result: Arc<ResultData> =
+        unsafe { Arc::from_raw(ret_bits as *const ResultData) };
+    // Determine whether to re-box the payload. Path=[0] applies to
+    // the Ok arm, path=[1] to the Err arm; matching against the
+    // result's `is_ok` selects which we descend into.
+    let arm_index: u8 = if result.is_ok { 0 } else { 1 };
+    let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
+        .iter()
+        .filter(|w| !w.path.is_empty() && w.path[0] == arm_index)
+        .map(|w| WrapTarget {
+            path: w.path[1..].iter().copied().collect(),
+            wrap_as_trait_id: w.wrap_as_trait_id,
+        })
+        .collect();
+    if descendants.is_empty() {
+        // The arm we're in doesn't have a wrap-target — return as-is.
+        let raw = Arc::into_raw(result) as u64;
+        return Ok((raw, NativeKind::Ptr(HeapKind::Result)));
+    }
+    // Rewrap the payload. Pull it out, recurse, install fresh.
+    // Cloning the ResultData lets us mutate the new copy's payload
+    // without disturbing other shared references (Arc::make_mut
+    // semantics, but we synthesize a fresh Arc since the descendant
+    // recursion already consumed shares).
+    let mut new_result = (*result).clone();
+    // The cloned payload owns its own share (per KindedSlot::Clone).
+    // Take its bits + kind without disturbing its Drop — we'll
+    // install the rewrapped result.
+    let payload_bits = new_result.payload.raw();
+    let payload_kind = new_result.payload.kind();
+    std::mem::forget(std::mem::replace(
+        &mut new_result.payload,
+        KindedSlot::none(),
+    ));
+    let (new_payload_bits, new_payload_kind) =
+        rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
+    new_result.payload = KindedSlot::new(
+        ValueSlot::from_raw(new_payload_bits),
+        new_payload_kind,
+    );
+    // Drop the borrowed `result` (releases the original share).
+    drop(result);
+    let new_arc = Arc::new(new_result);
+    let raw = Arc::into_raw(new_arc) as u64;
+    Ok((raw, NativeKind::Ptr(HeapKind::Result)))
+}
+
+/// Re-wrap inside an `Option<T>` carrier — analogous to Result but
+/// single-arm (None has no payload).
+fn rewrap_option_payload(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    if ret_bits == 0 {
+        return Err(VMError::RuntimeError(
+            "DynMethodCall BoxedReturn: null Option return".to_string(),
+        ));
+    }
+    // SAFETY: kind=Ptr(Option); bits are
+    // `Arc::into_raw::<OptionData>(arc)`. Consume the share.
+    let option: Arc<OptionData> =
+        unsafe { Arc::from_raw(ret_bits as *const OptionData) };
+    if !option.is_some {
+        // None: nothing to re-box.
+        let raw = Arc::into_raw(option) as u64;
+        return Ok((raw, NativeKind::Ptr(HeapKind::Option)));
+    }
+    let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
+        .iter()
+        .filter(|w| !w.path.is_empty() && w.path[0] == 0)
+        .map(|w| WrapTarget {
+            path: w.path[1..].iter().copied().collect(),
+            wrap_as_trait_id: w.wrap_as_trait_id,
+        })
+        .collect();
+    if descendants.is_empty() {
+        let raw = Arc::into_raw(option) as u64;
+        return Ok((raw, NativeKind::Ptr(HeapKind::Option)));
+    }
+    let mut new_option = (*option).clone();
+    let payload_bits = new_option.payload.raw();
+    let payload_kind = new_option.payload.kind();
+    std::mem::forget(std::mem::replace(
+        &mut new_option.payload,
+        KindedSlot::none(),
+    ));
+    let (new_payload_bits, new_payload_kind) =
+        rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
+    new_option.payload = KindedSlot::new(
+        ValueSlot::from_raw(new_payload_bits),
+        new_payload_kind,
+    );
+    drop(option);
+    let new_arc = Arc::new(new_option);
+    let raw = Arc::into_raw(new_arc) as u64;
+    Ok((raw, NativeKind::Ptr(HeapKind::Option)))
+}
+
+/// Re-wrap inside a `TypedObject` that represents a tuple or record
+/// (per the C+ playbook amendment for tuples → named-field TypedObject
+/// records). Descend into each field index named by a wrap-target's
+/// first path step.
+///
+/// This path is round-3 minimum: we don't currently mutate the inner
+/// TypedObject in-place — we surface a structured error if the
+/// emission tier ever produces a wrap-target for a TypedObject-return
+/// shape, because the in-place field rewrite path would need
+/// `TypedObjectStorage::write_slot_in_place` (added by W17-references-
+/// mutation, see hardening (c)) plus a field-index reverse lookup
+/// from the trait's tuple/record shape. The dispatch shell stays
+/// correct without it; the work surfaces when the emission tier
+/// actually emits a wrap-target with this carrier shape.
+fn rewrap_typed_object_fields(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    _receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::TypedObject));
+    Err(VMError::NotImplemented(format!(
+        "SURFACE: DynMethodCall BoxedReturn with TypedObject-carrier \
+         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.C.5 — \
+         in-place tuple/record field re-box requires \
+         `TypedObjectStorage::write_slot_in_place` integration with \
+         a trait-declared field-index lookup. The dispatch shell \
+         surfaces; lifting this is a follow-up sub-cluster pending \
+         the typed-record-rewrap recipe.",
+        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+    )))
+}
+
+/// Re-wrap inside a `HashMap` whose value arm names `Self`. Descend
+/// into each entry's value buffer position.
+///
+/// Same shape-issue as `rewrap_typed_object_fields`: the in-place
+/// values-buffer rewrite would need a typed-buffer mutation entry
+/// for `HashMapValueBuf::TraitObject` (the storage carrier already
+/// has the arm — see hashmap_methods.rs:259). Surfacing here keeps
+/// the dispatch correct while the values-buffer write-path is built.
+fn rewrap_hashmap_values(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    _receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::HashMap));
+    Err(VMError::NotImplemented(format!(
+        "SURFACE: DynMethodCall BoxedReturn with HashMap<K, Self> \
+         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.C.5 — \
+         values-buffer rewrap requires a typed-buffer write-path \
+         that takes a `HashMapValueBuf::TraitObject` arm + a per-\
+         entry re-box. The dispatch shell surfaces; lifting this \
+         pairs with the `rewrap_typed_object_fields` follow-up.",
+        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+    )))
+}
+
+/// Re-wrap inside a `TypedArray` whose elements name `Self`. Each
+/// element is a `TypedObject`-shaped Self leaf; rewrap into a
+/// `TypedArrayData::TraitObject` buffer using the receiver vtable.
+fn rewrap_typed_array_elements(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    receiver_vtable: &Arc<VTable>,
+) -> Result<(u64, NativeKind), VMError> {
+    if ret_bits == 0 {
+        return Err(VMError::RuntimeError(
+            "DynMethodCall BoxedReturn: null TypedArray return".to_string(),
+        ));
+    }
+    // SAFETY: kind=Ptr(TypedArray); bits are
+    // `Arc::into_raw::<TypedArrayData>(arc)`. Consume.
+    let arr: Arc<shape_value::heap_value::TypedArrayData> =
+        unsafe { Arc::from_raw(ret_bits as *const shape_value::heap_value::TypedArrayData) };
+    // Only path=[0] applies to array elements (single generic arg).
+    let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
+        .iter()
+        .filter(|w| !w.path.is_empty() && w.path[0] == 0)
+        .map(|w| WrapTarget {
+            path: w.path[1..].iter().copied().collect(),
+            wrap_as_trait_id: w.wrap_as_trait_id,
+        })
+        .collect();
+    if descendants.is_empty() {
+        let raw = Arc::into_raw(arr) as u64;
+        return Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)));
+    }
+    // Read the array's elements per its current TypedArrayData arm
+    // and re-box each into a TraitObject. The most common arm for
+    // a `Self`-returning method on a TypedObject impl is
+    // `TypedArrayData::TypedObject` (the impl built the array as a
+    // typed buffer of its concrete type).
+    use shape_value::heap_value::TypedArrayData;
+    match &*arr {
+        TypedArrayData::TypedObject(buf) => {
+            // Build a new TraitObject buffer.
+            let new_data: Vec<Arc<TraitObjectStorage>> = buf
+                .data
+                .iter()
+                .map(|to_inner| {
+                    Arc::new(TraitObjectStorage::new(
+                        Arc::clone(to_inner),
+                        Arc::clone(receiver_vtable),
+                    ))
+                })
+                .collect();
+            let new_buf = Arc::new(
+                shape_value::typed_buffer::TypedBuffer::from_vec(new_data),
+            );
+            let new_arr = Arc::new(TypedArrayData::TraitObject(new_buf));
+            let raw = Arc::into_raw(new_arr) as u64;
+            drop(arr);
+            Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)))
+        }
+        TypedArrayData::TraitObject(_) => {
+            // Already a TraitObject buffer — passthrough.
+            let raw = Arc::into_raw(arr) as u64;
+            Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)))
+        }
+        other => {
+            // Other element kinds with Self-named target are an
+            // emission-tier shape we don't expect — surface.
+            let other_name = match other {
+                TypedArrayData::F64(_) => "F64",
+                TypedArrayData::I64(_) => "I64",
+                TypedArrayData::String(_) => "String",
+                _ => "<other>",
+            };
+            drop(arr);
+            Err(VMError::NotImplemented(format!(
+                "SURFACE: DynMethodCall BoxedReturn TypedArray with \
+                 element arm {} + wrap_targets {:?} — Self-leaf re-box \
+                 expects TypedObject-arm element buffer (the impl built \
+                 a typed buffer of its concrete type). Per ADR-006 \
+                 §2.7.24 Q25.C.5.",
+                other_name,
+                wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+            )))
+        }
+    }
+}
+
 
