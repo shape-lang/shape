@@ -4942,6 +4942,236 @@ impl KindedSlot {
 
 Binding for Phase 2d onward.
 
+#### 2.7.27 Method-mutation semantics — `&mut self` opt-in with compile-time Arc-COW write-back (Item 4 ruling, W17-mutation-writeback, 2026-05-12)
+
+Phase 2d Item 4 (handover §1 Item 4) surfaced that `let s = HashSet();
+s.add("a"); s.size()` returns 0 — the post-W16 method-call dispatch is
+functional-shaped (handlers return a new `Arc<HashSetData>` after
+`Arc::make_mut`, but the dispatch shell pops the receiver and pushes
+the result; with no consumer, the new Arc is dropped and the binding
+slot retains the old Arc). The user ruling adopts Rust-style `&mut self`
+opt-in: mutating handlers stay in the existing `MethodFnV2` ABI
+(`fn(&mut VM, &[KindedSlot], ctx) -> Result<KindedSlot, VMError>`), but
+the compiler now emits a `Dup; StoreLocal recv` / `Dup;
+StoreModuleBinding recv` write-back after the standard `CallMethod`
+opcode when the call site matches a `&mut self` opt-in pattern.
+
+**Decision (Item 4 ruling):**
+
+1. **Mutation semantics — `&mut self` opt-in with write-back at the
+   call site.** Methods that mutate the receiver Arc (via
+   `Arc::make_mut` and returning a possibly-new Arc) opt in by
+   registration name in the per-receiver-kind
+   `MUT_SELF_*` `phf::Set` exposed from
+   `crates/shape-vm/src/executor/objects/method_registry.rs`. The
+   compiler reads these sets via
+   `crate::compiler::mutation_writeback::ContainerKind::is_mut_self_method`
+   to decide whether to emit a post-`CallMethod` write-back at the
+   identifier-receiver method-call site:
+
+   ```rust
+   // §2.7.27 emit shape, post-CallMethod, for mut-self methods on
+   // identifier receivers tracked as recognised COW container kinds.
+   self.emit(Instruction::new(OpCode::CallMethod, Some(operand)));
+   if let Some(target) = mut_self_writeback_target {
+       self.emit(Instruction::simple(OpCode::Dup));
+       match target {
+           MutSelfWriteBackTarget::Local(idx) =>
+               self.emit(Instruction::new(OpCode::StoreLocal,
+                   Some(Operand::Local(idx)))),
+           MutSelfWriteBackTarget::ModuleBinding(idx) =>
+               self.emit(Instruction::new(OpCode::StoreModuleBinding,
+                   Some(Operand::ModuleBinding(idx)))),
+       }
+   }
+   ```
+
+   `Dup` bumps the heap refcount via `clone_with_kind` (§2.7.7 WB2.4
+   retain-on-read), so the binding slot and the method-call expression
+   result each own an independent share of the new Arc. `StoreLocal` /
+   `StoreModuleBinding` pops one share, releases the old slot
+   occupant's share via `drop_with_kind` (existing
+   `stack_write_kinded` invariant), and stores the new bits. The
+   result share stays on the stack for the expression value.
+
+2. **R-value receiver rule.** `compute_set().add(x)` — receiver is not
+   an `Identifier(name, _)`; `resolve_mut_self_writeback_target`
+   returns `None`; no write-back is emitted. The new (mutated) Arc is
+   the expression value of the call; if the statement has no consumer
+   (`compute_set().add(x);`), it drops on statement end. This matches
+   the dispatch text's decision-call: silent drop, not an error,
+   because erroring would break composition patterns.
+
+3. **`let` (immutable binding) check.** When the compiler resolves a
+   write-back target, it invokes the existing
+   `check_named_binding_write_allowed` to enforce that the receiver
+   binding is `let mut` / `var`. `let s = HashSet(); s.add("x")` fails
+   to compile with the diagnostic "Cannot reassign immutable variable
+   's'. Use `let mut` or `var` for mutable bindings", flowing through
+   the same path as direct reassignment.
+
+4. **Receiver-kind narrowing — `ContainerKind` tracking.** The
+   compiler maintains
+   `mut_self_container_locals: HashMap<u16, ContainerKind>` and
+   `mut_self_container_bindings: HashMap<u16, ContainerKind>`
+   populated at let-binding time when the initializer is a recognised
+   container constructor (`Set()` / `HashMap()` / `Deque()` /
+   `PriorityQueue()`). The constructor-call emit path (in
+   `compile_expr_function_call`) sets
+   `pending_variable_container_kind` after emitting `BuiltinCall(...
+   Ctor)`; the let-binding completion in
+   `compile_statement(Statement::Var)` transfers the pending kind onto
+   the target local-slot or module-binding index. Method-call
+   dispatch's `resolve_mut_self_writeback_target` consults this side
+   table to narrow `add` / `set` / `delete` — names that overlap
+   between mutating containers (HashSet / HashMap) and pure-functional
+   types (`DateTime.add` is the operator-trait backing for `+`,
+   `Mutex.set` is interior mutability). Without a recognised container
+   kind, the writeback path is not taken and the call falls through
+   to the standard `CallMethod` shape (the pre-ruling functional
+   behaviour).
+
+5. **Interior-mutability primitives — explicitly NOT registered.**
+   `Mutex.set`, `Atomic.store` / `fetch_add` / etc., `Lazy.get`,
+   `Channel.send` / `close` mutate through `Cell` / `AtomicI64` /
+   `OnceCell` / channel-buffer; the receiver Arc's identity is
+   preserved, no write-back is needed, and `let m = Mutex(0);
+   m.set(5)` stays valid (the binding itself is immutable; what
+   changes is the shared interior — mirrors Rust's `let m =
+   Mutex::new(0); *m.lock().unwrap() = 5;` shape). These primitives
+   do not register a `ContainerKind` in
+   `mut_self_container_locals`; their mutating method names
+   (`set`, `store`, `send`, ...) are NOT in any `MUT_SELF_*` set.
+
+6. **`pop`-shaped methods — explicitly NOT in the write-back set.**
+   `Array.pop`, `Deque.popBack` / `popFront`, `PriorityQueue.pop`
+   return the popped *element*, not the (mutated) receiver Arc.
+   Generic write-back semantics would corrupt the binding slot by
+   writing the element bits where the container Arc should be. Until
+   a future tuple-return ABI lands for mutate-and-return-something-
+   else methods, the pre-ruling pop behaviour is preserved (mutation
+   visible only via `arr = arr.pop()` reassignment if the popped
+   element is discarded). Listed in the `MUT_SELF_*` doc-comments as
+   the next ABI milestone.
+
+7. **Primitive operator sugar — `s += x` already covered by existing
+   compound-assignment lowering.** The parser (`shape-ast/src/parser/expressions/binary_ops.rs::parse_assignment_impl`)
+   desugars `s += x` into `Expr::Assign { target: s, value: s + x }` at
+   parse time. The compound-assignment lowering already emits
+   `LoadLocal s; <load x>; AddInt; StoreLocal s` for primitive
+   receivers — typed opcode (`AddInt` / `AddNumber` / `SubInt` /
+   etc.) + write-back to s's slot. The non-assignment form `s + x`
+   produces a value without write-back (`s` stays unchanged). This
+   sub-cluster's ruling does NOT change operator lowering; the
+   desugaring path was already correct. Coverage: `i8 / i16 / i32 /
+   i64 / u8 / u16 / u32 / u64 / number / string` for `+=` (string is
+   concatenation); same set minus `string` for `-= / *= / /= / %=`
+   (string subtraction is undefined).
+
+8. **Informal naming convention — documented, not tool-enforced.**
+   Mutating methods take simple names (`add`, `push`, `set`,
+   `pushBack`); functional siblings, if needed, take participial names
+   (`added`, `pushed`, ...). No LSP / clippy / verify-merge.sh hook
+   enforces this — adopting the convention is on the stdlib /
+   user-code author. The LSP "naming convention warning" hook
+   originally listed in the dispatch text is deferred to the
+   hardening backlog (phase-2d-hardening:(j) when added).
+
+**Forbidden shapes this rules out (mirror of §2.7.7 / §2.7.10
+forbidden lists, applied to method mutation semantics):**
+
+- **Silent mutation without write-back.** A handler returns a new Arc
+  via `Arc::make_mut` but the binding slot doesn't update. This is
+  the footgun the ruling fixes. Any `MUT_SELF_*`-registered method
+  whose dispatch path doesn't write back is a §2.7.27 defection.
+
+- **Reintroducing runtime numeric coercion** to dodge the lossless-
+  widening lattice (`IntToNumber` / `NumberToInt` opcodes added "for
+  one assignment"). CLAUDE.md "Forbidden Patterns" #5 (`Convert<X>To<Y>`
+  opcodes papered over a kind-tracker gap) stands verbatim. The
+  Commit-2 widening lattice is compile-time only; the smaller type's
+  value is reinterpreted into the wider slot at compile-time-resolved
+  binding/call sites (typed slots already carry `NativeKind` so the
+  compiler can emit the target slot directly).
+
+- **Implicit narrowing without explicit `as T`.** `let n: i8 =
+  some_i32_value` without `as i8` must be a compile error. The
+  typer's existing unify pass plus the §2.7.27 widening lattice
+  (Commit 2) cover this — narrowing requires explicit `as T`.
+
+- **Defection-attractor descriptors.** "MethodMut bridge",
+  "writeback hop", "Arc-mutation translator", "let-mut adapter".
+  Per the 2026-05-09 user ruling broadening the W-series rename
+  family, any descriptor of the writeback emission that uses bridge /
+  probe / helper / hop / translator / adapter framing belongs to the
+  defection-attractor family CLAUDE.md "Renames to refuse on sight"
+  enumerates. Describe the writeback emission by name (the §2.7.27
+  `Dup; StoreLocal` emission) or by mechanism (compile-time
+  write-back at the identifier-receiver site), never by hypothetical
+  role.
+
+**Out-of-scope this amendment:**
+
+- **Trait-based operator overloading for user types** (e.g. `impl Add
+  for Vec3` so `v1 + v2` calls `v1.add(v2)`). Phase 3 work; not in
+  scope for Item 4.
+- **Tuple-return ABI for `pop`-shaped methods.** Pop methods return
+  the popped element; a future amendment can add a mutate-and-return-
+  X handler shape so write-back fires on the receiver while the
+  element is the call's expression value.
+- **Runtime-driven write-back via opcode operand extension.** The
+  compile-time approach in this amendment is sufficient for all
+  Identifier-receiver call sites. A future hardening pass could move
+  the write-back into the `op_call_method` dispatch shell via an
+  operand extension on `TypedMethodCall`; the `mutation_writeback`
+  module ships a `WriteBackTarget` / `writeback_result` stub for
+  that future surface but neither is wired in this ruling.
+- **LSP naming-convention warning hook.** Deferred to
+  phase-2d-hardening backlog (the dispatch text's deferral).
+- **Width-narrowing operator sugar** (`let n: i32 = 100; n += 1i64;`
+  — would require explicit narrowing of the i64 rhs; Commit 2's
+  lossless-widening lattice covers the opposite direction and rejects
+  narrowing).
+
+**Migration scope (W17-mutation-writeback Commit 1 deliverable):**
+
+1. `crates/shape-vm/src/executor/objects/method_registry.rs` — per-
+   receiver-kind `MUT_SELF_*` `phf::Set` constants
+   (`MUT_SELF_HASHSET_METHODS` / `MUT_SELF_HASHMAP_METHODS` /
+   `MUT_SELF_ARRAY_METHODS` / `MUT_SELF_DEQUE_METHODS` /
+   `MUT_SELF_PRIORITY_QUEUE_METHODS` /
+   `MUT_SELF_TYPED_ARRAY_METHODS`) — registered names of
+   `&mut self` opt-in methods that return the (mutated) receiver
+   Arc.
+2. `crates/shape-vm/src/compiler/mutation_writeback.rs` (new module) —
+   `ContainerKind` enum (HashSet / HashMap / Deque / PriorityQueue /
+   Array), `is_mut_self_method(method)` classifier,
+   `from_ctor_name(name)` recogniser, `MutSelfWriteBackTarget` enum
+   (Local / ModuleBinding).
+3. `crates/shape-vm/src/compiler/mod.rs` —
+   `mut_self_container_locals` / `mut_self_container_bindings`
+   side tables on `BytecodeCompiler` + the
+   `pending_variable_container_kind` signal mirror of
+   `pending_variable_typed_array_kind`.
+4. `crates/shape-vm/src/compiler/expressions/function_calls.rs` —
+   `resolve_mut_self_writeback_target(receiver, method)` helper +
+   the post-`CallMethod` `Dup; Store{Local,ModuleBinding}` emit gate +
+   the let-immutability guard (calls existing
+   `check_named_binding_write_allowed`).
+5. `crates/shape-vm/src/compiler/expressions/function_calls.rs` /
+   `statements.rs` — the existing bespoke `ArrayPushLocal` fast paths
+   for `arr.push(x)` (call site + standalone statement site) are
+   gated to NOT fire when the receiver is a recognised non-Array
+   container kind; those fall through to the standard `CallMethod`
+   path which then receives the §2.7.27 write-back emission.
+6. Smoke tests in `crates/shape-vm/src/executor/tests/mutation_writeback.rs`
+   — 23 tests covering HashSet / HashMap / Deque / PriorityQueue
+   write-back, let-immutability compile errors, r-value receiver
+   silent-drop, compound-assignment for primitives, and
+   interior-mutability primitives staying on `let` bindings.
+
+Binding for Phase 2d onward.
+
 ## 16. References
 
 ### Research base

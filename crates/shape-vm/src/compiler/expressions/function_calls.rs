@@ -920,6 +920,17 @@ impl BytecodeCompiler {
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.clear_last_expr_reference_result();
+                        // ADR-006 §2.7.27 / Item 4: v2 typed-map fast-
+                        // path also produces a COW HashMap carrier. The
+                        // existing `v2_typed_map_locals` track will
+                        // carry the (k,v) pair; the parallel
+                        // `mut_self_container_locals` track records the
+                        // higher-level kind so method-call write-back
+                        // emission picks the right `MUT_SELF_HASHMAP`
+                        // set.
+                        self.pending_variable_container_kind = Some(
+                            crate::compiler::mutation_writeback::ContainerKind::HashMap,
+                        );
                         return Ok(());
                     }
                 }
@@ -946,6 +957,17 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.clear_last_expr_reference_result();
+            // ADR-006 §2.7.27 / Item 4 ruling: signal a recognised COW
+            // container kind so the surrounding let-binding code path
+            // can transfer it to the receiver-local's
+            // `mut_self_container_locals` entry. The signal is consumed
+            // at `statements.rs` let-binding completion (mirror of
+            // `pending_variable_typed_array_kind`).
+            if let Some(kind) =
+                crate::compiler::mutation_writeback::ContainerKind::from_ctor_name(name)
+            {
+                self.pending_variable_container_kind = Some(kind);
+            }
             return Ok(());
         }
 
@@ -1353,6 +1375,53 @@ impl BytecodeCompiler {
         self.pending_closure_param_types = Some(hints);
     }
 
+    /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback,
+    /// 2026-05-12): determine whether the method call needs a
+    /// post-`CallMethod` write-back to the receiver's binding slot.
+    ///
+    /// Returns `Some(target)` when ALL of:
+    /// - `receiver` is an `Identifier(name, _)` (resolvable to a
+    ///   local-slot index OR a module-binding index);
+    /// - the receiver binding is tracked as a recognised COW container
+    ///   kind in `mut_self_container_locals` /
+    ///   `mut_self_container_bindings`;
+    /// - `method` is in the kind's `MUT_SELF_*` set per
+    ///   `method_registry`.
+    ///
+    /// Returns `None` otherwise; the standard `CallMethod` path then
+    /// runs without write-back (the dispatch text's "silent drop"
+    /// decision-call for r-value receivers and for non-container
+    /// receivers).
+    fn resolve_mut_self_writeback_target(
+        &self,
+        receiver: &Expr,
+        method: &str,
+    ) -> Option<crate::compiler::mutation_writeback::MutSelfWriteBackTarget> {
+        use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+        let Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
+                if kind.is_mut_self_method(method) {
+                    return Some(MutSelfWriteBackTarget::Local(local_idx));
+                }
+            }
+            return None;
+        }
+        let scoped = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
+                if kind.is_mut_self_method(method) {
+                    return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
+                }
+            }
+        }
+        None
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
@@ -1411,7 +1480,43 @@ impl BytecodeCompiler {
         // In-place mutation: arr.push(val) → ArrayPushLocal + LoadLocal
         // This is the primary push path for method calls inside function bodies,
         // loops, and blocks (which are compiled as expressions, not statements).
-        if method == "push" && args.len() == 1 {
+        //
+        // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback):
+        // gate this bespoke path so it does NOT fire when the receiver
+        // is a non-Array container (Deque / PriorityQueue / HashMap /
+        // HashSet). Those containers have their own `push` handlers in
+        // method_registry which the standard `CallMethod` path
+        // dispatches to; `ArrayPushLocal` would error on a
+        // non-Array slot kind (the runtime explicitly rejects
+        // `Ptr(PriorityQueue)` etc. with `NotImplemented`).
+        let bespoke_push_blocked = if let Expr::Identifier(recv_name, _) = receiver {
+            let local_kind = self
+                .resolve_local(recv_name)
+                .and_then(|idx| self.mut_self_container_locals.get(&idx).copied());
+            let module_kind = if local_kind.is_none() {
+                let scoped = self
+                    .resolve_scoped_module_binding_name(recv_name)
+                    .unwrap_or_else(|| recv_name.to_string());
+                self.module_bindings
+                    .get(&scoped)
+                    .copied()
+                    .and_then(|idx| self.mut_self_container_bindings.get(&idx).copied())
+            } else {
+                None
+            };
+            local_kind
+                .or(module_kind)
+                .map(|kind| {
+                    !matches!(
+                        kind,
+                        crate::compiler::mutation_writeback::ContainerKind::Array
+                    )
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if method == "push" && args.len() == 1 && !bespoke_push_blocked {
             if let Expr::Identifier(recv_name, _) = receiver {
                 // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr.push(x)`.
                 // Resolved BEFORE arg compilation since compile_expr may
@@ -1732,6 +1837,41 @@ impl BytecodeCompiler {
         } else {
             None
         };
+
+        // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback): detect
+        // whether this method call needs a `&mut self` write-back after
+        // the standard `CallMethod` dispatch. The decision is made BEFORE
+        // compiling the receiver because `compile_expr` overwrites
+        // `last_expr_*` state and we need the receiver-shape captured
+        // upfront. Three conditions: (1) receiver is an Identifier (so
+        // there's a binding location to write back to); (2) the binding
+        // is tracked as a recognised COW container kind (HashSet /
+        // HashMap / Deque / PriorityQueue / Array); (3) the method name
+        // matches the kind's `MUT_SELF_*` set in `method_registry`.
+        //
+        // Interior-mutability primitives (Mutex / Atomic / Lazy /
+        // Channel) deliberately do NOT register a container-kind in
+        // `mut_self_container_locals`, so their `set` / `store` / `send`
+        // / etc. methods do not trip this gate — the Arc identity is
+        // preserved through interior mutability and no writeback is
+        // required.
+        let mut_self_writeback_target: Option<
+            crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
+        > = self.resolve_mut_self_writeback_target(receiver, method);
+
+        if mut_self_writeback_target.is_some() {
+            // Enforce the let-vs-let-mut immutability check at the
+            // method-call site: a `&mut self` call on an immutable
+            // binding is the cleanest place to surface "method `add`
+            // mutates the receiver; bind `s` as `let mut s = ...`".
+            // The diagnostic flows through the existing
+            // `check_named_binding_write_allowed` which already handles
+            // both local-slot and module-binding cases.
+            if let Expr::Identifier(name, span) = receiver {
+                let source_loc = self.span_to_source_location(*span);
+                self.check_named_binding_write_allowed(name, Some(source_loc))?;
+            }
+        }
 
         // Compile receiver (the object/series being called)
         self.compile_expr(receiver)?;
@@ -2104,6 +2244,41 @@ impl BytecodeCompiler {
                 receiver_type_tag: rtt,
             }),
         ));
+
+        // ADR-006 §2.7.27 / Item 4 ruling: post-CallMethod write-back.
+        // The handler returned a fresh `Arc<HashSetData>` /
+        // `Arc<HashMapData>` / etc. (possibly cloned via
+        // `Arc::make_mut`). `Dup` bumps the heap refcount so we have
+        // two independent shares of the new Arc; `StoreLocal recv`
+        // pops one and writes it back to the receiver's binding slot
+        // (the existing `stack_write_kinded` drops the slot's prior
+        // share via `drop_with_kind`). The remaining share stays on
+        // the stack as the expression value of the method call.
+        //
+        // For interior-mutability primitives (Mutex / Atomic / Lazy /
+        // Channel), `resolve_mut_self_writeback_target` returns None
+        // because their container kinds are not registered in
+        // `mut_self_container_locals`. The Arc identity is preserved
+        // through interior mutability; no writeback is needed.
+        if let Some(target) = mut_self_writeback_target {
+            use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+            self.emit(Instruction::simple(OpCode::Dup));
+            match target {
+                MutSelfWriteBackTarget::Local(local_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                }
+                MutSelfWriteBackTarget::ModuleBinding(binding_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreModuleBinding,
+                        Some(Operand::ModuleBinding(binding_idx)),
+                    ));
+                }
+            }
+        }
+
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
         self.last_expr_numeric_type = method_return_numeric_type(method);

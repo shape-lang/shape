@@ -26,7 +26,7 @@
 //! defection-attractor family that ABI sat in.
 
 use crate::executor::VirtualMachine;
-use phf::phf_map;
+use phf::{phf_map, phf_set};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{KindedSlot, VMError};
 
@@ -53,6 +53,109 @@ pub type MethodFnV2 = fn(
 
 /// Method handler stored in PHF maps.
 pub type MethodHandler = MethodFnV2;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `&mut self` opt-in registries (ADR-006 §2.7.27 / Item 4 ruling, 2026-05-12)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Methods that mutate the receiver Arc (i.e. call `Arc::make_mut` on the
+// receiver and return a possibly-new Arc) opt in by name in the per-kind
+// `MUT_SELF_*` `phf::Set` below. The compiler reads these to decide whether
+// to emit a write-back to the receiver's binding slot after `CallMethod`
+// (see `compile_expr_method_call`'s mutation-writeback path). The runtime
+// dispatch shell does NOT consult these — write-back is purely a compile-
+// time concern (the dispatch shell already pops the receiver, so the
+// source-binding identity is lost at the runtime layer).
+//
+// **Interior-mutability primitives (`Mutex` / `Atomic` / `Lazy` / `Channel`)
+// are NOT in these sets.** Their mutating methods (`Mutex.set`,
+// `Atomic.store`, `Lazy.get`, `Channel.send` / `close`, etc.) preserve the
+// receiver's Arc identity — the mutation happens through `RefCell` /
+// `AtomicI64` / `OnceCell` / channel-buffer inside the carrier. No
+// write-back is required and `let m = Mutex(0); m.set(5)` stays valid (the
+// binding itself is immutable; what changes is the shared interior).
+
+/// HashSet methods that opt into `&mut self` semantics.
+pub static MUT_SELF_HASHSET_METHODS: phf::Set<&'static str> = phf_set! {
+    "add",
+    "delete",
+};
+
+/// HashMap methods that opt into `&mut self` semantics.
+pub static MUT_SELF_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
+    "set",
+    "delete",
+    "merge",
+};
+
+/// Array methods that opt into `&mut self` semantics.
+///
+/// `push` already writes back via the bespoke `ArrayPushLocal` /
+/// typed-array push opcodes for identifier receivers (see
+/// `compile_expr_method_call`); listed here so the generic fallback
+/// path also writes back when the bespoke path isn't taken.
+///
+/// **NOT listed:** `pop`. Pop's return value is the popped element
+/// (`Option<T>`), not the mutated array — generic-writeback semantics
+/// would corrupt the binding by writing the element bits into the
+/// array slot. The pre-ruling `pop` behaviour (mutation visible only
+/// when the user does `arr = arr.pop()` and discards the popped
+/// element) is preserved; a future amendment can add a tuple-return
+/// ABI for pop-shaped methods.
+pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+};
+
+/// Deque methods that opt into `&mut self` semantics.
+///
+/// Same return-value rule as `MUT_SELF_ARRAY_METHODS`: only listed when
+/// the handler returns the (mutated) receiver Arc. `popBack` /
+/// `popFront` return the popped element, so they stay off the writeback
+/// set (deferred to a future tuple-return ABI).
+pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "pushBack",
+    "pushFront",
+};
+
+/// PriorityQueue methods that opt into `&mut self` semantics.
+///
+/// `pop` returns the popped element, not the mutated queue — see
+/// `MUT_SELF_ARRAY_METHODS` for the return-value rule.
+pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+};
+
+/// TypedArray<i64> / TypedArray<f64> methods that opt into `&mut self`.
+///
+/// The shared set covers both `TYPED_INT_ARRAY_METHODS` and
+/// `TYPED_NUMBER_ARRAY_METHODS` PHF registries — `push` / `set` mutate
+/// the underlying TypedBuffer via Arc::make_mut and return the
+/// (mutated) array. `pop` is excluded per the same return-value rule
+/// as `MUT_SELF_ARRAY_METHODS`.
+pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+    "set",
+};
+
+/// Returns `true` if `method` is a name registered as `&mut self` for ANY
+/// container/collection receiver class.
+///
+/// This is the compiler-side liberal classifier: when the receiver type
+/// is unknown at compile time, the compiler may still emit a write-back
+/// for any name that's known to mutate on some container kind. The
+/// write-back is harmless when the actual receiver kind turns out to be
+/// pure (the handler returns the same Arc identity, the StoreLocal
+/// re-stores the same bits — net effect: no-op modulo refcount churn).
+///
+/// Used by `compile_expr_method_call`'s writeback emission gate.
+pub fn is_mut_self_method_name(method: &str) -> bool {
+    MUT_SELF_HASHSET_METHODS.contains(method)
+        || MUT_SELF_HASHMAP_METHODS.contains(method)
+        || MUT_SELF_ARRAY_METHODS.contains(method)
+        || MUT_SELF_DEQUE_METHODS.contains(method)
+        || MUT_SELF_PRIORITY_QUEUE_METHODS.contains(method)
+        || MUT_SELF_TYPED_ARRAY_METHODS.contains(method)
+}
 
 /// PHF registry for Array methods (47 methods total)
 ///
