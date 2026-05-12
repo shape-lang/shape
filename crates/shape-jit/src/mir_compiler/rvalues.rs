@@ -259,9 +259,65 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             )),
             Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
-                let slot = p.root_local();
+                self.place_native_kind(p)
+            }
+        }
+    }
+
+    /// Project a `Place` to the `NativeKind` of the value it produces at
+    /// the consumer site, per ADR-006 §2.7.5 stamp-at-compile-time
+    /// discipline (W12-jit-binop-after-heap-read-kind-tracker close).
+    ///
+    /// - `Place::Local(slot)`: read the slot's MIR-inferred kind from
+    ///   `slot_kinds`.
+    /// - `Place::Field(base, field_idx)`: look up the field name via
+    ///   `field_name_table`, then the per-field kind in
+    ///   `field_native_kinds` — populated by the producer-side
+    ///   `StatementKind::ObjectStore` walk at MirToIR construction time.
+    ///   This threads the producer's kind classification across the
+    ///   TypedObject field-read projection without runtime tag-bit
+    ///   decode (§2.7.7 #4 / #7 forbidden).
+    /// - `Place::Index(base, _)`: when the base local's `ConcreteType`
+    ///   is `Array<scalar>` (per the W12-top-level-concrete-types-
+    ///   conduit close), project to the element's `NativeKind` via
+    ///   `v2_typed_array_elem_kind`. This is the same kind the v2
+    ///   `read_place` fast path uses to load the element at its native
+    ///   width.
+    /// - `Place::Deref(_)`: not stamped — references are heap-tier
+    ///   indirection and the type-of-pointed-to-value is not threaded
+    ///   into the JIT-side projection map yet. Returns `None` so the
+    ///   BinaryOp lowering surfaces honestly rather than papering.
+    ///
+    /// Returns `None` when no proof exists at this consumer site;
+    /// callers in `compile_rvalue` then choose between surface-and-stop
+    /// (the dynamic-arith / dynamic-cmp arms) and continuing through the
+    /// `UInt64` carrier fallback in `operand_slot_kind_or_carrier`.
+    ///
+    /// `pub(crate)` so `ownership::refcount_disposition` can project
+    /// through `Field` / `Index` to decide retain/release on the value
+    /// being copied — the value's kind is the field's / element's kind,
+    /// not the base struct/array's heap kind. This closes the segfault
+    /// where `Copy(Field(p_TypedObject, x_Int64))` previously routed
+    /// through the base's heap retain and called `arc_retain(i64_3)`.
+    pub(crate) fn place_native_kind(&self, place: &Place) -> Option<shape_vm::type_tracking::NativeKind> {
+        match place {
+            Place::Local(slot) => {
                 super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
             }
+            Place::Field(_, field_idx) => {
+                let name = self.mir.field_name_table.get(field_idx)?;
+                self.field_native_kinds.get(name).copied()
+            }
+            Place::Index(base, _) => {
+                // The v2 typed-array element-kind helper takes a Place
+                // and reads `concrete_types[base.root_local()]`. It is
+                // the same source the `read_place` fast path uses to
+                // pick the native-width load width for the element —
+                // pairing the producer-side kind classification with the
+                // consumer-side BinaryOp picker.
+                self.v2_typed_array_elem_kind(base)
+            }
+            Place::Deref(_) => None,
         }
     }
 

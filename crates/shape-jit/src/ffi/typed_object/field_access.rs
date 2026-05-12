@@ -112,14 +112,32 @@ impl TypedObject {
 /// Get a field from a typed object by byte offset.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 /// * `offset` - Byte offset of the field
 ///
 /// # Returns
-/// The field value (NaN-boxed), or TAG_NULL if invalid
+/// The field value (raw u64 bits), or TAG_NULL if `obj_bits` is null/0.
+///
+/// W12-jit-binop-after-heap-read-kind-tracker close (2026-05-12): removed
+/// the `is_typed_object(obj_bits)` precondition that was the documented
+/// production-code consumer migration gap in
+/// `field_access.rs:275..314`'s deleted-test comment. `is_typed_object`
+/// requires `is_heap(bits) = is_tagged(bits) && get_tag == TAG_HEAP_BITS`
+/// — a NaN-box-tag check that doesn't apply under §2.7.5 where the JIT
+/// allocator (`unified_box` / `heap_box`) returns raw `Box::into_raw`
+/// pointers without tag bits. Every call to `jit_typed_object_set_field` /
+/// `_get_field` on a valid producer output took the "not a typed object"
+/// early-return path and returned TAG_NULL — silently null-corrupted the
+/// just-allocated obj and segfaulted on the subsequent field-read deref.
+///
+/// Per §2.7.5 the kind is stamped at the call signature, not decoded
+/// from bits — the consumer trusts the kind on the parallel companion.
+/// Null-pointer / mis-alignment guards remain as defensive checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return TAG_NULL;
     }
 
@@ -141,15 +159,22 @@ pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 
 /// Set a field on a typed object by byte offset.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 /// * `offset` - Byte offset of the field
-/// * `value` - NaN-boxed value to set
+/// * `value` - Raw u64 bits to write (interpretation is per the field's
+///   kind, stamped at compile time by the producing-side compiler)
 ///
 /// # Returns
-/// The object (unchanged) for chaining, or TAG_NULL if invalid
+/// The object (unchanged) for chaining, or TAG_NULL if `obj_bits` is null/0.
+///
+/// See `jit_typed_object_get_field` for the §2.7.5 / W12-jit-binop-after-
+/// heap-read-kind-tracker close commentary on the dropped `is_typed_object`
+/// precondition.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: u64) -> u64 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return TAG_NULL;
     }
 

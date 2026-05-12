@@ -200,6 +200,21 @@ pub(crate) fn infer_slot_kinds(
     mir: &MirFunction,
     existing: &[Option<NativeKind>],
 ) -> Vec<Option<NativeKind>> {
+    infer_slot_kinds_with_concrete(mir, existing, &[])
+}
+
+/// Same as `infer_slot_kinds` but also accepts the per-slot
+/// `ConcreteType` vector. The vector is used to project through
+/// `Place::Index` to the array's element kind so destination slots of
+/// `Assign(slot, Use(Copy(Index(arr, _))))` infer the element kind
+/// rather than the array's heap-pointer kind. Mirrors the JIT codegen-
+/// side `v2_typed_array_elem_kind` projection used in
+/// `place_native_kind` (rvalues.rs).
+pub(crate) fn infer_slot_kinds_with_concrete(
+    mir: &MirFunction,
+    existing: &[Option<NativeKind>],
+    concrete_types: &[ConcreteType],
+) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
     let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
 
@@ -210,6 +225,70 @@ pub(crate) fn infer_slot_kinds(
         }
     }
 
+    // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
+    // pre-compute the producer-side field-kinds map from
+    // `StatementKind::ObjectStore { operands, field_names }`. Each
+    // operand's kind is resolved via a forward-only constant-propagation
+    // pass over the seeded slot kinds (`kinds` here, freshly seeded with
+    // `existing`). The result is then used to project through
+    // `Place::Field` in `infer_rvalue_kind` / `infer_operand_kind_with_
+    // fields` so that `Assign(slot, Use(Move(Field(_, _))))` infers the
+    // destination slot's kind from the FIELD's kind, not the base
+    // struct's heap kind.
+    //
+    // Without this, slot kinds inferred from `Use(Move(Field(_, _)))`
+    // inherit the base's `Ptr(HeapKind::TypedObject)`, which downstream
+    // `refcount_disposition` then dispatches as refcounted — and the
+    // field-value `i64=3` passed to `arc_release` segfaults at the
+    // initial-zero or post-assignment slot read.
+    //
+    // Run a quick `Assign(slot, Use(Const))` forward pass first to
+    // populate operand-source slot kinds, then walk `ObjectStore` to
+    // stamp `field_kinds`. The pre-pass is forward-only (no fixed-point
+    // iteration); for cluster-0's load-bearing field-add smoke
+    // (`Point{x:3,y:4}` with `int` constants) this is sufficient.
+    let field_kinds_pre: std::collections::HashMap<String, NativeKind> = {
+        let mut tmp_kinds = kinds.clone();
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(
+                    Place::Local(slot),
+                    Rvalue::Use(Operand::Constant(c)),
+                ) = &stmt.kind
+                {
+                    let idx = slot.0 as usize;
+                    if idx < n && tmp_kinds[idx].is_none() {
+                        tmp_kinds[idx] = infer_constant_kind(c);
+                    }
+                }
+            }
+        }
+        let mut fk: std::collections::HashMap<String, NativeKind> =
+            std::collections::HashMap::new();
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::ObjectStore {
+                    operands,
+                    field_names,
+                    ..
+                } = &stmt.kind
+                {
+                    for (op, name) in operands.iter().zip(field_names.iter()) {
+                        if name.is_empty() {
+                            continue;
+                        }
+                        if let Some(kind) =
+                            infer_operand_kind_with_fields(op, &tmp_kinds, None, None)
+                        {
+                            fk.insert(name.clone(), kind);
+                        }
+                    }
+                }
+            }
+        }
+        fk
+    };
+
     // Forward pass: infer from constants and operations.
     for block in &mir.blocks {
         for stmt in &block.statements {
@@ -218,12 +297,24 @@ pub(crate) fn infer_slot_kinds(
                     if let Place::Local(slot) = place {
                         let idx = slot.0 as usize;
                         if idx < n && kinds[idx].is_none() {
-                            if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
+                            if let Some(inferred) = infer_rvalue_kind_with_projections(
+                                rvalue,
+                                &kinds,
+                                Some(&field_kinds_pre),
+                                Some(&mir.field_name_table),
+                                Some(concrete_types),
+                            ) {
                                 kinds[idx] = Some(inferred);
                             }
                         } else if idx < n {
                             // Slot already has a kind — check for conflicts.
-                            if let Some(inferred) = infer_rvalue_kind(rvalue, &kinds) {
+                            if let Some(inferred) = infer_rvalue_kind_with_projections(
+                                rvalue,
+                                &kinds,
+                                Some(&field_kinds_pre),
+                                Some(&mir.field_name_table),
+                                Some(concrete_types),
+                            ) {
                                 if Some(inferred) != kinds[idx] {
                                     // Conflict: different types on different paths.
                                     // Keep the existing kind (first write wins for
@@ -412,11 +503,57 @@ fn set_kind_if_unknown(kinds: &mut [Option<NativeKind>], idx: usize, kind: Nativ
 
 /// Infer the NativeKind produced by an Rvalue.
 fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[Option<NativeKind>]) -> Option<NativeKind> {
+    infer_rvalue_kind_with_fields(rvalue, kinds, None, None)
+}
+
+/// Project-aware version of `infer_rvalue_kind`: see
+/// `infer_operand_kind_with_fields` for the rationale. `Use(Move(Field))`
+/// / `Use(Copy(Field))` route the destination slot's kind to the FIELD's
+/// kind (per `field_kinds`) rather than the base struct's heap kind.
+#[allow(dead_code)]
+fn infer_rvalue_kind_with_fields(
+    rvalue: &Rvalue,
+    kinds: &[Option<NativeKind>],
+    field_kinds: Option<&std::collections::HashMap<String, NativeKind>>,
+    field_name_table: Option<&std::collections::HashMap<FieldIdx, String>>,
+) -> Option<NativeKind> {
+    infer_rvalue_kind_with_projections(rvalue, kinds, field_kinds, field_name_table, None)
+}
+
+/// Full project-aware Rvalue kind inference: Field via `field_kinds` +
+/// Index via `concrete_types`'s `Array<scalar>` shape. Used by
+/// `infer_slot_kinds_with_concrete` for top-level MIR compilation where
+/// the bytecode compiler's `concrete_types` side-table is available.
+fn infer_rvalue_kind_with_projections(
+    rvalue: &Rvalue,
+    kinds: &[Option<NativeKind>],
+    field_kinds: Option<&std::collections::HashMap<String, NativeKind>>,
+    field_name_table: Option<&std::collections::HashMap<FieldIdx, String>>,
+    concrete_types: Option<&[ConcreteType]>,
+) -> Option<NativeKind> {
     match rvalue {
-        Rvalue::Use(operand) => infer_operand_kind(operand, kinds),
+        Rvalue::Use(operand) => infer_operand_kind_with_projections(
+            operand,
+            kinds,
+            field_kinds,
+            field_name_table,
+            concrete_types,
+        ),
         Rvalue::BinaryOp(op, lhs, rhs) => {
-            let lk = infer_operand_kind(lhs, kinds);
-            let rk = infer_operand_kind(rhs, kinds);
+            let lk = infer_operand_kind_with_projections(
+                lhs,
+                kinds,
+                field_kinds,
+                field_name_table,
+                concrete_types,
+            );
+            let rk = infer_operand_kind_with_projections(
+                rhs,
+                kinds,
+                field_kinds,
+                field_name_table,
+                concrete_types,
+            );
             match (lk, rk) {
                 (Some(l), Some(r)) if l == r => {
                     // Both operands same type.
@@ -438,9 +575,21 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[Option<NativeKind>]) -> Option<Na
                 }
             }
         }
-        Rvalue::UnaryOp(UnOp::Neg, operand) => infer_operand_kind(operand, kinds),
+        Rvalue::UnaryOp(UnOp::Neg, operand) => infer_operand_kind_with_projections(
+            operand,
+            kinds,
+            field_kinds,
+            field_name_table,
+            concrete_types,
+        ),
         Rvalue::UnaryOp(UnOp::Not, _) => Some(NativeKind::Bool),
-        Rvalue::Clone(operand) => infer_operand_kind(operand, kinds),
+        Rvalue::Clone(operand) => infer_operand_kind_with_projections(
+            operand,
+            kinds,
+            field_kinds,
+            field_name_table,
+            concrete_types,
+        ),
         Rvalue::Borrow(_, _) => None,     // References are heap pointers
         Rvalue::Aggregate(_) => None,      // Arrays are heap objects
     }
@@ -448,14 +597,185 @@ fn infer_rvalue_kind(rvalue: &Rvalue, kinds: &[Option<NativeKind>]) -> Option<Na
 
 /// Infer the NativeKind of an operand.
 fn infer_operand_kind(operand: &Operand, kinds: &[Option<NativeKind>]) -> Option<NativeKind> {
+    infer_operand_kind_with_fields(operand, kinds, None, None)
+}
+
+/// W12-jit-binop-after-heap-read-kind-tracker: project through
+/// `Place::Field` / `Place::Index` so `infer_slot_kinds` produces the
+/// correct destination kind for `Assign(slot, Use(Move(Field(_, _))))`
+/// and `Assign(slot, Use(Copy(Index(_, _))))`.
+///
+/// Without projection, the destination slot inherits the BASE's kind
+/// (typically `Ptr(HeapKind::TypedObject)` for a struct base or
+/// `Ptr(HeapKind::TypedArray)` for an array base) — but the value
+/// actually moved/copied is the FIELD or ELEMENT, whose kind is
+/// orthogonal to the base's. The wrong inference makes the destination
+/// slot `Ptr(HeapKind::TypedObject)`, which the bytecode-compiler-
+/// authoritative `LocalTypeInfo::NonCopy` path then dispatches as
+/// refcounted at `release_old_value_if_heap` — and the initial-zero or
+/// later-stored field value (e.g. `i64=3`) gets passed to `arc_release`
+/// /  `arc_retain` as a raw pointer, segfaulting.
+///
+/// Sources:
+/// - `field_kinds`: the producer-side map from `infer_field_native_kinds`
+///   (populated by walking `StatementKind::ObjectStore { operands,
+///   field_names }`). For `Place::Field(_, FieldIdx)`, project via
+///   `field_name_table[FieldIdx] → name → field_kinds[name]`.
+/// - `field_name_table`: passed from the MIR for the `FieldIdx → name`
+///   translation. When `None` (the `infer_field_native_kinds` pre-pass
+///   that uses constant-only slot kinds), Field projection is skipped
+///   and the function falls back to `root_local()` — the same shape as
+///   the pre-W12 path.
+/// - `Place::Index(_, _)`: not threaded into MIR-level inference yet.
+///   The JIT-side `place_native_kind` (in `rvalues.rs`) projects through
+///   `concrete_types`'s `Array<scalar>` shape at JIT codegen time;
+///   adding the same projection here would require threading
+///   `concrete_types` into `infer_slot_kinds` (cross-tier flow). For
+///   cluster-0's load-bearing smokes (Smoke 3 field-add and array-
+///   scalar smoke `xs[0] + xs[1]`), the Array case is covered by the
+///   JIT-side projection alone — the destination slot of
+///   `Use(Copy(Index(_, _)))` doesn't drive a refcount-dispatch bug
+///   because v2 typed-array slots route through the
+///   `RefcountDisposition::Skip_TypedCellCarrier` arm (per
+///   `ownership.rs:99`) before reaching the `slot_kind` discriminator.
+///   If a future smoke surfaces a similar refcount-on-element-read bug,
+///   thread `concrete_types` here.
+fn infer_operand_kind_with_fields(
+    operand: &Operand,
+    kinds: &[Option<NativeKind>],
+    field_kinds: Option<&std::collections::HashMap<String, NativeKind>>,
+    field_name_table: Option<&std::collections::HashMap<FieldIdx, String>>,
+) -> Option<NativeKind> {
+    infer_operand_kind_with_projections(
+        operand,
+        kinds,
+        field_kinds,
+        field_name_table,
+        None,
+    )
+}
+
+/// Project-aware kind classification with both Field (via `field_kinds`)
+/// and Index (via `concrete_types`'s `Array<scalar>` shape).
+///
+/// `Place::Index(base, _)`: when `concrete_types[base.root_local()] =
+/// Array(elem)` with a scalar `elem`, the element kind is `elem` mapped
+/// through `elem_slot_kind_for_concrete`. This mirrors the JIT codegen-
+/// side `v2_typed_array_elem_kind` projection that drives the typed
+/// array load path — same kind source, both consumer sites.
+///
+/// Without this projection, the destination slot of `Use(Copy(Index(
+/// xs_TypedArray, _)))` inherits `xs`'s `Ptr(HeapKind::TypedArray)` kind,
+/// then `print(slot)` falls through `print_i64/f64/bool` to the kind-
+/// blind `jit_print` fallback, which decodes the raw int as f64 and
+/// prints a denormalized garbage. Threading the element kind to the
+/// destination slot makes `print` pick the matching `print_i64` /
+/// `print_f64` arm and produce the correct output.
+fn infer_operand_kind_with_projections(
+    operand: &Operand,
+    kinds: &[Option<NativeKind>],
+    field_kinds: Option<&std::collections::HashMap<String, NativeKind>>,
+    field_name_table: Option<&std::collections::HashMap<FieldIdx, String>>,
+    concrete_types: Option<&[ConcreteType]>,
+) -> Option<NativeKind> {
     match operand {
         Operand::Constant(c) => infer_constant_kind(c),
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            if let (Place::Field(_, field_idx), Some(fk), Some(fnt)) =
+                (place, field_kinds, field_name_table)
+            {
+                if let Some(name) = fnt.get(field_idx) {
+                    if let Some(k) = fk.get(name).copied() {
+                        return Some(k);
+                    }
+                }
+                // Field projection without a stamped kind: fall through
+                // to root-local lookup (the pre-W12 behaviour). Caller
+                // surfaces `None` honestly if the root lookup also fails.
+            }
+            if let (Place::Index(base, _), Some(cts)) = (place, concrete_types) {
+                let base_slot = base.root_local();
+                if let Some(elem_kind) = is_v2_typed_array_slot(cts, base_slot.0) {
+                    return Some(elem_kind);
+                }
+                // Index without a proven Array<scalar> shape: fall
+                // through to root-local lookup. Caller surfaces None
+                // honestly if the root lookup also fails.
+            }
             let slot = place.root_local();
             let idx = slot.0 as usize;
             kinds.get(idx).copied().flatten()
         }
     }
+}
+
+/// Producing-site field-kind classification per ADR-006 §2.7.5
+/// stamp-at-compile-time discipline (W12-jit-binop-after-heap-read-kind-
+/// tracker close, 2026-05-12).
+///
+/// Walk the MIR for every `StatementKind::ObjectStore { container_slot,
+/// operands, field_names }` and stamp `field_native_kinds[name]` with the
+/// operand's MIR-inferred `NativeKind`. This makes `Place::Field(base,
+/// field_idx)` reads have a proven kind at JIT compile time, threading
+/// the kind from the struct-literal producer into downstream `BinaryOp`
+/// lowering without runtime tag-bit decode.
+///
+/// Each operand's kind is sourced from the already-computed `slot_kinds`
+/// (which `infer_slot_kinds` produced from MIR-observable constants and
+/// `ConcreteType` seeds). For `Constant` operands, classification comes
+/// from `infer_constant_kind`. When an operand's kind is unprovable
+/// (`None`), the field is NOT stamped — downstream consumers of
+/// `field_native_kinds` get `None` and the JIT honestly surfaces the gap
+/// at the BinaryOp call site rather than papering with a Bool-default
+/// (§2.7.7 #9 forbidden rationalization).
+///
+/// The map is keyed by field NAME (not `FieldIdx`) to match the existing
+/// `field_byte_offsets` keying — the JIT's `field_name_table` translates
+/// `FieldIdx → String` at the field-read site, and we look up by name
+/// here. Same fragility as `field_byte_offsets`: if two different struct
+/// types share a field name with differing types, last-writer-wins. For
+/// the Smoke 3 case (`Point.x: int`, `Point.y: int`) and the load-
+/// bearing cluster-0 close criterion, this is sufficient. A schema-aware
+/// (StructLayoutId-keyed) registry is the principled long-term shape,
+/// but adding one is out-of-scope for this sub-cluster — see also
+/// `field_byte_offsets`'s identical structural fragility.
+///
+/// `ObjectStore` is the structural kind source — the same statement
+/// that's responsible for materializing the TypedObject in the v2 fast
+/// path. By stamping field kinds here we mirror the producer-side
+/// classification the §2.7.5 conduit already does for the destination
+/// slot's `ConcreteType` (via the `infer_top_level_concrete_types_from_mir`
+/// pass in `crates/shape-vm/src/compiler/helpers.rs`), one layer down
+/// in the type structure.
+pub(crate) fn infer_field_native_kinds(
+    mir: &MirFunction,
+    slot_kinds: &[Option<NativeKind>],
+) -> std::collections::HashMap<String, NativeKind> {
+    let mut field_kinds: std::collections::HashMap<String, NativeKind> =
+        std::collections::HashMap::new();
+    for block in &mir.blocks {
+        for stmt in &block.statements {
+            if let StatementKind::ObjectStore {
+                operands,
+                field_names,
+                ..
+            } = &stmt.kind
+            {
+                for (op, name) in operands.iter().zip(field_names.iter()) {
+                    if name.is_empty() {
+                        // Spreads / unnamed positional operands have no
+                        // field name in the JIT's flat name→kind map.
+                        // The field_byte_offsets walk skips them too.
+                        continue;
+                    }
+                    if let Some(kind) = infer_operand_kind(op, slot_kinds) {
+                        field_kinds.insert(name.clone(), kind);
+                    }
+                }
+            }
+        }
+    }
+    field_kinds
 }
 
 /// Infer the NativeKind of a constant.
