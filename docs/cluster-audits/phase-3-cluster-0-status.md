@@ -143,7 +143,7 @@ Four sub-clusters dispatched in parallel 2026-05-12:
 
 ### W12-jit-stack-parallel-kind-track close notes (2026-05-12)
 
-**Close commit:** `<TBD — pending commit>`
+**Close commit:** `1a4d1156`
 
 **Deliverable:** `JITContext.stack_kinds: [u8; 512]` parallel-track companion
 to `JITContext.stack: [u64; 512]`, mirroring ADR-006 §2.7.7 / Q9 stack
