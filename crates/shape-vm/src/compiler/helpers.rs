@@ -430,8 +430,34 @@ pub(crate) fn with_typed_string_coerce_concat_flag<R>(enabled: bool, f: impl FnO
 /// inferred" sentinel per §2.7.5.1 — NOT a Bool-default fallback per
 /// forbidden #9. Downstream JIT consumers (`concrete_type_for_slot` in
 /// `v2_array.rs`) treat `Void` as "fall through to legacy path".
+///
+/// Wrapper for the resolver-aware variant — preserves existing callers
+/// that don't have access to a callee-return resolver. Call-terminator
+/// destinations stay `Void` when this entry point is used; the resolver-
+/// aware variant `infer_top_level_concrete_types_from_mir_with_returns`
+/// stamps them from the callee's declared return type.
 pub(crate) fn infer_top_level_concrete_types_from_mir(
     mir: &crate::mir::MirFunction,
+) -> Vec<shape_value::v2::ConcreteType> {
+    infer_top_level_concrete_types_from_mir_with_returns(mir, None)
+}
+
+/// Resolver-aware conduit producer.
+///
+/// `callee_returns(name) -> Option<&ConcreteType>` returns the declared
+/// `ConcreteType` of the named function's return value, or `None` for
+/// "unknown / not annotated / not user-defined". The body stamps
+/// `TerminatorKind::Call { destination, .. }` slots from the resolver
+/// when the callee is `MirConstant::Function(name)`.
+///
+/// ADR-006 §2.7.5 — W12-jit-call-return-kind, 2026-05-12. Producing-
+/// site classification at the bytecode-compile layer: the callee's
+/// declared return type is the proof source for the destination slot's
+/// ConcreteType. No tag-bit decode, no Bool-default — when the
+/// resolver returns `None` the slot stays `Void`.
+pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
+    mir: &crate::mir::MirFunction,
+    callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
     use crate::mir::types::{MirConstant, Operand, StatementKind};
     let n = mir.num_locals as usize;
@@ -519,6 +545,60 @@ pub(crate) fn infer_top_level_concrete_types_from_mir(
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Call-terminator destination pass: stamp slots from the callee's
+    // declared return type. ADR-006 §2.7.5 producing-site classification
+    // applied to `TerminatorKind::Call` — the callee's return annotation
+    // (resolved via the `callee_returns` closure) IS the proof source
+    // for the destination slot's `ConcreteType`.
+    //
+    // `let r = divide(10, 2)` lowers to:
+    //   bb_call: ... terminator = Call(divide, [10, 2], dst=r_slot, next=bb_after)
+    //
+    // Without this pass the destination slot stays `Void` (no
+    // `*Store` statement, no `Use(Move)` propagation seeds it),
+    // and the downstream `match r { Ok(v) => ..., Err(e) => ... }`
+    // codegen sees `r` as kind-unclassified and falls through to the
+    // legacy decoder path. This pass stamps `Result(I64, String)` for
+    // `divide`'s return; the match consumer can then dispatch on
+    // `is_typed_object_slot(r_slot)`.
+    //
+    // The pass runs BEFORE the slot-move propagation pass so that any
+    // `Use(Move|Copy)` chain from the Call destination to a user-visible
+    // slot propagates the Call-stamped kind correctly.
+    //
+    // No tag-bit decode, no Bool-default — when the resolver returns
+    // `None` the slot stays `Void` per §2.7.5.1.
+    if let Some(resolver) = callee_returns {
+        use crate::mir::types::TerminatorKind;
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call {
+                func, destination, ..
+            } = &block.terminator.kind
+            {
+                if let Operand::Constant(MirConstant::Function(name)) = func {
+                    if let crate::mir::types::Place::Local(dst) = destination {
+                        let idx = dst.0 as usize;
+                        if idx < n
+                            && matches!(
+                                concrete_types[idx],
+                                shape_value::v2::ConcreteType::Void
+                            )
+                        {
+                            if let Some(ct) = resolver(name.as_str()) {
+                                if !matches!(
+                                    ct,
+                                    shape_value::v2::ConcreteType::Void
+                                ) {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5067,5 +5147,200 @@ mod tests {
     #[test]
     fn _phase_2c_rebuild() {
         todo!("phase-2c — see ADR-006 §2.7.4");
+    }
+}
+
+// ADR-006 §2.7.5 — W12-jit-call-return-kind close (2026-05-12).
+//
+// Fresh test module for the resolver-aware conduit producer. The
+// historical `mod tests` above remains gated for the unrelated
+// ValueWord-shape deletions; this module builds a synthetic MIR
+// using only the strict-typed shapes and verifies the
+// `TerminatorKind::Call` destination stamping pass.
+#[cfg(test)]
+mod call_return_kind_tests {
+    use super::*;
+    use crate::mir::types::{
+        BasicBlock, BasicBlockId, MirConstant, MirFunction, Operand,
+        Place, Point, Rvalue, SlotId, StatementKind, Terminator,
+        TerminatorKind,
+    };
+    use shape_value::v2::ConcreteType;
+
+    fn mk_span() -> shape_ast::Span {
+        shape_ast::Span::new(0, 0)
+    }
+
+    fn mk_mir_with_call(callee_name: &str, dst_slot: u16) -> MirFunction {
+        let span = mk_span();
+        // Two blocks: bb0 unconditionally jumps to bb1 with a Call
+        // terminator that writes into `dst_slot`. bb1 returns.
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function(
+                        callee_name.to_string(),
+                    )),
+                    args: vec![],
+                    destination: Place::Local(SlotId(dst_slot)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let n_locals = (dst_slot as u16) + 1;
+        MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: n_locals,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                n_locals as usize
+            ],
+            span,
+            field_name_table: Default::default(),
+        }
+    }
+
+    #[test]
+    fn call_terminator_destination_stamped_from_resolver() {
+        // ADR-006 §2.7.5 producing-site classification for
+        // `TerminatorKind::Call`. The resolver returns
+        // `Result(I64, String)` for the callee; the destination slot
+        // (slot 3 here) must be stamped with that ConcreteType.
+        let mir = mk_mir_with_call("divide", 3);
+        let resolver = |name: &str| -> Option<ConcreteType> {
+            if name == "divide" {
+                Some(ConcreteType::Result(
+                    Box::new(ConcreteType::I64),
+                    Box::new(ConcreteType::String),
+                ))
+            } else {
+                None
+            }
+        };
+        let result = infer_top_level_concrete_types_from_mir_with_returns(
+            &mir,
+            Some(&resolver),
+        );
+        assert_eq!(
+            result[3],
+            ConcreteType::Result(
+                Box::new(ConcreteType::I64),
+                Box::new(ConcreteType::String),
+            ),
+            "Call destination slot 3 should be stamped Result(I64,String)"
+        );
+        // Other slots stay Void.
+        assert_eq!(result[0], ConcreteType::Void);
+    }
+
+    #[test]
+    fn call_terminator_no_resolver_leaves_void() {
+        // Without a resolver, the producer falls back to the legacy
+        // behavior — Call destinations stay Void. The conduit doesn't
+        // fabricate a kind per §2.7.5.1.
+        let mir = mk_mir_with_call("divide", 3);
+        let result = infer_top_level_concrete_types_from_mir(&mir);
+        assert_eq!(result[3], ConcreteType::Void);
+    }
+
+    #[test]
+    fn call_terminator_resolver_returns_none_leaves_void() {
+        // Resolver returns None for unknown callees — destination
+        // stays Void (no Bool-default fabrication per §2.7.5.1 /
+        // forbidden #9).
+        let mir = mk_mir_with_call("unknown_callee", 2);
+        let resolver = |_name: &str| -> Option<ConcreteType> { None };
+        let result = infer_top_level_concrete_types_from_mir_with_returns(
+            &mir,
+            Some(&resolver),
+        );
+        assert_eq!(result[2], ConcreteType::Void);
+    }
+
+    #[test]
+    fn call_terminator_propagates_through_move() {
+        // The Call-terminator pass runs BEFORE the slot-move
+        // propagation pass, so `let r = divide(10, 2); let x = r;`
+        // (which lowers to a Call writing slot 3 followed by an
+        // `Assign(x_slot, Use(Move(slot 3)))`) propagates the Result
+        // kind through to `x_slot`.
+        let span = mk_span();
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![crate::mir::types::MirStatement {
+                kind: StatementKind::Assign(
+                    Place::Local(SlotId(5)),
+                    Rvalue::Use(Operand::Move(Place::Local(SlotId(3)))),
+                ),
+                span,
+                point: Point(0),
+            }],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function(
+                        "divide".to_string(),
+                    )),
+                    args: vec![],
+                    destination: Place::Local(SlotId(3)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let mir = MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: 6,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                6
+            ],
+            span,
+            field_name_table: Default::default(),
+        };
+        let resolver = |name: &str| -> Option<ConcreteType> {
+            if name == "divide" {
+                Some(ConcreteType::Result(
+                    Box::new(ConcreteType::I64),
+                    Box::new(ConcreteType::String),
+                ))
+            } else {
+                None
+            }
+        };
+        let result = infer_top_level_concrete_types_from_mir_with_returns(
+            &mir,
+            Some(&resolver),
+        );
+        let expected = ConcreteType::Result(
+            Box::new(ConcreteType::I64),
+            Box::new(ConcreteType::String),
+        );
+        assert_eq!(result[3], expected, "Call destination slot stamped");
+        assert_eq!(result[5], expected, "Move destination propagated");
     }
 }

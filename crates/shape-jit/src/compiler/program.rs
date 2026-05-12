@@ -301,6 +301,7 @@ impl JITCompiler {
                 top_level_frame: None,
                 top_level_local_concrete_types: Vec::new(),
                 function_local_concrete_types: Vec::new(),
+                function_return_concrete_types: Vec::new(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),

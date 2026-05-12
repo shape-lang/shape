@@ -536,6 +536,145 @@ conduit successfully stamped Enum (including `divide`).
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
+## Round 6 — dispatching (Round 5B option-(iii) co-design unpacked into three sub-clusters)
+
+Three sub-clusters dispatched in parallel 2026-05-12 from the Round 5B
+W12-jit-aggregate-non-array close (`d3ea6546`), which surfaced
+co-design territory the dispatch correctly split into three orthogonal
+pieces:
+
+| Sub-cluster | Branch | Smoke unblocked | Status |
+|---|---|---|---|
+| W12-jit-call-return-kind | `bulldozer-strictly-typed-w12-jit-call-return-kind` | 1.5 (Call-terminator destination kind for `let r = divide(...)`) | **closed** (2026-05-12) |
+| W12-jit-match-enum-inline-codegen | `bulldozer-strictly-typed-w12-jit-match-enum-inline` | 1.5 (match-on-`r` codegen for Ok/Err/Some/None) | dispatching |
+| W12-collection-constructor-mir-lowering | `bulldozer-strictly-typed-w12-collection-ctor-mir` | 4 (Set/HashMap/Deque/... constructors) | dispatching |
+
+### W12-jit-call-return-kind close (2026-05-12)
+
+Audit-first sub-cluster. Audit doc:
+`docs/cluster-audits/w12-jit-call-return-kind-audit.md` (793 lines, 11
+sections).
+
+**Audit reclassified the territory as option (ii), NOT option (iii)** as
+Round 5B audit §4.4 had framed it. The reframing:
+
+- The **Call-return kind track piece** is option (ii) — same conduit
+  shape as the existing kind-source statement walks (`ObjectStore`,
+  `EnumStore`, `ArrayStore`), applied to one more MIR shape
+  (`TerminatorKind::Call`). The callee's declared return type IS the
+  proof source per ADR-006 §2.7.5 producing-site classification.
+  No ADR amendment.
+- The **match codegen piece** is Round 6B's territory — independent
+  sub-cluster.
+- The **NaN-box↔Arc carrier mismatch piece** is a real architectural
+  gap but is NOT load-bearing for any current cluster-0 smoke
+  (single JIT execution, no cross-mode boundary). Surfaced as
+  cluster-1 candidate `W12-jit-result-carrier-unification`.
+
+Splitting the 5B-monolith into three independent sub-clusters lets
+each ship at its own scope.
+
+**Fix shape (Commit 2)**: pure §2.7.5 conduit extension —
+
+1. NEW `BytecodeProgram.function_return_concrete_types: Vec<ConcreteType>`
+   side-table, populated per user function from the AST
+   `FunctionDef.return_type` (preserved through `expanded_function_defs`)
+   via the existing `concrete_type_from_annotation` (in use for HashMap
+   key/value extraction; reused, not rebuilt).
+2. NEW `infer_top_level_concrete_types_from_mir_with_returns` resolver-
+   aware variant of the conduit producer. Walks `TerminatorKind::Call`
+   destinations BEFORE the slot-move propagation pass, stamps from the
+   resolver. Existing `infer_top_level_concrete_types_from_mir` becomes
+   a None-passing wrapper preserving callers.
+3. Build a callee-return resolver closure over the side-table + a
+   function-name → index map; thread through both the top-level and
+   per-function conduit calls in `compile_post_assembly`. This also
+   handles user-function bodies that call other user functions — the
+   resolver works recursively at each layer.
+4. Thread the new side-table through `linker.rs` / `remote.rs` /
+   `ContentAddressedProgram` / `LinkedProgram` (same shape as
+   `function_local_concrete_types` from Round 5B).
+5. 4 unit tests added under `compiler::helpers::call_return_kind_tests`
+   (4/0/0): basic stamping, no-resolver legacy behavior, None-returning
+   resolver leaves Void, propagation through `Use(Move)` chains.
+
+No new MIR shape. No new HeapKind. No new dispatch shape. No new FFI
+entry. No ADR amendment.
+
+**Smoke 1.5 status post-fix**: VM `5` unchanged. JIT still errors
+`JIT execution error (code: -1)` because `divide` itself fails Phase-4
+compile at the EnumStore consumer (Round 5B's deferred work). When
+divide's stub returns -1 from the deopt signal, the top-level call
+propagates it through `return_(&[signal])` (terminators.rs:628)
+killing JIT execution before `r`'s slot kind is ever read. **My fix
+establishes the necessary kind-classification piece** but Smoke 1.5
+end-to-end JIT success requires:
+
+1. The EnumStore consumer (Round 5B's deferred surface) to actually
+   emit codegen — or Round 6B picks up that piece alongside match
+   codegen, since they're both about consuming EnumStore-produced bits.
+2. Round 6B's match-on-enum inline codegen for `Ok(v)` / `Err(e)` /
+   `Some(x)` / `None` dispatch.
+
+Both pre-existed; my fix does not regress them.
+
+**NaN-box ↔ Arc<ResultData> round-trip audit (audit doc §6)**:
+`jit_make_ok(inner_bits)` returns raw `Box::into_raw(UnifiedValue<u64>)
+as u64` — NOT NaN-boxed. The boundary predicate `is_ok_tag(bits)`
+chains through `is_heap_kind` → `heap_kind` → `is_heap` → `is_tagged`
+which checks `bits & TAG_BASE == TAG_BASE`. Raw `Box::into_raw`
+pointers have NO TAG_BASE bits → `is_heap` returns false → `is_ok_tag`
+returns false on every output of `jit_make_ok`. This is the deleted-
+ValueWord-shape API documented at `result.rs:178-200` (W12-deleted-
+valuewordshape-tests-rewrite, Round 3) — the production callers were
+never migrated. `format_value_word` HK_OK arm CORRECTLY reads via
+`jit_unbox::<u64>` from the raw-pointer payload, BUT `is_heap(bits)`
+gate fails first → falls into `is_number(bits)` arm decoding raw
+pointer bits as a denormalized f64 (the `0.000...471777` observed in
+Round 5B's experiment). VM-side `BuiltinFunction::OkCtor` produces
+`Arc<ResultData>` wrapped via `KindedSlot::from_result` —
+fundamentally different storage shape. **NOT load-bearing for Smoke
+1.5** (single JIT execution); surfaced as cluster-1 candidate
+`W12-jit-result-carrier-unification`.
+
+**Close gates (devenv exit-code-verified)**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-vm --lib call_return_kind_tests` 4/0/0 (NEW)
+- `cargo test -p shape-jit --lib` EXIT=0 (322/0/26 — matches baseline
+  322, verified by stash-and-rerun)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Sites surfaced (cite-tracked, NOT silently fallback'd)**:
+- (a) NaN-box vs `Arc<ResultData>` carrier mismatch — cluster-1
+  candidate `W12-jit-result-carrier-unification`. Two options for
+  that future cluster: (A) extend `jit_make_ok`/`_err`/`_some` to
+  produce `Arc<ResultData>` bits and stamp `Ptr(HeapKind::Result)` —
+  §2.7.5 single source of truth; or (B) extend JIT consumer to
+  handle both carrier shapes dispatched on slot kind.
+- (b) `is_ok_tag` / `is_err_tag` / `is_some_tag` predicates broken
+  on raw-pointer producer output. Same cluster as (a).
+- (c) `format_value_word` HK_OK/HK_ERR/HK_SOME arms correctly
+  handle the JIT-internal raw-pointer shape but NOT the
+  Arc<ResultData> shape. Same cluster.
+- (d) Round 5B's EnumStore non-empty payload consumer for user-
+  function bodies (28 stdlib `TryFrom::*::Json::tryFrom` + `divide`
+  itself) — orthogonal to top-level Call-return kind track. Round
+  6B's territory if it also handles EnumStore production; otherwise
+  separate sub-cluster.
+- (e) Round 6B's match-on-enum inline codegen — load-bearing for
+  Smoke 1.5 end-to-end alongside this fix.
+
+**ADR-006 amendment**: NOT required. The fix is §2.7.5 producing-site
+classification at the MIR layer, applied to `TerminatorKind::Call`
+(one more kind-source MIR shape alongside the existing `*Store`
+walks). No new HeapKind, no new MIR statement kind, no new opcode,
+no new dispatch shape.
+
+Branch: `bulldozer-strictly-typed-w12-jit-call-return-kind`
+Audit commit: `f58abc8d`
+Fix commit: (pending — appended at merge)
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
