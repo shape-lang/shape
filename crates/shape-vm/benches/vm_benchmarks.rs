@@ -235,7 +235,13 @@ fn bench_typed_arithmetic(c: &mut Criterion) {
 ///   1: StoreLocal(0)     — x = 0
 ///   2: LoadLocal(0)      — [loop top] push x
 ///   3: PushConst(N)      — push limit
-///   4: LessThan          — x < N
+///   4: LtInt             — x < N (typed: both ints; the pre-strict-typing
+///                          generic `Lt` opcode was deleted alongside
+///                          ValueWord, so this loop also uses the typed
+///                          variant — the function-name `loop_1k_generic`
+///                          stays for criterion bench-name stability and
+///                          historical comparison, even though the runtime
+///                          dispatch is now identical to `loop_1k_typed`)
 ///   5: JumpIfFalse(+5)   — if false, jump to Halt (instruction 10)
 ///   6: LoadLocal(0)      — push x
 ///   7: PushConst(1)      — push 1
@@ -266,8 +272,9 @@ fn build_loop_program(iterations: i64) -> BytecodeProgram {
         OpCode::PushConst,
         Some(Operand::Const(c_limit)),
     ));
-    // 4: x < N
-    prog.emit(Instruction::simple(OpCode::Lt));
+    // 4: x < N — typed (`Lt` was deleted; `LtInt` is the post-strict-typing
+    // entry-point for `i64 × i64 → bool` comparison)
+    prog.emit(Instruction::simple(OpCode::LtInt));
     // 5: jump if false to halt (skip 5 instructions forward: 6,7,8,9,10 -> land on 11)
     prog.emit(Instruction::new(
         OpCode::JumpIfFalse,
