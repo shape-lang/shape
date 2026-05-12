@@ -684,7 +684,77 @@ pub(super) fn lower_pattern_bindings_from_place_opt(
                 );
             }
         }
-        ast::Pattern::Constructor { fields, .. } => {
+        ast::Pattern::Constructor { variant, fields, .. } => {
+            // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
+            // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
+            // bindings (per ADR-006 §2.7.17 / Q18 — kinded
+            // `Arc<ResultData>` / `Arc<OptionData>` carrier), the binding
+            // payload is NOT `Place::Index(scrutinee, 0)` — that would
+            // read the `is_ok` byte of the ResultData struct interpreted
+            // as an array element, returning garbage. Instead we emit an
+            // explicit `Rvalue::EnumPayload { operand, variant: <tag> }`
+            // into a fresh slot, then bind the inner pattern to that
+            // slot. The JIT consumer reads from
+            // `r.payload.kind`/`o.payload.kind` via `jit_arc_result_payload`
+            // / `jit_arc_option_payload` per the §2.7.17 receiver-
+            // recovery soundness rule.
+            //
+            // None has no payload (and the surrounding match codegen
+            // ensures this arm is only entered when the variant matches —
+            // so we don't emit EnumPayload for None_).
+            if let Some(tag) = VariantTag::from_name(variant) {
+                if matches!(tag, VariantTag::None_) {
+                    // None: no inner bindings (parser only allows
+                    // Unit-shape constructor fields for None).
+                    return;
+                }
+                if let Some(source_place) = source_place {
+                    // Allocate a fresh payload slot; emit
+                    // EnumPayload into it; recurse with the new slot as
+                    // the source_place. The fields are tuple-shape for
+                    // Ok / Err / Some — single-element tuple containing
+                    // the binding pattern.
+                    match fields {
+                        ast::PatternConstructorFields::Tuple(patterns) if patterns.len() == 1 => {
+                            let payload_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+                            builder.push_stmt(
+                                StatementKind::Assign(
+                                    Place::Local(payload_slot),
+                                    Rvalue::EnumPayload {
+                                        operand: Operand::Copy(source_place.clone()),
+                                        variant: tag,
+                                    },
+                                ),
+                                span,
+                            );
+                            lower_pattern_bindings_from_place_opt(
+                                builder,
+                                &patterns[0],
+                                Some(&Place::Local(payload_slot)),
+                                span,
+                                binding_metadata,
+                            );
+                            return;
+                        }
+                        ast::PatternConstructorFields::Unit => {
+                            // No payload to bind — `Ok` / `Err` / `Some`
+                            // with no payload pattern is an unusual but
+                            // valid form (e.g. just to test the variant
+                            // without naming the payload). No bindings to
+                            // emit.
+                            return;
+                        }
+                        _ => {
+                            // Fall through to the general path for non-
+                            // tuple/non-unit shapes — this preserves
+                            // backward-compat for user-defined struct
+                            // variants that happen to be named Ok/Err/Some
+                            // (rare but legal).
+                        }
+                    }
+                }
+            }
+
             lower_constructor_bindings_from_place_opt(
                 builder,
                 fields,

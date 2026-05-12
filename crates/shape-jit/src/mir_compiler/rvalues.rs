@@ -104,7 +104,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 };
                 if self.refcount_disposition_for_place(place)? {
-                    self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                    let retain_func = self.retain_func_for_place(place);
+                    self.builder.ins().call(retain_func, &[val]);
                 }
                 Ok(val)
             }

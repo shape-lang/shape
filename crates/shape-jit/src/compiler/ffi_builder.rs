@@ -229,6 +229,10 @@ impl JITCompiler {
             arc_option_is_some: r!("jit_arc_option_is_some"),
             arc_option_is_none: r!("jit_arc_option_is_none"),
             arc_option_payload: r!("jit_arc_option_payload"),
+            arc_result_retain: r!("jit_arc_result_retain"),
+            arc_result_release: r!("jit_arc_result_release"),
+            arc_option_retain: r!("jit_arc_option_retain"),
+            arc_option_release: r!("jit_arc_option_release"),
 
             // v2 typed HashMap<string, ...>
             //

@@ -407,6 +407,70 @@ pub extern "C" fn jit_arc_option_payload(bits: u64) -> u64 {
     raw
 }
 
+/// Retain (clone) an `Arc<ResultData>` strong-count share. Bumps the
+/// standard Rust Arc refcount at offset -16 of the `Arc::into_raw` pointer
+/// via `Arc::increment_strong_count::<ResultData>` — NOT the W-series
+/// `UnifiedValue<T>` refcount at offset 4 (`jit_arc_retain`'s shape).
+///
+/// W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A, 2026-05-12).
+/// The legacy `jit_arc_retain` would write a U32 fetch_add at the wrong
+/// offset of `Arc<ResultData>` — corrupting `payload.slot.0`'s high 32
+/// bits with the spurious "refcount". The kinded retain operates on the
+/// correct refcount location via `Arc::increment_strong_count::<T>` per
+/// the Rust standard library Arc contract.
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<ResultData>) as u64` from
+/// `jit_v2_make_result_ok` / `jit_v2_make_result_err` or the VM-side
+/// `KindedSlot::from_result` producer. Null is silently no-op'd.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_result_retain(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::increment_strong_count(bits as *const ResultData);
+    }
+}
+
+/// Release an `Arc<ResultData>` strong-count share. Mirrors
+/// `jit_arc_result_retain`'s decrement — uses
+/// `Arc::decrement_strong_count::<ResultData>` per Rust Arc contract.
+/// Reaching refcount zero runs `ResultData::Drop` which retires the
+/// inner `KindedSlot::Drop` (kind-aware per §2.7.6 / Q8).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_result_release(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::decrement_strong_count(bits as *const ResultData);
+    }
+}
+
+/// Retain (clone) an `Arc<OptionData>` strong-count share. Mirror of
+/// `jit_arc_result_retain`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_option_retain(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::increment_strong_count(bits as *const OptionData);
+    }
+}
+
+/// Release an `Arc<OptionData>` strong-count share. Mirror of
+/// `jit_arc_result_release`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_option_release(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::decrement_strong_count(bits as *const OptionData);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

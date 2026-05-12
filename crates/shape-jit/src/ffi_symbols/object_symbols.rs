@@ -117,6 +117,27 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_arc_option_payload",
         super::super::ffi::result::jit_arc_option_payload as *const u8,
     );
+    // Arc-shape kinded retain/release per ADR-006 §2.7.17 / Q18.
+    // Required because the legacy `jit_arc_retain`/`jit_arc_release`
+    // operate on the `UnifiedValue<T>` refcount layout at offset 4,
+    // which would corrupt `Arc<ResultData>`/`Arc<OptionData>` allocations
+    // (whose refcount lives at offset -16 per Rust Arc contract).
+    builder.symbol(
+        "jit_arc_result_retain",
+        super::super::ffi::result::jit_arc_result_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_release",
+        super::super::ffi::result::jit_arc_result_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_retain",
+        super::super::ffi::result::jit_arc_option_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_release",
+        super::super::ffi::result::jit_arc_option_release as *const u8,
+    );
     builder.symbol("jit_print", jit_print as *const u8);
     // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
     // print entry points dispatched by the MIR-side print emitter when
@@ -619,6 +640,25 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // Arc-shape retain/release: bump/decrement the standard Rust Arc
+    // refcount at offset -16 per Arc contract. Signature: `(bits: u64)`.
+    // Required by `refcount_disposition` when the slot kind is
+    // `Ptr(HeapKind::Result)` or `Ptr(HeapKind::Option)` — the legacy
+    // `jit_arc_retain`/`jit_arc_release` for `UnifiedValue<T>` corrupt
+    // these allocations.
+    for name in [
+        "jit_arc_result_retain",
+        "jit_arc_result_release",
+        "jit_arc_option_retain",
+        "jit_arc_option_release",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
         let func_id = module
             .declare_function(name, Linkage::Import, &sig)
             .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));

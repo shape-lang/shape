@@ -235,11 +235,55 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.refcount_disposition(place)?,
                     RefcountDisposition::Refcounted
                 ) {
-                    self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                    let retain_func = self.retain_func_for_place(place);
+                    self.builder.ins().call(retain_func, &[val]);
                 }
                 Ok(val)
             }
             Operand::Constant(constant) => self.compile_constant(constant),
+        }
+    }
+
+    /// Pick the kind-appropriate retain FFI for a place. ADR-006 §2.7.17
+    /// adopted `Arc<ResultData>` / `Arc<OptionData>` as the strict-typed
+    /// Result/Option carriers; their refcount lives at offset -16 per
+    /// Rust Arc contract, NOT at offset 4 like the legacy
+    /// `UnifiedValue<T>` shape. The legacy `jit_arc_retain` would write
+    /// to the wrong offset and corrupt the inner payload.
+    ///
+    /// Returns `arc_result_retain` / `arc_option_retain` for the typed-Arc
+    /// kinds; falls back to the legacy `arc_retain` for all other heap
+    /// kinds (still on `UnifiedValue<T>` until W11-jit-new-array's wider
+    /// migration). Same dispatch shape that release uses.
+    ///
+    /// W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
+    /// 2026-05-12).
+    pub(crate) fn retain_func_for_place(
+        &self,
+        place: &Place,
+    ) -> cranelift::codegen::ir::FuncRef {
+        use shape_value::heap_value::HeapKind;
+        use shape_vm::type_tracking::NativeKind;
+        let kind = self.place_native_kind(place);
+        match kind {
+            Some(NativeKind::Ptr(HeapKind::Result)) => self.ffi.arc_result_retain,
+            Some(NativeKind::Ptr(HeapKind::Option)) => self.ffi.arc_option_retain,
+            _ => self.ffi.arc_retain,
+        }
+    }
+
+    /// Mirror of `retain_func_for_place` for release.
+    pub(crate) fn release_func_for_place(
+        &self,
+        place: &Place,
+    ) -> cranelift::codegen::ir::FuncRef {
+        use shape_value::heap_value::HeapKind;
+        use shape_vm::type_tracking::NativeKind;
+        let kind = self.place_native_kind(place);
+        match kind {
+            Some(NativeKind::Ptr(HeapKind::Result)) => self.ffi.arc_result_release,
+            Some(NativeKind::Ptr(HeapKind::Option)) => self.ffi.arc_option_release,
+            _ => self.ffi.arc_release,
         }
     }
 
@@ -422,7 +466,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         match disposition {
             RefcountDisposition::Refcounted => {
                 let val = self.read_place(place)?;
-                self.builder.ins().call(self.ffi.arc_release, &[val]);
+                let release_func = self.release_func_for_place(place);
+                self.builder.ins().call(release_func, &[val]);
                 self.null_place(place)?;
             }
             RefcountDisposition::Skip => {
@@ -472,7 +517,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         match disposition {
             RefcountDisposition::Refcounted => {
                 let old_val = self.read_place(place)?;
-                self.builder.ins().call(self.ffi.arc_release, &[old_val]);
+                let release_func = self.release_func_for_place(place);
+                self.builder.ins().call(release_func, &[old_val]);
             }
             RefcountDisposition::Skip | RefcountDisposition::Skip_TypedCellCarrier => {
                 // Scalar / typed-cell-carrier slots: no refcount work.

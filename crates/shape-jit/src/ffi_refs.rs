@@ -258,6 +258,18 @@ pub struct FFIFuncRefs {
     pub(crate) arc_option_is_none: FuncRef,
     pub(crate) arc_option_payload: FuncRef,
 
+    // Arc-shape kinded retain/release for `Arc<ResultData>` /
+    // `Arc<OptionData>` carriers (W12-jit-result-option-trinity,
+    // 2026-05-12). The legacy `arc_retain` / `arc_release` operate on
+    // the `UnifiedValue<T>` refcount layout (offset 4) and corrupt the
+    // typed-Arc allocations (whose refcount lives at offset -16 per
+    // Rust Arc contract). Refcount sites for Result/Option-kinded
+    // slots dispatch HERE instead of the legacy entries.
+    pub(crate) arc_result_retain: FuncRef,
+    pub(crate) arc_result_release: FuncRef,
+    pub(crate) arc_option_retain: FuncRef,
+    pub(crate) arc_option_release: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):
