@@ -1452,10 +1452,73 @@ impl BytecodeCompiler {
         // exactly). `ConcreteType::Void` per slot means "no
         // information inferred" — a real enum variant per §2.7.5.1, not
         // a Bool-default fallback per forbidden #9.
+        //
+        // The top-level conduit walk is deferred a few lines down — it
+        // runs AFTER the per-function return-type side-table is built,
+        // so the Call-terminator destination stamping in the walk has
+        // access to callee return types via the resolver. See the
+        // W12-jit-call-return-kind block below.
+
+        // ADR-006 §2.7.5 conduit (W12-jit-call-return-kind close, 2026-05-12):
+        // Per-user-function declared return ConcreteType, built first so the
+        // per-function and top-level conduit passes can consume it via the
+        // callee-return resolver. Returns are classified from the AST
+        // `FunctionDef.return_type` (preserved via `expanded_function_defs`)
+        // through `concrete_type_from_annotation` (already used for HashMap
+        // key/value extraction). When the function has no annotation or the
+        // annotation doesn't reduce to a known shape, the entry stays
+        // `ConcreteType::Void` per §2.7.5.1 — NOT a Bool-default fallback.
+        let mut per_fn_ret: Vec<shape_value::v2::ConcreteType> =
+            Vec::with_capacity(self.program.functions.len());
+        for func in &self.program.functions {
+            let ct = self
+                .program
+                .expanded_function_defs
+                .get(&func.name)
+                .and_then(|fd| fd.return_type.as_ref())
+                .and_then(|ann| {
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
+                        ann,
+                    )
+                })
+                .unwrap_or(shape_value::v2::ConcreteType::Void);
+            per_fn_ret.push(ct);
+        }
+        self.program.function_return_concrete_types = per_fn_ret;
+
+        // Build the callee-return resolver: maps `MirConstant::Function(name)`
+        // to the callee's declared return ConcreteType via the side-table
+        // just populated. Used by the conduit passes below to stamp
+        // `TerminatorKind::Call` destination slots. `None` for unknown /
+        // unannotated / void-returning functions — the destination slot
+        // stays `Void` (no fabrication).
+        let name_to_idx: std::collections::HashMap<String, usize> = self
+            .program
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), i))
+            .collect();
+        let returns_vec = self.program.function_return_concrete_types.clone();
+        let callee_returns = |name: &str| -> Option<shape_value::v2::ConcreteType> {
+            let idx = *name_to_idx.get(name)?;
+            let ct = returns_vec.get(idx)?;
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct.clone())
+            }
+        };
+
+        // Re-run top-level conduit with the callee-return resolver so the
+        // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
+        // the Call terminator. (The first run above stamped `Void` for
+        // Call destinations since no resolver was available.)
         if let Some(ref mir_data) = self.program.top_level_mir {
             let concrete_types =
-                crate::compiler::helpers::infer_top_level_concrete_types_from_mir(
+                crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_returns(
                     &mir_data.mir,
+                    Some(&callee_returns),
                 );
             self.program.top_level_local_concrete_types = concrete_types;
         }
@@ -1473,6 +1536,11 @@ impl BytecodeCompiler {
         // body (Smoke 1.5 `divide`, Smoke 2 `first_positive`, 28 stdlib
         // helpers verified at audit time).
         //
+        // The callee-return resolver is also threaded here so user-function
+        // bodies that call other user functions (e.g. `divide` calls a
+        // helper) propagate the helper's return ConcreteType into their
+        // own slot, recursing through the conduit.
+        //
         // `ConcreteType::Void` per slot per §2.7.5.1 — NOT a Bool-default
         // fallback per forbidden #9. Functions without `mir_data` get an
         // empty inner vec; downstream consumers fall back to the legacy
@@ -1482,8 +1550,9 @@ impl BytecodeCompiler {
         for func in &self.program.functions {
             if let Some(ref mir_data) = func.mir_data {
                 per_fn.push(
-                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir(
+                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_returns(
                         &mir_data.mir,
+                        Some(&callee_returns),
                     ),
                 );
             } else {

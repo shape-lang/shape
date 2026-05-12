@@ -328,6 +328,33 @@ pub struct BytecodeProgram {
     #[serde(skip, default)]
     pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
 
+    /// Per-user-function declared `ConcreteType` for the function's return value.
+    ///
+    /// `function_return_concrete_types[f]` is the `ConcreteType` derived
+    /// from `FunctionDef.return_type` via
+    /// `compiler::v2_map_emission::concrete_type_from_annotation`. Used
+    /// by the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir`) to stamp Call-
+    /// terminator destination slots: when the caller writes
+    /// `let r = divide(10, 2)`, the `r` slot's ConcreteType is the
+    /// callee's return type (here, `Result(I64, String)`).
+    ///
+    /// `ConcreteType::Void` per entry means "no annotation" or
+    /// "annotation didn't reduce to a known shape" — the conduit and
+    /// JIT consumers treat Void as the no-information sentinel per
+    /// §2.7.5.1. NOT a Bool-default fallback per forbidden #9.
+    ///
+    /// Producer: `compile_post_assembly` — per-function walk after the
+    /// per-function MIR conduit populate.
+    /// Consumer: `infer_top_level_concrete_types_from_mir` extended
+    /// with the callee-return resolver parameter.
+    ///
+    /// ADR-006 §2.7.5 — W12-jit-call-return-kind close, 2026-05-12.
+    /// Same NOT-serialized rationale as the sibling `*_concrete_types`
+    /// side-tables; ConcreteType isn't wire-stable.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

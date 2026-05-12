@@ -54,6 +54,7 @@ fn make_program(blobs: Vec<FunctionBlob>, entry: FunctionHash) -> Program {
         top_level_frame: None,
         top_level_local_concrete_types: vec![],
         function_local_concrete_types: vec![],
+        function_return_concrete_types: vec![],
         data_schema: None,
         type_schema_registry: Default::default(),
         trait_method_symbols: HashMap::new(),

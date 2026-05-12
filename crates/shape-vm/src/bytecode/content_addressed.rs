@@ -219,6 +219,18 @@ pub struct Program {
     #[serde(skip, default)]
     pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
 
+    /// Per-user-function declared `ConcreteType` for the return value.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-call-return-kind close, 2026-05-12):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.function_return_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit can stamp Call-terminator destination
+    /// slots from the callee's declared return type. Not serialised —
+    /// same rationale as the sibling `*_concrete_types` side-tables.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -380,6 +392,17 @@ pub struct LinkedProgram {
     /// `top_level_local_concrete_types`.
     #[serde(skip, default)]
     pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
+    /// Per-user-function declared `ConcreteType` for the return value.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-call-return-kind, 2026-05-12):
+    /// LinkedProgram mirror of
+    /// `Program.function_return_concrete_types` — propagated through
+    /// the linker so the conduit can stamp Call-terminator destination
+    /// slots from the callee's declared return type. Not serialised —
+    /// same rationale.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,
