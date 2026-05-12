@@ -37,10 +37,12 @@
 
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    AlignedTypedBuffer, AlignedVec, DataTable, HeapValue, KindedSlot, NativeKind, TableViewData,
-    TypedArrayData, TypedBuffer, ValueSlot, VMError, heap_value::HeapKind,
+    AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData,
+    TypedArrayData, TypedBuffer, TypedObjectStorage, ValueSlot, VMError,
+    heap_value::{HeapKind, MatrixData},
 };
 use std::sync::Arc;
+use arrow_array::Array;
 
 use crate::executor::VirtualMachine;
 
@@ -243,8 +245,17 @@ pub(crate) fn handle_select(
     push_data_table_result(DataTable::new(new_batch))
 }
 
-/// `dt.toMat()` — convert to `Array<Array<f64>>`. Each row becomes a
-/// row-vector; per-column kinds widen to `f64` (Float64 / Int64 supported).
+/// `dt.toMat()` — convert to a flat row-major matrix. Each row's values
+/// widen to `f64` (Float64 / Int64 supported).
+///
+/// W17-out-of-bundle-A-followups (2026-05-12): per the C+ precedent in
+/// `phase-2d-playbook.md` §3, rewires from the pre-Q25.A polymorphic
+/// `Array<Array<f64>>` (which routed through the deleted
+/// `TypedArrayData::HeapValue` carrier) to a direct `MatrixData` —
+/// the rectangular-numeric shape is already monomorphic and `MatrixData`
+/// is the existing carrier for it. User-visible: `mat.length` returns
+/// the row count via Matrix's iteration shape; `mat[i]` returns row `i`
+/// as a `FloatSlice` view.
 pub(crate) fn handle_to_mat(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -272,31 +283,20 @@ pub(crate) fn handle_to_mat(
         }
     }
 
-    let mut row_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(row_count);
+    // Build flat row-major buffer; MatrixData stores rows*cols f64s.
+    let total = row_count.checked_mul(col_count).ok_or_else(|| {
+        VMError::RuntimeError("toMat: row_count * col_count overflow".to_string())
+    })?;
+    let mut flat: Vec<f64> = Vec::with_capacity(total);
     for r in 0..row_count {
-        let row: Vec<f64> = (0..col_count).map(|c| cols[c][r]).collect();
-        let aligned = AlignedVec::from_vec(row);
-        let buf = AlignedTypedBuffer::from_aligned(aligned);
-        let inner = TypedArrayData::F64(Arc::new(buf));
-        let hv = HeapValue::TypedArray(Arc::new(inner));
-        row_arcs.push(Arc::new(hv));
+        for c in 0..col_count {
+            flat.push(cols[c][r]);
+        }
     }
-    // W17-typed-carrier-bundle-A checkpoint 2/4: Array<Array<f64>> as a
-    // value-of-array-of-array carrier has no specialized variant in
-    // ADR-006 §2.7.24 Q25.A's spec list. The dispatcher will surface on
-    // the nested-TypedArray HeapValue arm. Out-of-territory follow-up:
-    // either add `TypedArrayData::TypedArray` (Array<Array<T>>) to Q25.A's
-    // list, or route DataTable.toMat through a Matrix carrier directly.
-    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(row_arcs)
-        .map_err(|err| {
-            VMError::NotImplemented(format!(
-                "DataTable.toMat: {} — ADR-006 §2.7.24 Q25.A spec list \
-                 lacks a `TypedArray`-element variant; out-of-territory \
-                 follow-up.",
-                err
-            ))
-        })?;
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let aligned = AlignedVec::from_vec(flat);
+    let matrix = MatrixData::from_flat(aligned, row_count as u32, col_count as u32);
+    let inner = TypedArrayData::Matrix(Arc::new(matrix));
+    Ok(KindedSlot::from_typed_array(Arc::new(inner)))
 }
 
 /// `dt.limit(n)` — alias for take-first-n.
@@ -323,7 +323,20 @@ pub(crate) fn handle_execute(
     ))
 }
 
-/// `dt.rows()` — `Array<RowView>` (each RowView is a TableView Arc).
+/// `dt.rows()` — `Array<{column_name: value, ...}>`. Each row materializes
+/// as a TypedObject whose schema mirrors the table's column names + types.
+///
+/// W17-out-of-bundle-A-followups (2026-05-12): per the C+ precedent in
+/// `phase-2d-playbook.md` §3, rewires from `Array<TableView>` (which
+/// routed through the deleted `TypedArrayData::HeapValue` carrier) to
+/// `Array<TypedObject>` via Q25.A's specialized list. Each row reads
+/// column data at construction time and writes a per-field slot — the
+/// `TableView`'s schema_id-only carrier is no longer needed at the row
+/// layer.
+///
+/// Supported column kinds: i64, f64, bool, string. Other Arrow types
+/// surface via SURFACE with an §-cite at construction time so the
+/// failure is structural rather than a silent slot-kind mismatch.
 pub(crate) fn handle_rows(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -331,62 +344,197 @@ pub(crate) fn handle_rows(
 ) -> Result<KindedSlot, VMError> {
     let dt_arc = borrow_data_table_arc(args, "rows")?;
     let row_count = dt_arc.row_count();
-    let schema_id = dt_arc.schema_id().unwrap_or(0) as u64;
-    let mut row_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(row_count);
+    let col_names = dt_arc.column_names();
+
+    // Auto-register the row schema. Field order = column order.
+    let schema_id =
+        shape_runtime::type_schema::register_predeclared_any_schema(&col_names);
+
+    // Pre-derive per-column kind so each row's slots are typed
+    // consistently. Build a per-column reader closure that produces a
+    // (ValueSlot, NativeKind, bool/heap) triple for row `i`.
+    let col_readers = build_column_readers(&dt_arc, "rows")?;
+    let field_kinds: Arc<[NativeKind]> = Arc::from(
+        col_readers
+            .iter()
+            .map(|r| r.kind)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let heap_mask: u64 = {
+        let mut m: u64 = 0;
+        for (i, r) in col_readers.iter().enumerate() {
+            if r.is_heap {
+                if i >= 64 {
+                    return Err(VMError::NotImplemented(format!(
+                        "DataTable.rows: {} columns exceed 64-bit heap_mask \
+                         capacity; ADR-006 §2.7.24 Q25.A row schema cap.",
+                        col_readers.len()
+                    )));
+                }
+                m |= 1u64 << i;
+            }
+        }
+        m
+    };
+
+    let mut row_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(row_count);
     for r in 0..row_count {
-        let tv = TableViewData::RowView {
-            schema_id,
-            table: Arc::clone(&dt_arc),
-            row_idx: r,
-        };
-        let hv = HeapValue::TableView(Arc::new(tv));
-        row_arcs.push(Arc::new(hv));
+        let mut slots: Vec<ValueSlot> = Vec::with_capacity(col_readers.len());
+        for reader in col_readers.iter() {
+            slots.push((reader.read)(r));
+        }
+        let storage = Arc::new(TypedObjectStorage::new(
+            schema_id as u64,
+            slots.into_boxed_slice(),
+            heap_mask,
+            Arc::clone(&field_kinds),
+        ));
+        row_storages.push(storage);
     }
-    // W17-typed-carrier-bundle-A checkpoint 2/4: `Array<TableView>` has
-    // no specialized variant in ADR-006 §2.7.24 Q25.A's spec list. The
-    // dispatcher will surface on the TableView heap arm. Out-of-territory
-    // follow-up: add `TypedArrayData::TableView` (Array<RowView | ColumnRef>).
-    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(row_arcs)
-        .map_err(|err| {
-            VMError::NotImplemented(format!(
-                "DataTable.rows: {} — ADR-006 §2.7.24 Q25.A spec list lacks \
-                 a `TableView`-element variant; out-of-territory follow-up.",
-                err
-            ))
-        })?;
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let buf = TypedBuffer::from_vec(row_storages);
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(buf)),
+    )))
 }
 
-/// `dt.columnsRef()` — `Array<ColumnRef>`.
+/// `dt.columnsRef()` — `Array<{name, kind}>`. Each column materializes
+/// as a small TypedObject describing the column metadata.
+///
+/// W17-out-of-bundle-A-followups (2026-05-12): per the C+ precedent in
+/// `phase-2d-playbook.md` §3, rewires from `Array<TableView::ColumnRef>`
+/// (which routed through the deleted `TypedArrayData::HeapValue`) to
+/// `Array<TypedObject>` with a fixed `{name: string, kind: string}`
+/// schema. The pre-rewire `ColumnRef` carrier had no method surface
+/// reachable through `Array<TableView>` element-access anyway (callers
+/// used `dt.column(name)` directly for column data); this preserves
+/// the metadata-as-array shape that user code naturally addresses.
 pub(crate) fn handle_columns_ref(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     let dt_arc = borrow_data_table_arc(args, "columnsRef")?;
-    let schema_id = dt_arc.schema_id().unwrap_or(0) as u64;
     let col_count = dt_arc.column_count();
-    let mut col_arcs: Vec<Arc<HeapValue>> = Vec::with_capacity(col_count);
-    for c in 0..col_count {
-        let tv = TableViewData::ColumnRef {
-            schema_id,
-            table: Arc::clone(&dt_arc),
-            col_id: c as u32,
-        };
-        let hv = HeapValue::TableView(Arc::new(tv));
-        col_arcs.push(Arc::new(hv));
+    let col_names = dt_arc.column_names();
+
+    let fields = ["name".to_string(), "kind".to_string()];
+    let schema_id = shape_runtime::type_schema::register_predeclared_any_schema(&fields);
+    let field_kinds: Arc<[NativeKind]> = Arc::from(
+        vec![NativeKind::String, NativeKind::String].into_boxed_slice(),
+    );
+    let heap_mask: u64 = 0b11;
+
+    let mut col_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(col_count);
+    for (idx, name) in col_names.iter().enumerate() {
+        let arrow_col = dt_arc.inner().column(idx);
+        let kind_name = format!("{:?}", arrow_col.data_type());
+        let slots: Box<[ValueSlot]> = Box::new([
+            ValueSlot::from_string_arc(Arc::new(name.clone())),
+            ValueSlot::from_string_arc(Arc::new(kind_name)),
+        ]);
+        let storage = Arc::new(TypedObjectStorage::new(
+            schema_id as u64,
+            slots,
+            heap_mask,
+            Arc::clone(&field_kinds),
+        ));
+        col_storages.push(storage);
     }
-    // W17-typed-carrier-bundle-A checkpoint 2/4: same TableView-not-in-Q25.A
-    // gap as `handle_rows` above. Surface-and-stop with cite.
-    let outer = shape_value::TypedArrayData::build_specialized_from_heap_arcs(col_arcs)
-        .map_err(|err| {
-            VMError::NotImplemented(format!(
-                "DataTable.columnsRef: {} — ADR-006 §2.7.24 Q25.A spec list \
-                 lacks a `TableView`-element variant; out-of-territory follow-up.",
-                err
-            ))
-        })?;
-    Ok(KindedSlot::from_typed_array(Arc::new(outer)))
+    let buf = TypedBuffer::from_vec(col_storages);
+    Ok(KindedSlot::from_typed_array(Arc::new(
+        TypedArrayData::TypedObject(Arc::new(buf)),
+    )))
+}
+
+/// Per-column reader: closure that produces a `ValueSlot` for row `i`,
+/// plus the column's `NativeKind` and whether the slot is heap-resident.
+/// Built once per `dt.rows()` call; reused across rows.
+struct ColumnReader {
+    read: Box<dyn Fn(usize) -> ValueSlot>,
+    kind: NativeKind,
+    is_heap: bool,
+}
+
+fn build_column_readers(
+    dt: &Arc<DataTable>,
+    method: &str,
+) -> Result<Vec<ColumnReader>, VMError> {
+    use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
+    let col_count = dt.column_count();
+    let mut readers: Vec<ColumnReader> = Vec::with_capacity(col_count);
+    for col_idx in 0..col_count {
+        let col = dt.inner().column(col_idx);
+        let col_clone = col.clone();
+        if let Some(_i64a) = col.as_any().downcast_ref::<Int64Array>() {
+            let arr: Arc<Int64Array> = Arc::new(
+                col_clone
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .clone(),
+            );
+            readers.push(ColumnReader {
+                read: Box::new(move |i| ValueSlot::from_raw(arr.value(i) as u64)),
+                kind: NativeKind::Int64,
+                is_heap: false,
+            });
+        } else if let Some(_f64a) = col.as_any().downcast_ref::<Float64Array>() {
+            let arr: Arc<Float64Array> = Arc::new(
+                col_clone
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .clone(),
+            );
+            readers.push(ColumnReader {
+                read: Box::new(move |i| ValueSlot::from_raw(arr.value(i).to_bits())),
+                kind: NativeKind::Float64,
+                is_heap: false,
+            });
+        } else if let Some(_b) = col.as_any().downcast_ref::<BooleanArray>() {
+            let arr: Arc<BooleanArray> = Arc::new(
+                col_clone
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap()
+                    .clone(),
+            );
+            readers.push(ColumnReader {
+                read: Box::new(move |i| {
+                    ValueSlot::from_raw(if arr.value(i) { 1 } else { 0 })
+                }),
+                kind: NativeKind::Bool,
+                is_heap: false,
+            });
+        } else if let Some(_s) = col.as_any().downcast_ref::<StringArray>() {
+            let arr: Arc<StringArray> = Arc::new(
+                col_clone
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .clone(),
+            );
+            readers.push(ColumnReader {
+                read: Box::new(move |i| {
+                    ValueSlot::from_string_arc(Arc::new(arr.value(i).to_string()))
+                }),
+                kind: NativeKind::String,
+                is_heap: true,
+            });
+        } else {
+            return Err(VMError::NotImplemented(format!(
+                "DataTable.{}: column {} has unsupported Arrow type {:?} — \
+                 only Int64/Float64/Boolean/String columns lower to TypedObject \
+                 row slots; other column types tracked as a follow-up \
+                 (ADR-006 §2.7.24 Q25.A row-schema extension).",
+                method,
+                col_idx,
+                col.data_type()
+            )));
+        }
+    }
+    Ok(readers)
 }
 
 // ── argument coercion helpers ───────────────────────────────────────────────
