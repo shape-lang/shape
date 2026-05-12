@@ -214,6 +214,48 @@ impl KindedSlot {
         )
     }
 
+    /// Convenience: a `Ptr(HeapKind::Temporal)`-kind slot. ADR-006
+    /// §2.7.6 / Q8 cardinality amendment (Wave 3 W17-from-temporal-
+    /// instant-constructors, 2026-05-12). Slot bits are
+    /// `Arc::into_raw(Arc<TemporalData>) as u64`; recovery goes through
+    /// the canonical 5-arm receiver-recovery pattern (reconstruct via
+    /// `Arc::<TemporalData>::from_raw`, clone, `into_raw` to restore).
+    /// Mirror of `from_iterator` typed-Arc dispatch shape — `TemporalData`
+    /// is the consolidated DateTime / Duration / TimeSpan / Timeframe /
+    /// TimeReference / DateTimeExpr / DataDateTimeRef carrier per
+    /// `heap_value.rs::TemporalData`. The Drop / Clone arms for
+    /// `HeapKind::Temporal` already dispatch the matching strong-count
+    /// retain/release; this constructor pairs with them by the §2.7.6 /
+    /// Q8 bounded carrier-API rule (one constructor per `NativeKind` heap
+    /// variant, no new heap-variant cardinality introduced).
+    #[inline]
+    pub fn from_temporal(arc: Arc<crate::heap_value::TemporalData>) -> Self {
+        let bits = Arc::into_raw(arc) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Temporal),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Instant)`-kind slot. ADR-006
+    /// §2.7.6 / Q8 cardinality amendment (Wave 3 W17-from-temporal-
+    /// instant-constructors, 2026-05-12). Slot bits are
+    /// `Arc::into_raw(Arc<std::time::Instant>) as u64`; recovery goes
+    /// through the canonical 5-arm receiver-recovery pattern. Mirror of
+    /// `from_temporal` for the `Instant` sibling — `Instant` rides
+    /// `Arc<std::time::Instant>` directly (no `InstantData` wrapper).
+    /// The Drop / Clone arms for `HeapKind::Instant` already dispatch
+    /// the matching strong-count retain/release; this constructor pairs
+    /// with them by the §2.7.6 / Q8 bounded carrier-API rule.
+    #[inline]
+    pub fn from_instant(arc: Arc<std::time::Instant>) -> Self {
+        let bits = Arc::into_raw(arc) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Instant),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Iterator)`-kind slot. Stores the
     /// `Arc::into_raw` pointer directly per ADR-006 §2.7.16 / Q17 (W13-
     /// iterator-state).
@@ -1136,5 +1178,73 @@ mod tests {
         // pointer; `as_str()` should round-trip the contents.
         let s = KindedSlot::from_string("round trip");
         assert_eq!(s.as_str(), Some("round trip"));
+    }
+
+    // ── §2.7.6 / Q8 from_temporal / from_instant constructor pair ────────
+    //
+    // W17-from-temporal-instant-constructors (Wave 3, 2026-05-12). These
+    // pin the bounded-carrier-API rule: one constructor per `NativeKind`
+    // heap variant, no parallel discrimination. Both constructors share
+    // the `Arc::into_raw` typed-Arc shape with the existing Drop / Clone
+    // arms for `HeapKind::Temporal` / `HeapKind::Instant`.
+
+    #[test]
+    fn kinded_slot_from_temporal_sets_kind_and_retires_arc() {
+        use crate::heap_value::TemporalData;
+        let arc = Arc::new(TemporalData::TimeSpan(chrono::Duration::seconds(7)));
+        let weak = Arc::downgrade(&arc);
+        let slot = KindedSlot::from_temporal(arc);
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Temporal));
+        assert_eq!(weak.strong_count(), 1, "slot owns the only strong share");
+        drop(slot);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "Drop dispatched HeapKind::Temporal arm and retired refcount"
+        );
+    }
+
+    #[test]
+    fn kinded_slot_from_temporal_clone_then_double_drop_balances() {
+        use crate::heap_value::TemporalData;
+        let arc = Arc::new(TemporalData::TimeSpan(chrono::Duration::milliseconds(500)));
+        let weak = Arc::downgrade(&arc);
+        let slot1 = KindedSlot::from_temporal(arc);
+        assert_eq!(weak.strong_count(), 1);
+        let slot2 = slot1.clone();
+        assert_eq!(weak.strong_count(), 2, "Clone bumped refcount");
+        drop(slot1);
+        assert_eq!(weak.strong_count(), 1, "first Drop retired one share");
+        drop(slot2);
+        assert_eq!(weak.strong_count(), 0, "second Drop retired the last");
+    }
+
+    #[test]
+    fn kinded_slot_from_instant_sets_kind_and_retires_arc() {
+        let arc = Arc::new(std::time::Instant::now());
+        let weak = Arc::downgrade(&arc);
+        let slot = KindedSlot::from_instant(arc);
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Instant));
+        assert_eq!(weak.strong_count(), 1, "slot owns the only strong share");
+        drop(slot);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "Drop dispatched HeapKind::Instant arm and retired refcount"
+        );
+    }
+
+    #[test]
+    fn kinded_slot_from_instant_clone_then_double_drop_balances() {
+        let arc = Arc::new(std::time::Instant::now());
+        let weak = Arc::downgrade(&arc);
+        let slot1 = KindedSlot::from_instant(arc);
+        assert_eq!(weak.strong_count(), 1);
+        let slot2 = slot1.clone();
+        assert_eq!(weak.strong_count(), 2, "Clone bumped refcount");
+        drop(slot1);
+        assert_eq!(weak.strong_count(), 1, "first Drop retired one share");
+        drop(slot2);
+        assert_eq!(weak.strong_count(), 0, "second Drop retired the last");
     }
 }

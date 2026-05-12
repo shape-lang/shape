@@ -233,32 +233,14 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::DateTime(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Timespan(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Duration(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Instant(buf) => Ok(kinded_from_instant_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::DateTime(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Timespan(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Duration(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Instant(buf) => Ok(KindedSlot::from_instant(Arc::clone(&buf.data[idx]))),
         TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
         TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
         TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
-}
-
-#[inline]
-fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        NativeKind::Ptr(HeapKind::Temporal),
-    )
-}
-
-#[inline]
-fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        NativeKind::Ptr(HeapKind::Instant),
-    )
 }
 
 /// Read codepoint `idx` from a string source as a single-character

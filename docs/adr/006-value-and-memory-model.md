@@ -4888,6 +4888,60 @@ Each follow-up extends `SerializableVMValue` in lockstep with its target arm, la
 
 Binding for Phase 2d onward.
 
+#### 2.7.6.A `KindedSlot::from_temporal` / `from_instant` constructor pair (Phase 2d Wave 3 W17-from-temporal-instant-constructors, 2026-05-12)
+
+**Question:** Bundle-A's close (`13d63ed7`) noted that `KindedSlot` lacked per-`FieldType`-style constructors for `NativeKind::Ptr(HeapKind::Temporal)` and `NativeKind::Ptr(HeapKind::Instant)`. Bundle-A migrated the `TypedArrayData::{DateTime, Timespan, Duration}` and `TypedArrayData::Instant` element-readback paths in `array_transform.rs`, `array_aggregation.rs`, `iterator_methods.rs`, and `compiler/comptime.rs` by introducing **local helper mirrors** (`kinded_from_temporal_arc` / `kinded_from_instant_arc`) that inlined the canonical `Arc::into_raw(arc) as u64` + `KindedSlot::new(ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::X))` shape. The mirrors were noted as "kept local so the comptime layer doesn't pull in executor-tier visibility" and explicitly flagged as a §2.7.6 / Q8 cardinality amendment for separate work.
+
+**Decision (Wave 3 W17-from-temporal-instant-constructors):** add the two missing constructors to `KindedSlot` and delete the four local helper mirrors. The new pair is:
+
+```rust
+// crates/shape-value/src/kinded_slot.rs
+impl KindedSlot {
+    #[inline]
+    pub fn from_temporal(arc: Arc<crate::heap_value::TemporalData>) -> Self {
+        let bits = Arc::into_raw(arc) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Temporal),
+        )
+    }
+
+    #[inline]
+    pub fn from_instant(arc: Arc<std::time::Instant>) -> Self {
+        let bits = Arc::into_raw(arc) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Instant),
+        )
+    }
+}
+```
+
+**Carrier-API-bound fit (§2.7.6 / Q8).** This pair sits squarely inside the §2.7.6 bound: one constructor per existing `NativeKind::Ptr(HeapKind::X)` heap variant. The amendment **does not introduce a new `HeapKind` variant** — `HeapKind::Temporal` and `HeapKind::Instant` already exist; they already have arms in the 4-table lockstep dispatch (`clone_with_kind` / `drop_with_kind` in `vm_impl/stack.rs`, `Drop` / `Clone` in `kinded_slot.rs`, `SharedCell::drop` in `v2/closure_layout.rs`, `TypedObjectStorage::drop` in `heap_value.rs`); and `TypedArrayData::{DateTime, Timespan, Duration, Instant}` already store the matching typed-Arc payloads (`Arc<TemporalData>` / `Arc<std::time::Instant>`). The constructors are the **missing matching half** of an already-complete §2.7.6 dispatch surface, not a cardinality expansion. No new heap-variant accessor is added (the §2.7.6 forbidden-shape rule against per-heap-variant `as_X()` accessors is preserved — receivers still recover the typed Arc via the 5-arm receiver-recovery pattern when needed, not via a `KindedSlot::as_temporal()`).
+
+**Storage-shape parity with siblings.** Both constructors follow the typed-Arc-via-`from_raw` shape (`KindedSlot::new(ValueSlot::from_raw(Arc::into_raw(arc) as u64), NativeKind::Ptr(HeapKind::X))`), matching the existing `from_iterator` (§2.7.16 / Q17), `from_range` (§2.7.23 / Q24), `from_result` / `from_option` (§2.7.17 / Q18) precedents where `ValueSlot` does not carry a sibling `from_temporal` / `from_instant` typed-Arc constructor and the `KindedSlot` constructor builds the slot bits directly. This is identical to the `from_iterator` shape — `ValueSlot::from_raw(Arc::into_raw(it) as u64)` inside the `KindedSlot::from_iterator` body.
+
+**Sibling-of-Temporal note.** `TemporalData` is the consolidated DateTime / Duration / TimeSpan / Timeframe / TimeReference / DateTimeExpr / DataDateTimeRef carrier (`crates/shape-value/src/heap_value.rs:3492`). `TypedArrayData::{DateTime, Timespan, Duration}` all carry `Arc<TemporalData>` element payloads; all three feed into the single `from_temporal` constructor at the element-readback path (the three TypedArrayData arms dispatch on storage variant, not on TemporalData variant — that's a downstream `TemporalData::*` body match, not a constructor-side cardinality concern).
+
+**Migration sites (four local helper mirrors deleted):**
+
+1. `crates/shape-vm/src/executor/objects/array_transform.rs::kinded_from_temporal_arc` / `kinded_from_instant_arc` — deleted; four call sites (`DateTime` / `Timespan` / `Duration` / `Instant` arms in `element_kinded`) now call `KindedSlot::from_temporal` / `KindedSlot::from_instant` directly.
+2. `crates/shape-vm/src/executor/objects/array_aggregation.rs::kinded_from_temporal_arc` / `kinded_from_instant_arc` — deleted; four call sites in the per-element `element_kinded` body migrated.
+3. `crates/shape-vm/src/executor/objects/iterator_methods.rs::kinded_from_temporal_arc` / `kinded_from_instant_arc` — deleted; four call sites in the iterator element-readback body migrated.
+4. `crates/shape-vm/src/compiler/comptime.rs::typed_array_element_kinded` — the `DateTime | Timespan | Duration` and `Instant` arms used **inline** `KindedSlot::new(ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::X))` construction (not a named helper); both migrated to call `KindedSlot::from_temporal` / `KindedSlot::from_instant` directly, collapsing the inline `Arc::into_raw` + slot-build dance into the named constructor.
+
+**Refcount discipline preserved.** Each call site previously built the slot bits by `Arc::into_raw(Arc::clone(&buf.data[idx]))`. The new constructors take ownership of the cloned `Arc<T>` and do the `Arc::into_raw` internally; the strong-count semantics are identical (one share owned by the resulting `KindedSlot`, paired with one Drop / Clone arm retire/bump under the existing 4-table lockstep). Storage-tier unit tests added in `kinded_slot.rs::tests` (`kinded_slot_from_temporal_sets_kind_and_retires_arc`, `kinded_slot_from_temporal_clone_then_double_drop_balances`, `kinded_slot_from_instant_sets_kind_and_retires_arc`, `kinded_slot_from_instant_clone_then_double_drop_balances`) pin the refcount-on-drop and clone-then-double-drop invariants for both kinds.
+
+**Forbidden shapes this rules out:**
+
+- **Per-heap-variant `KindedSlot::as_temporal()` / `KindedSlot::as_instant()` accessors.** The §2.7.6 / Q8 forbidden-shape rule against per-heap-variant accessors stands — heap dispatch goes through `slot.slot.as_heap_value()` + `HeapValue` match (for `Box<HeapValue>` arms) or the 5-arm receiver-recovery pattern (for typed-Arc arms like Temporal / Instant). Adding only the constructor half preserves the carrier-API bound.
+- **`from_heap_arc(Arc<HeapValue>)` catch-all.** Q6 ruling reaffirmed. The constructors take typed `Arc<TemporalData>` / `Arc<std::time::Instant>`, never `Arc<HeapValue>`.
+- **Local helper-mirror retention "for separation of concerns".** Bundle-A's noted "kept local so the comptime layer doesn't pull in executor-tier visibility" rationale dissolves once the constructor lives on `KindedSlot` directly — `shape-value` is already a dependency of both `shape-vm/executor/` and `shape-vm/compiler/`, so the constructor has lower visibility burden than the local helpers it replaces (zero versus three duplicated function definitions).
+
+**Out-of-scope this amendment:** any further `KindedSlot` constructor for heap variants whose slot-bits shape is not `Arc::into_raw(Arc<T>) as u64` — those are §2.7.6 forbidden by the carrier-API bound and require a separate ADR amendment if a new heap variant is ever introduced with a different storage shape; deletion of `HeapKind::Temporal` / `HeapKind::Instant` as discriminator labels (they remain, with all 4-table lockstep arms intact); migration of `executor/stack_ops/mod.rs:153`'s `op_push_const` Temporal / Instant paths to the new constructors (those use the same inline `Arc::into_raw` + `KindedSlot::new` shape; constructor migration is a mechanical follow-up but not in this sub-cluster's territory because the bundle-A close did not name `stack_ops` as one of the helper-mirror sites).
+
+Binding for Phase 2d onward.
+
 ## 16. References
 
 ### Research base

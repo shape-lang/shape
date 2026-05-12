@@ -1051,22 +1051,8 @@ fn typed_array_element_kinded(
         TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
         TypedArrayData::DateTime(b)
         | TypedArrayData::Timespan(b)
-        | TypedArrayData::Duration(b) => {
-            let arc = Arc::clone(&b.data[idx]);
-            let bits = Arc::into_raw(arc) as u64;
-            KindedSlot::new(
-                shape_value::ValueSlot::from_raw(bits),
-                shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal),
-            )
-        }
-        TypedArrayData::Instant(b) => {
-            let arc = Arc::clone(&b.data[idx]);
-            let bits = Arc::into_raw(arc) as u64;
-            KindedSlot::new(
-                shape_value::ValueSlot::from_raw(bits),
-                shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant),
-            )
-        }
+        | TypedArrayData::Duration(b) => KindedSlot::from_temporal(Arc::clone(&b.data[idx])),
+        TypedArrayData::Instant(b) => KindedSlot::from_instant(Arc::clone(&b.data[idx])),
         TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
         TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object(Arc::clone(&b.data[idx])),
         TypedArrayData::TraitObject(b) => KindedSlot::from_trait_object(Arc::clone(&b.data[idx])),

@@ -199,38 +199,14 @@ fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMErro
         // arms. Same shape as `array_transform::element_kinded`.
         TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
         TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
-        TypedArrayData::DateTime(b) => kinded_from_temporal_arc(Arc::clone(&b.data[idx])),
-        TypedArrayData::Timespan(b) => kinded_from_temporal_arc(Arc::clone(&b.data[idx])),
-        TypedArrayData::Duration(b) => kinded_from_temporal_arc(Arc::clone(&b.data[idx])),
-        TypedArrayData::Instant(b) => kinded_from_instant_arc(Arc::clone(&b.data[idx])),
+        TypedArrayData::DateTime(b) => KindedSlot::from_temporal(Arc::clone(&b.data[idx])),
+        TypedArrayData::Timespan(b) => KindedSlot::from_temporal(Arc::clone(&b.data[idx])),
+        TypedArrayData::Duration(b) => KindedSlot::from_temporal(Arc::clone(&b.data[idx])),
+        TypedArrayData::Instant(b) => KindedSlot::from_instant(Arc::clone(&b.data[idx])),
         TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
         TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object(Arc::clone(&b.data[idx])),
         TypedArrayData::TraitObject(b) => KindedSlot::from_trait_object(Arc::clone(&b.data[idx])),
     })
-}
-
-/// W17-typed-carrier-bundle-A checkpoint 3/4: build a `KindedSlot`
-/// carrying `NativeKind::Ptr(HeapKind::Temporal)` from an
-/// `Arc<TemporalData>`. Mirror of `array_transform::kinded_from_temporal_arc`.
-#[inline]
-fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
-    use shape_value::heap_value::HeapKind;
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        shape_value::NativeKind::Ptr(HeapKind::Temporal),
-    )
-}
-
-/// Mirror for `Arc<std::time::Instant>` → `NativeKind::Ptr(HeapKind::Instant)`.
-#[inline]
-fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
-    use shape_value::heap_value::HeapKind;
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        shape_value::NativeKind::Ptr(HeapKind::Instant),
-    )
 }
 
 /// Test a `KindedSlot` for truthiness — Bool/numeric arms read bits,

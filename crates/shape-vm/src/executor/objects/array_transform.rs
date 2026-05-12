@@ -854,42 +854,14 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
         // arms — each builds a `KindedSlot` of the variant's element type.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::DateTime(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Timespan(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Duration(buf) => Ok(kinded_from_temporal_arc(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Instant(buf) => Ok(kinded_from_instant_arc(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::DateTime(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Timespan(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Duration(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
+        TypedArrayData::Instant(buf) => Ok(KindedSlot::from_instant(Arc::clone(&buf.data[idx]))),
         TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
         TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
         TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
-}
-
-/// W17-typed-carrier-bundle-A checkpoint 3/4: build a `KindedSlot`
-/// carrying `NativeKind::Ptr(HeapKind::Temporal)` from an
-/// `Arc<TemporalData>`. KindedSlot lacks a per-FieldType `from_temporal`
-/// constructor at landing; this helper inlines the canonical
-/// `Arc::into_raw` + `KindedSlot::new` shape used by the temporal
-/// constant-push path in `executor/stack_ops/mod.rs:153`.
-#[inline]
-fn kinded_from_temporal_arc(arc: Arc<shape_value::heap_value::TemporalData>) -> KindedSlot {
-    use shape_value::heap_value::HeapKind;
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        shape_value::NativeKind::Ptr(HeapKind::Temporal),
-    )
-}
-
-/// Mirror of `kinded_from_temporal_arc` for `Arc<std::time::Instant>` →
-/// `NativeKind::Ptr(HeapKind::Instant)`.
-#[inline]
-fn kinded_from_instant_arc(arc: Arc<std::time::Instant>) -> KindedSlot {
-    use shape_value::heap_value::HeapKind;
-    let bits = Arc::into_raw(arc) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        shape_value::NativeKind::Ptr(HeapKind::Instant),
-    )
 }
 
 /// Stringify a `KindedSlot` for `groupBy` bucket keys. Dispatches on
