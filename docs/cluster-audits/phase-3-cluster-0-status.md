@@ -348,8 +348,87 @@ correct cites are §2.7.14 / §2.7.5. Round-5B agent fixes this.
 | Sub-cluster | Branch | Smoke unblocked | Status |
 |---|---|---|---|
 | W12-jit-binop-after-heap-read-kind-tracker | `bulldozer-strictly-typed-w12-jit-binop-heap-read` | 3 (binop after p.x field read) | dispatching |
-| W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | dispatching (audit-first) |
+| W12-jit-aggregate-non-array-carrier | `bulldozer-strictly-typed-w12-jit-aggregate-non-array` | 1.5 + 2 (Aggregate for Enum/Struct/Tuple destinations) + 30+ stdlib fns | **closed partial** (audit `b1dce3b5` + fix `d3ea6546`, 2026-05-12) — (ii) landed; (iii) surfaced |
 | W12-jit-print-kind-classification | `bulldozer-strictly-typed-w12-jit-print-kind` | 4 (`.size()` int result mis-decoded as f64) | dispatching |
+
+### W12-jit-aggregate-non-array close (partial, 2026-05-12)
+
+Audit-first sub-cluster. Audit doc:
+`docs/cluster-audits/w12-jit-aggregate-non-array-audit.md`.
+
+**Landed (option (ii) + structural prep)**:
+
+- `BytecodeProgram.function_local_concrete_types: Vec<Vec<ConcreteType>>` —
+  per-user-function ConcreteType conduit side-table. Walks each
+  `Function::mir_data` through the existing
+  `infer_top_level_concrete_types_from_mir` (generic over any MirFunction;
+  name historical from the top-level-only Round-3 landing). Threaded
+  through `BytecodeProgram` → `ContentAddressedProgram` →
+  `LinkedProgram` → `linked_to_bytecode_program` → JIT
+  `compile_function_with_user_funcs` consumer (was `Vec::new()`).
+  Aggregate short-circuit now fires inside user-function bodies for
+  Enum/Struct destinations. `divide`'s `Ok(a/b)` Aggregate
+  short-circuits cleanly.
+- `StatementKind::EnumStore.variant_name: Option<String>` — MIR shape
+  addition. Four producer sites thread the variant name through (bare-
+  form intercept + `Expr::EnumConstructor` + 2 pipe-operator forms).
+  Five consumer sites updated to pattern-ignore the new field.
+- Kinded EnumStore FFI registered (`jit_make_ok`, `jit_make_err`,
+  `jit_make_some`) — symbols + FuncRef slots. Not yet consumed by the
+  EnumStore consumer (see surface below).
+- Stray §-cite fix at the two known sites:
+  `mir_compiler/statements.rs:236` and
+  `docs/cluster-audits/w12-enum-constructor-audit.md:215`:
+  §2.7.4 (task-scheduler boundary) → §2.7.14 (JIT array FFI rebuild,
+  the correct cite).
+
+**Surfaced — option (iii) territory**:
+
+The EnumStore consumer cannot be wired end-to-end without three
+co-designed infrastructure pieces:
+
+1. **Call-terminator return-kind track.** The conduit walks MIR
+   statements, not `TerminatorKind::Call` return kinds. After
+   `let r = divide(...)`, `r` has `ConcreteType::Void`; downstream
+   `print(v)` / match-on-`r` codegen mis-decode the NaN-boxed return
+   bits.
+2. **JIT match-on-enum inline codegen.** Pattern-match for
+   `Ok(v)`/`Err(e)`/`Some(x)`/`None` has no inline path on either the
+   NaN-boxed `HK_OK`/`HK_ERR`/`HK_SOME` shape or the typed-Arc
+   `Arc<ResultData>` shape. Current path falls through to generic
+   SwitchBool.
+3. **NaN-box vs Arc<ResultData> round-trip audit.** `jit_make_ok`
+   returns the legacy NaN-boxed `unified_box(HK_OK, bits)` shape; the
+   VM-side `BuiltinFunction::OkCtor` produces `Arc<ResultData>`.
+   Boundary conversion lives in `ffi/conversion.rs:246-258` but the
+   end-to-end round-trip (JIT divide produces NaN-box → top-level
+   JIT consumes the same → match reads via `is_ok_tag`) isn't audited
+   as a coherent path.
+
+Together these are ADR-amendment-level co-design. Surfaced for
+cluster-1 or future agent per CLAUDE.md surface-and-stop discipline.
+The current sub-cluster's landed changes are a strict prep for that
+work — Aggregate-surface bottleneck moved one level deeper (to
+EnumStore) for 5 functions; the remaining 23 Aggregate-surface
+functions return non-Enum types and are separate.
+
+**Before/after compile-failure counts under SHAPE_JIT_DEBUG=1 on Smoke 1.5**:
+
+- Pre-fix: 30 total (28 `Rvalue::Aggregate` + 2 `compile_binop_dynamic_arith`)
+- Post-fix: 30 total (23 `Rvalue::Aggregate` + 5 `EnumStore: SURFACE` + 2
+  `compile_binop_dynamic_arith`)
+
+Same count, but bottleneck moved deeper for the 5 functions where the
+conduit successfully stamped Enum (including `divide`).
+
+**Close gates**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 322/0/26 (matches baseline; the
+  dispatch-quoted 319/0/38 baseline drifted between rounds)
+- `bash scripts/verify-merge.sh` 12/12
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+- Smoke 1.5 / Smoke 2 under `--mode jit`: still fail end-to-end (option
+  (iii) territory); under `--mode vm`: unchanged ('5' / 'Some(3)').
 
 **Deferred to future cluster (NOT cluster-0):** `W12-collection-constructor-mir-lowering` (8 sites). The Round-4 audit identified this but Smoke 4's actual gap is print-classification, not constructor MIR. Constructor MIR will be picked up by cluster-2 if it ever becomes load-bearing.
 
