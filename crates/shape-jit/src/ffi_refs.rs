@@ -35,12 +35,25 @@ pub struct FFIFuncRefs {
     pub(crate) call_value: FuncRef,
     pub(crate) call_method: FuncRef,
 
-    // Array allocator + hot per-element push used by v2 lowerings.
-    pub(crate) new_array: FuncRef,
-    pub(crate) array_push_elem: FuncRef,
-
+    // Array allocator + hot per-element push.
+    //
+    // Route A (ADR-006 §2.7.14 / W11-jit-new-array close): the kind-blind
+    // `jit_new_array` / `jit_array_push_elem` FuncRefs are deleted. The
+    // kinded `Arc<TypedArrayData>` allocator surface is the existing
+    // `v2_array_new_<kind>` family (below), and the kinded push surface is
+    // `v2_array_push` dispatched by element byte size. Call sites that
+    // lack a proven element kind surface-and-stop per §2.7.5.
+    //
     // Builtin print fallback (used by emit_print).
     pub(crate) print: FuncRef,
+    // W11-jit-new-array (ADR-006 §2.7.5): per-kind print entry points
+    // dispatched by the MIR-side print emitter when the operand's
+    // `NativeKind` is statically known. The kind-blind `print` fallback
+    // is reserved for receivers whose kind the MIR could not prove
+    // (heap arms remain a §2.7.5 follow-up).
+    pub(crate) print_i64: FuncRef,
+    pub(crate) print_f64: FuncRef,
+    pub(crate) print_bool: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,
@@ -192,9 +205,12 @@ pub struct FFIFuncRefs {
     pub(crate) string_concat: FuncRef,
 
     // v2 typed HashMap<string, ...> access.
-    pub(crate) v2_map_get_str_i64: FuncRef,
-    pub(crate) v2_map_get_str_f64: FuncRef,
-    pub(crate) v2_map_has_str: FuncRef,
-    pub(crate) v2_map_set_str_i64: FuncRef,
-    pub(crate) v2_map_len: FuncRef,
+    //
+    // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):
+    // the kind-blind `jit_v2_map_*` symbols (deleted ValueWord-shape map FFI)
+    // are gated on the kinded `Arc<HashMapData>` + `KindedSlot` rebuild. The
+    // FuncRef slots are deleted from this struct in lockstep with the v2_map
+    // call-site surface-and-stop in `mir_compiler/v2_typed_map.rs`. The
+    // declarations in `ffi_symbols/v2_symbols.rs::declare_v2_functions` are
+    // already a no-op for the same set.
 }

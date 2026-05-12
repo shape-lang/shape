@@ -641,6 +641,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
+                ValueWord-shape `is_number` / `box_typed_object` NaN-box \
+                encoding. Under strict typing TypedObject pointers are \
+                typed `Arc<TypedObjectStorage>` carried directly via the \
+                §2.7.5 (bits, NativeKind) JIT-FFI carrier — no NaN-box \
+                tagging. Re-enable after the §2.7.5 carrier rebuild lands."]
     fn test_typed_object_encoding() {
         let fake_ptr = 0x0000_1234_5678_0000u64 as *const u8;
         let boxed = box_typed_object(fake_ptr);

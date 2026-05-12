@@ -4,13 +4,181 @@
 //! - Move: read value, null source slot (prevents double-drop)
 //! - Copy: read value, arc_retain if heap type (Arc::clone)
 //! - Drop: arc_release for heap types, no-op for primitives
+//!
+//! ## Refcount discrimination (W11-jit-new-array, ADR-006 §2.7.5 / §2.7.6 / Q8)
+//!
+//! Post-strict-typing the kind IS the discriminator that decides refcount
+//! semantics; there is no tag-bit probing. The discrimination here uses
+//! [`shape_value::NativeKind::is_refcounted`] which returns `true` for the
+//! two heap-pointer kinds (`String`, `Ptr(HeapKind::*)`) and `false` for
+//! every numeric / bool / nullable-scalar kind — including `NativeKind::Int64`,
+//! which the legacy `types::is_native_slot` predicate excluded (the legacy
+//! exclusion was correct under the deleted ValueWord ABI where an `Int64`
+//! slot might carry NaN-boxed pointer bits; under strict typing an `Int64`
+//! slot stores a raw native `i64`, period).
+//!
+//! When the slot's `NativeKind` is not proven by either source (the
+//! bytecode compiler's seed, the MIR-level forward/backward inference in
+//! `infer_slot_kinds`), the response is **surface-and-stop** — never a
+//! kind-blind fall-through to `arc_retain` / `arc_release`. Defaulting
+//! "unknown kind → assume heap and retain" is the W-series Bool-default
+//! defection-attractor (CLAUDE.md "Forbidden rationalizations": *"Soft-fail
+//! counter for now, harden later."*) applied to a different surface; the
+//! prior W11-jit-new-array close attempted the symmetric variant
+//! ("unknown kind → silently skip retain") via a no-op FFI body, which
+//! refcount-leaks every heap value the JIT routes through. Both are refused
+//! on sight per §2.7.7 #9 / W10 jit-playbook §5.
 
 use cranelift::prelude::*;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;
+use shape_vm::type_tracking::NativeKind;
+
+/// Refcount disposition for an ownership-aware codegen site.
+///
+/// Computed from the slot's proven `NativeKind` (per ADR-006 §2.7.5
+/// stamp-at-compile-time). The variants encode every legitimate answer the
+/// emitter can give without falling back to a kind-blind default.
+#[derive(Debug, Clone, Copy)]
+enum RefcountDisposition {
+    /// The slot is a raw scalar / bool / nullable-scalar — emit no
+    /// retain/release call.
+    Skip,
+    /// The slot is a heap-pointer kind (`String` / `Ptr(HeapKind::*)`) —
+    /// emit the matching retain/release call.
+    Refcounted,
+    /// The slot is one of the "raw pointer to a typed cell" carriers the
+    /// MIR uses for closure capture cells / shared cells / stack closures.
+    /// These have their own dedicated retain/release path (the matching
+    /// per-FieldKind FFI in `ffi/object/closure.rs`, or no retain at all
+    /// for stack closures) — emit nothing here.
+    Skip_TypedCellCarrier,
+}
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    /// Compute the refcount disposition for a place's root local.
+    ///
+    /// Returns the disposition or a surface-and-stop error when the slot's
+    /// `NativeKind` cannot be resolved from either the bytecode-compiler
+    /// seed or the MIR-level inference. The error path is the §2.7.7 #9
+    /// principled response; no Bool-default fall-through.
+    fn refcount_disposition(&self, place: &Place) -> Result<RefcountDisposition, String> {
+        let slot = place.root_local();
+
+        // Stack closures: the slot value is a raw Cranelift stack-slot
+        // address, not a refcounted handle. (Phase E.)
+        if let Place::Local(slot_id) = place {
+            if self.stack_closure_slots.contains_key(slot_id) {
+                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+            }
+            // Track A.1D.2 / A.1E: OwnedMutable / Shared capture slots
+            // hold raw `*mut ValueWord` / `*const SharedCell` pointers
+            // whose lifecycle is owned by `release_typed_closure`
+            // (`ClosureLayout`'s owned-mutable / shared masks). Frame-
+            // exit retain/release on these slots would mis-interpret
+            // the pointer as a NaN-boxed heap handle.
+            if self.owned_mutable_capture_slots.contains_key(slot_id)
+                || self.shared_capture_slots.contains_key(slot_id)
+            {
+                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+            }
+            // Session 1 Commit 3: SharedCow outer-scope local slots
+            // hold a `*const SharedCell` Arc pointer; their lifecycle
+            // is `jit_arc_shared_release` (not the generic
+            // `jit_arc_release`) at `Drop`. Skip here.
+            if self.shared_local_slots.contains(slot_id) {
+                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+            }
+        }
+
+        // v2 typed-array slots: the value is a raw `*mut TypedArray<T>`
+        // pointer with inline `HeapHeader` refcount. The kinded `v2`
+        // retain/release surface is the right path (a §2.7.14 follow-up);
+        // skip the generic arc_retain/release here.
+        if matches!(place, Place::Local(_)) && self.v2_typed_array_elem_kind(place).is_some() {
+            return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+        }
+
+        // Authoritative kind source: the slot's proven `NativeKind` from
+        // bytecode-compiler seed + MIR-level inference. Under §2.7.5
+        // stamp-at-compile-time this is the canonical refcount
+        // discriminator.
+        let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+        match slot_kind {
+            Some(k) if k.is_refcounted() => Ok(RefcountDisposition::Refcounted),
+            Some(_) => Ok(RefcountDisposition::Skip),
+            None => {
+                // Kind genuinely unproven by both inference passes. Per
+                // §2.7.7 #9 / CLAUDE.md "Forbidden rationalizations" the
+                // emitter does NOT default to "assume heap and retain"
+                // (the W-series Bool-default attractor); surface-and-stop
+                // at JIT compile time so the program falls back to the
+                // interpreter rather than refcount-leak / segfault.
+                //
+                // Practical fallback for the implicit-return slot 0 +
+                // unused-tail-slot cases the MIR-inference pass leaves
+                // unproven: those slots are never written via an Assign
+                // the inference can see, so they never carry a live value
+                // — emit no retain/release. We discriminate this from a
+                // genuine kind-source gap via `LocalTypeInfo`: `Copy`
+                // and `NonCopy` are bytecode-compiler-authoritative
+                // (primitive / heap), `Unknown` is the "no annotation
+                // and no Assign" path — that's the unused / implicit
+                // slot, safe to skip.
+                let type_info = self
+                    .local_types
+                    .get(slot.0 as usize)
+                    .cloned()
+                    .unwrap_or(LocalTypeInfo::Unknown);
+                match type_info {
+                    LocalTypeInfo::Copy => Ok(RefcountDisposition::Skip),
+                    LocalTypeInfo::NonCopy => {
+                        // The bytecode compiler classified this as heap,
+                        // but MIR inference couldn't prove the kind.
+                        // Surface-and-stop: a `NonCopy` slot needs a
+                        // proven heap `NativeKind` to dispatch the
+                        // correct retain (per-kind §2.7.6 / Q8). Falling
+                        // through to a kind-blind retain on `String` /
+                        // `Ptr(HeapKind::*)` ambiguity is the W-series
+                        // attractor.
+                        Err(format!(
+                            "MirToIR ownership: SURFACE — slot {} has \
+                             LocalTypeInfo::NonCopy but MIR inference did \
+                             not prove its NativeKind. Refcount dispatch \
+                             requires a proven `NativeKind::String` or \
+                             `NativeKind::Ptr(HeapKind::*)` per ADR-006 \
+                             §2.7.5 / §2.7.6 / Q8. Tracked as a \
+                             W11-jit-new-array kind-source-gap follow-up. \
+                             ADR-006 §2.7.7 #9 (no Bool-default fallback).",
+                            slot.0
+                        ))
+                    }
+                    LocalTypeInfo::Unknown => {
+                        // Implicit-return / unused / dead-store slot —
+                        // no live value, no refcount work. This is the
+                        // structurally-safe arm: the slot has neither a
+                        // proven kind nor a bytecode-compiler heap
+                        // classification, so no Assign(_, _) flows a
+                        // refcounted value into it.
+                        Ok(RefcountDisposition::Skip)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Public wrapper for `refcount_disposition` — returns `true` when the
+    /// place's slot is heap-kinded (a refcount call is required). Used by
+    /// `Rvalue::Clone` in `rvalues.rs` to share the same discrimination
+    /// path as `compile_operand`'s `Copy` arm.
+    pub(crate) fn refcount_disposition_for_place(&self, place: &Place) -> Result<bool, String> {
+        Ok(matches!(
+            self.refcount_disposition(place)?,
+            RefcountDisposition::Refcounted
+        ))
+    }
+
     /// Compile an Operand, respecting Move/Copy ownership semantics.
     pub(crate) fn compile_operand(&mut self, operand: &Operand) -> Result<Value, String> {
         match operand {
@@ -21,30 +189,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(val)
             }
             Operand::Copy(place) => {
-                // Copy: read the value. For heap types, increment the refcount.
+                // Copy: read the value. For heap-kind slots, increment the refcount.
                 let val = self.read_place(place)?;
-                {
-                    let slot = place.root_local();
-                    // Phase E: stack closures carry a raw Cranelift stack-slot
-                    // address. No refcount → skip arc_retain.
-                    let is_stack_closure = matches!(place, Place::Local(s) if self.stack_closure_slots.contains_key(s));
-                    let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-                    // Native primitive types (Float64, Int32, Bool) never need refcounting.
-                    // `None` (kind not inferred) treats as non-native heap-shaped — same as
-                    // the legacy `Unknown` arm: takes refcount via the LocalTypeInfo branch.
-                    let is_native = slot_kind.map_or(false, super::types::is_native_slot);
-                    if !is_stack_closure && !is_native {
-                        let type_info = self
-                            .local_types
-                            .get(slot.0 as usize)
-                            .cloned()
-                            .unwrap_or(LocalTypeInfo::Unknown);
-                        if super::types::is_heap_type(&type_info) {
-                            self.builder.ins().call(self.ffi.arc_retain, &[val]);
-                        } else if matches!(type_info, LocalTypeInfo::Unknown) {
-                            self.builder.ins().call(self.ffi.arc_retain, &[val]);
-                        }
-                    }
+                if matches!(
+                    self.refcount_disposition(place)?,
+                    RefcountDisposition::Refcounted
+                ) {
+                    self.builder.ins().call(self.ffi.arc_retain, &[val]);
                 }
                 Ok(val)
             }
@@ -202,68 +353,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Emit Drop for a local: release refcount if it's a heap type.
     pub(crate) fn emit_drop(&mut self, place: &Place) -> Result<(), String> {
-        // v2 fast path: typed-array slots hold raw `*mut TypedArray<T>`
-        // pointers (with their own HeapHeader refcount). The legacy
-        // `arc_release` FFI expects a NaN-boxed value and would either
-        // crash or no-op on a raw pointer. Skip the release for now —
-        // a follow-up will plumb v2_release through to call `jit_v2_release`.
-        if self.v2_typed_array_elem_kind(place).is_some() {
-            self.null_place(place)?;
-            return Ok(());
-        }
-
-        // Phase E: stack-allocated closures own no refcounted data; the
-        // Cranelift stack slot is freed implicitly at function return.
-        // Skip arc_release to avoid accidentally treating the raw
-        // stack-slot address as a NaN-boxed heap handle.
-        if let Place::Local(slot_id) = place {
-            if self.stack_closure_slots.contains_key(slot_id) {
-                self.null_place(place)?;
-                return Ok(());
-            }
-        }
-
-        // Track A.1D.2: the OwnedMutable capture slot holds a raw
-        // `*mut ValueWord` cell pointer, not a NaN-boxed refcounted
-        // value. Reclaim is handled by `release_typed_closure`'s
-        // `Box::from_raw` (A.1A) when the closure itself is dropped;
-        // frame-exit `Drop` on the capture slot must be a no-op.
-        // `null_place` also early-returns for these slots (preserving
-        // the cell pointer for release_typed_closure), so we skip it
-        // here too.
-        //
-        // Track A.1E: parallel rationale for Shared capture slots.
-        // The slot holds a `*const SharedCell` (Arc pointer). Calling
-        // `arc_release` on it would misinterpret the Arc pointer as a
-        // NaN-boxed value. The Arc share is reclaimed exactly once by
-        // `release_typed_closure`'s `Arc::from_raw` (gated on the
-        // `shared_capture_mask`, A.1A). Frame-exit `Drop` must be a
-        // no-op.
-        if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains_key(slot_id)
-                || self.shared_capture_slots.contains_key(slot_id)
-            {
-                return Ok(());
-            }
-        }
-
-        // Session 1 Commit 3: SharedCow outer-scope local slots hold a
-        // raw `*const SharedCell` Arc pointer (allocated at function
-        // entry by `initialize_shared_local_slots`). The MIR emits
-        // `StatementKind::Drop(Place::Local(slot))` at scope exit; we
-        // consume the slot's one strong share via
-        // `jit_arc_shared_release`. Mirrors the interpreter's
-        // `op_drop_shared_local` handler: reconstruct `Arc::from_raw`,
-        // drop it (one atomic decrement), then overwrite the slot
-        // bits with 0 so any reentrant access reports a null pointer
-        // rather than dereferencing freed memory.
-        //
-        // SAFETY: the pointer is a live `Arc::into_raw`-produced
-        // `*const SharedCell` (from `jit_alloc_shared_cell`) with at
-        // least one outstanding strong share at the time of release.
-        // Additional shares minted by `jit_arc_shared_retain` for
-        // capturing closures are reclaimed independently by
-        // `release_typed_closure`.
+        // Session 1 Commit 3 SharedCow path: outer-scope local slots
+        // holding a `*const SharedCell` Arc pointer use the dedicated
+        // `jit_arc_shared_release` (not the generic `arc_release`).
+        // Handled here BEFORE the generic disposition because the
+        // disposition's `Skip_TypedCellCarrier` arm would otherwise
+        // suppress this required release.
         if let Place::Local(slot_id) = place {
             if self.shared_local_slots.contains(slot_id) {
                 let var = *self.locals.get(slot_id).ok_or_else(|| {
@@ -283,29 +378,42 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
-        let slot = place.root_local();
-        let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-
-        // Native primitive types never need refcounting. `None` is
-        // treated as non-native (legacy `Unknown` arm).
-        let is_native = slot_kind.map_or(false, super::types::is_native_slot);
-        if !is_native {
-            let val = self.read_place(place)?;
-            let type_info = self
-                .local_types
-                .get(slot.0 as usize)
-                .cloned()
-                .unwrap_or(LocalTypeInfo::Unknown);
-
-            if super::types::is_heap_type(&type_info) {
+        let disposition = self.refcount_disposition(place)?;
+        match disposition {
+            RefcountDisposition::Refcounted => {
+                let val = self.read_place(place)?;
                 self.builder.ins().call(self.ffi.arc_release, &[val]);
-            } else if matches!(type_info, LocalTypeInfo::Unknown) {
-                self.builder.ins().call(self.ffi.arc_release, &[val]);
+                self.null_place(place)?;
+            }
+            RefcountDisposition::Skip => {
+                // Raw scalar / unused-tail-slot — no refcount work.
+                // Still null the slot per the use-after-drop contract:
+                // scalar slots get clobbered to 0, which is the
+                // default-init value the runtime expects on re-read.
+                self.null_place(place)?;
+            }
+            RefcountDisposition::Skip_TypedCellCarrier => {
+                // OwnedMutable / Shared capture slots: lifecycle is
+                // owned by `release_typed_closure`; per the
+                // Track A.1D.2 / A.1E SAFETY notes the slot must NOT
+                // be nulled here (the cell pointer is reclaimed by
+                // the closure-drop, not by frame-exit).
+                //
+                // v2 typed-array / stack-closure slots: null the slot
+                // to prevent use-after-drop reads from picking up the
+                // raw pointer bits. (Match the prior behaviour.)
+                let null_slot = match place {
+                    Place::Local(slot_id) => {
+                        !(self.owned_mutable_capture_slots.contains_key(slot_id)
+                            || self.shared_capture_slots.contains_key(slot_id))
+                    }
+                    _ => true,
+                };
+                if null_slot {
+                    self.null_place(place)?;
+                }
             }
         }
-
-        // Null the slot to prevent use-after-drop.
-        self.null_place(place)?;
         Ok(())
     }
 
@@ -315,84 +423,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         place: &Place,
     ) -> Result<(), String> {
-        // v2 fast path: same reasoning as `emit_drop` — skip the legacy
-        // arc_release for slots whose ConcreteType is a v2 typed array.
-        if matches!(place, Place::Local(_))
-            && self.v2_typed_array_elem_kind(place).is_some()
-        {
+        // Skip non-local places — only Place::Local supplies the
+        // discrimination plumbing.
+        if !matches!(place, Place::Local(_)) {
             return Ok(());
         }
-
-        // Phase E: stack-resident closure handles are raw stack-slot
-        // addresses, not refcounted heap pointers. Skip arc_release.
-        if let Place::Local(slot_id) = place {
-            if self.stack_closure_slots.contains_key(slot_id) {
-                return Ok(());
-            }
-        }
-
-        // Track A.1D.2: the "old value" of an OwnedMutable capture slot
-        // is the raw `*mut ValueWord` cell pointer bits — NOT a
-        // NaN-boxed heap handle. Calling `arc_release` on it would
-        // misinterpret the pointer as a refcounted value and crash /
-        // double-free. The cell's interior contents are reclaimed
-        // exactly once by `release_typed_closure`'s `Box::from_raw`
-        // loop (A.1A) when the closure's refcount hits zero; the
-        // interpreter's `op_store_owned_mutable_capture` likewise does
-        // not release the old inner value (see its SAFETY note), so
-        // skipping release here is parity-correct.
-        //
-        // Track A.1E: parallel rationale for Shared capture slots. The
-        // slot holds a `*const SharedCell` Arc pointer. `arc_release`
-        // would misinterpret it. The Arc share is reclaimed once by
-        // `release_typed_closure`'s `Arc::from_raw` (gated on
-        // `shared_capture_mask`, A.1A); the interpreter's
-        // `op_store_shared_capture` does not modify the Arc strong
-        // count either.
-        if let Place::Local(slot_id) = place {
-            if self.owned_mutable_capture_slots.contains_key(slot_id)
-                || self.shared_capture_slots.contains_key(slot_id)
-            {
-                return Ok(());
-            }
-        }
-
-        // Session 1 Commit 3: SharedCow outer-scope local slots: the
-        // "old value" is a `*const SharedCell` pointer — not a
-        // refcounted NaN-boxed heap value. `jit_arc_shared_release`
-        // runs once at `Drop(slot)`, not on every reassignment.
-        // Subsequent assignments only update the cell's payload
-        // via the lock-gated store in `write_place`; the cell
-        // pointer stays intact.
-        if let Place::Local(slot_id) = place {
-            if self.shared_local_slots.contains(slot_id) {
-                return Ok(());
-            }
-        }
-
-        let slot = place.root_local();
-        if matches!(place, Place::Local(_)) {
-            let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-            // Native primitive types never need refcounting. `None` is
-            // treated as non-native (legacy `Unknown` arm — falls
-            // through to the heap-type branch below).
-            if slot_kind.map_or(false, super::types::is_native_slot) {
-                return Ok(());
-            }
-
-            let type_info = self
-                .local_types
-                .get(slot.0 as usize)
-                .cloned()
-                .unwrap_or(LocalTypeInfo::Unknown);
-
-            if super::types::is_heap_type(&type_info)
-                || matches!(type_info, LocalTypeInfo::Unknown)
-            {
+        let disposition = self.refcount_disposition(place)?;
+        match disposition {
+            RefcountDisposition::Refcounted => {
                 let old_val = self.read_place(place)?;
                 self.builder.ins().call(self.ffi.arc_release, &[old_val]);
+            }
+            RefcountDisposition::Skip | RefcountDisposition::Skip_TypedCellCarrier => {
+                // Scalar / typed-cell-carrier slots: no refcount work.
+                // (TypedCellCarrier: the dedicated reclaim path runs at
+                // Drop / closure-drop, not at reassign.)
             }
         }
         Ok(())
     }
 }
+
+// Silence unused-import warnings — `NativeKind` is imported for the
+// `RefcountDisposition` deductions in `refcount_disposition`; if the
+// reader uses no `NativeKind` directly, this stays a documentation
+// anchor for the kind-discriminator import.
+#[allow(dead_code)]
+const _: fn() = || {
+    let _ = NativeKind::Int64;
+};

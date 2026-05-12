@@ -2487,6 +2487,119 @@ amendment add overhead). Either way it's an explicit Phase-2c wave,
 not a maintenance follow-up; the W12-jit-array audit was the
 boundary check.
 
+**Status:** CLOSED. Phase 3 cluster-0 W11-jit-new-array (2026-05-12)
+adopted Route A and shipped the unblock surface:
+
+- `jit_array.rs`: 5 offset constants deleted (Route A uses
+  `TypedArray<T>` directly: header @ 0, `data` @ 8, `len` @ 16,
+  `cap` @ 20). Module retained as documentation anchor.
+- `ffi/array.rs`: legacy entry-point bodies remain deleted;
+  `ArrayInfo` `#[repr(C)]` carrier struct + `is_inline_bool`
+  helper preserved per Q15 contract.
+- `ffi_symbols/array_symbols.rs`: kept as no-op with Route-A-close
+  documentation. The kinded allocator surface is the existing
+  `register_v2_symbols`-registered `v2_array_new_<f64,i64,i32,bool>`
+  family plus the size-dispatched `v2_array_push` helper.
+- `FFIFuncRefs`: kind-blind `new_array` / `array_push_elem` slots
+  deleted. Consumer MIR call sites (`Rvalue::Aggregate`,
+  `StatementKind::ArrayStore` fallback, `StatementKind::EnumStore`
+  payload, qualified-name enum-constructor call) surface-and-stop
+  with a `Route A surface-and-stop:` marker and §-cite when the
+  destination place's element kind isn't statically provable.
+- `mir_compiler/v2_array.rs::try_emit_v2_array_method` covers
+  `length` / `len` / `push` / `sum` / `min` / `max` / `mean` /
+  `sumSquares` / `scale` / `addScalar` / `addArray` / `mulArray`
+  inline against the `TypedArray<T>` layout. Cascade entries beyond
+  that set (slice, reverse, zip, filled, range, info, first, last,
+  pop) remain reachable via the generic `jit_call_method` trampoline
+  path — per-method Cranelift codegen for them is a §2.7.14
+  follow-up.
+
+The §2.7.5 stamp-at-compile-time discipline was extended to two
+collateral surfaces uncovered during the close: (a) `RETURN_TAG_I64`
+is now stamped at the `TerminatorKind::Return` codegen from the
+return slot's `NativeKind` (was always `RETURN_TAG_NANBOXED`); (b) a
+new `RETURN_TAG_UNIT = 5` is stamped for `()`-typed returns
+(top-level program ending in `print(x)`), mapped by the executor to
+`WireValue::Null`. Per-kind `jit_print_<i64,f64,bool>` entries were
+added with the MIR emitter dispatching by operand kind — the
+kind-blind `jit_print` fallback is reserved for unproven kinds.
+
+Smoke 1 (`let mut sum = 0; for i in 0..100 { sum += i }; print(sum)`)
+produces `4950` under both `--mode vm` and `--mode jit` (exit 0).
+
+**Reopen amendment (2026-05-12):** the first close (`b60d3678`) walked
+back `jit_arc_retain` / `jit_arc_release` to a silent no-op, justified
+in the close report as "the MIR caller side doesn't yet thread kind".
+The walk-back hit CLAUDE.md "Forbidden rationalizations" (*"Soft-fail
+counter for now, harden later."*) and was refused by the supervisor.
+
+Root-cause from the reopen tracing: the MIR caller side
+(`mir_compiler/ownership.rs`) DOES have the proven `NativeKind` for the
+firing slots — `mir::types::infer_slot_kinds` proves `Int64` for the
+`let mut x = 0` accumulator in the user-frame MIR — but the legacy
+`is_native_slot` predicate (`types.rs:46-58`) excluded the
+integer-family variants, treating any I64-wide slot as a candidate
+heap pointer. The exclusion was correct under the deleted ValueWord
+ABI (where I64 bits could be NaN-boxed pointer) and stale under
+strict typing.
+
+The reopen landed a principled refactor:
+
+- New `shape_value::NativeKind::is_refcounted()` predicate — returns
+  `true` iff the kind is `String` or `Ptr(HeapKind::*)` (the only two
+  heap-pointer-carrying kinds). Every numeric / bool / nullable
+  variant is `false`. This IS the §2.7.5 kind-discriminator answer
+  to "does this slot need refcounting": kind IS the discriminator,
+  no tag-bit probe.
+- `mir_compiler/ownership.rs::refcount_disposition` centralizes the
+  three-way decision (`Refcounted` / `Skip` / `Skip_TypedCellCarrier`)
+  consulting `slot_kinds` + the existing typed-cell-carrier guards.
+  Unproven kind falls back to `LocalTypeInfo` discrimination: `Copy`
+  → skip, `Unknown` → safe-skip for unused-tail / implicit-return
+  slots, `NonCopy` + unproven kind → surface-and-stop (the genuine
+  §2.7.7 #9 kind-source gap; no W-series Bool-default).
+- `Rvalue::Clone` in `rvalues.rs` shares the same disposition path
+  via `refcount_disposition_for_place` instead of unconditionally
+  retaining.
+- `jit_arc_retain` / `jit_arc_release` bodies implement real
+  retain/release against the `UnifiedValue<T>` `#[repr(C)]` layout
+  (refcount `AtomicU32` at offset 4). The kind-dispatched reclaim on
+  refcount-zero lives in `ffi/jit_release.rs::release_unified_value_by_kind`
+  — reads the `kind: u16` field at offset 0 of `UnifiedValue` (the
+  §2.7.6 / Q8 single-discriminator structural field, NOT a tag-bit
+  probe) and dispatches per-kind `Box::from_raw::<UnifiedValue<T>>`
+  arms. Unknown kinds surface-and-stop with intentional leak (no
+  silent skip).
+- Leak-balance verification: `SHAPE_JIT_ARC_COUNTERS=1` opt-in
+  surface in `executor.rs` reports `retain_calls` /
+  `release_calls` / `release_frees` deltas across the JIT-emitted
+  code run. Smoke 1 measures `0/0/0` (no heap allocations at
+  runtime — the principled outcome).
+
+Remaining out-of-scope (now properly surfaced, not silently no-op'd):
+
+- v2-map family (`jit_v2_map_*`) slots deleted from `FFIFuncRefs`
+  with `try_emit_v2_typed_map_method` surface-and-stopped — these
+  are W11-jit-carrier-conversion's territory.
+- Top-level `concrete_types` side-table empty at
+  `compiler/strategy.rs:205` — typed-array literals at top level
+  (e.g. `let xs: Array<int> = [1,2,3]`) hit the `Rvalue::Aggregate`
+  surface-and-stop instead of routing to the v2 fast path. This is
+  a genuine §2.7.5 architectural gap (the bytecode compiler proves
+  `Array<int>` but the side-table conduit from `BytecodeProgram` to
+  the JIT MirToIR doesn't exist; the comment at strategy.rs:200-204
+  flags it as "in flux upstream, other Phase 3.1 agents are
+  refactoring it"). Surfaced for ADR-amendment / supervisor decision
+  per CLAUDE.md handover §0 "Surface-and-stop discipline".
+- Compile-time-boxed string constants (`box_string` in `MirConstant::Str`
+  lowering) leak by design — pre-existing JIT pattern that pre-dates
+  W11; flagged here for completeness.
+- Per-HeapKind kinded print entries (`jit_print_str` / `jit_print_typed_object`
+  / ...) — the kind-blind `jit_print` fallback still uses
+  `format_value_word` (NaN-decode-via-tag-bits) for heap arms.
+  §2.7.5 follow-up.
+
 #### 2.7.15 `HeapKind::HashSet` — Q16 cardinality amendment (Wave 13 W13-hashset-rebuild, 2026-05-10)
 
 Phase 1.B-vm Wave 13 W13-hashset-rebuild

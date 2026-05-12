@@ -76,51 +76,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
             StatementKind::ArrayStore {
                 container_slot,
-                operands,
+                operands: _,
             } => {
                 // v2 fast path: when the container slot is a v2 `Array<scalar>`,
                 // the preceding `Assign(Aggregate)` has already allocated a real
-                // `*mut TypedArray<T>` and populated it. The legacy `ArrayStore`
-                // shape here would overwrite that pointer with a NaN-boxed
-                // `JitArray` built from `Move`d (and thus now-nulled) source
-                // slots — corrupting both the container and the element values.
-                // Skip the legacy build entirely in that case. The MIR ownership
-                // transfer has already been observed by the preceding Aggregate.
+                // `*mut TypedArray<T>` and populated it. Skip the redundant
+                // re-build — the MIR ownership transfer has already been
+                // observed by the preceding Aggregate.
                 let container_place = Place::Local(*container_slot);
                 if self.v2_typed_array_elem_kind(&container_place).is_some() {
                     return Ok(());
                 }
 
-                let zero = self.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    0i64,
-                );
-                let inst = self.builder.ins().call(
-                    self.ffi.new_array,
-                    &[self.ctx_ptr, zero],
-                );
-                let mut arr = self.builder.inst_results(inst)[0];
-
-                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
-                // box wrap needed at call site. Array elements reach
-                // `array_push_elem` as ValueWord-encoded I64 slots. Native
-                // F64/I32/I8 operands from `compile_operand` must be
-                // NaN-boxed (not raw-widened) so that the legacy array-read
-                // path decodes each element's original type rather than
-                // treating raw bool/int bits as a denormal `Number`.
-                for op in operands {
-                    let hint = self.operand_slot_kind(op);
-                    let val_raw = self.compile_operand(op)?;
-                    let val = self.nan_box_for_value_word(val_raw, hint);
-                    let inst = self.builder
-                        .ins()
-                        .call(self.ffi.array_push_elem, &[arr, val]);
-                    arr = self.builder.inst_results(inst)[0];
-                }
-
-                self.release_old_value_if_heap(&container_place)?;
-                self.write_place(&container_place, arr)?;
-                Ok(())
+                // Route A (ADR-006 §2.7.14 / W11-jit-new-array close):
+                // reaching here means the container slot has no proven
+                // `Array<scalar>` element kind. The kind-blind
+                // `jit_new_array` + `jit_array_push_elem` path was the
+                // deleted ValueWord-shape ABI. Per §2.7.14 forbidden list
+                // ("Bool-default fallback for unknown element kinds")
+                // surface-and-stop instead of fabricating a kind.
+                Err(
+                    "Route A surface-and-stop: SURFACE — \
+                     StatementKind::ArrayStore reached the kind-blind \
+                     fallback. The v2 typed-array fast path requires the \
+                     container `Place::Local` to carry a \
+                     `ConcreteType::Array<scalar>`; reaching here means the \
+                     element kind is not threaded from the producing call \
+                     signature. Tracked as W11-jit-new-array per \
+                     phase-3-kickoff-prompt.md. ADR-006 §2.7.14 / §2.7.5."
+                        .to_string(),
+                )
             }
 
             StatementKind::ObjectStore {
@@ -186,52 +171,42 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             StatementKind::EnumStore {
-                container_slot,
+                container_slot: _,
                 operands,
             } => {
                 // Enum variant construction.
                 //
                 // In the bytecode path, enums are compiled as TypedObjects with a
-                // schema_id and variant discriminant. The MIR doesn't carry schema
-                // information, so we represent enum payloads as arrays — the
-                // preceding Assign(Aggregate) already creates an array with the
-                // payload values.
+                // schema_id and variant discriminant. The MIR-level JIT path
+                // historically represented enum payloads as heterogeneous arrays
+                // built via the kind-blind `jit_new_array` + `jit_array_push_elem`
+                // ABI — the deleted ValueWord-shape path.
                 //
-                // For non-empty payloads, rebuild the array from operands to ensure
-                // correct ownership semantics (Move/Copy). For unit variants (empty
-                // operands), the slot already holds the value from the Assign.
-                if !operands.is_empty() {
-                    // Create empty array, then push each element.
-                    let zero = self.builder.ins().iconst(
-                        cranelift::prelude::types::I64,
-                        0i64,
-                    );
-                    let inst = self.builder.ins().call(
-                        self.ffi.new_array,
-                        &[self.ctx_ptr, zero],
-                    );
-                    let mut arr = self.builder.inst_results(inst)[0];
-
-                    // R4.2B: FFI signatures accept plain u64 bit-patterns —
-                    // no box wrap needed at call site. Enum payload values
-                    // reach `array_push_elem` as ValueWord-encoded I64 slots.
-                    // Native F64/I32/I8 operands from `compile_operand` must
-                    // be widened to I64 before the FFI call so the Cranelift
-                    // verifier accepts the parameter types.
-                    for op in operands {
-                        let val_raw = self.compile_operand(op)?;
-                        let val = self.widen_to_i64(val_raw);
-                        let inst = self.builder
-                            .ins()
-                            .call(self.ffi.array_push_elem, &[arr, val]);
-                        arr = self.builder.inst_results(inst)[0];
-                    }
-
-                    let place = Place::Local(*container_slot);
-                    self.release_old_value_if_heap(&place)?;
-                    self.write_place(&place, arr)?;
+                // For unit variants (empty operands), the preceding
+                // `Assign(Aggregate)` has already stored the discriminant; this
+                // is a no-op.
+                //
+                // For non-empty payloads, Route A (ADR-006 §2.7.14 /
+                // W11-jit-new-array close) does not yet provide a
+                // heterogeneous-element carrier — that's the same
+                // `op_new_array` surface the VM-side handler returns
+                // (`crates/shape-vm/src/executor/objects/object_creation.rs:316`).
+                // Per §2.7.14 forbidden list ("Bool-default fallback for
+                // unknown element kinds") surface-and-stop instead of
+                // fabricating a kind.
+                if operands.is_empty() {
+                    return Ok(());
                 }
-                Ok(())
+                Err(
+                    "Route A surface-and-stop: SURFACE — \
+                     StatementKind::EnumStore with non-empty payload depends \
+                     on a heterogeneous-element-array carrier that Route A \
+                     does not yet supply (parallel to op_new_array's VM-side \
+                     surface in shape-vm `object_creation.rs:316`). Tracked \
+                     as W11-jit-new-array follow-up per ADR-006 §2.7.4. \
+                     ADR-006 §2.7.14 / §2.7.5."
+                        .to_string(),
+                )
             }
 
             StatementKind::Nop => Ok(()),

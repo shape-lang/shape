@@ -219,6 +219,29 @@ impl NativeKind {
         }
     }
 
+    /// Whether values of this kind carry a refcounted heap pointer.
+    ///
+    /// Post-strict-typing (ADR-006 §2.7.5 / §2.7.6 / Q8), the kind IS the
+    /// discriminator that decides refcount semantics — there is no
+    /// tag-bit probing. Heap kinds are `String` (Arc<String> raw pointer)
+    /// and `Ptr(HeapKind::*)` (Arc<HeapValue> raw pointer). All
+    /// numeric / bool kinds — including their nullable variants — are
+    /// raw scalars and do NOT carry a refcount, regardless of Cranelift
+    /// storage width (an `Int64` slot is a raw `i64`, not a NaN-boxed
+    /// ValueWord; the deleted ValueWord ABI is what made the W-series
+    /// `is_native_slot` predicate exclude Int64).
+    ///
+    /// Used by `shape-jit/src/mir_compiler/ownership.rs` to gate
+    /// `jit_arc_retain` / `jit_arc_release` emission. The kind-blind
+    /// fall-through ("if kind isn't proven, assume heap and retain")
+    /// the prior W-series MIR emitter took is forbidden under §2.7.7
+    /// #9 — when kind isn't proven, surface-and-stop is the principled
+    /// response, not a Bool-default-like silent retain.
+    #[inline]
+    pub fn is_refcounted(self) -> bool {
+        matches!(self, Self::String | Self::Ptr(_))
+    }
+
     #[inline]
     pub fn non_nullable(self) -> Self {
         match self {

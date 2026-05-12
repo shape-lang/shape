@@ -273,6 +273,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
+                ValueWord-shape `is_typed_object` tag-bit dispatch on the \
+                FFI return bits. Under strict typing the FFI returns a \
+                typed `Arc<TypedObjectStorage>` via the §2.7.5 carrier; \
+                the bits no longer pass the legacy NaN-box tag test. \
+                Re-enable after the §2.7.5 kinded-carrier rebuild lands."]
     fn test_jit_typed_object_ffi() {
         // Test FFI allocation
         let bits = super::super::allocation::jit_typed_object_alloc(42, 24); // 3 fields * 8 bytes

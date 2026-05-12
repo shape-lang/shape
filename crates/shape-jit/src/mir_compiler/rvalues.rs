@@ -73,14 +73,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             Rvalue::Clone(operand) => {
-                // Explicit clone: get the value and retain.
+                // Explicit clone: get the value and (if heap-kinded) retain.
                 //
-                // R4.2D: `jit_arc_retain` takes a plain `u64` bit-pattern
-                // (implicitly ValueWord-encoded), so no width-extension
-                // wrap is needed. Clones are only emitted for heap types,
-                // which already live in I64 slots at this site.
+                // W11-jit-new-array (ADR-006 §2.7.5 / §2.7.6 / Q8): the
+                // pre-W11 unconditional retain here was the symmetric
+                // version of the `compile_operand` Copy bug — fired on
+                // every Clone regardless of kind, which segfaulted on
+                // `NativeKind::Int64` slots whose bits are a raw int
+                // (the `MIR-emits-Clone-on-non-heap` case the W-series
+                // ABI tolerated via tag-bit decode). The principled
+                // response is to use the same kind-aware disposition
+                // path as Copy. When the operand has no `Place::Local`
+                // (e.g. `Operand::Constant`), there's no slot to
+                // discriminate by — and the bytecode compiler does not
+                // emit `Rvalue::Clone(Constant(...))` (Clone is by
+                // construction a place-rooted operation), so the
+                // fallback arm surface-and-stops with a clear marker.
                 let val = self.compile_operand_raw(operand)?;
-                self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                let place = match operand {
+                    shape_vm::mir::types::Operand::Copy(p)
+                    | shape_vm::mir::types::Operand::Move(p)
+                    | shape_vm::mir::types::Operand::MoveExplicit(p) => p,
+                    shape_vm::mir::types::Operand::Constant(_) => {
+                        return Err(
+                            "MirToIR: Rvalue::Clone(Constant) — Clone is \
+                             defined on place-rooted operands per ADR-006 \
+                             §2.7.5; emitter contract violated. SURFACE."
+                                .to_string(),
+                        );
+                    }
+                };
+                if self.refcount_disposition_for_place(place)? {
+                    self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                }
                 Ok(val)
             }
 
@@ -116,33 +141,38 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().stack_addr(types::I64, slot, 0))
             }
 
-            Rvalue::Aggregate(operands) => {
-                // Create an empty array via jit_new_array(ctx, 0), then push elements.
-                let zero = self.builder.ins().iconst(types::I64, 0i64);
-                let inst = self.builder.ins().call(
-                    self.ffi.new_array,
-                    &[self.ctx_ptr, zero],
-                );
-                let mut arr = self.builder.inst_results(inst)[0];
-
-                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
-                // box wrap needed at call site. Operands reaching
-                // `jit_array_push_elem` are ValueWord-encoded I64 slots. Native
-                // F64/I32/I8 constants flowing in from `compile_operand_raw`
-                // must be NaN-boxed (not raw-widened) so that the legacy
-                // array-read path decodes the element's original type rather
-                // than treating raw bits as a denormal `Number`.
-                for operand in operands {
-                    let hint = self.operand_slot_kind(operand);
-                    let elem_raw = self.compile_operand_raw(operand)?;
-                    let elem = self.nan_box_for_value_word(elem_raw, hint);
-                    let inst = self.builder
-                        .ins()
-                        .call(self.ffi.array_push_elem, &[arr, elem]);
-                    arr = self.builder.inst_results(inst)[0];
-                }
-
-                Ok(arr)
+            Rvalue::Aggregate(_operands) => {
+                // Route A (ADR-006 §2.7.14 / W11-jit-new-array close):
+                // typed-array allocation is kind-monomorphized on the
+                // destination slot's element kind. The kind-blind
+                // `jit_new_array` + `jit_array_push_elem` ABI was the
+                // deleted ValueWord-shape path.
+                //
+                // statements.rs's `StatementKind::Assign` handler short-
+                // circuits to `emit_v2_array_aggregate` (which calls
+                // `jit_v2_array_new_<kind>` directly) when the destination
+                // place has a proven scalar element kind via
+                // `v2_typed_array_elem_kind`. Reaching this fallback means
+                // the destination place could not be resolved to a typed-
+                // array slot — either the destination isn't a local, or
+                // the local's `ConcreteType` lacks the `Array<T>` shape
+                // the v2 fast path requires.
+                //
+                // Per §2.7.14 forbidden list ("Bool-default fallback for
+                // unknown element kinds") the correct response is
+                // surface-and-stop; falling back to a kind-blind allocator
+                // would resurrect the deleted UnifiedArray heap layout.
+                Err(
+                    "Route A surface-and-stop: SURFACE — Rvalue::Aggregate \
+                     reached the kind-blind fallback. The v2 typed-array \
+                     fast path in statements.rs requires the destination \
+                     `Place::Local` to carry a `ConcreteType::Array<scalar>`; \
+                     reaching here means the element kind is not threaded \
+                     from the producing call signature. Tracked as \
+                     W11-jit-new-array per phase-3-kickoff-prompt.md. \
+                     ADR-006 §2.7.14 / §2.7.5."
+                        .to_string(),
+                )
             }
         }
     }
