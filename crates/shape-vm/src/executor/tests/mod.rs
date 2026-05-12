@@ -57,6 +57,11 @@ mod module_deep_tests;
 mod operator_overload;
 #[cfg(feature = "deep-tests")]
 mod trusted_edge_cases;
+// Wave 3 W17-trait-object-thunks (ADR-006 §2.7.24 Q25.C, 2026-05-12):
+// per-variant smoke tests for the `op_dyn_method_call` dispatcher's
+// `SelfArg` / `Generic` / `Compound` / nested-`BoxedReturn` / `Closure`
+// variants. Each test pins a row of the §Q25.C.5 `VTableEntry` table.
+mod trait_object_thunks;
 
 // REMOVED: These helpers and their imports were removed during refactoring
 // TODO: Re-implement these tests once the new context API is finalized

@@ -176,19 +176,25 @@ impl BytecodeCompiler {
                 .cloned()
                 .or_else(|| method.return_type.clone());
 
-            // Detect whether the declared return type names `Self` at
-            // the top level (path=[]). Nested-Self cases
-            // (`Result<Self, E>`, `Option<Self>`, `(Self, Self)`) are
-            // explicitly **NOT** handled at round-2; they surface as
-            // NotImplemented at dispatch time.
-            let return_is_self = declared_return
-                .as_ref()
-                .map(is_top_level_self)
-                .unwrap_or(false);
-            let return_has_nested_self = declared_return
-                .as_ref()
-                .map(has_nested_self)
-                .unwrap_or(false);
+            // Compute full `wrap_targets` for the return type per the
+            // §Q25.C.1 `Erase_T` substitution rule. Round-3 (Wave 3
+            // W17-trait-object-thunks) extends the round-2 emission
+            // (top-level Self only) to nested Self via a local walker
+            // over `TypeAnnotation`. The walker enumerates every Self
+            // site in the structural return type and assigns it a
+            // `path` (generic-argument-index trace). The executor
+            // then walks the path through the return value at dispatch
+            // time and re-boxes at each leaf.
+            //
+            // The walker matches `is_top_level_self` semantics at
+            // path=[] and `has_nested_self` semantics under generic
+            // constructors / tuples / arrays — the rules in ADR-006
+            // §2.7.24 Q25.C.1 row table.
+            let mut wrap_targets: SmallVec<[WrapTarget; 2]> = SmallVec::new();
+            if let Some(rt) = declared_return.as_ref() {
+                let mut path: SmallVec<[u8; 4]> = SmallVec::new();
+                collect_self_wrap_targets(rt, &mut path, &mut wrap_targets);
+            }
 
             let self_arg_positions = trait_method_self_args
                 .get(&method.name)
@@ -200,49 +206,10 @@ impl BytecodeCompiler {
                 .unwrap_or(0);
 
             // Build a `ThunkSignature` to get the right
-            // `VTableEntry::*` shape.
-            //
-            // Round-2 scope: emit Direct (no rewriting) or BoxedReturn
-            // with `wrap_targets = [{ path: [], wrap_as_trait_id: 0 }]`.
-            // Wider shapes (SelfArg / Generic / Compound, nested
-            // wrap-targets) get the descriptor populated but flagged
-            // via the `Compound` arm; the dispatch executor surfaces
-            // unsupported variants as NotImplemented.
-            let mut wrap_targets: SmallVec<[WrapTarget; 2]> = SmallVec::new();
-            if return_is_self {
-                // Top-level Self → wrap at path=[]. `wrap_as_trait_id`
-                // is the trait id; we don't have a stable u32 trait
-                // identity scheme yet — use 0 as a sentinel meaning
-                // "the surrounding trait" (the op_box_trait_object
-                // dispatch resolves this against the receiver's vtable
-                // at dispatch time).
-                wrap_targets.push(WrapTarget {
-                    path: SmallVec::new(),
-                    wrap_as_trait_id: 0,
-                });
-            }
-            if return_has_nested_self {
-                // Nested-Self case: surface-and-stop at dispatch.
-                // Emit a Compound entry that the executor will reject.
-                let mut flags = VTableEntryFlags::empty();
-                flags.set(VTableEntryFlags::BOXED_RETURN);
-                // We can't compute the right wrap_target paths
-                // here without a richer `Erase_T` walk over the
-                // compiler's `Type`; flag the entry and the executor
-                // surfaces as NotImplemented per §Q25.C.5.
-                methods.insert(
-                    method.name.clone(),
-                    VTableEntry::Compound {
-                        thunk_id: func_idx,
-                        flags,
-                        wrap_targets,
-                        self_arg_positions: SmallVec::new(),
-                        type_param_count: 0,
-                    },
-                );
-                continue;
-            }
-
+            // `VTableEntry::*` shape per §Q25.C.5. Single-flag
+            // signatures collapse to `BoxedReturn` / `SelfArg` /
+            // `Generic`; multi-flag (or unusual) shapes use
+            // `Compound`. The dispatch executor handles each.
             let sig = ThunkSignature::build(
                 /*impl_type_id=*/ 0,
                 /*trait_id=*/ 0,
@@ -334,5 +301,155 @@ pub(crate) fn trait_name_from_annotation(ann: &TypeAnnotation) -> Option<&str> {
             Some(traits[0].as_str())
         }
         _ => None,
+    }
+}
+
+/// Walk a `TypeAnnotation` and append a `WrapTarget` for every Self
+/// site reached, threading the generic-argument-index path. Used by
+/// `build_and_register_vtable` to populate the round-3 nested-Self
+/// `BoxedReturn` / `Compound` entries.
+///
+/// Per ADR-006 §2.7.24 Q25.C.1 row table:
+/// - `Self` (top-level) → push with current path.
+/// - `Result<Self, E>` → recurse into args, path=[0] for the Self arm.
+/// - `Option<Self>` → recurse, path=[0] for the Self arm.
+/// - `(Self, Self)` (tuple) → two pushes, paths=[0] and [1].
+/// - `HashMap<K, Self>` → recurse, path=[1] for the Self arm.
+/// - `Option<Result<Self, E>>` → recurse, path=[0, 0].
+/// - References (`&G<...>`) — the reference itself isn't a path step;
+///   recurse into the inner without pushing.
+/// - `Array<T>` — array is a generic with one arg; path=[0] for an
+///   Array<Self>-named site.
+///
+/// `wrap_as_trait_id` is set to 0 (the sentinel meaning "the
+/// surrounding trait"); the executor resolves this against the
+/// receiver's vtable at dispatch time.
+pub(super) fn collect_self_wrap_targets(
+    ann: &TypeAnnotation,
+    path: &mut SmallVec<[u8; 4]>,
+    out: &mut SmallVec<[WrapTarget; 2]>,
+) {
+    if is_top_level_self(ann) {
+        out.push(WrapTarget {
+            path: path.clone(),
+            wrap_as_trait_id: 0,
+        });
+        return;
+    }
+    match ann {
+        TypeAnnotation::Generic { args, .. } => {
+            for (i, a) in args.iter().enumerate() {
+                path.push(i as u8);
+                collect_self_wrap_targets(a, path, out);
+                path.pop();
+            }
+        }
+        TypeAnnotation::Tuple(items) => {
+            for (i, a) in items.iter().enumerate() {
+                path.push(i as u8);
+                collect_self_wrap_targets(a, path, out);
+                path.pop();
+            }
+        }
+        TypeAnnotation::Array(inner) => {
+            // `Array<T>` is sugar for a single-arg generic; treat as
+            // path=[0] for the element.
+            path.push(0);
+            collect_self_wrap_targets(inner, path, out);
+            path.pop();
+        }
+        // References (`&T` / `&mut T`) are transparent for `Erase_T`
+        // purposes — the reference itself doesn't gain a path step.
+        // Shape's TypeAnnotation doesn't have an explicit ref variant
+        // at this layer (refs are encoded inside `Reference(path)`
+        // as basic names), so no recursion needed.
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod wrap_target_tests {
+    //! Wave 3 W17-trait-object-thunks (ADR-006 §2.7.24 Q25.C, 2026-05-12).
+    //! Pin the `collect_self_wrap_targets` walker — verifies the
+    //! generic-arg-index path tracing for every row of the §Q25.C.1
+    //! `Erase_T` substitution table.
+    use super::*;
+    use shape_ast::ast::TypeAnnotation;
+
+    fn t_self() -> TypeAnnotation {
+        TypeAnnotation::Basic("Self".to_string())
+    }
+
+    fn t_concrete(name: &str) -> TypeAnnotation {
+        TypeAnnotation::Basic(name.to_string())
+    }
+
+    fn t_generic(name: &str, args: Vec<TypeAnnotation>) -> TypeAnnotation {
+        TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple(name),
+            args,
+        }
+    }
+
+    fn run(ann: &TypeAnnotation) -> Vec<Vec<u8>> {
+        let mut path = SmallVec::new();
+        let mut out = SmallVec::new();
+        collect_self_wrap_targets(ann, &mut path, &mut out);
+        out.iter().map(|w| w.path.to_vec()).collect()
+    }
+
+    #[test]
+    fn top_level_self_yields_empty_path() {
+        let paths = run(&t_self());
+        assert_eq!(paths, vec![vec![] as Vec<u8>]);
+    }
+
+    #[test]
+    fn concrete_type_yields_no_targets() {
+        let paths = run(&t_concrete("int"));
+        assert_eq!(paths, Vec::<Vec<u8>>::new());
+    }
+
+    #[test]
+    fn result_of_self_yields_path_zero() {
+        // `Result<Self, Error>` → wrap_targets = [{ path: [0] }]
+        let paths = run(&t_generic(
+            "Result",
+            vec![t_self(), t_concrete("Error")],
+        ));
+        assert_eq!(paths, vec![vec![0u8]]);
+    }
+
+    #[test]
+    fn option_of_self_yields_path_zero() {
+        let paths = run(&t_generic("Option", vec![t_self()]));
+        assert_eq!(paths, vec![vec![0u8]]);
+    }
+
+    #[test]
+    fn hashmap_k_self_yields_path_one() {
+        let paths = run(&t_generic("HashMap", vec![t_concrete("string"), t_self()]));
+        assert_eq!(paths, vec![vec![1u8]]);
+    }
+
+    #[test]
+    fn tuple_self_self_yields_two_paths() {
+        let paths = run(&TypeAnnotation::Tuple(vec![t_self(), t_self()]));
+        assert_eq!(paths, vec![vec![0u8], vec![1u8]]);
+    }
+
+    #[test]
+    fn nested_option_result_self_yields_path_zero_zero() {
+        let paths = run(&t_generic(
+            "Option",
+            vec![t_generic("Result", vec![t_self(), t_concrete("E")])],
+        ));
+        assert_eq!(paths, vec![vec![0u8, 0u8]]);
+    }
+
+    #[test]
+    fn array_of_self_yields_path_zero() {
+        let paths = run(&TypeAnnotation::Array(Box::new(t_self())));
+        assert_eq!(paths, vec![vec![0u8]]);
     }
 }
