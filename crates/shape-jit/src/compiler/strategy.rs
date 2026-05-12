@@ -71,13 +71,20 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
-                // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
-                // The bytecode-program-level side-table is in flux upstream
-                // (other Phase 3.1 agents are refactoring it), so we pass an
-                // empty vec for now — MirToIR's v2 fast path falls through to
-                // the legacy NaN-boxed path on `None`. Wire-up will happen
-                // once Agent 1 lands the BytecodeProgram concrete-types vec.
-                let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
+                // ADR-006 §2.7.5 conduit: thread the bytecode compiler's
+                // proven per-slot `ConcreteType` for top-level locals into
+                // MirToIR. The bytecode compiler stamps the side-table at
+                // `populate_program_storage_hints` time from
+                // `local_array_element_types`, `local_map_key_value_types`,
+                // and the type-tracker's schema registry (W12-top-level-
+                // concrete-types-conduit close, 2026-05-12). MirToIR's v2
+                // fast path uses `Array<scalar>` / `Struct(_)` /
+                // `HashMap(K, V)` slot kinds to bypass `Rvalue::Aggregate`
+                // surface-and-stop and the kind-blind ObjectStore path.
+                // Empty vec (no top-level code) → MirToIR falls through to
+                // the legacy NaN-boxed path naturally.
+                let concrete_types: Vec<shape_value::v2::ConcreteType> =
+                    program.top_level_local_concrete_types.clone();
                 let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()
@@ -196,13 +203,14 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
-                // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
-                // The bytecode-program-level side-table is in flux upstream
-                // (other Phase 3.1 agents are refactoring it), so we pass an
-                // empty vec for now — MirToIR's v2 fast path falls through to
-                // the legacy NaN-boxed path on `None`. Wire-up will happen
-                // once Agent 1 lands the BytecodeProgram concrete-types vec.
-                let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
+                // ADR-006 §2.7.5 conduit: thread the bytecode compiler's
+                // proven per-slot `ConcreteType` for top-level locals into
+                // MirToIR (W12-top-level-concrete-types-conduit close,
+                // 2026-05-12). Same source as the no-user-funcs path
+                // above; see the populate_program_storage_hints
+                // commentary in `crates/shape-vm/src/compiler/helpers.rs`.
+                let concrete_types: Vec<shape_value::v2::ConcreteType> =
+                    program.top_level_local_concrete_types.clone();
                 let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()

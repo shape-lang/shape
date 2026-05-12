@@ -285,6 +285,28 @@ pub struct BytecodeProgram {
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
 
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit: stamped at bytecode-compile time from the
+    /// compiler's proven type information (the typed-array kind chosen by
+    /// `compile_expr_array`, schema name from the type-tracker for struct
+    /// slots, etc.). The JIT `MirToIR` reads this side-table to drive the
+    /// v2 typed-array fast path (`Rvalue::Aggregate` short-circuit) and
+    /// the TypedObject ObjectStore short-circuit.
+    ///
+    /// `ConcreteType::Void` per slot means "no information available" —
+    /// downstream consumers fall back to the legacy NaN-boxed path. This
+    /// is NOT a Bool-default fallback per §2.7.5.1 / forbidden #9; `Void`
+    /// is the explicit "no concrete type" sentinel value in the
+    /// `ConcreteType` enum, distinct from a fabricated scalar kind.
+    ///
+    /// Not serialized — `ConcreteType` carries opaque `StructLayoutId` /
+    /// `EnumLayoutId` IDs that index into compile-time registries; the
+    /// cached-program path rebuilds them from the program's other
+    /// metadata or falls through to the legacy path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

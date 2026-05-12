@@ -106,16 +106,50 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `NativeKind`. Returns `None` for non-array slots, arrays of non-scalar
     /// elements, or unresolved types — caller falls back to legacy path.
     ///
-    /// Note: today only the per-MirToIR `concrete_types` vector is consulted.
-    /// The bytecode compiler / MIR-level slot concrete types are still in
-    /// flux upstream (other Phase 3.1 agents are refactoring them), so the
-    /// MirFunction-side fallback is intentionally not used here.
+    /// Source: the per-MirToIR `concrete_types` vector, threaded from
+    /// `BytecodeProgram.top_level_local_concrete_types` per ADR-006
+    /// §2.7.5 (W12-top-level-concrete-types-conduit close, 2026-05-12).
     pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<NativeKind> {
         let slot = match place {
             Place::Local(s) => *s,
             _ => return None,
         };
         is_v2_typed_array_slot(&self.concrete_types, slot.0)
+    }
+
+    /// True when the place's root local is known to hold a TypedObject
+    /// (`ConcreteType::Struct(_)` / `ConcreteType::Enum(_)` /
+    /// `ConcreteType::Option(_)` / `ConcreteType::Result(_, _)` /
+    /// `ConcreteType::Tuple(_)`). These all share the `HeapKind::TypedObject`
+    /// carrier and are materialised by the subsequent
+    /// `StatementKind::ObjectStore` / `EnumStore`.
+    ///
+    /// Used by the `Assign(Aggregate)` short-circuit in `statements.rs`:
+    /// when the bytecode compiler proved the destination slot is a
+    /// TypedObject, the preceding `Rvalue::Aggregate` is a MIR scratch step
+    /// — the real allocation happens in the following `ObjectStore`.
+    /// Skipping the Aggregate avoids the `Route A surface-and-stop`
+    /// previously hit at compile time for `Point { x, y }`-style literals.
+    ///
+    /// Source: the per-MirToIR `concrete_types` vector, threaded from
+    /// `BytecodeProgram.top_level_local_concrete_types` per ADR-006
+    /// §2.7.5 (W12-top-level-concrete-types-conduit close, 2026-05-12).
+    pub(crate) fn is_typed_object_slot(&self, place: &Place) -> bool {
+        let slot = match place {
+            Place::Local(s) => *s,
+            _ => return false,
+        };
+        let Some(ct) = self.concrete_types.get(slot.0 as usize) else {
+            return false;
+        };
+        matches!(
+            ct,
+            ConcreteType::Struct(_)
+                | ConcreteType::Enum(_)
+                | ConcreteType::Option(_)
+                | ConcreteType::Result(_, _)
+                | ConcreteType::Tuple(_)
+        )
     }
 
     /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.

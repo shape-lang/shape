@@ -34,6 +34,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
+                // v2 fast path: when the destination is a TypedObject slot
+                // (`ConcreteType::Struct(_)` / `Enum(_)` / `Option(_)` /
+                // `Result(_, _)` / `Tuple(_)`), the bytecode/MIR lowering
+                // emits a redundant `Assign(Aggregate)` (a scratch step
+                // mirroring the AST shape) followed by a real
+                // `StatementKind::ObjectStore` (or `EnumStore`) that does
+                // the actual `typed_object_alloc` + per-field set. Skip
+                // the kind-blind Aggregate compilation here — the real
+                // allocation arrives at the ObjectStore site. This is
+                // the §2.7.5 conduit's user-visible benefit: with the
+                // top-level slot's `ConcreteType` threaded from the
+                // bytecode compiler, the JIT no longer surfaces-and-stops
+                // on `Point { x, y }`-style struct literals (W12-top-level-
+                // concrete-types-conduit close, 2026-05-12).
+                //
+                // ADR-006 §2.7.5 forbidden list — this is NOT a Bool-
+                // default fallback. The condition is "the bytecode
+                // compiler proved this slot's `ConcreteType`"; when
+                // unproven the slot's `concrete_types[slot]` is
+                // `ConcreteType::Void` and `is_typed_object_slot`
+                // returns `false` — codegen surfaces-and-stops at the
+                // Aggregate site, not silently leaks. Per §2.7.5 the
+                // kind is stamped at compile time from the proven
+                // type information, never decoded from runtime bits.
+                if matches!(rvalue, Rvalue::Aggregate(_))
+                    && self.is_typed_object_slot(place)
+                {
+                    return Ok(());
+                }
+
                 // Session 2: propagate stack-closure call metadata on simple
                 // local→local moves/copies. MIR frequently shuffles a closure
                 // handle between slots (e.g. `let f = <closure>; f(x)` lowers

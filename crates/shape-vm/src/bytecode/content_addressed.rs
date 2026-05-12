@@ -192,6 +192,19 @@ pub struct Program {
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
 
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit (content-addressed mirror of
+    /// `BytecodeProgram.top_level_local_concrete_types`). Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so JIT compilation of in-memory-compiled programs can
+    /// use the typed-array / TypedObject fast paths. Not serialised —
+    /// `ConcreteType` carries opaque registry IDs that aren't a stable
+    /// wire shape; cached-program loads fall through to the legacy
+    /// NaN-boxed path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -330,6 +343,18 @@ pub struct LinkedProgram {
     /// Typed frame layout for top-level locals.
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
+
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit (top-level concrete-types side-table):
+    /// propagated from `BytecodeProgram.top_level_local_concrete_types`
+    /// through the linker so JIT compilation of linked programs can use
+    /// the typed-array / TypedObject fast paths. Not serialised — the
+    /// embedded `StructLayoutId` / `EnumLayoutId` are compile-time-local
+    /// registry indices; cached-program loads fall through to the legacy
+    /// NaN-boxed path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,

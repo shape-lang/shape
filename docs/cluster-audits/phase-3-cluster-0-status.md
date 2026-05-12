@@ -134,12 +134,109 @@ when the original scope mismatched the work needed.
 
 Four sub-clusters dispatched in parallel 2026-05-12:
 
-| Sub-cluster | Branch | Smoke unblocked | Est |
-|---|---|---|---|
-| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session |
-| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) | ~1 session |
-| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) |
-| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) |
+| Sub-cluster | Branch | Smoke unblocked | Est | Status |
+|---|---|---|---|---|
+| W12-jit-stack-parallel-kind-track | `bulldozer-strictly-typed-w12-jit-stack-kind-track` | 1.5 (Result/match with closures) | ~1 session | migrating |
+| W12-top-level-concrete-types-conduit | `bulldozer-strictly-typed-w12-top-level-concrete-types` | 3 (TypedObject field access) — `Rvalue::Aggregate` surface closed | ~1 session | **closed** 2026-05-12 |
+| W12-jit-linker-symbol-resolution | `bulldozer-strictly-typed-w12-jit-linker-resolve` | 2 (Option/return + Array) | ~1 session (audit-first) | auditing |
+| W12-deleted-valuewordshape-tests-rewrite | `bulldozer-strictly-typed-w12-vw-tests-rewrite` | 17 ignored tests un-ignored | ~1 session (parallel test-infra) | migrating |
+
+### W12-top-level-concrete-types-conduit close (2026-05-12)
+
+Branch: `bulldozer-strictly-typed-w12-top-level-concrete-types` (see commit hash in close commit).
+
+**Conduit shape:** new `#[serde(skip)]` field
+`top_level_local_concrete_types: Vec<ConcreteType>` on
+`BytecodeProgram` + `Program` + `LinkedProgram`, populated by a
+MIR-walk inference pass (`infer_top_level_concrete_types_from_mir` in
+`crates/shape-vm/src/compiler/helpers.rs`). The walk stamps slots from
+MIR-level kind-source statements:
+
+- `StatementKind::ObjectStore { container_slot, .. }` →
+  `ConcreteType::Struct(StructLayoutId(0))` (the schema-id placeholder
+  is irrelevant for the JIT short-circuit which only checks the
+  variant tag)
+- `StatementKind::EnumStore { container_slot, .. }` →
+  `ConcreteType::Enum(EnumLayoutId(0))` (same)
+- `StatementKind::ArrayStore { container_slot, operands }` →
+  `ConcreteType::Array(scalar)` when all operands resolve to a
+  homogeneous scalar kind via a per-slot scalar pre-pass walking
+  `Assign(slot, Use(Constant))`; heterogeneous / non-literal arrays
+  leave the slot at `ConcreteType::Void` (the explicit "no information"
+  sentinel per §2.7.5.1, NOT a Bool-default fallback per forbidden #9)
+- Use-of-local fixed-point propagation: `Assign(dst, Use(Move|Copy
+  local))` propagates the source slot's stamped ConcreteType to the
+  destination slot, handling the `let p = temp` pattern emitted by
+  the MIR lowering after `Aggregate` + `ObjectStore`
+
+**Why MIR-walk and not bytecode-compiler slot mapping:** top-level
+code allocates the user's bindings as module_bindings (NOT bytecode
+locals — `self.next_local` is 0 at top level), so the bytecode-
+compiler's per-local side-tables (`local_array_element_types`,
+`current_function_local_concrete_types`) do not carry top-level
+`let p = Point{...}` slots. The cached top-level MIR already encodes
+the structural type information through the `ObjectStore` / `ArrayStore`
+/ `EnumStore` statements. The walk is purely from the proven MIR
+shape; no runtime decode, no Bool-default fallback.
+
+**JIT consumer side:** new helper `is_typed_object_slot` in
+`crates/shape-jit/src/mir_compiler/v2_array.rs` (matches `Struct(_)`/
+`Enum(_)`/`Option(_)`/`Result(_, _)`/`Tuple(_)`). The
+`Assign(Aggregate)` handler in `crates/shape-jit/src/mir_compiler/
+statements.rs` adds a TypedObject short-circuit: when the destination
+slot is a TypedObject, skip the Aggregate (the redundant MIR scratch
+step). The subsequent `ObjectStore` does the real `typed_object_alloc`
++ per-field-set work. This mirrors the existing typed-array
+short-circuit (`v2_typed_array_elem_kind` + `emit_v2_array_aggregate`).
+
+**Smoke 3 (`type Point { x, y } let p = Point{x:3, y:4}; print(p.x +
+p.y)`):**
+- VM mode: prints `7` ✓
+- JIT mode: `Rvalue::Aggregate` surface eliminated; now hits
+  `compile_binop_dynamic_arith: kind-untyped arith Add reached the
+  JIT — SURFACE per W10 playbook §5: producing-MIR kind-tracker gap`
+  on the `p.x + p.y` field-access addition. **This is a separate
+  downstream gap** (the JIT's TypedObject field-read codegen doesn't
+  thread the field kind through to the BinaryOp emission). Belongs to
+  a follow-up sub-cluster — out of scope for the conduit.
+
+**Array literal (`let xs: Array<int> = [1, 2, 3, 4, 5]; print(xs[0] +
+xs[1] + xs[2])`):**
+- VM mode: prints `6` ✓
+- JIT mode: `Rvalue::Aggregate` surface eliminated; same downstream
+  `compile_binop_dynamic_arith` surface on the array-element-read
+  addition.
+
+Both Smoke 3 and the array smoke now compile past the original
+`Rvalue::Aggregate` surface. The remaining surface is in different
+JIT territory (kind tracking through TypedObject field access /
+TypedArray scalar read → BinaryOp), tracked as a separate
+sub-cluster.
+
+**Forbidden patterns observed:** none reintroduced. Specifically: no
+Bool-default fallback, no runtime tag_bits decode, no
+"bridge"/"probe"/"helper"/"hop"/"translator"/"adapter"/"shim" framing.
+The `ConcreteType::Void` sentinel is a real `ConcreteType` enum
+variant per §2.7.5.1, not a placeholder kind — downstream consumers
+fall through to legacy path on `Void`.
+
+**ADR-006 amendment needed?** No. The conduit landed cleanly in the
+existing §2.7.5 stamp-at-compile-time framework. The added field
+`top_level_local_concrete_types` is publicly observable but
+`#[serde(skip)]` (not on the wire); the existing `top_level_frame`
+field has the same shape for `NativeKind` per-slot data. No ABI
+change to the JIT FFI boundary; no new HeapKind variants.
+
+**Findings surfaced for downstream sub-clusters:**
+
+- **`compile_binop_dynamic_arith` after TypedObject field read** —
+  Smoke 3's `p.x + p.y` hits this. The JIT TypedObject field access
+  codegen returns the field bits but doesn't stamp the result's
+  `NativeKind` for the subsequent `BinaryOp`. ADR-006 §2.7.5 / W10
+  playbook §5. Likely territory of `W12-jit-stack-parallel-kind-track`
+  or a separate JIT kind-tracker follow-up.
+- **`compile_binop_dynamic_arith` after TypedArray scalar read** —
+  same surface for `xs[0] + xs[1]`. Same fix-class as above.
 
 **Deferred to future cluster (NOT cluster-0):**
 
@@ -169,7 +266,7 @@ surface-and-stop. Triaged by cluster:
 
 | # | Surface | Site / §-cite | Disposition |
 |---|---|---|---|
-| 1 | `concrete_types: Vec::new()` for top-level code | `compiler/strategy.rs:200-205`; §2.7.5 conduit gap | **cluster-1** (`W12-top-level-concrete-types-conduit`) — needs BytecodeProgram→JIT MirToIR side-table threading or an explicit ADR ruling that top-level slots use a different kind-source path |
+| 1 | `concrete_types: Vec::new()` for top-level code | `compiler/strategy.rs:200-205`; §2.7.5 conduit gap | **Round 3 closed (W12-top-level-concrete-types-conduit, 2026-05-12)** — `BytecodeProgram.top_level_local_concrete_types` field added; populated by MIR-walk inference (`infer_top_level_concrete_types_from_mir`); threaded through both `compile_strategy` + `compile_strategy_with_user_funcs` sites + `Program` + `LinkedProgram`. JIT side: new `is_typed_object_slot` helper + `Assign(Aggregate)` TypedObject short-circuit in `mir_compiler/statements.rs`. Smoke 3 + array-literal: `Rvalue::Aggregate` surface eliminated; downstream `compile_binop_dynamic_arith` gap surfaced as separate finding |
 | 2 | Compile-time-boxed string constants leak by design | `MirConstant::Str` lowering; pre-W11 pattern | **cluster-2 candidate** — box-once-bake-into-code with no release path; observable via `SHAPE_JIT_ARC_COUNTERS` (strconcat smoke: `retain=2 release=0`); independent of W11's caller-side ownership work |
 | 3 | Per-HeapKind kinded `jit_print` entries | `ffi/print.rs` kind-blind fallback uses `format_value_word` (NaN-decode-via-tag-bits) for heap arms | **cluster-2 candidate** — scalar arms (`jit_print_i64`/`f64`/`bool`) landed in W11; string / typed-object / Option / Result print still routes through the deleted-shape decoder |
 | 4 | `op_new_array` heterogeneous-element surface | `crates/shape-vm/src/executor/objects/object_creation.rs:316` | **Phase 2d gap** — surfaced as a finding; affects `xs.map(\|x\| x*2)` style smokes in VM mode (before JIT is reached). Not cluster-0 territory; tracked for the next Phase 2d hardening pass |

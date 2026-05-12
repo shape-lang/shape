@@ -299,6 +299,7 @@ impl JITCompiler {
                 module_binding_storage_hints: program.module_binding_storage_hints.clone(),
                 function_local_storage_hints: Vec::new(),
                 top_level_frame: None,
+                top_level_local_concrete_types: Vec::new(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
