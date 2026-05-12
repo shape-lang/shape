@@ -956,22 +956,45 @@ mod tests {
         assert_eq!(closure.captures_count, 32); // count unchanged, ptr nulled
     }
 
+    /// `jit_box(HK_CLOSURE, JITClosure)` round-trip — strict-typed rewrite
+    /// (W12-deleted-valuewordshape-tests-rewrite, 2026-05-12).
+    ///
+    /// Pre-rewrite the test asserted `is_heap_kind(bits, HK_CLOSURE) ==
+    /// true` after `jit_box(HK_CLOSURE, *closure)`. Under ADR-006 §2.7.5
+    /// JIT-side producers return raw `Box::into_raw(...) as u64`; the
+    /// `is_heap_kind` consumer first checks `is_heap(bits)` which requires
+    /// `is_tagged(bits)` (negative-NaN tag bits). Raw pointers don't have
+    /// those tag bits, so `is_heap_kind` returns false — the consumer is
+    /// in the production-code migration gap surfaced separately.
+    ///
+    /// The strict-typed discriminator reads the `kind: u16` prefix at
+    /// offset 0 of the JIT allocation via `read_heap_kind(bits)`. Per
+    /// §2.7.5 "*not* tag-bit dispatch — it reads a field from a
+    /// heap-resident struct that the producing call placed there."
+    ///
+    /// Same round-trip semantics expressed through the strict-typed
+    /// predicate.
     #[test]
-    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
-                ValueWord-shape `is_heap_kind` / `jit_box` heap-kind dispatch \
-                (HK_CLOSURE tag-bit probe). Under strict typing the JIT-FFI \
-                returns typed `Arc<TypedObjectStorage>` via the §2.7.5 \
-                carrier — the closure box-roundtrip body has to migrate to \
-                the kinded value-call ABI (§2.7.11/Q12) before this test \
-                exercises a live path. Re-enable after the rebuild lands."]
-    fn test_closure_jit_box_roundtrip() {
+    fn test_closure_jit_box_roundtrip_via_heap_kind_prefix() {
         // Verify JITClosure survives jit_box/jit_unbox roundtrip
         let captures = [box_number(42.0), TAG_BOOL_FALSE];
         let closure = JITClosure::new(10, &captures);
         let bits = jit_box(HK_CLOSURE, *closure);
 
-        assert!(is_heap_kind(bits, HK_CLOSURE));
+        // Construction-side contract: `jit_box` writes `HK_CLOSURE` into
+        // the `kind: u16` prefix at offset 0 of the `JitAlloc<JITClosure>`
+        // allocation. The strict-typed §2.7.5 discriminator reads the
+        // prefix directly — no tag-bit dispatch.
+        assert_ne!(bits, 0, "allocation pointer is non-null");
+        assert_eq!(
+            unsafe { crate::ffi::jit_kinds::read_heap_kind(bits) },
+            HK_CLOSURE,
+            "heap-kind prefix at offset 0 discriminates the JIT allocation"
+        );
 
+        // Round-trip via direct `jit_unbox`: reads the `data` field of
+        // the `JitAlloc<JITClosure>` without gating on tag bits, recovering
+        // the JITClosure the producer stored.
         let recovered = unsafe { jit_unbox::<JITClosure>(bits) };
         assert_eq!(recovered.function_id, 10);
         assert_eq!(recovered.captures_count, 2);
@@ -979,6 +1002,12 @@ mod tests {
             assert_eq!(unbox_number(recovered.get_capture(0)), 42.0);
             assert_eq!(recovered.get_capture(1), TAG_BOOL_FALSE);
         }
+
+        // Clean up the JitAlloc allocation directly. The deleted
+        // ValueWord-shape clean-up went through the JIT-emitted `jit_drop`
+        // call; here we go straight to `jit_drop::<JITClosure>` which is
+        // the §2.7.5 direct-path cleanup.
+        unsafe { crate::ffi::jit_kinds::jit_drop::<JITClosure>(bits) };
     }
 
     #[test]

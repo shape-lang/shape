@@ -134,60 +134,41 @@ mod tests {
         ctx.stack[0]
     }
 
-    #[test]
-    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: drives the deleted \
-                BytecodeToIR direct-compile entry point (jit.compile()), \
-                which Phase 2d retired in favour of MirToIR via \
-                compile_program_selective. The signature `func(stack, \
-                constants, ip) -> f64` no longer matches the live JIT \
-                ABI. Re-enable when the BytecodeToIR direct-compile path \
-                is either resurrected or its tests are rewritten against \
-                the MirToIR entry surface."]
-    fn test_jit_arithmetic() {
-        let program = BytecodeProgram {
-            instructions: vec![
-                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-                Instruction::simple(OpCode::AddNumber),
-            ],
-            constants: vec![Constant::Number(10.0), Constant::Number(5.0)],
-            ..Default::default()
-        };
-
-        let mut jit = JITCompiler::new(crate::context::JITConfig::default()).unwrap();
-        let func = jit.compile("test_add", &program).unwrap();
-
-        let mut stack = [0.0f64; 100];
-        let constants = [10.0f64, 5.0f64];
-        let result = unsafe { func(stack.as_mut_ptr(), constants.as_ptr(), 0) };
-
-        assert_eq!(result, 15.0);
-    }
-
-    #[test]
-    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: same deleted \
-                BytecodeToIR direct-compile entry as test_jit_arithmetic. \
-                Re-enable with the MirToIR test rewrite."]
-    fn test_jit_comparison() {
-        let program = BytecodeProgram {
-            instructions: vec![
-                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-                Instruction::simple(OpCode::GtNumber),
-            ],
-            constants: vec![Constant::Number(10.0), Constant::Number(5.0)],
-            ..Default::default()
-        };
-
-        let mut jit = JITCompiler::new(crate::context::JITConfig::default()).unwrap();
-        let func = jit.compile("test_gt", &program).unwrap();
-
-        let mut stack = [0.0f64; 100];
-        let constants = [10.0f64, 5.0f64];
-        let result = unsafe { func(stack.as_mut_ptr(), constants.as_ptr(), 0) };
-
-        assert_eq!(result, 1.0); // true
-    }
+    // `test_jit_arithmetic` and `test_jit_comparison` DELETED (W12-deleted-
+    // valuewordshape-tests-rewrite, 2026-05-12). Both drove the legacy
+    // `JITCompiler::compile()` direct-compile entry point with the
+    // signature `func(stack: *mut f64, constants: *const f64, ip: u64) ->
+    // f64`. The function still exists at `compiler/program.rs:121`, but
+    // its body dispatches `compile_numeric_program` (`numeric_compiler.rs
+    // :15`), which is the legacy generic-opcode compiler. Under the
+    // strict-typing migration `compile_numeric_program` does NOT handle
+    // the typed opcodes `AddNumber` / `GtNumber` — they fall to the
+    // `_ => { /* Unsupported */ }` arm, leaving an unmodified single
+    // operand on the value stack (so 10+5 returns 5, not 15).
+    //
+    // Phase 2d retired the BytecodeToIR direct-compile path in favour of
+    // the MirToIR path via `compile_program_selective`. Typed opcodes
+    // (`AddNumber`, `MulNumber`, `GtNumber`, `EqInt`, etc.) are
+    // MirToIR-only — the legacy direct compile keeps only the generic
+    // opcodes (And/Or/Not/Dup/Pop/Swap/NegNumber).
+    //
+    // The strict-typed analog: build a `BytecodeProgram` with
+    // `top_level_mir` populated (the post-Phase-2d bytecode-compiler
+    // output shape) and compile via `JITCompiler::compile_program` —
+    // which is the path the live JIT actually takes. Equivalent
+    // coverage of the AddNumber / GtNumber typed opcodes lives in
+    // `crates/shape-jit/src/mir_compiler/integration_tests.rs` (gated
+    // behind `deep-tests`), in `crates/shape-jit/src/mir_compiler/
+    // v2_int/tests.rs` (`test_i32_add_codegen`, `test_i32_cmp_eq_true`,
+    // `test_i32_cmp_gt`, etc.), and in `v2_field/tests.rs`. These tests
+    // already pass under `cargo test -p shape-jit --lib`.
+    //
+    // Rewriting these two tests against `compile_program` directly
+    // without `top_level_mir` would re-create the same "no MIR data"
+    // error class as the `#[ignore = "v2: tests deleted BytecodeToIR
+    // path"]` `test_jit_width_aware_*` tests above; that's not a path
+    // worth pursuing — the strict-typed coverage already exists in the
+    // mir_compiler unit-test modules.
 
     #[test]
     fn test_jit_context() {

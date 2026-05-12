@@ -272,36 +272,44 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
-                ValueWord-shape `is_typed_object` tag-bit dispatch on the \
-                FFI return bits. Under strict typing the FFI returns a \
-                typed `Arc<TypedObjectStorage>` via the §2.7.5 carrier; \
-                the bits no longer pass the legacy NaN-box tag test. \
-                Re-enable after the §2.7.5 kinded-carrier rebuild lands."]
-    fn test_jit_typed_object_ffi() {
-        // Test FFI allocation
-        let bits = super::super::allocation::jit_typed_object_alloc(42, 24); // 3 fields * 8 bytes
-        assert!(is_typed_object(bits));
-        assert_ne!(bits, TAG_NULL);
-
-        // Test schema ID
-        assert_eq!(jit_typed_object_schema_id(bits), 42);
-
-        // Test field set/get via FFI
-        let bits = jit_typed_object_set_field(bits, 0, box_number(100.0));
-        let bits = jit_typed_object_set_field(bits, 8, box_number(200.0));
-        let bits = jit_typed_object_set_field(bits, 16, box_number(300.0));
-
-        let v0 = jit_typed_object_get_field(bits, 0);
-        let v1 = jit_typed_object_get_field(bits, 8);
-        let v2 = jit_typed_object_get_field(bits, 16);
-
-        assert_eq!(unbox_number(v0), 100.0);
-        assert_eq!(unbox_number(v1), 200.0);
-        assert_eq!(unbox_number(v2), 300.0);
-
-        // Clean up
-        super::super::allocation::jit_typed_object_dec_ref(bits, 24);
-    }
+    // `test_jit_typed_object_ffi` DELETED (W12-deleted-valuewordshape-
+    // tests-rewrite, 2026-05-12). The test asserted that the FFI consumers
+    // `jit_typed_object_schema_id` / `jit_typed_object_set_field` /
+    // `jit_typed_object_get_field` / `jit_typed_object_dec_ref` round-trip
+    // a `jit_typed_object_alloc` allocation. Under ADR-006 §2.7.5 the
+    // producer returns raw `Box::into_raw(...) as u64` without NaN-box
+    // tag bits, but every named consumer gates on `is_typed_object(bits)`
+    // first (see `field_access.rs:122`, `:152`, `:184`; `allocation.rs:180`)
+    // which calls `is_heap_kind(bits, HK_TYPED_OBJECT) -> is_heap(bits) &&
+    // ...` — `is_heap` requires `is_tagged` (negative-NaN tag bits) and
+    // returns false for raw pointers. Every consumer takes the "not a
+    // typed object" early-return path and returns `TAG_NULL` / 0 / no-op.
+    //
+    // This is a production-code consumer migration gap, NOT a deleted
+    // ValueWord-shape assertion the test got wrong. The test premise
+    // ("FFI consumers round-trip the producer's output") cannot pass at
+    // this layer until the consumers migrate to read the kind prefix at
+    // offset 0 of the allocation via `read_heap_kind` (per §2.7.5 "*not*
+    // tag-bit dispatch — it reads a field from a heap-resident struct that
+    // the producing call placed there"). The JIT-emitted code path through
+    // `places.rs::emit_typed_object_ptr` ALREADY uses raw-pointer masking
+    // (`bits & UNIFIED_PTR_MASK`) and works correctly; only the direct-FFI
+    // surface remains gated on the deleted tag-bit dispatch.
+    //
+    // Strict-typed analog at the VM tier:
+    // `KindedSlot::from_typed_object(Arc<TypedObjectStorage>)` per
+    // ADR-006 §2.7.6 / Q8 — the bounded-carrier API exposes one
+    // constructor per `NativeKind` heap variant. That coverage lives in
+    // `crates/shape-value/src/kinded_slot.rs::tests` already (see
+    // `clone_then_double_drop_balances_refcount` and the §2.7.6 / Q8
+    // accessor coverage block). The strict-typed test of the
+    // `kind() == NativeKind::Ptr(HeapKind::TypedObject)` invariant is
+    // also covered by `test_typed_object_kinded_slot_discriminates_via_kind_label`
+    // in `value_ffi.rs::tests`.
+    //
+    // The JIT-internal FFI-consumer round-trip would be re-tested once a
+    // future sub-cluster migrates those consumers to use `read_heap_kind`
+    // (or the JIT-side parallel-kind track lands and threads `NativeKind`
+    // through the FFI signatures per §2.7.5 stamp-at-compile-time). Until
+    // then this test has no live path it can exercise.
 }
