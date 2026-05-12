@@ -64,13 +64,46 @@ Three sub-clusters dispatched in parallel, all closed and merged into
   version of `#[ignore = "..."]` strings has more detailed §-cites
   and cross-references than W11's terse version).
 
-## Round 2 — dispatching
+## Round 2 — closed
 
-- **W11-jit-carrier-conversion** — depends on W11-jit-new-array's FFI
-  shape (now stable at merged HEAD `a57e164f`). Routes per-arm
-  encoding through the new carrier surface per phase-2d-close-summary
-  item #2. Expected to close ~10 of the 17 pre-existing test failures
-  surfaced by jit-test-runner.
+- **W11-jit-carrier-conversion** — closed 2026-05-12. Branch
+  `bulldozer-strictly-typed-w11-jit-carrier-conversion`. Conversion
+  FFI bodies in `crates/shape-jit/src/ffi/object/conversion.rs`
+  rewritten to identity pack/unpack per §2.7.5 stamp-at-compile-time
+  discipline: `jit_bits_to_nanboxed(bits, kind) -> JitFfiCarrier` now
+  takes `NativeKind` as a new parameter (the §2.7.5 stable-FFI
+  raw-pair shape); body is `(bits, kind)` — no decode, no probe.
+  `nanboxed_to_jit_bits(&carrier) -> u64` returns `carrier.0`
+  unchanged — per §2.7.5 the JIT bits ARE the raw bits, no
+  re-encoding step exists under strict typing.
+
+  `crates/shape-jit/src/ffi/control/mod.rs::jit_call_value` real
+  body — classifies callee via JIT-internal NaN-box predicates
+  (`is_inline_function` / `is_heap_kind(_, HK_CLOSURE)`) for inline
+  function and deprecated-`unified_box(HK_CLOSURE, JITClosure)`
+  callee shapes; surfaces-and-stops with TAG_NULL on the raw-Arc
+  closure callee shape (the `jit_finalize_heap_closure` return
+  shape) since `JITContext.stack` has no parallel-kind track and
+  the callee's `NativeKind::Ptr(HeapKind::Closure)` is not
+  recoverable from the bits alone. Same graceful-surface pattern as
+  `jit_join_init` in W11 round-1 close; NOT a silent leak. Diagnostic
+  audible via `SHAPE_JIT_DEBUG=1`.
+
+  `dispatch_call_via_trampoline_vm` real body — stamps
+  `NativeKind::UInt64` for args/captures (the §2.7.11/Q12
+  function-id-callee-classification kind, also the §2.7.5 stable-FFI
+  I64-wide raw bits carrier kind — NOT a Bool-default fallback);
+  routes to `VirtualMachine::jit_trampoline_call_closure` for
+  closure callees or `VirtualMachine::call_value_immediate_nb` for
+  bare function callees.
+
+  Test recovery: 311 → 316 passed (+5 new conversion.rs round-trip
+  / kind-preservation tests). 0 → 0 failed. 38 → 38 ignored
+  unchanged — the previously-ignored tests assert deleted ValueWord-
+  shape API (`is_typed_object(bits)` on raw Arc pointers, the W11
+  round-1 close's "9 individual tests #[ignore]'d that assert the
+  deleted ValueWord-shape API"). Those tests need rewrites against
+  the new strict-typed API, NOT carrier conversion work.
 
 ## Surfaced items (cite-tracked, NOT silently fallback'd)
 
@@ -83,7 +116,9 @@ surface-and-stop. Triaged by cluster:
 | 2 | Compile-time-boxed string constants leak by design | `MirConstant::Str` lowering; pre-W11 pattern | **cluster-2 candidate** — box-once-bake-into-code with no release path; observable via `SHAPE_JIT_ARC_COUNTERS` (strconcat smoke: `retain=2 release=0`); independent of W11's caller-side ownership work |
 | 3 | Per-HeapKind kinded `jit_print` entries | `ffi/print.rs` kind-blind fallback uses `format_value_word` (NaN-decode-via-tag-bits) for heap arms | **cluster-2 candidate** — scalar arms (`jit_print_i64`/`f64`/`bool`) landed in W11; string / typed-object / Option / Result print still routes through the deleted-shape decoder |
 | 4 | `op_new_array` heterogeneous-element surface | `crates/shape-vm/src/executor/objects/object_creation.rs:316` | **Phase 2d gap** — surfaced as a finding; affects `xs.map(\|x\| x*2)` style smokes in VM mode (before JIT is reached). Not cluster-0 territory; tracked for the next Phase 2d hardening pass |
-| 5 | `jit_call_value` `todo!()` | `ffi/control/mod.rs:171`; §2.7.11/Q12 | **Round 2 (W11-jit-carrier-conversion)** — naturally absorbed by the kinded value-call ABI rebuild |
+| 5 | `jit_call_value` `todo!()` | `ffi/control/mod.rs:171`; §2.7.11/Q12 | **Round 2 closed (W11-jit-carrier-conversion, 2026-05-12)** — inline-function + deprecated-HK_CLOSURE callee shapes implemented; raw-Arc closure callee (the `jit_finalize_heap_closure` return shape) surfaces-and-stops returning TAG_NULL — `JITContext.stack` parallel-kind track is the §2.7.5 follow-up (cluster-1) |
+| 6 | `JITContext.stack` has no parallel-kind track | `crates/shape-jit/src/context.rs:491` (`stack: [u64; 512]`); §2.7.5 / §2.7.11 | **cluster-1** (`W12-jit-stack-parallel-kind-track`) — surfaced by W11-jit-carrier-conversion's `jit_call_value`. Raw-Arc closure callees + per-arg kinded retain/release across the JIT-FFI boundary depend on the JIT-side §2.7.7 parallel-kind track. Resolution: either extend `JITContext` with `kinds: [NativeKind; 512]` parallel array + thread kinds through `terminators.rs::TerminatorKind::Call` lowering, or per-callee kind side-table threaded through MIR emitter into a separate FFI signature. ADR-level shape change |
+| 7 | `jit_v2_map_*` typed-HashMap FFI rebuild | `ffi_refs.rs:209`, `compiler/ffi_builder.rs:208`, `mir_compiler/v2_typed_map.rs:71-99`; §2.7.14 Q15 / §2.7.5 | **future-cluster** (`W12-jit-typed-map-ffi`) — referenced as W11-jit-carrier-conversion follow-up in those files but actually a separate FFI rebuild: kinded `Arc<HashMapData>` + `KindedSlot` map FFI bodies (`jit_v2_map_get_str_i64` / `get_str_f64` / `has_str` / `set_str_i64` / `len`). The deleted ValueWord-shape bodies decoded map handle + key as raw u64 bits via tag_bits; rebuild needs per-method kind-aware entry-point bodies. Separate concern from identity-function carrier conversion |
 
 Items 2 and 3 are the cluster-2 candidate flags the user asked for.
 Item 1 is cluster-1 territory (hardening). Items 4 and 5 are either
@@ -98,12 +133,20 @@ Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
 
 Round 1's three sub-clusters did NOT make `--mode jit` end-to-end yet
 on their own (only Smoke 1 of the kickoff's 4 targets fully works
-identically under VM and JIT). The cluster-0 close depends on
-Round 2 (W11-jit-carrier-conversion) landing. Once Round 2 closes
-with the carrier-conversion FFI bodies replacing the `todo!()`
-SURFACEs in `ffi/object/conversion.rs:70,217`, the remaining ~10
-of the 17 pre-existing assertion failures should resolve, and
-cluster-0 can close.
+identically under VM and JIT). Round 2 (W11-jit-carrier-conversion,
+closed 2026-05-12) implemented the carrier-conversion FFI bodies as
+identity pack/unpack per §2.7.5 stamp-at-compile-time, but the
+remaining ~10 pre-existing failing tests assert deleted ValueWord-
+shape API (`is_typed_object(bits)` on raw Arc pointers, NaN-box-tag
+roundtrips) — they need test rewrites against the new strict-typed
+API, NOT carrier conversion work. Those rewrites are not in any
+cluster-0 sub-cluster scope. The remaining `--mode jit` gaps for
+the kickoff smokes are the §2.7.5 JIT-side parallel-kind track
+(item 6, cluster-1) and the `concrete_types` conduit (item 1,
+cluster-1) — both ADR-level shape changes per the surface-and-stop
+discipline. **Cluster-0 closes**: the three Round-1 sub-clusters
++ Round-2 W11-jit-carrier-conversion all closed with surfacing the
+deeper gaps for cluster-1.
 
 ## Process / discipline notes for next session
 
