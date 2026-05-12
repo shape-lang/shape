@@ -317,6 +317,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         function_blob_hashes: vec![],
         top_level_frame: None,
         top_level_local_concrete_types: vec![],
+        function_local_concrete_types: vec![],
         monomorphization_keys: vec![],
         closure_function_layouts: program.closure_function_layouts.clone(),
         trait_vtables: program.trait_vtables.clone(),

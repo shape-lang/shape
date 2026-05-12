@@ -352,9 +352,19 @@ pub enum StatementKind {
     },
     /// Store values into an enum payload.
     /// Operands are the tuple/struct payload values being stored.
+    ///
+    /// `variant_name` carries the constructor name (Ok / Err / Some /
+    /// user-defined variant) — known at MIR-lowering time and threaded
+    /// through so the JIT EnumStore consumer can dispatch to the right
+    /// typed-Arc producer (`jit_v2_make_result_ok` / `_err` /
+    /// `jit_v2_make_option_some`). `None` is permitted for paths that
+    /// haven't been migrated to thread the variant; downstream JIT
+    /// consumers surface-and-stop on `None` for non-empty payloads per
+    /// ADR-006 §2.7.5 / §2.7.7 #9 (no Bool-default fallback).
     EnumStore {
         container_slot: SlotId,
         operands: Vec<Operand>,
+        variant_name: Option<String>,
     },
     /// No-op (placeholder, padding).
     Nop,

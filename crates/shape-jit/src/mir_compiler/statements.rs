@@ -203,40 +203,57 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             StatementKind::EnumStore {
                 container_slot: _,
                 operands,
+                variant_name,
             } => {
                 // Enum variant construction.
                 //
-                // In the bytecode path, enums are compiled as TypedObjects with a
-                // schema_id and variant discriminant. The MIR-level JIT path
-                // historically represented enum payloads as heterogeneous arrays
-                // built via the kind-blind `jit_new_array` + `jit_array_push_elem`
-                // ABI — the deleted ValueWord-shape path.
-                //
                 // For unit variants (empty operands), the preceding
-                // `Assign(Aggregate)` has already stored the discriminant; this
-                // is a no-op.
-                //
-                // For non-empty payloads, Route A (ADR-006 §2.7.14 /
-                // W11-jit-new-array close) does not yet provide a
-                // heterogeneous-element carrier — that's the same
-                // `op_new_array` surface the VM-side handler returns
-                // (`crates/shape-vm/src/executor/objects/object_creation.rs:316`).
-                // Per §2.7.14 forbidden list ("Bool-default fallback for
-                // unknown element kinds") surface-and-stop instead of
-                // fabricating a kind.
+                // `Assign(Aggregate)` short-circuit already left the slot
+                // initialized.
                 if operands.is_empty() {
                     return Ok(());
                 }
-                Err(
-                    "Route A surface-and-stop: SURFACE — \
-                     StatementKind::EnumStore with non-empty payload depends \
-                     on a heterogeneous-element-array carrier that Route A \
-                     does not yet supply (parallel to op_new_array's VM-side \
-                     surface in shape-vm `object_creation.rs:316`). Tracked \
-                     as W11-jit-new-array follow-up per ADR-006 §2.7.4. \
-                     ADR-006 §2.7.14 / §2.7.5."
-                        .to_string(),
-                )
+                // W12-jit-aggregate-non-array audit (2026-05-12):
+                // Threading variant_name and registering kinded
+                // make_ok / make_err / make_some FFI entries is in place
+                // (commits in this sub-cluster), but the JIT consumer that
+                // would call them depends on downstream kind-flow
+                // infrastructure that isn't ready yet:
+                //
+                // 1. The top-level caller slot for `let r = divide(...)`
+                //    receives a `Call` terminator return; its kind isn't
+                //    classified as `Ptr(HeapKind::Result)` by the conduit
+                //    (which only walks MIR statements, not return-kind
+                //    flow). Without that classification, print and match
+                //    on `r` mis-decode the bits.
+                // 2. JIT pattern-matching for `match r { Ok(v) => ..., }`
+                //    doesn't yet have an inline path for the legacy
+                //    NaN-boxed `box_ok/err/some` shape OR the typed-Arc
+                //    `Arc<ResultData>` shape.
+                // 3. The legacy `jit_make_ok/err/some` FFI returns
+                //    NaN-boxed bits; the VM-side `Arc<ResultData>`
+                //    consumer needs conversion at the boundary, which
+                //    isn't audited end-to-end.
+                //
+                // The right fix is an ADR-amendment-level co-design of
+                // (Call-return kind tracking + match-on-enum codegen +
+                // NaN-box↔Arc conversion). Per CLAUDE.md surface-and-
+                // stop discipline, this consumer surfaces honestly here
+                // with the structured §-cite. The audit doc spells out
+                // the deeper scope at §8 "Sites surfaced".
+                let variant_label = variant_name.as_deref().unwrap_or("<missing>");
+                Err(format!(
+                    "EnumStore: SURFACE — variant '{}' (operands.len()={}) \
+                     requires a co-designed Call-return kind track + \
+                     pattern-match codegen + NaN-box↔Arc conversion that \
+                     exceeds this sub-cluster's scope. Conduit extension \
+                     (option (ii)) is landed; this consumer is option (iii) \
+                     territory per W12-jit-aggregate-non-array audit \
+                     `docs/cluster-audits/w12-jit-aggregate-non-array-audit.md` §4. \
+                     ADR-006 §2.7.14 / §2.7.5.",
+                    variant_label,
+                    operands.len()
+                ))
             }
 
             StatementKind::Nop => Ok(()),

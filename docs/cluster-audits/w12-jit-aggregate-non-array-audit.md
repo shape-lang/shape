@@ -199,20 +199,195 @@ and thread it through `compile_function_with_user_funcs` at
 
 ---
 
-## §4. Why the EnumStore non-empty-payload surface is dead post-fix
+## §4. Why the EnumStore non-empty-payload surface is NOT dead post-fix
+## (audit revision after partial-fix verification — 2026-05-12)
+##
+## SECOND REVISION (after option-(i) attempt verification): scope is (iii)
+## territory. See §4.4 below.
 
-When the conduit stamps `Enum(_)` on the destination slot, the
-`Assign(Aggregate)` short-circuit at `statements.rs:61-65` returns `Ok(())`
-**before reaching the EnumStore consumer**. The EnumStore consumer's
-non-empty-payload branch is dead code in the typed-conduit world — but
-it remains as a defensive backstop for the case where the conduit
-somehow misses a slot. That backstop must surface-and-stop honestly
-(per ADR-006 §2.7.7 #9 forbidden Bool-default), but its existing cite
-"§2.7.4" is wrong (task-scheduler boundary). The cite-only fix in
-commit 2/3 is mechanical: §2.7.4 → §2.7.14 / §2.7.5.
+Initial audit hypothesis (§4 of the first audit revision): "the
+Aggregate short-circuit fires before reaching EnumStore, so the
+EnumStore non-empty surface becomes dead code post-conduit-extension."
 
-The audit doc itself has the same wrong cite at line 215; the cite-fix
-applies symmetrically.
+**This was wrong.** Verified by partial-fix experiment: after threading
+the conduit through user functions, `divide` now reaches the EnumStore
+site (the Aggregate short-circuit fires correctly), but EnumStore
+surfaces because:
+
+- The `Assign(Aggregate)` short-circuit returns `Ok(())` without writing
+  any value to the destination slot — the slot is **uninitialized** at
+  this point.
+- MIR then issues `StatementKind::EnumStore { container_slot, operands }`
+  to perform the actual allocation. This site IS reached and IS
+  load-bearing.
+- The existing EnumStore consumer handles only empty payloads (unit
+  variants). Non-empty payloads (`Ok(x)`, `Err(e)`, `Some(x)`) surface.
+
+So the scope must extend to **option (i)** as well as option (ii): the
+EnumStore consumer must actually allocate the right typed-Arc carrier
+based on the variant name.
+
+### §4.1 Variant identity is lost in current MIR
+
+The MIR statement `StatementKind::EnumStore { container_slot: SlotId,
+operands: Vec<Operand> }` does NOT carry the variant name (Ok / Err /
+Some / user-defined). The MIR lowering at
+`crates/shape-vm/src/mir/lowering/expr.rs:1548-1571` (bare-form
+intercept) and `:1613-1651` (`Expr::EnumConstructor`) both KNOW the
+variant name at lowering time but discard it before emitting the MIR
+statement.
+
+**Option (i) full scope therefore requires threading the variant name
+into the MIR statement.** This is a bounded structural change — one
+new field on `StatementKind::EnumStore`, two emit sites updated,
+zero new MIR statement kinds.
+
+### §4.2 The kinded-Arc producers
+
+The VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` bodies
+at `crates/shape-vm/src/executor/vm_impl/builtins.rs:551-586` are the
+canonical typed-Arc producers post-W14-variant-codegen:
+
+```rust
+let res = Arc::new(ResultData::ok(payload));      // is_ok=true,  payload: KindedSlot
+let res = Arc::new(ResultData::err(payload));     // is_ok=false, payload: KindedSlot
+let opt = Arc::new(OptionData::some(payload));    // is_some=true, payload: KindedSlot
+KindedSlot::from_result(arc) / from_option(arc)   // wraps Arc::into_raw(arc) as u64 bits
+```
+
+The kinded-slot's kind is `NativeKind::Ptr(HeapKind::Result)` /
+`HeapKind::Option`.
+
+For JIT compile-time emission, we need three FFI entry points that
+mirror this shape and return the raw `Arc::into_raw(arc) as u64` bits
+the JIT slots consume:
+
+- `jit_v2_make_result_ok(payload_bits: u64, payload_kind: u8) -> u64`
+- `jit_v2_make_result_err(payload_bits: u64, payload_kind: u8) -> u64`
+- `jit_v2_make_option_some(payload_bits: u64, payload_kind: u8) -> u64`
+
+`payload_kind` carries the `NativeKind` discriminant byte per ADR-006
+§2.7.5 cross-crate ABI policy (raw bits + parallel kind, stamped at
+JIT compile time from the producing-site MIR operand's kind via
+`operand_slot_kind`). No tag-bit decode, no Bool-default — kind comes
+from the §2.7.5 producing-site classification.
+
+### §4.3 Updated decision
+
+Final scope: **option (ii) + option (i) combined**, plus:
+
+- **MIR shape addition**: `StatementKind::EnumStore` grows a
+  `variant_name: Option<String>` field. The two MIR-lowering emit
+  sites are updated to thread the variant name. Existing `EnumStore`
+  consumers that don't care about the variant (borrow solver, liveness,
+  field analysis) ignore the new field (None for non-bare paths kept
+  open for now; the JIT requires `Some(_)` to dispatch).
+- **JIT FFI**: 3 new entry points (`jit_v2_make_result_ok` / `_err` /
+  `jit_v2_make_option_some`) returning `Arc::into_raw(_)` bits.
+- **JIT EnumStore consumer**: dispatch on `variant_name` to emit the
+  matching FFI call. Slot stamped with the conduit-supplied kind
+  (`Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`).
+- **Conduit extension (option (ii))**: per-function MIR-walk to
+  populate `BytecodeProgram.function_local_concrete_types`, threaded
+  through linker / remote serialization / LinkedProgram round-trip.
+
+No new HeapKind. No new MIR statement kind. No new dispatch shape.
+**No ADR-006 amendment** — every piece reuses existing concepts.
+This sits inside option (i) "Route A FFI extension" + option (ii)
+"ConcreteType conduit extension", combined. The dispatch authorized
+"(i) and/or (ii)" — this fix uses both.
+
+The audit doc's earlier "EnumStore non-empty is dead post-fix" claim
+was unverified hypothesis; the partial-fix experiment falsified it
+in the same commit.
+
+The stray §-cite fix remains: §2.7.4 → §2.7.14 / §2.7.5 at the two
+known sites (`mir_compiler/statements.rs:236` and the previous
+`w12-enum-constructor-audit.md:215`).
+
+### §4.4 Second revision — option-(i) attempt landed (iii) gaps
+
+I attempted the option-(i) extension (register `jit_make_ok` / `_err` /
+`jit_make_some` FFI, dispatch from EnumStore consumer on
+`variant_name`). The compile path landed clean and the `divide`
+function compiles successfully under JIT. But the **end-to-end smoke
+fails**:
+
+- Smoke 1.5 (`let r = divide(10,2); match r { Ok(v) => print(v), ... }`)
+  prints garbage (`0.000...471777`) under JIT. The top-level `r` slot
+  holds NaN-boxed `box_ok(inner_bits)` from divide's return, but the
+  conduit cannot stamp `r`'s ConcreteType because Call-terminator return
+  kinds aren't part of its kind-source statement coverage. Without
+  ConcreteType on `r`, the top-level `print(v)` / match-on-`r` codegen
+  falls through to the legacy NaN-box-decode path and mis-interprets
+  the heap pointer as f64.
+- Smoke 2 fails earlier — V2 bytecode verification fails (5 violations)
+  before JIT execution. Separate gap — likely impl-trait MIR shape
+  issue, but compounded by the same root cause (kind tracking after
+  function return).
+
+The deeper architecture this needs is **co-designed**:
+
+1. **Call-terminator return-kind track.** The conduit must classify
+   slots filled by `TerminatorKind::Call` based on the callee's return
+   type (Result<T, E> → `Ptr(HeapKind::Result)`; Option<T> →
+   `Ptr(HeapKind::Option)`). Today no such pass exists. Adding it
+   touches per-call kind metadata + the conduit's per-slot inference.
+2. **JIT match-on-enum codegen.** Pattern-match for `Ok(v)` / `Err(e)`
+   / `Some(x)` / `None` needs inline JIT codegen — load the variant
+   tag, branch, unwrap. Currently the JIT match path is generic
+   `SwitchBool`-based and doesn't have an inline enum-discriminator
+   path that knows about HK_OK / HK_ERR / HK_SOME.
+3. **NaN-box vs Arc<ResultData> ABI audit.** `jit_make_ok` returns the
+   legacy NaN-boxed `unified_box(HK_OK, bits)` shape. The VM-side
+   `BuiltinFunction::OkCtor` produces `Arc<ResultData>`. The boundary
+   conversion (`jit_bits_to_nanboxed` in
+   `crates/shape-jit/src/ffi/conversion.rs:246-258`) handles the
+   classification but the round-trip end-to-end (JIT divide produces
+   NaN-box → top-level JIT consumes the same NaN-box → match pattern
+   reads via `is_ok_tag`) is not audited as a coherent path.
+
+These three together exceed option (i) "bounded mechanical work, no
+ADR amendment". They're an ADR-level co-design — option (iii).
+
+### §4.5 Disposition
+
+Per dispatch's "If your audit reveals (iii), STOP after the audit
+commit and SURFACE to supervisor" discipline:
+
+- **Landed in this sub-cluster** (commits in the fix sequence below):
+  - Option (ii): per-user-function `function_local_concrete_types`
+    conduit. Threaded through `BytecodeProgram` →
+    `ContentAddressedProgram` → `LinkedProgram` →
+    `linked_to_bytecode_program` → JIT `compile_function_with_user_funcs`.
+    No regressions; safe progressive landing. The Aggregate short-
+    circuit now fires inside user-function bodies (`divide` no longer
+    surfaces at Aggregate).
+  - Variant-name threading: `StatementKind::EnumStore` grows a
+    `variant_name: Option<String>` field. Two MIR-lowering producer
+    sites (bare-form intercept + `Expr::EnumConstructor`) thread the
+    variant name through. Five other consumers updated to ignore the
+    new field (`solver.rs`, `storage_planning.rs` test fixture). No
+    behavioral change.
+  - Kinded EnumStore FFI registration: `jit_make_ok` / `jit_make_err`
+    / `jit_make_some` registered in the JIT module's FFI table. Not
+    yet called from the EnumStore consumer (see below).
+  - Stray §-cite fix at the two known sites.
+
+- **NOT landed, surfaced to supervisor as option (iii)**:
+  - EnumStore consumer using the kinded FFI. The first attempt
+    compiled cleanly but Smoke 1.5 / Smoke 2 still fail end-to-end
+    because top-level slot kind classification after `Call` returns
+    is missing, JIT pattern-match for enums isn't inlineable on the
+    NaN-box shape, and the NaN-box↔Arc boundary conversion is
+    untested end-to-end.
+
+The EnumStore consumer currently surfaces honestly with a structured
+error pointing at this audit. Future agent picking up the (iii)
+work should start there. The current sub-cluster's landed changes
+are a strict prep for that work — they're not regressions and
+reduce one of the two distinct bottlenecks (Aggregate surface for
+user-function bodies).
 
 ---
 

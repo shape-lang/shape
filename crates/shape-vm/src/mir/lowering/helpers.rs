@@ -53,6 +53,31 @@ pub(super) fn emit_container_store_with_names(
     field_names: Vec<String>,
     span: Span,
 ) {
+    emit_container_store_full(
+        builder,
+        kind,
+        container_slot,
+        operands,
+        field_names,
+        None,
+        span,
+    );
+}
+
+/// Emit a container-store statement carrying both optional field names
+/// (for ObjectStore) and an optional variant name (for EnumStore — required
+/// per ADR-006 §2.7.5 for the JIT EnumStore consumer to dispatch to the
+/// right typed-Arc producer). Non-applicable kinds ignore the extra
+/// metadata.
+pub(super) fn emit_container_store_full(
+    builder: &mut MirBuilder,
+    kind: ContainerStoreKind,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    field_names: Vec<String>,
+    variant_name: Option<String>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
@@ -69,6 +94,7 @@ pub(super) fn emit_container_store_with_names(
         ContainerStoreKind::Enum => StatementKind::EnumStore {
             container_slot,
             operands,
+            variant_name,
         },
         ContainerStoreKind::Closure => StatementKind::ClosureCapture {
             closure_slot: container_slot,
