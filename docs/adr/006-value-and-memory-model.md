@@ -2487,6 +2487,59 @@ amendment add overhead). Either way it's an explicit Phase-2c wave,
 not a maintenance follow-up; the W12-jit-array audit was the
 boundary check.
 
+**Status:** CLOSED. Phase 3 cluster-0 W11-jit-new-array (2026-05-12)
+adopted Route A and shipped the unblock surface:
+
+- `jit_array.rs`: 5 offset constants deleted (Route A uses
+  `TypedArray<T>` directly: header @ 0, `data` @ 8, `len` @ 16,
+  `cap` @ 20). Module retained as documentation anchor.
+- `ffi/array.rs`: legacy entry-point bodies remain deleted;
+  `ArrayInfo` `#[repr(C)]` carrier struct + `is_inline_bool`
+  helper preserved per Q15 contract.
+- `ffi_symbols/array_symbols.rs`: kept as no-op with Route-A-close
+  documentation. The kinded allocator surface is the existing
+  `register_v2_symbols`-registered `v2_array_new_<f64,i64,i32,bool>`
+  family plus the size-dispatched `v2_array_push` helper.
+- `FFIFuncRefs`: kind-blind `new_array` / `array_push_elem` slots
+  deleted. Consumer MIR call sites (`Rvalue::Aggregate`,
+  `StatementKind::ArrayStore` fallback, `StatementKind::EnumStore`
+  payload, qualified-name enum-constructor call) surface-and-stop
+  with a `Route A surface-and-stop:` marker and §-cite when the
+  destination place's element kind isn't statically provable.
+- `mir_compiler/v2_array.rs::try_emit_v2_array_method` covers
+  `length` / `len` / `push` / `sum` / `min` / `max` / `mean` /
+  `sumSquares` / `scale` / `addScalar` / `addArray` / `mulArray`
+  inline against the `TypedArray<T>` layout. Cascade entries beyond
+  that set (slice, reverse, zip, filled, range, info, first, last,
+  pop) remain reachable via the generic `jit_call_method` trampoline
+  path — per-method Cranelift codegen for them is a §2.7.14
+  follow-up.
+
+The §2.7.5 stamp-at-compile-time discipline was extended to two
+collateral surfaces uncovered during the close: (a) `RETURN_TAG_I64`
+is now stamped at the `TerminatorKind::Return` codegen from the
+return slot's `NativeKind` (was always `RETURN_TAG_NANBOXED`); (b) a
+new `RETURN_TAG_UNIT = 5` is stamped for `()`-typed returns
+(top-level program ending in `print(x)`), mapped by the executor to
+`WireValue::Null`. Per-kind `jit_print_<i64,f64,bool>` entries were
+added with the MIR emitter dispatching by operand kind — the
+kind-blind `jit_print` fallback is reserved for unproven kinds.
+
+Smoke 1 (`let mut sum = 0; for i in 0..100 { sum += i }; print(sum)`)
+produces `4950` under both `--mode vm` and `--mode jit` (exit 0).
+
+Two surfaces remained out of W11-jit-new-array's scope:
+
+- `arc_retain` / `arc_release` no-op'd pending §2.7.5 MIR call-site
+  kind-stamping (MIR emits the call on every non-`is_native_slot`
+  slot including `NativeKind::Int64` raw-int slots; decoding kind
+  from the bits would require tag-bit dispatch). Memory consequence:
+  JIT-routed heap allocations leak.
+- v2-map family (`jit_v2_map_*`) slots deleted from `FFIFuncRefs`
+  with `try_emit_v2_typed_map_method` surface-and-stopped; these
+  are W11-jit-carrier-conversion's territory and were unconditionally
+  pulled in by `build_ffi_refs`.
+
 #### 2.7.15 `HeapKind::HashSet` — Q16 cardinality amendment (Wave 13 W13-hashset-rebuild, 2026-05-10)
 
 Phase 1.B-vm Wave 13 W13-hashset-rebuild

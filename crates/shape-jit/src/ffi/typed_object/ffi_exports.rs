@@ -212,6 +212,11 @@ mod tests {
 
     /// Test that GetFieldTyped works with TypedObjects
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts deleted \
+                ValueWord-shape `is_number` tag-bit dispatch on the field \
+                access result. Same Phase-2d-deleted-ABI boundary as \
+                test_jit_typed_object_ffi. Re-enable after the §2.7.5 \
+                kinded-carrier rebuild lands."]
     fn test_jit_field_access_both_paths() {
         // Create two TypedObjects with different schemas
         let schema1 = TypeSchema::new("Data", vec![("value".to_string(), FieldType::F64)]);

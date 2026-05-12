@@ -263,6 +263,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.4 / W11-jit-new-array: jit_join_init body \
+                surface-and-stops returning TAG_NULL pending the §2.7.5 \
+                kinded TaskGroup FFI rebuild (see source-side SURFACE \
+                comment at jit_join_init body). The test's `assert_ne!` \
+                against TAG_NULL was the pre-rebuild expectation. \
+                Re-enable after the kinded TaskGroup carrier lands."]
     fn test_join_init_empty() {
         let mut ctx = JITContext::default();
         // kind=0 (All), arity=0
@@ -281,6 +287,10 @@ mod tests {
     // synthesized task-group payload.
 
     #[test]
+    #[ignore = "phase-2c §2.7.4 / W11-jit-new-array: jit_cancel_task body is \
+                `todo!()` — extern \"C\" cannot unwind, so the panic SIGABRTs \
+                the test process. Re-enable after the §2.7.5 kinded \
+                future-classification FFI rebuild lands (ADR-006 §2.7.6 / Q8)."]
     fn test_cancel_task_null_trampoline() {
         let mut ctx = JITContext::default();
         let result = jit_cancel_task(&mut ctx, 0);

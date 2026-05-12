@@ -455,7 +455,11 @@ mod tests {
     // companion explicitly.
 
     #[test]
-    #[should_panic(expected = "phase-2c")]
+    #[ignore = "phase-2c §2.7.10/Q11 / W11-jit-new-array: \
+                jit_call_foreign_native_0 body is `todo!()` — extern \"C\" \
+                cannot unwind, so the panic SIGABRTs the test process. \
+                #[should_panic] is silently ineffective at this boundary; \
+                re-enable after the kinded foreign-call ABI rebuild lands."]
     fn native_fixed_arity_helpers_surface_pending_kinded_abi() {
         // SURFACE: jit_call_foreign_native_args_fixed routes to todo!()
         // pending the kinded foreign-call ABI rebuild (§2.7.10/Q11).

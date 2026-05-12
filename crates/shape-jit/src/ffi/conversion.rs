@@ -260,9 +260,56 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
     }
 }
 
-/// Print a ValueWord value to stdout with a newline
+/// Print a ValueWord value to stdout with a newline.
+///
+/// W11-jit-new-array note: this is the kind-blind fallback retained for
+/// receivers whose `NativeKind` the MIR-side print emitter could not
+/// prove (heap pointers etc.). The kinded entry points
+/// `jit_print_i64` / `jit_print_f64` / `jit_print_bool` below are the
+/// §2.7.5 stamp-at-compile-time path the MIR emitter routes through
+/// when the operand's slot kind is statically known. Future ADR-006
+/// §2.7.5 follow-ups extend this to `jit_print_str` /
+/// `jit_print_ptr<HeapKind::*>` per heap arm.
 pub extern "C" fn jit_print(value_bits: u64) {
     println!("{}", format_value_word(value_bits));
+}
+
+/// Print a raw native i64 to stdout with a newline.
+///
+/// W11-jit-new-array (ADR-006 §2.7.5 / Q15 stamp-at-compile-time): the
+/// MIR-side print emitter dispatches to this entry point whenever the
+/// operand slot is proven `NativeKind::Int64` / `UInt64` / `IntSize` /
+/// `UIntSize`. The value is the raw native integer, not a NaN-boxed
+/// ValueWord — the kind-blind `jit_print` decoded raw int bits as a
+/// denormal `f64` and displayed `0.000...208` for `print(42)`, which
+/// was the §2.7.5 kind-source gap surfaced by smoke target 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_i64(value: i64) {
+    println!("{}", value);
+}
+
+/// Print a raw native f64 to stdout with a newline.
+///
+/// W11-jit-new-array companion to `jit_print_i64`: dispatched when the
+/// operand slot is proven `NativeKind::Float64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_f64(value: f64) {
+    if value.is_finite() && value == value.trunc() && value.abs() < 1e15 {
+        println!("{}", value as i64);
+    } else {
+        println!("{}", value);
+    }
+}
+
+/// Print a raw native bool to stdout with a newline.
+///
+/// W11-jit-new-array companion to `jit_print_i64`: dispatched when the
+/// operand slot is proven `NativeKind::Bool`. The Cranelift I8 carrier
+/// is widened to a `u8` (0 = false, nonzero = true) at the FFI
+/// boundary.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_bool(value: u8) {
+    println!("{}", value != 0);
 }
 
 /// Concatenate two NaN-boxed string values into a freshly boxed

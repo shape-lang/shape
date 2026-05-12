@@ -269,15 +269,91 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Dispatch directly to the FFI implementation.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
                     if name == "print" && self.function_indices.get(name.as_str()).is_none() {
-                        // R4.2C: FFI signatures accept plain u64 bit-patterns
-                        // — no box wrap needed at call site. `jit_print`
-                        // takes the arg as an already-ValueWord-encoded I64.
+                        // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-
+                        // time): when the operand's `NativeKind` is proven
+                        // (Int64 / Float64 / Bool), dispatch to the matching
+                        // kinded entry point so the FFI sees the raw native
+                        // value rather than a deleted-ValueWord-shape u64.
+                        // The kind-blind `jit_print` falls through for
+                        // operands whose kind the MIR could not prove
+                        // (heap arms remain a §2.7.5 follow-up).
+                        let kind_hint = if args.is_empty() {
+                            None
+                        } else {
+                            self.operand_slot_kind(&args[0])
+                        };
                         let val = if args.is_empty() {
                             self.builder.ins().iconst(types::I64, 0i64)
                         } else {
-                            self.compile_operand(&args[0])?
+                            self.compile_operand_raw(&args[0])?
                         };
-                        self.builder.ins().call(self.ffi.print, &[val]);
+                        use shape_vm::type_tracking::NativeKind;
+                        match kind_hint {
+                            Some(
+                                NativeKind::Int64
+                                | NativeKind::UInt64
+                                | NativeKind::IntSize
+                                | NativeKind::UIntSize,
+                            ) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::I32 {
+                                    self.builder.ins().sextend(types::I64, val)
+                                } else if val_ty == types::I8 {
+                                    self.builder.ins().uextend(types::I64, val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(self.ffi.print_i64, &[widened]);
+                            }
+                            Some(NativeKind::Float64) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let coerced = if val_ty == types::F64 {
+                                    val
+                                } else if val_ty == types::I64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::F64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(self.ffi.print_f64, &[coerced]);
+                            }
+                            Some(NativeKind::Bool) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let coerced = if val_ty == types::I8 {
+                                    val
+                                } else if val_ty == types::I64
+                                    || val_ty == types::I32
+                                {
+                                    self.builder.ins().ireduce(types::I8, val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(self.ffi.print_bool, &[coerced]);
+                            }
+                            _ => {
+                                // Kind-blind fallback. Operands flowing here
+                                // are heap-shaped or unresolved — the
+                                // kind-source gap §2.7.5 follow-up.
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else if val_ty == types::I32 {
+                                    self.builder.ins().sextend(types::I64, val)
+                                } else if val_ty == types::I8 {
+                                    self.builder.ins().uextend(types::I64, val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(self.ffi.print, &[widened]);
+                            }
+                        }
 
                         // v2-boundary: None represented as TAG_NULL in NaN-boxed ABI
                         let none_val = self.builder.ins().iconst(types::I64, 0i64);
@@ -295,45 +371,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // ── ENUM CONSTRUCTOR PATH ─────────────────────────────
                 // Qualified function calls like "Shape::Circle" that don't
                 // exist in the function index are enum variant constructors.
-                // Enums are represented as arrays in the JIT, so we just
-                // create an array from the constructor arguments.
+                // The legacy path lowered the payload as a heterogeneous
+                // array via the kind-blind `jit_new_array` +
+                // `jit_array_push_elem` ABI (the deleted ValueWord-shape
+                // path).
+                //
+                // Route A (ADR-006 §2.7.14 / W11-jit-new-array close) does
+                // not yet provide a heterogeneous-element carrier — that's
+                // the same `op_new_array` surface the VM-side handler
+                // returns (`shape-vm executor/objects/object_creation.rs:
+                // 316`). Per §2.7.14 forbidden list ("Bool-default fallback
+                // for unknown element kinds") surface-and-stop instead of
+                // fabricating a kind. Unit variants (empty args) still
+                // route through the normal call dispatch below.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
-                    if name.contains("::") && self.function_indices.get(name.as_str()).is_none() {
-                        // Create array from args (enum payload)
-                        let zero = self.builder.ins().iconst(types::I64, 0i64);
-                        let inst = self.builder.ins().call(
-                            self.ffi.new_array,
-                            &[self.ctx_ptr, zero],
-                        );
-                        let mut arr = self.builder.inst_results(inst)[0];
-
-                        // R4.2B: FFI signatures accept plain u64 bit-patterns
-                        // — no box wrap needed at call site. Enum payload args
-                        // reach `array_push_elem` as ValueWord-encoded I64
-                        // slots. Native F64/I32/I8 operands from
-                        // `compile_operand` must be widened to I64 before the
-                        // FFI call so the Cranelift verifier accepts the
-                        // parameter types.
-                        for arg in args.iter() {
-                            let val_raw = self.compile_operand(arg)?;
-                            let val = self.widen_to_i64(val_raw);
-                            let inst = self.builder.ins().call(
-                                self.ffi.array_push_elem,
-                                &[arr, val],
-                            );
-                            arr = self.builder.inst_results(inst)[0];
-                        }
-
-                        // Store result to destination
-                        self.release_old_value_if_heap(destination)?;
-                        self.write_place(destination, arr)?;
-
-                        // Jump to continuation block
-                        let next_block = self.block_map.get(next).ok_or_else(|| {
-                            format!("MirToIR: unknown call continuation block {}", next)
-                        })?;
-                        self.builder.ins().jump(*next_block, &[]);
-                        return Ok(());
+                    if name.contains("::")
+                        && self.function_indices.get(name.as_str()).is_none()
+                    {
+                        return Err(format!(
+                            "Route A surface-and-stop: SURFACE — enum \
+                             constructor `{}` depends on a heterogeneous- \
+                             element-array carrier that Route A does not \
+                             yet supply (parallel to op_new_array's VM-side \
+                             surface in shape-vm `object_creation.rs:316`). \
+                             Tracked as W11-jit-new-array follow-up per \
+                             ADR-006 §2.7.4. ADR-006 §2.7.14 / §2.7.5.",
+                            name
+                        ));
                     }
                 }
 
@@ -649,6 +713,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Write return value to ctx.stack[0] and set return_type_tag
                 // for native type preservation (avoids NaN-boxing on return path).
                 let return_slot = SlotId(0);
+                // W11-jit-new-array: when SlotId(0) is not declared, the
+                // program has no value-bearing return (e.g. top-level ending
+                // with `print(x)`). Stamp UNIT so the executor's typed
+                // dispatch maps it to `WireValue::Null` — pre-W11 this
+                // arm left the tag at its zero default (NANBOXED) and the
+                // executor.rs:267 SURFACE fired.
+                if !self.locals.contains_key(&return_slot) {
+                    let tag = self.builder.ins().iconst(
+                        types::I8,
+                        crate::context::RETURN_TAG_UNIT as i64,
+                    );
+                    let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                    let sp_zero = self.builder.ins().iconst(types::I64, 0);
+                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), sp_zero, self.ctx_ptr, sp_offset);
+                    let signal = self.builder.ins().iconst(types::I32, 0);
+                    self.builder.ins().return_(&[signal]);
+                    return Ok(());
+                }
                 if let Some(&var) = self.locals.get(&return_slot) {
                     let ret_val = self.builder.use_var(var);
                     let val_type = self.builder.func.dfg.value_type(ret_val);
@@ -668,10 +756,67 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_BOOL as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
                         self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                    } else if val_type == types::I32 {
+                        // Native i32 (NativeKind::Int32 / UInt32): sign-extend
+                        // to I64 and stamp RETURN_TAG_I32 so the host marshals
+                        // the value as an integer rather than a NaN-boxed
+                        // ValueWord. Pre-W11 close this arm fell through to
+                        // the `RETURN_TAG_NANBOXED` default — the §2.7.5
+                        // kind-source gap the executor.rs:267 SURFACE
+                        // documented (W11-jit-new-array unblocks).
+                        let extended = self.builder.ins().sextend(types::I64, ret_val);
+                        self.builder.ins().store(MemFlags::new(), extended, self.ctx_ptr, stack_offset);
+                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_I32 as i64);
+                        let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
+                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     } else {
-                        // I64 (NaN-boxed or native int): store directly, set tag=0 (NaN-boxed default)
+                        // I64. Under strict typing the return-slot kind is
+                        // statically known: an `Int64` slot is a raw native
+                        // integer (RETURN_TAG_I64); a slot with no inferred
+                        // kind is a `()` / no-value return (RETURN_TAG_UNIT);
+                        // any other kind that happened to widen to I64 in
+                        // Cranelift (Ptr to a v2 heap value, String, etc.)
+                        // is still the deleted NaN-boxed ABI's residual —
+                        // those paths hit the executor.rs:267 SURFACE.
+                        //
+                        // W11-jit-new-array stamps RETURN_TAG_I64 from the
+                        // bytecode compiler's slot kind (§2.7.5 stamp-at-
+                        // compile-time): when the return slot's
+                        // `NativeKind` is `Int64`/`UInt64`/`IntSize`/
+                        // `UIntSize` (and their nullable variants), the
+                        // value is a raw native integer. `None` kind means
+                        // the slot was never written with a value-bearing
+                        // expression (typical for top-level programs ending
+                        // in `print(x)`) — stamp UNIT. All other I64 arms
+                        // fall through to RETURN_TAG_NANBOXED — the §2.7.5
+                        // kind-source gap surfaced at `executor.rs:267`.
+                        use shape_vm::type_tracking::NativeKind;
+                        let return_kind = super::types::slot_kind_for_local(
+                            &self.slot_kinds,
+                            return_slot.0,
+                        );
+                        let raw_int = matches!(
+                            return_kind,
+                            Some(
+                                NativeKind::Int64
+                                    | NativeKind::UInt64
+                                    | NativeKind::IntSize
+                                    | NativeKind::UIntSize
+                                    | NativeKind::NullableInt64
+                                    | NativeKind::NullableUInt64
+                                    | NativeKind::NullableIntSize
+                                    | NativeKind::NullableUIntSize
+                            )
+                        );
                         self.builder.ins().store(MemFlags::new(), ret_val, self.ctx_ptr, stack_offset);
-                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_NANBOXED as i64);
+                        let tag_value = if raw_int {
+                            crate::context::RETURN_TAG_I64
+                        } else if return_kind.is_none() {
+                            crate::context::RETURN_TAG_UNIT
+                        } else {
+                            crate::context::RETURN_TAG_NANBOXED
+                        };
+                        let tag = self.builder.ins().iconst(types::I8, tag_value as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
                         self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     }

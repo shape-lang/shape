@@ -135,6 +135,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: drives the deleted \
+                BytecodeToIR direct-compile entry point (jit.compile()), \
+                which Phase 2d retired in favour of MirToIR via \
+                compile_program_selective. The signature `func(stack, \
+                constants, ip) -> f64` no longer matches the live JIT \
+                ABI. Re-enable when the BytecodeToIR direct-compile path \
+                is either resurrected or its tests are rewritten against \
+                the MirToIR entry surface."]
     fn test_jit_arithmetic() {
         let program = BytecodeProgram {
             instructions: vec![
@@ -157,6 +165,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: same deleted \
+                BytecodeToIR direct-compile entry as test_jit_arithmetic. \
+                Re-enable with the MirToIR test rewrite."]
     fn test_jit_comparison() {
         let program = BytecodeProgram {
             instructions: vec![

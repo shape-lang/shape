@@ -264,6 +264,13 @@ impl JITExecutor {
             crate::context::RETURN_TAG_BOOL => {
                 WireValue::Bool(raw_result != 0)
             }
+            crate::context::RETURN_TAG_UNIT => {
+                // W11-jit-new-array: `()`-typed return — the program's
+                // terminal expression produced no value. Map to Null
+                // (matches the VM's `wire_value` for `print(x)` at the
+                // top level).
+                WireValue::Null
+            }
             _ => {
                 // tag=0 (RETURN_TAG_NANBOXED) or unknown: per ADR-006
                 // §2.7.5 / §2.7.5.1, the JIT-FFI return path must be

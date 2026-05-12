@@ -1,71 +1,39 @@
-//! JIT array — surface-and-stop pending strict-typing rebuild.
+//! JIT array — Route A close.
 //!
-//! ## Status
+//! ## Route A close (ADR-006 §2.7.14 / W11-jit-new-array)
 //!
-//! `JitArray` was previously a type alias for the deleted
-//! `shape_value::unified_array::UnifiedArray` (1,134 LoC, removed in
-//! commit `0270dd4` "phase-2: delete dead dynamic infrastructure
-//! files in shape-value"). The deletion bulldozed the
-//! `tags::HEAP_KIND_*` / `is_tagged` / `unified_heap_ptr` machinery
-//! the layout was built on; the v2 runtime reads `TypedArray<T>` /
-//! typed pointers directly (`docs/runtime-v2-spec.md`), so no surviving
-//! shape-value type matches the JIT's `#[repr(C)]` `Vec<u64>`-of-bits
-//! layout the Cranelift IR emits offsets into.
+//! Q15 resolved Route A: kinded per-element-kind `Arc<TypedArrayData>`
+//! monomorphization. The deleted `UnifiedArray` heap layout
+//! (`#[repr(C)]` with `data` / `len` / `cap` / `typed_data` /
+//! `element_kind` byte) is gone. Under Route A the JIT and VM share
+//! the `shape_value::v2::typed_array::TypedArray<T>` carrier (24-byte
+//! header: `HeapHeader` at offset 0, `*mut T` at offset 8, `len: u32`
+//! at offset 16, `cap: u32` at offset 20). Element kind is stamped at
+//! the producing call-site (`jit_v2_array_new_<kind>`) and not stored
+//! on the heap object — it lives on the `HeapValue::TypedArray(arc)`
+//! variant the `HeapHeader.kind` field discriminates (§2.7.6 / Q8
+//! single-discriminator).
 //!
-//! ## Surface (ADR-006 §2.7.4 / W10 jit-playbook §5)
+//! Cranelift offsets for the typed-array layout live inline at the
+//! consumer sites (`mir_compiler/v2_array.rs`'s `DATA_PTR_OFFSET = 8`
+//! and `LEN_OFFSET = 16`). The five legacy offset constants
+//! (`DATA_OFFSET`, `LEN_OFFSET`, `CAP_OFFSET`, `TYPED_DATA_OFFSET`,
+//! `ELEMENT_KIND_OFFSET`) that the W10-cascade close marked
+//! `#[allow(dead_code)]` are deleted — under Route A there is no
+//! ELEMENT_KIND byte on the heap, and the remaining offsets are no
+//! longer the JIT's canonical reference shape.
 //!
-//! Per ADR-006 §2.7.5, the JIT-FFI carries raw `u64` plus a parallel
-//! `NativeKind` companion stamped at JIT compile time. The legacy
-//! `JitArray` packed an element kind byte + a typed-mirror pointer
-//! into the `#[repr(C)]` heap object — equivalent to per-element
-//! `NativeKind` storage on the heap. Rebuilding this under
-//! strict-typing is an architectural decision, not a mechanical
-//! translation: the JIT's array representation has to either (a)
-//! adopt monomorphized `TypedArray<T>` per element kind (matching
-//! `shape_value::v2::typed_array::TypedArray<T>`, 24 bytes/header,
-//! one allocation per concrete element type), or (b) carry a parallel
-//! `Vec<NativeKind>` track alongside the `Vec<u64>` data buffer per
-//! the §2.7.7 / §2.7.8 cell-storage pattern.
+//! ## Forbidden under any future expansion
 //!
-//! Either route is multi-day work that crosses Cranelift codegen
-//! (offsets and field reads), the FFI layer (every consumer in
-//! `ffi/array.rs`, `ffi/iterator.rs`, `ffi/object/*`, `ffi/control/*`,
-//! `ffi/call_method/*`, `mir_compiler/*`), and the FFI-symbol
-//! registration. It is the cluster the W10 audit flagged as a
-//! "deeper Phase-2c" / W11 concern.
-//!
-//! Until that rebuild lands, the public alias and offset constants
-//! are kept as `pub` items declared but *not implemented* — every
-//! consumer in shape-jit that referenced `JitArray::*` constructors
-//! or methods now fails to compile with a clear "unresolved item"
-//! error pointing back to this module. That is the
-//! deletion-fate signal the playbook §5 calls for; consumers should
-//! either wait for the rebuild or surface their own `todo!()` per
-//! ADR-006 §2.7.4.
-//!
-//! ## Forbidden
-//!
-//! - Do NOT re-introduce `UnifiedArray` under a renamed-but-equivalent
-//!   shape ("UnifiedArray shim" / "tag-bit array carrier" / "boundary
-//!   array view" / "JitArray bridge" — all defection-attractor framing
-//!   per CLAUDE.md "Renames to refuse on sight").
-//! - Do NOT add a `tag_bits`-based element decoder.
-//! - Do NOT add a Bool-default fallback for unknown element kinds.
+//! - `UnifiedArray` revival under any renamed shape (CLAUDE.md
+//!   "Renames to refuse on sight" — broader-family regex).
+//! - `tag_bits`-based element decoder.
+//! - Bool-default fallback for unknown element kind.
+//! - Re-introducing an ELEMENT_KIND byte on the heap object — the
+//!   discriminator lives on `HeapValue::TypedArray(arc)` per ADR-005
+//!   §1 single-discriminator.
 
-// Inline Cranelift offset constants (relative to the `data` field
-// region after an 8-byte header). Preserved so the codegen modules
-// that compute these from `JitAlloc<JitArray>::DATA_OFFSET + N` keep
-// the same arithmetic shape pending the rebuild; flagged as
-// `#[allow(dead_code)]` because the strict-typing rebuild may pick a
-// different layout entirely. Replaced (not removed) when the
-// architectural decision lands.
-#[allow(dead_code)]
-pub const DATA_OFFSET: i32 = 0;
-#[allow(dead_code)]
-pub const LEN_OFFSET: i32 = 8;
-#[allow(dead_code)]
-pub const CAP_OFFSET: i32 = 16;
-#[allow(dead_code)]
-pub const TYPED_DATA_OFFSET: i32 = 24;
-#[allow(dead_code)]
-pub const ELEMENT_KIND_OFFSET: i32 = 32;
+// No public items — Route A close (W11-jit-new-array): consumers use
+// `shape_value::v2::typed_array::TypedArray<T>` directly via the
+// existing `jit_v2_array_*` FFI surface and the inline-codegen helpers
+// in `mir_compiler/v2_array.rs`.

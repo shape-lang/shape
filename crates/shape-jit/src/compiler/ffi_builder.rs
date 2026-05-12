@@ -5,22 +5,24 @@
 //! Historically this builder declared ~240 functions; the V6 cleanup pruned
 //! it to the live native-typed surface.
 //!
-//! ## Surface-and-stop boundary (ADR-006 §2.7.14 / Q15)
+//! ## Route A close (ADR-006 §2.7.14 / W11-jit-new-array)
 //!
-//! After the W10 jit-playbook cleanup, several FFI registration modules
-//! (`array_symbols`, `arc_symbols`, parts of `v2_symbols` for the typed-map
-//! family) were no-op'd because their entry points wrapped the deleted
-//! `JitArray` / `UnifiedArray` heap layout. The keys we look up below
-//! (`jit_new_array`, `jit_array_push_elem`, `jit_arc_retain`,
-//! `jit_arc_release`, the `jit_v2_map_*` family, etc.) are absent from
-//! `self.ffi_funcs` until the kinded `TypedArray<T>` / map-FFI rebuild
-//! lands (Q15 close trigger).
+//! W11-jit-new-array adopted Route A: kinded `Arc<TypedArrayData>`
+//! per-element-kind monomorphization. The kind-blind `jit_new_array` /
+//! `jit_array_push_elem` symbols (the deleted ValueWord-shape ABI) are
+//! no longer referenced from `FFIFuncRefs`. Array allocation routes
+//! through the per-kind `v2_array_new_<f64,i64,i32,bool>` allocators and
+//! the size-dispatched `v2_array_push` push helper. Consumers that lack
+//! a proven element kind surface-and-stop at JIT compile time per the
+//! `Route A surface-and-stop` marker in the MIR lowering — the
+//! kind-blind fallback would resurrect the deleted UnifiedArray heap
+//! layout (§2.7.14 forbidden list).
 //!
-//! Previously each missing key triggered an unhandled `HashMap` index
-//! panic at JIT-init time. We now look each key up via `.get()` and
-//! return a clean `RuntimeError`-shaped error citing §2.7.14, so the
-//! JIT entry path surfaces the deferral as a `RuntimeError` instead of
-//! an unhandled panic. The error includes the missing key for triage.
+//! `r!()` keeps the per-key fallback so that any future agent who
+//! re-introduces a deleted symbol gets a structured `RuntimeError`
+//! at JIT-init time instead of an unhandled `HashMap` index panic.
+//! Map-FFI consumers (the `jit_v2_map_*` family) remain on the same
+//! Q15-style deferral until W11-jit-carrier-conversion lands.
 
 use super::setup::JITCompiler;
 use crate::ffi_refs::FFIFuncRefs;
@@ -70,11 +72,20 @@ impl JITCompiler {
             call_method: r!("jit_call_method"),
 
             // Arrays
-            new_array: r!("jit_new_array"),
-            array_push_elem: r!("jit_array_push_elem"),
-
-            // Print fallback
+            //
+            // Route A (ADR-006 §2.7.14 / W11-jit-new-array close): the
+            // kind-blind `jit_new_array` / `jit_array_push_elem` symbols are
+            // deleted. Allocation routes through `v2_array_new_<kind>`
+            // (registered below) per the producing call signature's element
+            // kind; push routes through the kinded `v2_array_push`
+            // dispatcher. Consumers that lack a kind source surface-and-stop
+            // at JIT compile time per §2.7.5.
+            //
+            // Print fallback + kinded entries (W11-jit-new-array)
             print: r!("jit_print"),
+            print_i64: r!("jit_print_i64"),
+            print_f64: r!("jit_print_f64"),
+            print_bool: r!("jit_print_bool"),
 
             // Closure construction
             make_closure: r!("jit_make_closure"),
@@ -193,11 +204,11 @@ impl JITCompiler {
             string_concat: r!("jit_string_concat"),
 
             // v2 typed HashMap<string, ...>
-            v2_map_get_str_i64: r!("jit_v2_map_get_str_i64"),
-            v2_map_get_str_f64: r!("jit_v2_map_get_str_f64"),
-            v2_map_has_str: r!("jit_v2_map_has_str"),
-            v2_map_set_str_i64: r!("jit_v2_map_set_str_i64"),
-            v2_map_len: r!("jit_v2_map_len"),
+            //
+            // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):
+            // gated on the kinded `Arc<HashMapData>` + `KindedSlot` rebuild;
+            // FuncRef slots and r!() lookups are deleted in lockstep with
+            // the v2_typed_map call-site surface-and-stop.
         })
     }
 }

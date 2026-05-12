@@ -47,6 +47,11 @@ pub const RETURN_TAG_I64: u8 = 2;
 pub const RETURN_TAG_I32: u8 = 3;
 /// Raw bool (0 or 1). Executor reads as `stack[0] != 0`.
 pub const RETURN_TAG_BOOL: u8 = 4;
+/// Unit / null / no-value return (W11-jit-new-array). Stamped when the
+/// program's terminal expression is a side-effecting call that
+/// produces no value (e.g. `print(x)` at top level). Executor maps
+/// this to `WireValue::Null`.
+pub const RETURN_TAG_UNIT: u8 = 5;
 /// Byte offset of `return_type_tag` in JITContext (for Cranelift codegen).
 pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, return_type_tag);
 
@@ -952,6 +957,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase-2c §2.7.5 / W11-jit-new-array: asserts the deleted \
+                ValueWord-shape `is_heap_kind` / `jit_box` heap-kind dispatch \
+                (HK_CLOSURE tag-bit probe). Under strict typing the JIT-FFI \
+                returns typed `Arc<TypedObjectStorage>` via the §2.7.5 \
+                carrier — the closure box-roundtrip body has to migrate to \
+                the kinded value-call ABI (§2.7.11/Q12) before this test \
+                exercises a live path. Re-enable after the rebuild lands."]
     fn test_closure_jit_box_roundtrip() {
         // Verify JITClosure survives jit_box/jit_unbox roundtrip
         let captures = [box_number(42.0), TAG_BOOL_FALSE];

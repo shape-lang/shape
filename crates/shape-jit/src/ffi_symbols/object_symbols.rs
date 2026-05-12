@@ -10,7 +10,8 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print, jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print, jit_print_bool, jit_print_f64, jit_print_i64, jit_string_concat, jit_to_number,
+    jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -55,6 +56,14 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
     builder.symbol("jit_print", jit_print as *const u8);
+    // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
+    // print entry points dispatched by the MIR-side print emitter when
+    // the operand's `NativeKind` is statically known. Replaces the
+    // deleted kind-blind tag-decode in `format_value_word` for scalar
+    // operands.
+    builder.symbol("jit_print_i64", jit_print_i64 as *const u8);
+    builder.symbol("jit_print_f64", jit_print_f64 as *const u8);
+    builder.symbol("jit_print_bool", jit_print_bool as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -481,6 +490,35 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print", Linkage::Import, &sig)
             .expect("Failed to declare jit_print");
         ffi_funcs.insert("jit_print".to_string(), func_id);
+    }
+
+    // W11-jit-new-array kinded print entries (ADR-006 §2.7.5).
+    // jit_print_i64(value: i64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_print_i64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_i64");
+        ffi_funcs.insert("jit_print_i64".to_string(), func_id);
+    }
+    // jit_print_f64(value: f64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        let func_id = module
+            .declare_function("jit_print_f64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_f64");
+        ffi_funcs.insert("jit_print_f64".to_string(), func_id);
+    }
+    // jit_print_bool(value: u8) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I8));
+        let func_id = module
+            .declare_function("jit_print_bool", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_bool");
+        ffi_funcs.insert("jit_print_bool".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64
