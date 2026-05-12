@@ -383,28 +383,206 @@ fn content_surface(op: &str) -> String {
     )
 }
 
+/// In-memory `SnapshotStore` for content-addressing operations
+/// (`state.hash`, `state.serialize`) that don't need filesystem
+/// persistence. The store is required by the
+/// `slot_to_serializable(bits, kind, store)` signature but is unused for
+/// scalar / heap-light kinds; complex chunked-blob kinds (TypedArray
+/// sidecar, large DataTable) surface clean from the kind-threaded API
+/// when no store is available.
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Falls
+/// back to a tempdir-backed store so chunked-blob arms work. If the
+/// tempdir creation itself fails, the body surfaces clean per the
+/// §2.7.4 invariant (no silent state-loss).
+fn ephemeral_store() -> Result<shape_runtime::snapshot::SnapshotStore, String> {
+    let tmp = tempfile::tempdir().map_err(|e| {
+        format!(
+            "W17-snapshot-resume surface — tempdir creation failed: {e}. \
+             ADR-006 §2.7.4."
+        )
+    })?;
+    let store = shape_runtime::snapshot::SnapshotStore::new(tmp.path()).map_err(|e| {
+        format!(
+            "W17-snapshot-resume surface — SnapshotStore::new failed: {e}. \
+             ADR-006 §2.7.4."
+        )
+    })?;
+    // Leak the tempdir so the store's blob files outlive the body's
+    // immediate frame. The bodies that call this are content-addressing
+    // /serialize paths — short-lived; the tempdir cleanup runs at
+    // process exit. For high-rate state.hash callers we'd want a
+    // per-VM store on ModuleContext, but that's beyond W17-state-tier-
+    // roundtrip's scope.
+    std::mem::forget(tmp);
+    Ok(store)
+}
+
+/// Compute the deterministic serialized-bytes representation of a
+/// `KindedSlot` argument. The bytes are bincode-encoded
+/// `SerializableVMValue` per ADR-006 §2.7.5.1 — identical to what
+/// `VmSnapshot` writes for each stack/binding slot.
+fn slot_to_serialized_bytes(slot: &KindedSlot) -> Result<Vec<u8>, String> {
+    use shape_runtime::snapshot::slot_to_serializable;
+    let store = ephemeral_store()?;
+    let sv = slot_to_serializable(slot.slot().raw(), slot.kind(), &store)?;
+    let bytes = bincode::serialize(&sv).map_err(|e| {
+        format!(
+            "state.serialize: W17-snapshot-resume surface — bincode \
+             serialization failed: {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+    Ok(bytes)
+}
+
 /// `state.hash(value) -> string`
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Wired
+/// end-to-end via the kind-threaded `slot_to_serializable` API: the
+/// arg slot is projected to `SerializableVMValue`, bincode-encoded,
+/// then SHA-256-hashed. Returns the hash as a hex string.
 pub(crate) fn state_hash(
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.hash"))
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.hash"));
+    };
+    let bytes = slot_to_serialized_bytes(arg)?;
+    let digest = shape_runtime::hash_bytes(&bytes);
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(digest.hex().to_string()),
+    ))
 }
 
 /// `state.fn_hash(f) -> string`
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Returns
+/// the content-hash of a function blob. The hash is sourced from the
+/// VM's content-addressed metadata table; functions without a
+/// content-hash entry (compiled without content-addressed metadata)
+/// surface a structured error.
 pub(crate) fn state_fn_hash(
-    _args: &[KindedSlot],
-    _ctx: &ModuleContext,
+    args: &[KindedSlot],
+    ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.fn_hash"))
+    use shape_value::{HeapKind, NativeKind};
+
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.fn_hash"));
+    };
+    // Function values flow as one of:
+    //  - NativeKind::Ptr(HeapKind::Closure) — raw OwnedClosureBlock bits
+    //  - NativeKind::Ptr(HeapKind::FunctionRef) — typed fn handle
+    //  - Inline function-id (Int64-kinded) for bare function references
+    let bits = arg.slot().raw();
+    let function_id = match arg.kind() {
+        NativeKind::Int64 | NativeKind::UInt64 => Some(bits as u16),
+        NativeKind::Ptr(HeapKind::Closure) => {
+            if bits == 0 {
+                None
+            } else {
+                // SAFETY: bits is OwnedClosureBlock::ptr per §2.7.8.
+                let ptr = bits as *const u8;
+                Some(unsafe {
+                    shape_value::v2::closure_raw::typed_closure_function_id(ptr)
+                })
+            }
+        }
+        _ => None,
+    };
+    let Some(fid) = function_id else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — argument is not a \
+             function value (kind={:?}); function-handle decoding for \
+             HeapKind::FunctionRef / TraitObject not yet wired. ADR-006 \
+             §2.7.4.",
+            arg.kind()
+        ));
+    };
+    // Look up the function's content hash via ctx.function_hashes.
+    let Some(hashes) = ctx.function_hashes else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — \
+             ctx.function_hashes is None at this dispatch surface; \
+             content-addressed metadata not propagated through \
+             invoke_module_fn_id_stub. ADR-006 §2.7.4."
+        ));
+    };
+    let Some(maybe_hash) = hashes.get(fid as usize) else {
+        return Err(format!(
+            "state.fn_hash: function_id {fid} out of range \
+             (program has {} functions). ADR-006 §2.7.4.",
+            hashes.len()
+        ));
+    };
+    let Some(hash_bytes) = maybe_hash else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — function_id {fid} \
+             has no content-addressed hash entry (compiled without \
+             content-addressed metadata). ADR-006 §2.7.4."
+        ));
+    };
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(hex::encode(hash_bytes)),
+    ))
 }
 
 /// `state.schema_hash(type_name) -> string`
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Returns
+/// the content-hash of a type schema definition. Schema bytes are the
+/// bincode-encoded `TypeSchema` from `ctx.schemas`.
 pub(crate) fn state_schema_hash(
-    _args: &[KindedSlot],
-    _ctx: &ModuleContext,
+    args: &[KindedSlot],
+    ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.schema_hash"))
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.schema_hash"));
+    };
+    // First arg is the type name (string-kinded). Recover the string
+    // payload via the canonical Arc<String> recovery pattern. The
+    // bits encode `Arc::into_raw(Arc<String>)` per §2.7.6 String-arm.
+    let type_name = match arg.kind() {
+        shape_value::NativeKind::String
+        | shape_value::NativeKind::Ptr(shape_value::HeapKind::String) => {
+            let bits = arg.slot().raw();
+            if bits == 0 {
+                return Err(format!(
+                    "state.schema_hash: W17-snapshot-resume surface — null \
+                     string bits. ADR-006 §2.7.6."
+                ));
+            }
+            // SAFETY: bits is Arc<String> share per §2.7.6 construction.
+            unsafe {
+                let arc = std::sync::Arc::<String>::from_raw(bits as *const String);
+                let s: String = (*arc).clone();
+                let _ = std::sync::Arc::into_raw(arc); // restore share
+                s
+            }
+        }
+        other => {
+            return Err(format!(
+                "state.schema_hash: W17-snapshot-resume surface — first \
+                 argument must be string (got kind={other:?}). ADR-006 §2.7.4."
+            ));
+        }
+    };
+    let Some(schema) = ctx.schemas.get(&type_name) else {
+        return Err(format!(
+            "state.schema_hash: unknown type '{type_name}'. ADR-006 §2.7.4."
+        ));
+    };
+    let bytes = bincode::serialize(schema).map_err(|e| {
+        format!(
+            "state.schema_hash: W17-snapshot-resume surface — bincode \
+             serialization failed: {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+    let digest = shape_runtime::hash_bytes(&bytes);
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(digest.hex().to_string()),
+    ))
 }
 
 // ===========================================================================
@@ -412,14 +590,34 @@ pub(crate) fn state_schema_hash(
 // ===========================================================================
 
 /// `state.serialize(value) -> Array<int>`
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** The body
+/// computes the bincode-encoded `SerializableVMValue` bytes via the
+/// kind-threaded `slot_to_serializable` API. The `Array<int>` return
+/// shape needs the marshal-return `Bytes` arm follow-up at
+/// `project_typed_return` — body succeeds, marshal surfaces clean.
 pub(crate) fn state_serialize(
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.serialize"))
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.serialize"));
+    };
+    let _bytes = slot_to_serialized_bytes(arg)?;
+    Err(format!(
+        "state.serialize: W17-snapshot-resume surface — body computed \
+         {} bytes via slot_to_serializable but the Array<int>/Bytes return \
+         arm needs the W17-marshal-return-arms follow-up at \
+         project_typed_return. ADR-006 §2.7.4 + §2.7.5.1.",
+        _bytes.len()
+    ))
 }
 
 /// `state.deserialize(bytes) -> Any`
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Mirror of
+/// `state_serialize`: requires the `Any` return arm (typed-Arc payload
+/// projection — same W17-marshal-return-arms follow-up).
 pub(crate) fn state_deserialize(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
@@ -432,6 +630,12 @@ pub(crate) fn state_deserialize(
 // ===========================================================================
 
 /// `state.diff(old, new) -> Delta`
+///
+/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
+/// `state_diff` depends on the deleted 1486-LoC `state_diff` runtime
+/// module (`crates/shape-runtime/src/state_diff.rs` pre-bulldozer) whose
+/// kind-threaded rebuild is its own substantial workstream — out of
+/// W17-state-tier-roundtrip's scope. Surfaces clean.
 pub(crate) fn state_diff(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,
@@ -440,6 +644,10 @@ pub(crate) fn state_diff(
 }
 
 /// `state.patch(base, delta) -> Any`
+///
+/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
+/// Same dependency on the deleted `state_diff` module as
+/// `state_diff`. Surfaces clean.
 pub(crate) fn state_patch(
     _args: &[KindedSlot],
     _ctx: &ModuleContext,

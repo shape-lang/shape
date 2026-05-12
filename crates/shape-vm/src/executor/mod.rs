@@ -472,15 +472,18 @@ pub struct VirtualMachine {
     /// the `set_pending_resume` callback on `ModuleContext`. Consumed by the
     /// dispatch loop after the current instruction completes.
     ///
-    /// W17-snapshot-resume surface (§2.7.4 + §2.7.5.1): the snapshot
-    /// subsystem is deferred — `apply_pending_resume` returns a
-    /// structured `VMError::NotImplemented` carrying the
-    /// `PHASE_2C_SNAPSHOT_SURFACE` string (`executor/resume.rs:55`).
-    /// W17 retains the carrier shape `Option<KindedSlot>` so callers can
-    /// thread the snapshot's `NativeKind` through the rebuild boundary
-    /// when Phase-2c lands. Today the `.take()` on `apply_pending_resume`
-    /// releases the queued payload via `KindedSlot::Drop` dispatch even
-    /// though the resume itself surface-stops.
+    /// W17-state-tier-roundtrip (§2.7.4 + §2.7.5.1, Phase 2d Wave 3,
+    /// 2026-05-12): The state.resume body in
+    /// `state_builtins/introspection.rs` calls `set_pending_resume` (when
+    /// `ModuleContext.set_pending_resume` is wired) to queue the
+    /// snapshot KindedSlot here. `apply_pending_resume` consumes the
+    /// queue on the next dispatch tick; the actual resume reconstruction
+    /// path (decode the typed-object VmState payload → rebuild
+    /// stack/locals via `serializable_to_slot`) requires a typed-object
+    /// field-decode helper that lands with W17-marshal-return-arms.
+    /// Until that lands, `apply_pending_resume` returns a structured
+    /// `VMError::NotImplemented` carrying the `PHASE_2C_SNAPSHOT_SURFACE`
+    /// string (`executor/resume.rs:55`).
     pub(crate) pending_resume: Option<KindedSlot>,
 
     /// Pending single-frame resume data. Set by `state.resume_frame()` to

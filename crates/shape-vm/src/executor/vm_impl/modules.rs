@@ -177,13 +177,14 @@ impl VirtualMachine {
             .ok_or(VMError::InvalidCall)?
             .clone();
 
+        // **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).**
         // Build a `ModuleContext` borrow against the live schema
-        // registry. The optional invoker hooks (`invoke_callable`,
-        // `raw_invoker`, `function_hashes`, `vm_state`, …) are None
-        // at the synchronous entry path; bodies that need re-entry
-        // back into the VM (`@ai` annotations calling `state.*`)
-        // surface clean per the W17-snapshot-callback-invoker
-        // follow-up.
+        // registry and capture a read-only `VmStateSnapshot` so state.*
+        // bodies can introspect the VM via `ctx.vm_state` (per
+        // ADR-006 §2.7.4 — state.* reads dispatched through the
+        // VmStateAccessor trait). The snapshot owns its own KindedSlot
+        // shares so the live VM is undisturbed.
+        let vm_state_snap = self.capture_vm_state();
         let schema_registry: &shape_runtime::type_schema::TypeSchemaRegistry =
             &self.program.type_schema_registry;
         // SAFETY: extend the borrow lifetime to 'ctx via transmute is
@@ -195,7 +196,7 @@ impl VirtualMachine {
             invoke_callable: None,
             raw_invoker: None,
             function_hashes: None,
-            vm_state: None,
+            vm_state: Some(&vm_state_snap),
             granted_permissions: None,
             scope_constraints: None,
             set_pending_resume: None,
